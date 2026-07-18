@@ -1,0 +1,11 @@
+LIBC {
+    global: *;
+};
+
+LIBC_N {
+    global: *;
+};
+
+LIBC_O {
+    global: *;
+};

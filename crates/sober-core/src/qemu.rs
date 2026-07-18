@@ -12,7 +12,7 @@ use crate::android_env::AndroidEnv;
 use crate::config::SoConfig;
 
 /// Launch the Roblox Android APK via QEMU user-mode translation.
-/// Uses a JNI shim binary to load libroblox.so with Android stub libraries.
+/// Uses a JNI shim binary to load libroblox.so with the bionic shim.
 pub fn launch_roblox(
     apk_path: &Path,
     env: &AndroidEnv,
@@ -35,8 +35,9 @@ pub fn launch_roblox(
     let main_binary = find_main_binary(&libs)?;
     info!("Main Roblox binary: {}", main_binary.display());
 
-    // Build and install the JNI stub/shims
+    // Build and install the JNI shim + bionic shim
     setup_jni_shim(env)?;
+    setup_bionic_shim(env)?;
 
     // Build the QEMU command using the shim as entry point
     let shim_path = env.root.join("jni_shim");
@@ -45,8 +46,8 @@ pub fn launch_roblox(
     // Point to the real Roblox library
     cmd.env("ROBLOX_LIB", &main_binary);
 
-    // LD_PRELOAD our stub library for missing Android/Bionic symbols
-    cmd.env("LD_PRELOAD", "/system/lib64/libcxx_syms.so");
+    // LD_PRELOAD our bionic shim to intercept @LIBC-versioned symbols
+    cmd.env("LD_PRELOAD", "/system/lib64/libbionic_shim.so");
 
     // Put libroblox.so's directory on the library path
     if let Some(lib_dir) = main_binary.parent() {
@@ -94,23 +95,32 @@ pub fn launch_roblox(
     }
 }
 
-/// Build and install the ARM64 JNI shim and stub libraries into the Android env.
+/// Build and install the ARM64 JNI shim executable.
+///
+/// The JNI shim is a minimal entry point that:
+/// 1. Initializes a fake JavaVM / JNIEnv with stub function tables
+/// 2. Loads libroblox.so via dlopen()
+/// 3. Calls JNI_OnLoad()
+/// 4. Lets the game run
 fn setup_jni_shim(env: &AndroidEnv) -> Result<()> {
-    let syslib64 = env.root.join("system").join("lib64");
+    let shim_out = env.root.join("jni_shim");
 
-    // Check if already installed
-    if env.root.join("jni_shim").exists() && syslib64.join("libcxx_syms.so").exists() {
-        info!("JNI shim already installed");
-        return Ok(());
+    // Check if already installed and up to date
+    let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let shim_src = crate_dir.join("jni_shim.c");
+    if shim_out.exists() {
+        if let (Ok(s_meta), Ok(b_meta)) = (
+            std::fs::metadata(&shim_src),
+            std::fs::metadata(&shim_out),
+        ) {
+            if s_meta.modified().ok() <= b_meta.modified().ok() {
+                info!("JNI shim already installed and up-to-date");
+                return Ok(());
+            }
+        }
     }
 
-    info!("Building ARM64 JNI shim and stubs...");
-
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-
-    // 1. Build the JNI shim executable
-    let shim_src = crate_dir.join("jni_shim.c");
-    let shim_out = env.root.join("jni_shim");
+    info!("Building ARM64 JNI shim...");
 
     let status = std::process::Command::new("aarch64-linux-gnu-gcc")
         .arg("-o")
@@ -124,25 +134,121 @@ fn setup_jni_shim(env: &AndroidEnv) -> Result<()> {
         anyhow::bail!("JNI shim compilation failed");
     }
 
-    // 2. Build the stub symbols library
-    let stubs_src = crate_dir.join("symbols_aarch64.c");
-    let stubs_out = syslib64.join("libcxx_syms.so");
+    info!("JNI shim ready at: {}", shim_out.display());
+    Ok(())
+}
 
-    if stubs_src.exists() {
-        let status = std::process::Command::new("aarch64-linux-gnu-gcc")
-            .arg("-shared")
-            .arg("-fPIC")
-            .arg("-o")
-            .arg(&stubs_out)
-            .arg(&stubs_src)
-            .status()?;
+/// Build the bionic shim shared library (`libbionic_shim.so`).
+///
+/// The bionic shim provides @LIBC-versioned symbols that libroblox.so needs.
+/// It is built from:
+///   - `bionic_shim.S` — ~392 assembly trampolines that lazily resolve to glibc
+///   - `bionic_init.c` — ~5 Bionic-only C stubs + lazy dispatch resolver
+///   - `bionic_version.ver` — version script tagging everything as LIBC/LIBC_N/LIBC_O
+///
+/// At runtime, it's LD_PRELOAD'ed and its LIBC-versioned symbols satisfy
+/// libroblox.so's symbol lookups, forwarding to glibc via the trampoline table.
+fn setup_bionic_shim(env: &AndroidEnv) -> Result<()> {
+    let syslib64 = env.root.join("system").join("lib64");
+    let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
-        if !status.success() {
-            warn!("Stub library compilation failed (continuing anyway)");
+    let asm_src = crate_dir.join("bionic_shim.S");
+    let c_src = crate_dir.join("bionic_init.c");
+    let ver_script = crate_dir.join("bionic_version.ver");
+    let shim_out = syslib64.join("libbionic_shim.so");
+
+    // Check if source files exist
+    if !asm_src.exists() || !c_src.exists() || !ver_script.exists() {
+        warn!("Bionic shim source files not found — build may be incomplete");
+        return Ok(());
+    }
+
+    // Check if already built and up to date
+    if shim_out.exists() {
+        // Rebuild if any source file is newer than the binary
+        let sources = [&asm_src, &c_src, &ver_script];
+        let need_rebuild = sources.iter().any(|src| {
+            src.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .zip(shim_out.metadata().and_then(|m| m.modified()).ok())
+                .map(|(s_mtime, b_mtime)| s_mtime > b_mtime)
+                .unwrap_or(true)
+        });
+
+        if !need_rebuild {
+            info!("libbionic_shim.so already installed and up-to-date");
+            return Ok(());
         }
     }
 
-    info!("JNI shim ready at: {}", shim_out.display());
+    info!("Building libbionic_shim.so (Bionic→glibc symbol bridge)...");
+
+    let obj_asm = syslib64.join("bionic_symbols.o");
+    let obj_c = syslib64.join("bionic_stubs.o");
+
+    // Assemble trampolines
+    let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+        .args(["-c", "-o"])
+        .arg(&obj_asm)
+        .arg(&asm_src)
+        .status()
+        .context("Failed to assemble bionic shim trampolines")?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to assemble bionic_shim.S");
+    }
+
+    // Compile C stubs
+    let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+        .args(["-c", "-o"])
+        .arg(&obj_c)
+        .arg("-fPIC")
+        .arg(&c_src)
+        .status()
+        .context("Failed to compile bionic_init.c")?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to compile bionic_init.c");
+    }
+
+    // Link into shared library with version script.
+    // We link against libglibc.so (a cross-compiled copy of glibc for ARM64)
+    // so the trampolines' dlsym() calls can resolve glibc symbols at runtime.
+    let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+        .arg("-shared")
+        .arg("-fPIC")
+        .arg("-o")
+        .arg(&shim_out)
+        .arg(&obj_asm)
+        .arg(&obj_c)
+        .arg("-Wl,--version-script")
+        .arg(&ver_script)
+        .arg("-Wl,-rpath,/system/lib64")
+        .arg("-L")
+        .arg(&syslib64)
+        .arg(&format!("-Wl,-rpath,{}", syslib64.display()))
+        .arg("-lglibc")   // cross-compiled glibc for ARM64
+        .arg("-lm")       // math library
+        .arg("-ldl")      // dlopen/dlsym
+        .arg("-nostartfiles")  // no _start needed — this is a shim library
+        .status()
+        .context("Failed to link libbionic_shim.so")?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to link libbionic_shim.so");
+    }
+
+    // Clean up object files
+    let _ = std::fs::remove_file(&obj_asm);
+    let _ = std::fs::remove_file(&obj_c);
+
+    // Verify the shim was created
+    if shim_out.exists() {
+        info!("libbionic_shim.so built successfully ({} bytes)",
+            shim_out.metadata().map(|m| m.len()).unwrap_or(0));
+    }
+
     Ok(())
 }
 
@@ -167,22 +273,4 @@ fn find_main_binary(libs: &[std::path::PathBuf]) -> Result<std::path::PathBuf> {
     libs.first()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No native libraries found in APK"))
-}
-
-/// Build environment variables for the QEMU process.
-fn build_env_vars(cfg: &SoConfig) -> Result<Vec<(&'static str, String)>> {
-    let mut vars = Vec::new();
-
-    // Graphics settings
-    vars.push(("SOBER_QUALITY", cfg.quality.to_string()));
-    if let Some(cap) = cfg.fps_cap {
-        vars.push(("SOBER_FPS_CAP", cap.to_string()));
-    }
-
-    // Discord RPC
-    if cfg.discord_rpc {
-        vars.push(("SOBER_DISCORD_RPC", "1".into()));
-    }
-
-    Ok(vars)
 }
