@@ -1,12 +1,16 @@
 [package]
 name = "sober-services"
 version.workspace = true
-edition.workspace = true
+edition = "2021"
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "6"

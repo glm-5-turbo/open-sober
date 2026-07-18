@@ -1,12 +1,22 @@
 [package]
 name = "libloader"
 version.workspace = true
-edition.workspace = true
+edition = "2021"
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 libc = "0.2"
-nix = { version = "0.29", features = ["process", "signal", "fs"] }
+nix = { version = "0.29", features = [
+    "process",
+    "signal",
+    "fs",
+    "mount",
+    "sched",
+    "user",
+] }
+anyhow = "1"
+tracing = "0.1"
+libbadcpu = { path = "../libbadcpu" }
