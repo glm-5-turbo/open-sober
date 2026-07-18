@@ -98,6 +98,37 @@ The Roblox Android APK's `libroblox.so` is compiled against **Android's Bionic l
    - `bionic_init.c` — constructor + bionic-only C stubs
    - `bionic_version.ver` — version script
 
+## Latest: Bionic Symbol Versioning SOLVED (July 18)
+
+The `libbionic_shim.so` approach now works. The key breakthrough was:
+
+1. **gen_shim.py** reads `libroblox.so`'s symbol table and generates dispatch-table trampolines for all 410 `@LIBC`/`@LIBC_N`/`@LIBC_O` symbols
+2. **bionic_shim.S**: 392 dispatch-table trampolines using `adrp :got:table + ldr + br` pattern, each tagged with `.symver ... @@LIBC`
+3. **jni_shim.c**: The dispatch table is filled from OUTSIDE the shim by the JNI shim binary (its PLT resolves to glibc, avoiding PLT circularity)
+4. `libbionic_shim.so` is `LD_PRELOAD`'ed, libroblox finds its `@@LIBC` symbols there
+
+**Verification**: Before: `dlopen("libroblox.so")` fails with `undefined symbol: abort`.
+After: libroblox.so loads, only fails on `glGetError` (EGL/GLES — separate graphics issue).
+
+## Current Status
+
+The Bionic→glibc symbol bridge is WORKING. Two new blockers remain:
+
+1. **GLES/EGL Graphics stubs** — `libGLESv2.so` and `libEGL.so` in the NDK are link-time stubs, not runtime implementations. Need to either:
+   - Preload Mesa's `libGLESv2.so` and `libEGL.so` for ARM64
+   - Or use the Vulkan→zink translation path (see GRAPHICS_RECOMMENDATION.md)
+2. **NDK library stubs** — Other NDK libs (libOpenMAXAL, libmediandk, etc.) are also stubs that might fail when called
+
+## Files Created/Modified
+
+- `crates/sober-core/src/gen_shim.py` — Python generator
+- `crates/sober-core/src/bionic_shim.S` — Generated assembly trampolines
+- `crates/sober-core/src/bionic_init.c` — C stubs for bionic-only functions
+- `crates/sober-core/src/bionic_version.ver` — Version script
+- `crates/sober-core/src/jni_shim.c` — Updated with dispatch table filling code
+- `crates/sober-core/src/qemu.rs` — Updated build script
+
+
 ## Two Recommended Approaches Forward
 
 ### Approach A: Full Android System Image (Recommended for quick progress)
