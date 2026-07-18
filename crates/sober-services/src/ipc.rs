@@ -2,7 +2,6 @@
 //
 // sober-services — Unix-domain-socket IPC for auth token exchange
 
-use std::io::{Read, Write};
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
