@@ -4,6 +4,7 @@ members = [
     "crates/libbadcpu",
     "crates/libloader",
     "crates/sober-services",
+    "crates/sober-core",
 ]
 
 [workspace.package]

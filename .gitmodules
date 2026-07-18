@@ -1,0 +1,3 @@
+[submodule "vendor/android2gnulinux"]
+	path = vendor/android2gnulinux
+	url = https://github.com/Cloudef/android2gnulinux.git
