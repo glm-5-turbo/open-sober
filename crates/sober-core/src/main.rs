@@ -78,54 +78,76 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run authentication flow — opens browser for Roblox login,
-/// then provides instructions for cookie extraction.
+/// Run authentication flow — opens an embedded webview window for Roblox login.
 fn run_auth(_cli: &Cli, _cfg: &config::SoConfig) -> anyhow::Result<()> {
-    info!("Starting authentication flow...");
+    info!("Starting embedded webview authentication...");
 
-    let service_config = sober_services::ServiceConfig::default();
+    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::window::WindowBuilder;
+    use wry::WebViewBuilder;
 
-    // Create the login webview (local HTTP server + system browser)
-    let mut webview = sober_services::webview::LoginWebview::new(&service_config)?;
-    let port = webview.start_server()?;
-    info!("OAuth callback server started on port {}", port);
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Open Sober — Sign in to Roblox")
+        .with_inner_size(tao::dpi::LogicalSize::new(800.0, 700.0))
+        .build(&event_loop)?;
 
-    // Open the Roblox login page
-    let auth_url = &service_config.auth_url;
-    info!("Opening browser for Roblox login...");
+    let token_saved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ts = token_saved.clone();
 
-    println!("\n╔══════════════════════════════════════════════════╗");
-    println!("║        Open Sober — Roblox Authentication        ║");
-    println!("╠══════════════════════════════════════════════════╣");
-    println!("║  1. A browser window will open to Roblox login   ║");
-    println!("║  2. Sign in to your Roblox account                ║");
-    println!("║  3. After signing in, copy your .ROBLOSECURITY    ║");
-    println!("║     cookie from browser DevTools (F12 → Storage)  ║");
-    println!("║  4. Paste the cookie value below                   ║");
-    println!("╚══════════════════════════════════════════════════╝");
-    println!();
+    let _webview = WebViewBuilder::new()
+        .with_url("https://www.roblox.com/login")
+        .with_navigation_handler(move |url: String| -> bool {
+            if url.starts_with("roblox:") || url.starts_with("roblox-player:") {
+                info!("Intercepted Roblox URI: {}", url);
+                false
+            } else {
+                true
+            }
+        })
+        .with_ipc_handler(move |req| {
+            let msg = req.body();
+            if !ts.load(std::sync::atomic::Ordering::SeqCst) {
+                let token = msg.trim_matches('"').to_string();
+                if !token.is_empty() {
+                    info!("Auth token received via IPC");
+                    if let Err(e) = save_token(&token) {
+                        tracing::error!("Failed to save token: {}", e);
+                    } else {
+                        ts.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        })
+        .with_initialization_script(
+            r#"
+            setInterval(function() {
+                try {
+                    var cookies = document.cookie.split(';').map(function(c) { return c.trim(); });
+                    for (var i = 0; i < cookies.length; i++) {
+                        if (cookies[i].startsWith('.ROBLOSECURITY=')) {
+                            var token = cookies[i].substring('.ROBLOSECURITY='.length);
+                            window.ipc.postMessage(JSON.stringify(token));
+                            break;
+                        }
+                    }
+                } catch(e) {}
+            }, 2000);
+            "#,
+        )
+        .build(&window)
+        .map_err(|e| anyhow::anyhow!("Failed to create webview: {}", e))?;
 
-    webview.open_browser(auth_url)?;
+    info!("Webview displayed, waiting for login...");
 
-    // Also start a simple stdin reader for pasting the token
-    info!("Waiting for token...");
-    println!("   Enter your .ROBLOSECURITY cookie value (or 'q' to quit):");
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let token = input.trim();
-
-    if token == "q" || token.is_empty() {
-        anyhow::bail!("Authentication cancelled");
-    }
-
-    info!("Token captured: {} chars", token.len());
-    save_token(token)?;
-
-    println!("\n   ✅ Authentication successful!");
-    println!("   Token saved. You can now run:");
-    println!("      open-sober play --apk <path>");
-    Ok(())
+    event_loop.run(move |_event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        if token_saved.load(std::sync::atomic::Ordering::SeqCst) {
+            info!("Auth complete, closing webview");
+            println!("\n✅ Authentication successful!");
+            *control_flow = ControlFlow::Exit;
+        }
+    });
 }
 
 /// Save the auth token to disk for future use.
