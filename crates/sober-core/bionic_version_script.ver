@@ -1,0 +1,50 @@
+LIBC {
+    global:
+        # Only put libc symbols here
+        abort; accept; accept4; access;
+        acos; acosf; asin; asinf; atan; atanf; atan2; atan2f;
+        ceil; ceilf; cos; cosf; exp; expf; floor; floorf; fmod; fmodf;
+        log; logf; log10; log10f; pow; powf; sin; sinf; sqrt; sqrtf;
+        tan; tanf;
+        free; malloc; calloc; realloc; aligned_alloc;
+        memcpy; memset; strlen; strcmp; strncmp; strdup; strndup;
+        memmove; memcmp; memchr; strchr; strrchr; strstr; strcasestr;
+        strtol; strtoul; strtoll; strtoull; atoi; atol; atoll;
+        sprintf; snprintf; vsprintf; vsnprintf; sscanf; vsscanf;
+        printf; fprintf; dprintf; vfprintf; vprintf;
+        open; openat; close; read; write; pread; pwrite;
+        lseek; lseek64; stat; fstat; lstat; fstatat;
+        mmap; munmap; mprotect; mlock; munlock; brk; sbrk;
+        socket; connect; bind; listen; accept; accept4;
+        send; recv; sendto; recvfrom; setsockopt; getsockopt;
+        getaddrinfo; freeaddrinfo; getnameinfo;
+        gettimeofday; settimeofday; clock_gettime; clock_settime;
+        nanosleep; usleep; sleep;
+        dlopen; dlsym; dlclose; dlerror; dladdr;
+        pthread_create; pthread_exit; pthread_join; pthread_detach;
+        pthread_self; pthread_equal; pthread_yield;
+        pthread_mutex_lock; pthread_mutex_unlock;
+        pthread_mutex_init; pthread_mutex_destroy; pthread_mutex_trylock;
+        pthread_cond_wait; pthread_cond_timedwait;
+        pthread_cond_signal; pthread_cond_broadcast;
+        pthread_once; pthread_key_create; pthread_key_delete;
+        pthread_getspecific; pthread_setspecific;
+        pthread_rwlock_init; pthread_rwlock_destroy;
+        pthread_rwlock_rdlock; pthread_rwlock_wrlock; pthread_rwlock_unlock;
+        exit; _exit; abort; atexit; on_exit;
+        signal; sigaction; sigprocmask; kill; raise;
+        getpid; getuid; geteuid; getgid; getegid;
+        getcwd; chdir; fchdir; mkdir; rmdir; unlink; rename;
+        dup; dup2; pipe; pipe2; fcntl; ioctl; poll; select;
+        errno; __errno_location; h_errno;
+};
+
+ANDROID {
+    global:
+        AAsset*; AConfiguration*; ALooper*; AMedia*;
+        __android_log*;
+};
+
+local:
+    *;
+};
