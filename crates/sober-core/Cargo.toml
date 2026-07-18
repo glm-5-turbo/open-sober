@@ -1,0 +1,21 @@
+[package]
+name = "sober-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "open-sober"
+path = "src/main.rs"
+
+[dependencies]
+libbadcpu = { path = "../libbadcpu" }
+libloader = { path = "../libloader" }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+clap = { version = "4", features = ["derive"] }

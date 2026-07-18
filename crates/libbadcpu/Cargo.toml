@@ -1,0 +1,11 @@
+[package]
+name = "libbadcpu"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+libc = "0.2"
