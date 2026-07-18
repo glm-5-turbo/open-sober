@@ -49,6 +49,7 @@ pub struct DecodedInstruction {
     /// Whether REX is present
     pub has_rex: bool,
     /// VEX vvvv field (destructive source)
+    #[allow(unused)]
     pub vex_vvvv: u8,
     /// VEX.W bit
     pub vex_w: bool,
@@ -102,7 +103,7 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
         inst.is_vex = true;
         pos += 1;
         let mut vex_w = 0u8;
-        let mut vex_pp: u8 = 0;
+        let mut _vex_pp: u8 = 0;
         let vex_m: u8;
 
         if first_byte == 0xC4 {
@@ -114,7 +115,7 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
             vex_m = b1 & 0x1F;
             let b2 = *ip.add(pos); pos += 1;
             vex_w = (b2 >> 7) & 1;
-            vex_pp = b2 & 0x03;
+            _vex_pp = b2 & 0x03;
             // Reconstruct REX: W|~R|~X|~B
             inst.rex = (vex_w << 3) | ((!vex_r & 1) << 2) | ((!((b1 >> 6) & 1) & 1) << 1) | ((!((b1 >> 5) & 1) & 1));
             inst.has_rex = true;
@@ -122,15 +123,15 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
             // 2-byte VEX
             let b1 = *ip.add(pos); pos += 1;
             let vex_r = (b1 >> 7) & 1;
-            vex_pp = b1 & 0x03;
+            _vex_pp = b1 & 0x03;
             vex_m = 1;
             inst.rex = (!vex_r & 1) << 2;
             inst.has_rex = true;
         }
 
-        if vex_pp == 1 { inst.has_66 = true; }
-        if vex_pp == 2 { inst.has_f2 = true; }
-        if vex_pp == 3 { inst.has_f3 = true; }
+        if _vex_pp == 1 { inst.has_66 = true; }
+        if _vex_pp == 2 { inst.has_f2 = true; }
+        if _vex_pp == 3 { inst.has_f3 = true; }
 
         opcode_map = match vex_m {
             1 => 1,
@@ -140,7 +141,6 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
         };
 
         inst.vex_w = vex_w != 0;
-        first_byte as usize; // suppress unused warning
     }
 
     // --- Parse opcode bytes ---

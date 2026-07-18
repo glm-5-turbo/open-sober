@@ -119,6 +119,7 @@ extern "C" fn sigill_handler(_sig: i32, _info: *mut libc::siginfo_t, ucontext: *
 }
 
 // Auto-initialize on library load for LD_PRELOAD-style injection
+#[allow(unused)]
 unsafe extern "C" fn init() {
     install();
 }

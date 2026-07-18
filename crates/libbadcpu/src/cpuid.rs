@@ -57,7 +57,7 @@ pub fn detect_features() -> CpuFeatures {
     let mut features = CpuFeatures::default();
 
     // Leaf 0: vendor string and max standard leaf
-    let result = unsafe { __cpuid(0u32) };
+    let result = __cpuid(0u32);
     let max_std = result.eax as u32;
 
     let vendor_bytes: [u8; 12] = [
@@ -76,7 +76,7 @@ pub fn detect_features() -> CpuFeatures {
 
     // Leaf 1: feature bits
     if max_std >= 1 {
-        let result = unsafe { __cpuid(1u32) };
+        let result = __cpuid(1u32);
         let ecx = result.ecx as u32;
         let _edx = result.edx as u32;
 
@@ -91,7 +91,7 @@ pub fn detect_features() -> CpuFeatures {
 
     // Leaf 7 (subleaf 0): extended features
     if max_std >= 7 {
-        let result = unsafe { __cpuid_count(7u32, 0u32) };
+        let result = __cpuid_count(7u32, 0u32);
         let ebx = result.ebx as u32;
 
         features.has_avx2 = (ebx & (1 << 5)) != 0;
@@ -100,12 +100,12 @@ pub fn detect_features() -> CpuFeatures {
     }
 
     // Extended leaves: brand string
-    let ext_result = unsafe { __cpuid(0x8000_0000u32) };
+    let ext_result = __cpuid(0x8000_0000u32);
     let max_ext = ext_result.eax as u32;
 
     if max_ext >= 0x8000_0004 {
         for i in 0usize..3 {
-            let result = unsafe { __cpuid(0x8000_0002 + i as u32) };
+            let result = __cpuid(0x8000_0002 + i as u32);
             let offset = i * 16;
             features.brand_string[offset..offset + 4].copy_from_slice(&result.eax.to_le_bytes());
             features.brand_string[offset + 4..offset + 8].copy_from_slice(&result.ebx.to_le_bytes());

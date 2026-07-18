@@ -525,6 +525,7 @@ impl MemoryMapEntry {
 // ---------------------------------------------------------------------------
 
 /// Read the ELF header from a file.
+#[allow(unused)]
 fn read_ehdr(file: &mut File) -> Result<Elf64Ehdr> {
     file.seek(SeekFrom::Start(0))
         .context("Failed to seek to ELF header")?;
@@ -558,6 +559,7 @@ fn read_ehdr(file: &mut File) -> Result<Elf64Ehdr> {
 }
 
 /// Validate the ELF header.
+#[allow(unused)]
 fn validate_elf_header(ehdr: &Elf64Ehdr) -> Result<()> {
     if ehdr.e_ident[0..4] != ELF_MAGIC {
         anyhow::bail!("Not an ELF file (bad magic)");
@@ -578,6 +580,7 @@ fn validate_elf_header(ehdr: &Elf64Ehdr) -> Result<()> {
 }
 
 /// Read program headers from an ELF file.
+#[allow(unused)]
 fn read_phdrs(file: &mut File, ehdr: &Elf64Ehdr) -> Result<Vec<Elf64Phdr>> {
     file.seek(SeekFrom::Start(ehdr.e_phoff))
         .context("Failed to seek to program headers")?;
@@ -612,6 +615,7 @@ fn read_phdrs(file: &mut File, ehdr: &Elf64Ehdr) -> Result<Vec<Elf64Phdr>> {
 }
 
 /// Read the interpreter path from PT_INTERP.
+#[allow(unused)]
 fn read_interp(file: &mut File, phdr: &Elf64Phdr) -> Result<String> {
     file.seek(SeekFrom::Start(phdr.p_offset))
         .context("Failed to seek to PT_INTERP")?;
@@ -631,6 +635,7 @@ fn read_interp(file: &mut File, phdr: &Elf64Phdr) -> Result<String> {
 }
 
 /// Parse NEEDED library entries from the dynamic section.
+#[allow(unused)]
 fn parse_needed(
     file: &mut File,
     _ehdr: &Elf64Ehdr,
@@ -719,6 +724,7 @@ fn parse_needed(
 }
 
 /// Convert a virtual address to a file offset using program headers.
+#[allow(unused)]
 fn virt_to_file_offset(phdrs: &[Elf64Phdr], vaddr: u64, _base: u64) -> Option<u64> {
     for ph in phdrs {
         if ph.p_type != PT_LOAD {
@@ -735,26 +741,31 @@ fn virt_to_file_offset(phdrs: &[Elf64Phdr], vaddr: u64, _base: u64) -> Option<u6
 }
 
 /// Align a value down to the nearest alignment boundary.
+#[allow(unused)]
 fn align_down(val: u64, align: u64) -> u64 {
     val & !(align - 1)
 }
 
 /// Align a value up to the nearest alignment boundary.
+#[allow(unused)]
 fn align_up(val: u64, align: u64) -> u64 {
     (val + align - 1) & !(align - 1)
 }
 
 /// Align a usize up to the nearest alignment boundary.
+#[allow(unused)]
 fn align_up_usize(val: usize, align: usize) -> usize {
     (val + align - 1) & !(align - 1)
 }
 
 /// u64 version of align_down
+#[allow(unused)]
 fn align_down_u64(val: u64, align: u64) -> u64 {
     val & !(align - 1)
 }
 
 /// u64 version of align_up
+#[allow(unused)]
 fn align_up_u64(val: u64, align: u64) -> u64 {
     (val + align - 1) & !(align - 1)
 }

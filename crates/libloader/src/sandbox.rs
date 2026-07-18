@@ -98,6 +98,7 @@ pub fn create_minimal_root(root_path: &Path) -> Result<()> {
 /// or with the chroot path as the target of bind mounts.
 ///
 /// SAFETY: mount(2) requires CAP_SYS_ADMIN in the current namespace.
+#[allow(unused)]
 pub fn mount_chroot_filesystems(root_path: &Path) -> Result<()> {
     debug!("Mounting chroot filesystems at {}", root_path.display());
 
@@ -149,6 +150,7 @@ pub fn mount_chroot_filesystems(root_path: &Path) -> Result<()> {
 /// Unmount chroot filesystems.
 ///
 /// Should be called before cleaning up the chroot directory.
+#[allow(unused)]
 pub fn unmount_chroot_filesystems(root_path: &Path) -> Result<()> {
     let paths = ["dev/shm", "dev/pts", "sys", "proc"];
     for p in &paths {
@@ -198,15 +200,13 @@ fn create_dev_node(root_path: &Path, name: &str, major: u64, minor: u64, mode: u
 
     // SAFETY: mknod(2) creates a device node. The caller must have
     // appropriate capabilities. We create character devices (S_IFCHR).
-    unsafe {
-        mknod(
-            &path,
-            SFlag::S_IFCHR,
-            Mode::from_bits_truncate(mode),
-            makedev(major, minor),
-        )
-        .with_context(|| format!("Failed to create device node {}", path.display()))?;
-    }
+    mknod(
+        &path,
+        SFlag::S_IFCHR,
+        Mode::from_bits_truncate(mode),
+        makedev(major, minor),
+    )
+    .with_context(|| format!("Failed to create device node {}", path.display()))?;
 
     debug!("Created device node {} ({}:{})", name, major, minor);
     Ok(())

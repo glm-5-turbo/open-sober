@@ -11,6 +11,7 @@ use crate::cpuid::CpuFeatures;
 pub enum EmulationResult {
     Success,
     UnrecognizedInstruction,
+    #[allow(unused)]
     UnsupportedCpu,
 }
 

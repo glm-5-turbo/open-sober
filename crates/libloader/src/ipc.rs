@@ -48,12 +48,14 @@ impl IpcChannel {
     }
 
     /// Get the file descriptor that should be used by the child.
+    #[allow(unused)]
     pub fn child_fd(&self) -> RawFd {
         self.fds[1]
     }
 
     /// Close the parent's end of the pipe.
     /// Should be called in the child process after fork.
+    #[allow(unused)]
     pub fn close_parent_end(&self) -> Result<()> {
         // SAFETY: close(2) is async-signal-safe.
         unsafe {
@@ -76,6 +78,7 @@ impl IpcChannel {
     ///
     /// Writes a single byte to the pipe. The parent blocks on read
     /// until this byte arrives.
+    #[allow(unused)]
     pub fn send_ready(&self) -> Result<()> {
         let byte: [u8; 1] = *b"R";
         // SAFETY: write(2) is async-signal-safe.
@@ -92,6 +95,7 @@ impl IpcChannel {
     ///
     /// Blocks the parent until the child writes the readiness byte.
     /// Returns `true` if the child is ready, `false` if the pipe closed.
+    #[allow(unused)]
     pub fn wait_ready(&self) -> Result<bool> {
         let mut byte: [u8; 1] = [0];
         // SAFETY: read(2) is safe.
@@ -109,6 +113,7 @@ impl IpcChannel {
     }
 
     /// Send a data message from parent to child.
+    #[allow(unused)]
     pub fn send_message(&self, data: &[u8]) -> Result<()> {
         // SAFETY: write(2) is async-signal-safe.
         unsafe {
@@ -121,6 +126,7 @@ impl IpcChannel {
     }
 
     /// Receive a data message on the parent end.
+    #[allow(unused)]
     pub fn receive_message(&self, buf: &mut [u8]) -> Result<usize> {
         // SAFETY: read(2) is safe.
         unsafe {
