@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 /// Ensure a Roblox APK is available at the given path, or download it.
+#[allow(dead_code)]
 pub fn ensure_apk(apk_path: Option<&str>) -> Result<PathBuf> {
     if let Some(path) = apk_path {
         let p = PathBuf::from(path);

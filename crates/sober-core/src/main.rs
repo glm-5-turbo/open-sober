@@ -78,132 +78,46 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run authentication flow — opens an embedded webview window for Roblox login.
+/// Run authentication flow — prints instructions since the game handles auth.
 fn run_auth(_cli: &Cli, _cfg: &config::SoConfig) -> anyhow::Result<()> {
-    info!("Starting embedded webview authentication...");
-
-    use tao::event_loop::{ControlFlow, EventLoop};
-    use tao::window::WindowBuilder;
-    use wry::WebViewBuilder;
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Open Sober — Sign in to Roblox")
-        .with_inner_size(tao::dpi::LogicalSize::new(800.0, 700.0))
-        .build(&event_loop)?;
-
-    let token_saved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ts = token_saved.clone();
-
-    let _webview = WebViewBuilder::new()
-        .with_url("https://www.roblox.com/login")
-        .with_navigation_handler(move |url: String| -> bool {
-            if url.starts_with("roblox:") || url.starts_with("roblox-player:") {
-                info!("Intercepted Roblox URI: {}", url);
-                false
-            } else {
-                true
-            }
-        })
-        .with_ipc_handler(move |req| {
-            let msg = req.body();
-            if !ts.load(std::sync::atomic::Ordering::SeqCst) {
-                let token = msg.trim_matches('"').to_string();
-                if !token.is_empty() {
-                    info!("Auth token received via IPC");
-                    if let Err(e) = save_token(&token) {
-                        tracing::error!("Failed to save token: {}", e);
-                    } else {
-                        ts.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-            }
-        })
-        .with_initialization_script(
-            r#"
-            setInterval(function() {
-                try {
-                    var cookies = document.cookie.split(';').map(function(c) { return c.trim(); });
-                    for (var i = 0; i < cookies.length; i++) {
-                        if (cookies[i].startsWith('.ROBLOSECURITY=')) {
-                            var token = cookies[i].substring('.ROBLOSECURITY='.length);
-                            window.ipc.postMessage(JSON.stringify(token));
-                            break;
-                        }
-                    }
-                } catch(e) {}
-            }, 2000);
-            "#,
-        )
-        .build(&window)
-        .map_err(|e| anyhow::anyhow!("Failed to create webview: {}", e))?;
-
-    info!("Webview displayed, waiting for login...");
-
-    event_loop.run(move |_event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        if token_saved.load(std::sync::atomic::Ordering::SeqCst) {
-            info!("Auth complete, closing webview");
-            println!("\n✅ Authentication successful!");
-            *control_flow = ControlFlow::Exit;
-        }
-    });
-}
-
-/// Save the auth token to disk for future use.
-fn save_token(token: &str) -> anyhow::Result<()> {
-    let token_path = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("open-sober")
-        .join(".ROBLOSECURITY");
-
-    if let Some(parent) = token_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&token_path, token)?;
-    info!("Auth token saved to {:?}", token_path);
+    info!("Auth flow started");
+    println!("\nOpen Sober will launch Roblox. Sign in inside the game window when prompted.");
+    println!("Auth tokens are stored by the game automatically.");
     Ok(())
 }
 
-/// URL-encode a string for use in a redirect URI.
-#[allow(dead_code)]
-fn urlencoding(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(byte as char);
-            }
-            _ => {
-                result.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    result
-}
-
-/// Play a Roblox experience (assumes already authenticated).
+/// Play a Roblox experience. Token is optional — the game handles auth.
 fn run_play(cli: &Cli, cfg: &config::SoConfig) -> anyhow::Result<()> {
-    let token_str: Option<String> = cli.token.clone()
+    // Token is now optional — the game handles login itself
+    let token = cli.token.clone()
         .or_else(|| std::env::var("ROBLOSECURITY").ok())
         .or_else(|| {
-            let path = dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                .join("open-sober")
-                .join(".ROBLOSECURITY");
-            std::fs::read_to_string(&path).ok()
-        });
-    let token = token_str.as_deref()
-        .ok_or_else(|| anyhow::anyhow!(
-            "No auth token found. Run 'open-sober auth' or set ROBLOSECURITY env var."
-        ))?;
+            std::fs::read_to_string(
+                dirs::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join("open-sober")
+                    .join(".ROBLOSECURITY")
+            ).ok()
+        })
+        .unwrap_or_default();
 
-    let token = token.trim().to_string();
-    info!("Auth token loaded ({} chars)", token.len());
+    if token.is_empty() {
+        info!("No auth token provided. Game will prompt for login.");
+        println!("No auth token — Roblox will prompt for login in-game.");
+    } else {
+        info!("Auth token loaded ({} chars)", token.len());
+    }
 
-    // Download APK if needed
-    let apk_path = apk::ensure_apk(cli.apk.as_deref())?;
-    info!("APK ready: {}", apk_path.display());
+    // Get APK path from CLI or config
+    let apk_path = cli.apk.clone()
+        .map(std::path::PathBuf::from)
+        .or_else(|| cfg.apk_path.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("roblox-android.apk"));
+
+    if !apk_path.exists() {
+        anyhow::bail!("APK not found at: {}. Download one or specify with --apk", apk_path.display());
+    }
+    info!("APK: {}", apk_path.display());
 
     // Set up Android environment
     let env = android_env::AndroidEnv::setup()?;
@@ -216,20 +130,9 @@ fn run_play(cli: &Cli, cfg: &config::SoConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Full launch: authenticate if needed, then play.
+/// Full launch: just plays directly.
 fn run_launch(cli: &Cli, cfg: &config::SoConfig) -> anyhow::Result<()> {
-    // Check if we have a token
-    let has_token = cli.token.is_some()
-        || std::env::var("ROBLOSECURITY").is_ok()
-        || dirs::data_dir()
-            .map(|d| d.join("open-sober").join(".ROBLOSECURITY").exists())
-            .unwrap_or(false);
-
-    if !has_token {
-        info!("No auth token found — launching auth flow");
-        run_auth(cli, cfg)?;
-        // After auth, the token should be saved. Continue to play.
-    }
-
+    info!("Launching Roblox...");
+    println!("Launching Roblox...");
     run_play(cli, cfg)
 }

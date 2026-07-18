@@ -21,6 +21,3 @@ walkdir = "2"
 zip = "2"
 sha2 = "0.10"
 dirs = "6"
-wry = "0.55"
-tao = { version = "0.35", features = ["serde"] }
-http = "1"
