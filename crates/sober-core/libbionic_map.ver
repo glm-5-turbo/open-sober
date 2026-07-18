@@ -1,6 +1,0 @@
-LIBC {
-    global:
-        *;
-    local:
-        *;
-};
