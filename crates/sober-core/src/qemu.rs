@@ -3,7 +3,7 @@
 // QEMU user-mode launcher for running ARM64 Android binaries on x86-64.
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
@@ -118,48 +118,4 @@ fn build_env_vars(cfg: &SoConfig) -> Result<Vec<(&'static str, String)>> {
     }
 
     Ok(vars)
-}
-
-/// Check if QEMU user-mode is available.
-pub fn check_qemu_available(qemu_path: &Path) -> bool {
-    Command::new(qemu_path)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Spawn an ARM64 binary under QEMU user-mode with the Android environment.
-pub fn spawn_qemu_process(
-    qemu_path: &Path,
-    android_root: &Path,
-    binary: &Path,
-    args: &[&str],
-    env_vars: &[(&str, &str)],
-) -> Result<Child> {
-    let mut cmd = Command::new(qemu_path);
-
-    cmd.arg("-L");
-    cmd.arg(android_root);
-    cmd.arg("-E");
-    cmd.arg("ANDROID_ROOT=/system");
-    cmd.arg("-E");
-    cmd.arg("ANDROID_DATA=/data");
-    cmd.arg("-E");
-    cmd.arg("ANDROID_STORAGE=/storage");
-
-    for (key, val) in env_vars {
-        cmd.arg("-E");
-        cmd.arg(format!("{}={}", key, val));
-    }
-
-    cmd.arg(binary);
-    cmd.args(args);
-
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-
-    cmd.spawn().context("Failed to spawn QEMU process")
 }

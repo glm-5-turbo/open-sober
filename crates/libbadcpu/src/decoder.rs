@@ -124,7 +124,7 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
             let vex_r = (b1 >> 7) & 1;
             vex_pp = b1 & 0x03;
             vex_m = 1;
-            inst.rex = ((!vex_r & 1) << 2);
+            inst.rex = (!vex_r & 1) << 2;
             inst.has_rex = true;
         }
 

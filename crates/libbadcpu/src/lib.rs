@@ -38,7 +38,7 @@ pub fn install() -> bool {
     // The signal handler is async-signal-safe.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = sigill_handler as libc::sighandler_t;
+        sa.sa_sigaction = sigill_handler as *const () as libc::sighandler_t;
         sa.sa_flags = libc::SA_SIGINFO;
         libc::sigemptyset(&mut sa.sa_mask);
 

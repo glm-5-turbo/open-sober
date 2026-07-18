@@ -904,16 +904,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "libredox"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1482,11 +1472,11 @@ dependencies = [
  "clap",
  "dirs",
  "libc",
- "libloading",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "sober-services",
  "tracing",
  "tracing-subscriber",
  "walkdir",

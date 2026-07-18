@@ -17,7 +17,7 @@ mod android_env;
 mod dirs_setup;
 
 use clap::Parser;
-use tracing::{info, warn, error};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "open-sober", about = "Open-source Roblox Linux runtime")]
@@ -78,17 +78,77 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run authentication flow only.
+/// Run authentication flow — opens browser for Roblox login.
 fn run_auth(_cli: &Cli, _cfg: &config::SoConfig) -> anyhow::Result<()> {
     info!("Starting authentication flow...");
-    // TODO: Launch sober-services binary or open browser with OAuth
-    // For now, print instructions
-    println!("Open Sober Authentication");
-    println!("========================");
-    println!("1. Open https://www.roblox.com/login in your browser");
-    println!("2. After logging in, copy the .ROBLOSECURITY cookie value");
-    println!("3. Run: open-sober --token \"YOUR_COOKIE\" play");
+
+    let service_config = sober_services::ServiceConfig::default();
+
+    // Create the login webview (opens a local HTTP server + system browser)
+    let mut webview = sober_services::webview::LoginWebview::new(&service_config)?;
+    let port = webview.start_server()?;
+    info!("OAuth callback server started on port {}", port);
+
+    // Build the Roblox login URL with our redirect URI
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
+    let auth_url = format!("{}?redirect_uri={}",
+        service_config.auth_url,
+        urlencoding(&redirect_uri));
+
+    info!("Opening browser for Roblox login...");
+    println!("\n   Opening browser for Roblox authentication...");
+    println!("   If the browser doesn't open, visit:");
+    println!("   {}", auth_url);
+
+    webview.open_browser(&auth_url)?;
+
+    info!("Waiting for authentication (timeout: 5 minutes)...");
+    println!("\n   Waiting for login to complete in browser...");
+
+    match webview.wait_for_token(300) {
+        Some(token) => {
+            info!("Authentication successful, saving token");
+            save_token(&token)?;
+
+            println!("\n   ✅ Authentication successful!");
+            println!("   You can now run: open-sober play --apk <path>");
+            Ok(())
+        }
+        None => {
+            anyhow::bail!("Authentication timed out after 5 minutes");
+        }
+    }
+}
+
+/// Save the auth token to disk for future use.
+fn save_token(token: &str) -> anyhow::Result<()> {
+    let token_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("open-sober")
+        .join(".ROBLOSECURITY");
+
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&token_path, token)?;
+    info!("Auth token saved to {:?}", token_path);
     Ok(())
+}
+
+/// URL-encode a string for use in a redirect URI.
+fn urlencoding(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
 }
 
 /// Play a Roblox experience (assumes already authenticated).

@@ -2,7 +2,7 @@
 //
 // Configuration management for Open Sober.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Open Sober configuration.
@@ -122,22 +122,6 @@ impl SoConfig {
                 Ok(SoConfig::default())
             }
         }
-    }
-
-    /// Save config to the default path.
-    pub fn save(&self) -> anyhow::Result<()> {
-        let path = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("open-sober")
-            .join("config.json");
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let data = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, data)?;
-        Ok(())
     }
 
     /// Get the mesa driver override string.

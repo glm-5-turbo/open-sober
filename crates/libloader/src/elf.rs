@@ -20,42 +20,63 @@ use tracing::{debug, info};
 // ---------------------------------------------------------------------------
 
 /// ELF magic number: \x7fELF
+#[allow(unused)]
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 
 /// ELF class: 64-bit
+#[allow(unused)]
 const ELFCLASS64: u8 = 2;
 
 /// ELF data encoding: little-endian
+#[allow(unused)]
 const ELFDATA2LSB: u8 = 1;
 
 /// ET_DYN — shared object / Position-Independent Executable
+#[allow(unused)]
 const ET_DYN: u16 = 3;
 
 /// ET_EXEC — executable
+#[allow(unused)]
 const ET_EXEC: u16 = 2;
 
 /// Program header types
+#[allow(unused)]
 const PT_NULL: u32 = 0;
+#[allow(unused)]
 const PT_LOAD: u32 = 1;
+#[allow(unused)]
 const PT_DYNAMIC: u32 = 2;
+#[allow(unused)]
 const PT_INTERP: u32 = 3;
+#[allow(unused)]
 const PT_NOTE: u32 = 4;
+#[allow(unused)]
 const PT_PHDR: u32 = 6;
+#[allow(unused)]
 const PT_GNU_STACK: u32 = 0x6474e551;
+#[allow(unused)]
 const PT_GNU_RELRO: u32 = 0x6474e552;
 
 /// Program header flags
+#[allow(unused)]
 const PF_X: u32 = 1; // Execute
+#[allow(unused)]
 const PF_W: u32 = 2; // Write
+#[allow(unused)]
 const PF_R: u32 = 4; // Read
 
 /// Dynamic section tags relevant to us
+#[allow(unused)]
 const DT_NEEDED: u64 = 1;
+#[allow(unused)]
 const DT_STRTAB: u64 = 5;
+#[allow(unused)]
 const DT_STRSZ: u64 = 10;
+#[allow(unused)]
 const DT_NULL: u64 = 0;
 
 /// ELF 64-bit header — 64 bytes total
+#[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Ehdr {
@@ -76,6 +97,7 @@ pub struct Elf64Ehdr {
 }
 
 /// ELF 64-bit program header — 56 bytes
+#[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Phdr {
@@ -90,6 +112,7 @@ pub struct Elf64Phdr {
 }
 
 /// ELF 64-bit dynamic entry — 16 bytes
+#[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Dyn {
@@ -98,6 +121,7 @@ pub struct Elf64Dyn {
 }
 
 /// Memory protection flags derived from ELF program header flags.
+#[allow(unused)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemProt {
     pub read: bool,
@@ -107,6 +131,7 @@ pub struct MemProt {
 
 impl MemProt {
     /// Convert to POSIX mprotect flags (PROT_READ | PROT_WRITE | PROT_EXEC).
+    #[allow(unused)]
     pub fn to_posix(self) -> libc::c_int {
         let mut flags = 0;
         if self.read {
@@ -122,6 +147,7 @@ impl MemProt {
     }
 
     /// Convert from ELF p_flags.
+    #[allow(unused)]
     pub fn from_elf(p_flags: u32) -> Self {
         Self {
             read: (p_flags & PF_R) != 0,
@@ -132,6 +158,7 @@ impl MemProt {
 }
 
 /// Information about an ELF binary extracted from its headers.
+#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct ElfInfo {
     /// Path to the ELF file.
@@ -155,6 +182,7 @@ pub struct ElfInfo {
 }
 
 /// A loaded ELF segment in memory.
+#[allow(unused)]
 #[derive(Debug)]
 pub struct LoadedSegment {
     /// Virtual address where this segment was mapped.
@@ -168,6 +196,7 @@ pub struct LoadedSegment {
 }
 
 /// Result of loading an ELF binary into memory.
+#[allow(unused)]
 #[derive(Debug)]
 pub struct LoadedElf {
     /// Base address where the ELF was loaded.
@@ -186,6 +215,7 @@ pub struct LoadedElf {
 ///
 /// Reads the ELF header and program headers to produce an `ElfInfo`.
 /// Does NOT load any segments into memory.
+#[allow(unused)]
 pub fn parse_elf(path: &Path) -> Result<ElfInfo> {
     let mut file = File::open(path)
         .with_context(|| format!("Failed to open ELF file: {}", path.display()))?;
@@ -245,6 +275,7 @@ pub fn parse_elf(path: &Path) -> Result<ElfInfo> {
 /// SAFETY: This function calls mmap(2) which creates memory mappings.
 /// The caller must ensure the file descriptor is valid and the
 /// mappings don't conflict with existing mappings.
+#[allow(unused)]
 pub unsafe fn load_elf(path: &Path) -> Result<LoadedElf> {
     let info = parse_elf(path)?;
     let file = File::open(path)
@@ -382,6 +413,7 @@ pub unsafe fn load_elf(path: &Path) -> Result<LoadedElf> {
 /// Read /proc/self/maps to understand the current memory layout.
 ///
 /// Returns a vector of memory mapping entries from the kernel.
+#[allow(unused)]
 pub fn read_process_maps() -> Result<Vec<MemoryMapEntry>> {
     let maps = std::fs::read_to_string("/proc/self/maps")
         .context("Failed to read /proc/self/maps")?;
@@ -398,6 +430,7 @@ pub fn read_process_maps() -> Result<Vec<MemoryMapEntry>> {
 }
 
 /// A single entry from /proc/self/maps.
+#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct MemoryMapEntry {
     /// Start address of the mapping.
@@ -429,6 +462,7 @@ impl MemoryMapEntry {
     ///
     /// Format: address           perms offset  dev   inode   pathname
     ///         00400000-00452000 r-xp 00000000 08:02 173521  /usr/bin/...
+    #[allow(unused)]
     pub fn parse(line: &str) -> Result<Self> {
         // Format: start-end perms offset dev:dev inode [path]
         let line = line.trim();

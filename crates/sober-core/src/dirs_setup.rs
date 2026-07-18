@@ -15,21 +15,3 @@ pub fn cache_dir() -> PathBuf {
 pub fn libs_dir() -> PathBuf {
     cache_dir().join("libs")
 }
-
-/// Get the Android environment root directory.
-pub fn android_env_dir() -> PathBuf {
-    cache_dir().join("android-env")
-}
-
-/// Get the APK cache directory.
-pub fn apk_cache_dir() -> PathBuf {
-    cache_dir().join("apks")
-}
-
-/// Ensure all directories exist.
-pub fn ensure_dirs() -> std::io::Result<()> {
-    std::fs::create_dir_all(libs_dir())?;
-    std::fs::create_dir_all(android_env_dir())?;
-    std::fs::create_dir_all(apk_cache_dir())?;
-    Ok(())
-}

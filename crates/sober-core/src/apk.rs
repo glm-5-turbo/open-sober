@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Ensure a Roblox APK is available at the given path, or download it.
 pub fn ensure_apk(apk_path: Option<&str>) -> Result<PathBuf> {
@@ -142,27 +142,11 @@ pub fn extract_libs(apk_path: &Path, output_dir: &Path) -> Result<Vec<PathBuf>> 
     Ok(extracted)
 }
 
-/// List all .so files in the APK.
-pub fn list_native_libs(apk_path: &Path) -> Result<Vec<String>> {
-    let file = std::fs::File::open(apk_path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
-
-    let mut libs = Vec::new();
-    for i in 0..archive.len() {
-        let entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
-        if name.contains("/lib") && name.ends_with(".so") {
-            libs.push(name);
-        }
-    }
-
-    Ok(libs)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn test_config_defaults() {
         let cfg = crate::config::SoConfig::default();
         assert_eq!(cfg.quality, 5);

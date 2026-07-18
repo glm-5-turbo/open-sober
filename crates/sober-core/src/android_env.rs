@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use std::os::unix::fs::PermissionsExt;
 use tracing::{info, warn};
 
 /// Android environment root.
@@ -15,6 +14,7 @@ pub struct AndroidEnv {
     /// Root directory of the Android environment
     pub root: PathBuf,
     /// Path to the android2gnulinux runtime
+    #[allow(dead_code)]
     pub runtime: PathBuf,
 }
 
@@ -191,44 +191,4 @@ impl AndroidEnv {
         }
         Ok(())
     }
-}
-
-/// Setup an Android environment suitable for use with QEMU user mode.
-/// Creates the chroot filesystem with the expected Android paths.
-pub fn setup_android_env(root: &Path) -> Result<()> {
-    let env = AndroidEnv::setup()?;
-
-    // Create a wrapper script that can be used directly
-    let wrapper_path = root.join("run-in-android-env.sh");
-    let wrapper = format!(
-        r#"#!/bin/bash
-# Open Sober - Android environment wrapper
-# Usage: ./run-in-android-env.sh <qemu-aarch64> <binary> [args...]
-
-QEMU="$1"
-shift
-BINARY="$1"
-shift
-
-ROOT="{}"
-RUNTIME="{}"
-
-exec "$QEMU" \
-    -L "$ROOT" \
-    -E LD_LIBRARY_PATH="/system/lib64:/vendor/lib64" \
-    -E ANDROID_ROOT="/system" \
-    -E ANDROID_DATA="/data" \
-    -E ANDROID_STORAGE="/storage" \
-    -E EXTERNAL_STORAGE="/sdcard" \
-    "$BINARY" "$@"
-"#,
-        env.root.display(),
-        env.runtime.display(),
-    );
-
-    std::fs::write(&wrapper_path, wrapper)?;
-    std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))?;
-
-    info!("Wrapper script created at: {}", wrapper_path.display());
-    Ok(())
 }
