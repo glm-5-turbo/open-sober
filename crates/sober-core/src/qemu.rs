@@ -12,6 +12,7 @@ use crate::android_env::AndroidEnv;
 use crate::config::SoConfig;
 
 /// Launch the Roblox Android APK via QEMU user-mode translation.
+/// Uses a JNI shim binary to load libroblox.so with Android stub libraries.
 pub fn launch_roblox(
     apk_path: &Path,
     env: &AndroidEnv,
@@ -30,15 +31,31 @@ pub fn launch_roblox(
         anyhow::bail!("No ARM64 native libraries found in the APK");
     }
 
-    // Find the main Roblox binary (libroblox.so or similar)
+    // Find the main Roblox binary
     let main_binary = find_main_binary(&libs)?;
     info!("Main Roblox binary: {}", main_binary.display());
 
-    // Build environment variables
-    let env_vars = build_env_vars(cfg)?;
+    // Build and install the JNI stub/shims
+    setup_jni_shim(env)?;
 
-    // Build the QEMU command
-    let mut cmd = env.build_qemu_cmd(&cfg.qemu_path, &main_binary, &env_vars);
+    // Build the QEMU command using the shim as entry point
+    let shim_path = env.root.join("jni_shim");
+    let mut cmd = env.build_qemu_cmd(&cfg.qemu_path, &shim_path, &[]);
+
+    // Point to the real Roblox library
+    cmd.env("ROBLOX_LIB", &main_binary);
+
+    // LD_PRELOAD our stub library for missing Android/Bionic symbols
+    cmd.env("LD_PRELOAD", "/system/lib64/libcxx_syms.so");
+
+    // Put libroblox.so's directory on the library path
+    if let Some(lib_dir) = main_binary.parent() {
+        let ld_path = format!(
+            "/system/lib64:/vendor/lib64:/lib:{}",
+            lib_dir.display()
+        );
+        cmd.env("LD_LIBRARY_PATH", &ld_path);
+    }
 
     // Set up graphics
     if let Some(driver) = cfg.mesa_loader_override() {
@@ -57,10 +74,9 @@ pub fn launch_roblox(
     cmd.stderr(Stdio::inherit());
     cmd.stdin(Stdio::inherit());
 
-    info!("Launching: {:?}", cmd);
+    info!("Launching Roblox under QEMU with JNI shim...");
     debug!("Full command: {:?}", cmd);
 
-    // Spawn and wait
     let mut child = cmd.spawn()
         .context("Failed to start QEMU process. Is qemu-aarch64 installed?")?;
 
@@ -74,9 +90,60 @@ pub fn launch_roblox(
         Ok(())
     } else {
         warn!("Roblox exited with status: {:?}", status.code());
-        // Non-zero exit isn't necessarily a failure for games
         Ok(())
     }
+}
+
+/// Build and install the ARM64 JNI shim and stub libraries into the Android env.
+fn setup_jni_shim(env: &AndroidEnv) -> Result<()> {
+    let syslib64 = env.root.join("system").join("lib64");
+
+    // Check if already installed
+    if env.root.join("jni_shim").exists() && syslib64.join("libcxx_syms.so").exists() {
+        info!("JNI shim already installed");
+        return Ok(());
+    }
+
+    info!("Building ARM64 JNI shim and stubs...");
+
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // 1. Build the JNI shim executable
+    let shim_src = crate_dir.join("jni_shim.c");
+    let shim_out = env.root.join("jni_shim");
+
+    let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+        .arg("-o")
+        .arg(&shim_out)
+        .arg(&shim_src)
+        .arg("-ldl")
+        .status()
+        .context("Failed to compile JNI shim (aarch64-linux-gnu-gcc required)")?;
+
+    if !status.success() {
+        anyhow::bail!("JNI shim compilation failed");
+    }
+
+    // 2. Build the stub symbols library
+    let stubs_src = crate_dir.join("symbols_aarch64.c");
+    let stubs_out = syslib64.join("libcxx_syms.so");
+
+    if stubs_src.exists() {
+        let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+            .arg("-shared")
+            .arg("-fPIC")
+            .arg("-o")
+            .arg(&stubs_out)
+            .arg(&stubs_src)
+            .status()?;
+
+        if !status.success() {
+            warn!("Stub library compilation failed (continuing anyway)");
+        }
+    }
+
+    info!("JNI shim ready at: {}", shim_out.display());
+    Ok(())
 }
 
 /// Find the main Roblox shared library among extracted libs.

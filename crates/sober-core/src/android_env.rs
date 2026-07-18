@@ -190,9 +190,6 @@ impl AndroidEnv {
             cmd.arg(format!("{}={}", key, val));
         }
 
-        // Drop QEMU's own env vars cleanly
-        cmd.arg("-drop-ld-preload");
-
         // The binary to execute
         cmd.arg(binary_path);
 

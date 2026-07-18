@@ -4,3 +4,7 @@
 *.swo
 .DS_Store
 *.apk
+*.so
+bot.sh
+mkstubs.sh
+stub_gen.sh
