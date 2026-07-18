@@ -81,11 +81,16 @@ impl AndroidEnv {
         }
 
         // Copy android2gnulinux runtime libraries if available
-        if runtime.join("lib").exists() {
-            let runtime_lib = runtime.join("lib");
+        if runtime.join("libdl.so").exists() {
             let system_lib = root.join("system").join("lib64");
-            Self::copy_dir(&runtime_lib, &system_lib)?;
-            info!("Copied android2gnulinux runtime libraries to {}", system_lib.display());
+            std::fs::create_dir_all(&system_lib)?;
+            std::fs::copy(runtime.join("libdl.so"), system_lib.join("libdl.so"))?;
+            info!("Copied android2gnulinux libdl.so to {}", system_lib.display());
+        }
+        // Also copy any prebuilt runtime libs
+        if runtime.join("lib").exists() {
+            let system_lib = root.join("system").join("lib64");
+            Self::copy_dir(&runtime.join("lib"), &system_lib)?;
         }
 
         info!("Android environment ready at: {}", root.display());
@@ -94,7 +99,6 @@ impl AndroidEnv {
 
     /// Build or find android2gnulinux runtime.
     fn find_or_build_runtime() -> Result<PathBuf> {
-        // Check the vendor submodule
         let vendor_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -104,36 +108,55 @@ impl AndroidEnv {
             .join("android2gnulinux");
 
         if vendor_path.exists() {
-            // Check if it's already built
-            let built = vendor_path.join("runtime");
-            if built.join("lib").exists() {
-                return Ok(built);
+            let runtime = vendor_path.join("runtime");
+            let libdl = runtime.join("libdl.so");
+
+            // Check if already built
+            if libdl.exists() {
+                info!("android2gnulinux runtime already built");
+                return Ok(runtime);
             }
 
-            // Try to build it
+            // Build directly (Makefile is broken for modern GCC)
             info!("Building android2gnulinux runtime...");
-            let status = Command::new("make")
-                .args(["-C", &vendor_path.to_string_lossy()])
-                .status()
-                .context("Failed to run make for android2gnulinux")?;
+            std::fs::create_dir_all(&runtime)?;
 
-            if status.success() {
-                if built.join("lib").exists() {
-                    return Ok(built);
-                }
-            } else {
-                warn!("android2gnulinux build failed — continuing without it");
+            let status = Command::new("cc")
+                .args([
+                    "-fPIC", "-shared",
+                    "-Isrc",
+                    "-D_GNU_SOURCE",
+                    "-DANDROID_X86_LINKER",
+                    "-DLINKER_DEBUG=0",
+                    "-DRUNTIMEPATH=\"\"",
+                    "src/wrapper/wrapper.c",
+                    "src/linker/dlfcn.c",
+                    "src/linker/linker.c",
+                    "src/linker/linker_environ.c",
+                    "src/linker/rt.c",
+                    "src/linker/strlcpy.c",
+                    "-ldl", "-lpthread",
+                    "-o", "runtime/libdl.so",
+                ])
+                .current_dir(&vendor_path)
+                .status()
+                .context("Failed to compile android2gnulinux")?;
+
+            if status.success() && libdl.exists() {
+                info!("android2gnulinux built successfully");
+                return Ok(runtime);
             }
+
+            warn!("android2gnulinux build failed — continuing without it");
         }
 
-        // Fallback: use system installed path or none
         let fallback = PathBuf::from("/usr/lib/android2gnulinux");
         if fallback.exists() {
             return Ok(fallback);
         }
 
         warn!("android2gnulinux runtime not found — Bionic→glibc compat will be limited");
-        Ok(fallback)
+        Ok(PathBuf::from("/tmp/open-sober-no-android-runtime"))
     }
 
     /// Build the QEMU command for launching an ARM64 binary.
