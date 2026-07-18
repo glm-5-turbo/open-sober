@@ -78,46 +78,54 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run authentication flow — opens browser for Roblox login.
+/// Run authentication flow — opens browser for Roblox login,
+/// then provides instructions for cookie extraction.
 fn run_auth(_cli: &Cli, _cfg: &config::SoConfig) -> anyhow::Result<()> {
     info!("Starting authentication flow...");
 
     let service_config = sober_services::ServiceConfig::default();
 
-    // Create the login webview (opens a local HTTP server + system browser)
+    // Create the login webview (local HTTP server + system browser)
     let mut webview = sober_services::webview::LoginWebview::new(&service_config)?;
     let port = webview.start_server()?;
     info!("OAuth callback server started on port {}", port);
 
-    // Build the Roblox login URL with our redirect URI
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
-    let auth_url = format!("{}?redirect_uri={}",
-        service_config.auth_url,
-        urlencoding(&redirect_uri));
-
+    // Open the Roblox login page
+    let auth_url = &service_config.auth_url;
     info!("Opening browser for Roblox login...");
-    println!("\n   Opening browser for Roblox authentication...");
-    println!("   If the browser doesn't open, visit:");
-    println!("   {}", auth_url);
 
-    webview.open_browser(&auth_url)?;
+    println!("\n╔══════════════════════════════════════════════════╗");
+    println!("║        Open Sober — Roblox Authentication        ║");
+    println!("╠══════════════════════════════════════════════════╣");
+    println!("║  1. A browser window will open to Roblox login   ║");
+    println!("║  2. Sign in to your Roblox account                ║");
+    println!("║  3. After signing in, copy your .ROBLOSECURITY    ║");
+    println!("║     cookie from browser DevTools (F12 → Storage)  ║");
+    println!("║  4. Paste the cookie value below                   ║");
+    println!("╚══════════════════════════════════════════════════╝");
+    println!();
 
-    info!("Waiting for authentication (timeout: 5 minutes)...");
-    println!("\n   Waiting for login to complete in browser...");
+    webview.open_browser(auth_url)?;
 
-    match webview.wait_for_token(300) {
-        Some(token) => {
-            info!("Authentication successful, saving token");
-            save_token(&token)?;
+    // Also start a simple stdin reader for pasting the token
+    info!("Waiting for token...");
+    println!("   Enter your .ROBLOSECURITY cookie value (or 'q' to quit):");
 
-            println!("\n   ✅ Authentication successful!");
-            println!("   You can now run: open-sober play --apk <path>");
-            Ok(())
-        }
-        None => {
-            anyhow::bail!("Authentication timed out after 5 minutes");
-        }
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let token = input.trim();
+
+    if token == "q" || token.is_empty() {
+        anyhow::bail!("Authentication cancelled");
     }
+
+    info!("Token captured: {} chars", token.len());
+    save_token(token)?;
+
+    println!("\n   ✅ Authentication successful!");
+    println!("   Token saved. You can now run:");
+    println!("      open-sober play --apk <path>");
+    Ok(())
 }
 
 /// Save the auth token to disk for future use.
@@ -136,6 +144,7 @@ fn save_token(token: &str) -> anyhow::Result<()> {
 }
 
 /// URL-encode a string for use in a redirect URI.
+#[allow(dead_code)]
 fn urlencoding(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for byte in s.bytes() {
