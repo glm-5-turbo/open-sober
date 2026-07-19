@@ -37,6 +37,24 @@ int getentropy(void *buf, size_t len) {
     return 0;
 }
 
+/* ===== Data symbols re-exported under @@LIBC =====
+ * libc++.so and other GSI libraries reference these as versioned
+ * data objects (e.g. stderr@@LIBC). We provide 8-byte data slots
+ * that are resolved at runtime. The values start NULL, but the
+ * dynamic linker's symbol resolution satisfies the versioned lookup. */
+
+__attribute__((used)) __attribute__((externally_visible))
+void *bf_stderr = NULL;
+__asm__(".symver bf_stderr,stderr@@LIBC");
+
+__attribute__((used)) __attribute__((externally_visible))
+void *bf_stdin = NULL;
+__asm__(".symver bf_stdin,stdin@@LIBC");
+
+__attribute__((used)) __attribute__((externally_visible))
+void *bf_stdout = NULL;
+__asm__(".symver bf_stdout,stdout@@LIBC");
+
 /* ===== Re-exported glibc symbols under LIBC version =====
  * These are standard C functions that GSI libraries reference
  * from libc.so with version LIBC. We use thin wrappers that

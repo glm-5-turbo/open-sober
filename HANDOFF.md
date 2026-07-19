@@ -529,12 +529,93 @@ Then: `ROBLOX_LIB=libc++.so` with LD_PRELOAD=libbionic_shim.so — gets to "unde
 - Bionic shim: `.bak` version (102KB, working)
 - libc++.so: PATCHED (from gsi_libc++.so via patch_gsi.py)
 
+## 🔬 Bionic shim SIGILL Root Cause (2026-07-19 update)
+
+**The bionic shim (as libc.so symlink) causes SIGILL in `call_init`.** Here's what we know:
+
+### SIGILL Flow
+```
+_dl_init → call_init(libc.so) → ldr x3,[x19] → add x3,x3,x0 → blr x3 → ELF header!
+```
+The crash is at a page-aligned address (library base) because `call_init` reads a function pointer
+that resolves to `l->l_addr + 0` = base of a loaded library = ELF header bytes.
+
+### Root Cause
+The issue is NOT `__bf_c_resolve` (removing it didn't help). The issue is likely in how glibc
+2.43's `call_init` processes the DT entries for libraries loaded via NEEDED chain when the
+library has DT_INIT_ARRAY=0 (zeroed by patch_gsi.py) but `l_info[DT_INIT_ARRAY]` is non-NULL
+because the DT entry still exists in the dynamic section. The call becomes `base + 0 = base`.
+
+### Key tests performed
+| Test | Result |
+|------|--------|
+| Bridge libc.so (original) with libc++.so | `undefined symbol: stderr@@LIBC` |
+| V2 shim (trimmed simple wrappers) as libc.so | SIGILL in call_init |
+| V3 shim (__bf_c_resolve UNDEFINED) as libc.so | SIGILL in call_init |
+| V4 shim (__bf_c_resolve=return NULL) as libc.so | SIGILL in call_init |
+| Bridge libc.so + stderr/stdin/stdout data stubs | `undefined symbol: free@@LIBC` |
+| Static libc.a linking into bridge | Too many glibc internal deps |
+
+### What Works
+The **bridge libc.so + data stub** approach is closest to working. It passed the version check
+(LIBC_P found) and data symbols (stderr, stdin, stdout) but hit `free@@LIBC` because glibc
+function symbols aren't re-exported from the bridge under the @@LIBC version tag.
+
+### Recommended auto-stub approach for next session
+Instead of manually adding ~170 forwarding functions to bridge_libc.c, auto-generate them:
+1. Extract all UNDEF LIBC-versioned symbols from libc++.so's `.dynsym`
+2. For each: generate a `dlsym(RTLD_NEXT, name)` forwarding wrapper with `.symver` tag
+3. Add to bridge_libc.c and rebuild
+4. This avoids BOTH the SIGILL (no assembly trampolines) and manual labor
+
+### Script to generate stubs
+```python
+#!/usr/bin/env python3
+"""Generate LIBC-versioned forwarding stubs for bridge libc.so"""
+import subprocess
+import sys
+
+lib = sys.argv[1]  # libc++.so
+out = sys.argv[2]  # output .c file
+
+# Extract UNDEF LIBC symbols
+result = subprocess.run(
+    ['aarch64-linux-gnu-readelf', '-s', lib],
+    capture_output=True, text=True
+)
+
+symbols = set()
+for line in result.stdout.split('\n'):
+    if 'UND' not in line: continue
+    if 'LIBC' not in line: continue
+    if 'OBJECT' in line: continue  # handled separately
+    # Extract symbol name
+    parts = line.strip().split()
+    if len(parts) < 8: continue
+    name = parts[-1].split('@')[0]
+    if name in ('__cxa_finalize', '__cxa_atexit', '__register_atfork'): continue
+    symbols.add(name)
+
+# Generate forwarding stubs
+with open(out, 'w') as f:
+    f.write('#define _GNU_SOURCE\n#include <dlfcn.h>\n#include <stddef.h>\n\n')
+    for sym in sorted(symbols):
+        f.write(f'__attribute__((used)) __attribute__((externally_visible))\n')
+        f.write(f'void *_bf_{sym}(void) __asm__("{sym}");\n')
+        f.write(f'__asm__(".symver _bf_{sym},{sym}@@LIBC");\n')
+        f.write(f'void *_bf_{sym}(void) {{\n')
+        f.write(f'    static void *(*_r)(void) = NULL;\n')
+        f.write(f'    if (!_r) _r = dlsym(RTLD_NEXT, "{sym}");\n')
+        f.write(f'    return _r ? _r() : NULL;\n')
+        f.write(f'}}\n\n')
+```
+
 ### Next steps for next session:
-1. Run the trim_simple_wrappers approach to build a working V2 shim
-2. Make `libc.so → libbionic_shim.so` to provide LIBC symbols via NEEDED chain
-3. Add missing simple wrappers as safe stubs (return 0/-1) individually
-4. Once libc++.so loads via this approach, test libEGL.so → libroblox.so
-5. For the ~60 missing simple wrappers: create a C file with safe stubs
+1. **Run the auto-stub script** to generate forwarding wrappers for ~170 LIBC symbols
+2. Add the generated stubs to bridge_libc.c
+3. Rebuild the bridge libc.so and test with `ROBLOX_LIB=libc++.so`
+4. If it loads without "undefined symbol", test with `libEGL.so` → `libroblox.so`
+5. Handle data symbols: stderr, stdin, stdout already added
 
 ### Scripts (in homedir, NOT in repo — also copied to repo):
 - `~/patch_gsi.py` also at `crates/sober-core/src/bridges/patch_gsi.py` ✓
