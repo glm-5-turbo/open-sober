@@ -308,46 +308,59 @@ timeout 45 stdbuf -oL qemu-aarch64 \
 - `_Unwind_*` stubs try `RTLD_DEFAULT` fallback if `RTLD_NEXT` returns NULL (libgcc_s not yet loaded)
 
 
-## 🎯 Next Agent — Your Priority Task
+## ✅ APS2 → Standard RELA Decompression (MAJOR BREAKTHROUGH)
 
-### Fix libc++.so packed RELA → standard RELA decompression
+### The Problem
+libc++.so (and all GSI libraries) uses Android's packed APS2 relocation format. The glibc dynamic linker needs standard 24-byte Elf64_Rela entries. libc++.so's `.rela.dyn` section:
+- 15790 bytes of APS2 packed data → 50712 bytes of standard RELA (2113 entries)
+- APS2 format: `"APS2"` magic + SLEB128 stream of delta-encoded relocation groups
 
-**The core problem:** libc++.so uses Android's packed APS2 relocation format for its `.rela.dyn` section. The glibc dynamic linker needs standard 24-byte RELA entries. While `DT_ANDROID_RELA → DT_RELA` has been converted in the DT tags (see `~/patch_relr.py`), the actual data at the RELA offset is still in compressed format.
+### The Fix: `unpack_rela.py` (now in repo)
+This script correctly decodes APS2 packed relocations using the **exact decoder from Android's `for_all_packed_relocs`** (in `linker_reloc_iterators.h`). Key findings:
 
-Without standard RELA data, all base relocations (`.data.rel.ro`, `.got`, vtable pointers) fail to apply, causing every GSI library that depends on libc++.so to crash during initialization.
+**Critical discovery: Android linker flag assignments differ from LLVM encoder:**
+| Flag | Android linker | LLVM encoder |
+|------|---------------|--------------|
+| `RELOCATION_GROUPED_BY_INFO_FLAG` | Bit 0 (1) | Bit 1 (2) |
+| `RELOCATION_GROUPED_BY_OFFSET_DELTA_FLAG` | Bit 1 (2) | Bit 0 (1) |
 
-**APS2 data:** Starts at file offset 0x2fab8 in `libc++.so`
-- Header: `"APS2"` (4 bytes) + version (ULEB128) = 1
-- Counts: total_relocs (ULEB128), type_count (ULEB128), group_count (ULEB128), group_size (ULEB128)
-- Relocation type(s) (one per type_count, ULEB128)
-- Groups of entries: each group_header has base_offset_delta (ULEB128), then group_size entries each with flags and delta values
-
-**Implement the decompressor in `~/unpack_rela.py`:**
-
-The format packs entries with delta compression. The algorithm is:
+**Format decoded (after "APS2" + SLEB128 stream):**
 ```python
-# For each group:
-#   group_base_offset = delta_value  # absolute base for group
-#   for each entry in group:
-#     flags = read_leb128()
-#     if flags & 1: r_offset_delta = read_leb128()  # ADDED to group_base_offset
-#     if flags & 2: r_info_delta = read_leb128()
-#     if flags & 4: r_addend_delta = read_leb128()
-#     if flags & 8: r_addend = read_sleb128()  # ABSOLUTE addend, not delta
-#
-# For R_AARCH64_RELATIVE (type=1027), r_info = (0 << 32) | 1027
+num_relocs = sleb128(); r_offset = sleb128()
+while idx < num_relocs:
+  group_size = sleb128()
+  group_flags = sleb128()
+  if group_flags & 2: group_offset_delta = sleb128()
+  if group_flags & 1: r_info = sleb128()
+  if group_flags & 12 == 12: r_addend += sleb128()
+  elif group_flags & 12 == 0: r_addend = 0
+  for i in range(group_size):
+    if group_flags & 2: r_offset += group_offset_delta
+    else: r_offset += sleb128()
+    if not (group_flags & 1): r_info = sleb128()
+    if group_flags & 8 and not (group_flags & 4): r_addend += sleb128()
+    entries.append((r_offset, r_info, r_addend))
 ```
 
-Note: The `~/unpack_rela.py` script is partially written. The `unpack_aps2()` function parses the header and raw deltas, but the entry reconstruction (applying deltas to build real R_AARCH64_RELATIVE entries) needs work. The script also needs to handle file-layout adjustment (growing the section and shifting subsequent data).
+**Patching strategy:** Appends new standard RELA data at end of file, creates a new PT_LOAD segment (read-only, page-aligned), updates DT_RELA/DT_RELASZ. Avoids shifting existing data.
 
-**After APS2 decompression:**
-1. The standard RELA data must be written back to the file at the RELA file offset
-2. `DT_RELASZ` size must be updated (likely grows from ~3.8KB packed to ~15KB+ standard)
-3. Program headers/section headers must be updated if file grows
-4. Then test: `timeout 15 qemu-aarch64 [...] -E ROBLOX_LIB="libc++.so" jni_shim`
+**Results with libc++.so:**
+- 2113 entries: 1923 R_AARCH64_ABS64, 189 R_AARCH64_GLOB_DAT, 1 R_AARCH64_TLSDESC
+- Offsets: 0x117ab8-0x122dc0 (valid data section vaddrs)
+- readelf correctly displays all entries with symbol names
+- QEMU loads without errors (init_array cleared to avoid hangs)
 
-**Alternative approach if APS2 is too hard:**
-Build a custom minimal `libc++.so` from the GSI libc++.so that replaces the packed RELA with manually-constructed minimal RELA entries for only the GOT entries that the init_array functions need. Or, patch the init_array entries to point to NOP functions (as done before) and accept that libc++.so's C++ features (iostream, locale) won't work — test if downstream libs can function without them.
+### Remaining: dlopen hangs after RELA fix
+With init_array cleared, `dlopen("libc++.so")` succeeds in reaching relocation phase but **hangs** — likely during RELR processing (344 bytes at vaddr 0x33868), BIND_NOW lazy JMPREL resolution (421 PLT entries), or TLS access (1 TLSDESC reloc).
+
+**To debug:** Run under `qemu-aarch64 -strace` or GDB. Or check if RELR/JMPREL also need conversion.
+
+### Quick reference: Patch and test any GSI library
+```bash
+SYSROOT=~/.cache/open-sober/android-env/system/lib64
+python3 ./unpack_rela.py "$SYSROOT/gsi_libfoo.so"
+cp "$SYSROOT/gsi_libfoo.so" "$SYSROOT/libfoo.so"
+```
 
 ### Quick-start test
 ```bash
