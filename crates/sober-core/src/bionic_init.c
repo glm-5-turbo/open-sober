@@ -837,6 +837,38 @@ __asm__(".symver _bf_android_create_ns,android_create_namespace@@LIBDL_ANDROID")
 __attribute__((externally_visible))
 void *_bf_android_create_ns(const char *n, const char *p, const char *l, unsigned t, const char *x, void *a) { (void)n;(void)p;(void)l;(void)t;(void)x;(void)a; return NULL; }
 
+
+/* nrand48 — Bionic-style drand48 variant */
+__attribute__((used)) __attribute__((externally_visible))
+long _bf_nrand48(unsigned short xsubi[3]);
+__asm__(".symver _bf_nrand48,nrand48@@LIBC");
+__attribute__((externally_visible))
+long _bf_nrand48(unsigned short xsubi[3]) {
+    static long(*_r)(unsigned short[3])=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"nrand48"); return _r?_r(xsubi):0;
+}
+
+/* android_dlopen_ext — Bionic-specific dlopen variant */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_android_dlopen_ext(const char *fn, int f, const void *ext);
+__asm__(".symver _bf_android_dlopen_ext,android_dlopen_ext@@LIBC");
+__attribute__((externally_visible))
+void *_bf_android_dlopen_ext(const char *fn, int f, const void *ext) {
+    (void)ext;
+    static void*(*_r)(const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"dlopen"); return _r?_r(fn,f):NULL;
+}
+
+/* futimens — Bionic futimens variant */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_futimens(int fd, const void *t);
+__asm__(".symver _bf_futimens,futimens@@LIBC");
+__attribute__((externally_visible))
+int _bf_futimens(int fd, const void *t) {
+    static int(*_r)(int,const void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"futimens"); return _r?_r(fd,t):-1;
+}
+
 /* ===== Common glibc re-exports under LIBC version =====
  * These are basic C functions referenced from GSI libs with version LIBC
  * that DON'T have assembly trampolines in bionic_shim.S.

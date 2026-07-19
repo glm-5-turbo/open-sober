@@ -84,6 +84,32 @@ dlopen("libroblox.so") passes version checks for:
 - ✅ **GSI libs symlinked:** libandroid.so, libOpenSLES.so, libmediandk.so
 - ✅ **Stubs created:** libandroidicu.so, libicu.so, tethering connectivity, nativeloader, statspull, statssocket, adb pairing
 
+
+## ✅ ANDROID_RELA → RELA Patch (NEW MAJOR BREAKTHROUGH)
+
+GSI libc++.so uses **packed ANDROID_RELA** relocations — a compressed format the Android linker understands but the ARM64 glibc linker does not. The standard `DT_RELA` tags point to data in APS2 packed format (signature `"APS2"` at offset 0x2fab8). The dynamic linker needs:
+- `DT_ANDROID_RELA (0x60000011)` → `DT_RELA (0x7)`
+- `DT_ANDROID_RELASZ (0x60000012)` → `DT_RELASZ (0x8)`
+
+**Fix:** `~/patch_relr.py` now handles ANDROID_RELA→RELA conversion (in addition to ANDROID_RELR).
+
+**Key status:** After DT tag conversion, libc++.so's RELA data is in compressed APS2 format that glibc still can't parse. The packed data needs to be **decompressed** into standard 24-byte RELA entries. A partial script at `~/unpack_rela.py` starts this work.
+
+## ✅ libEGL.so → libnativewindow.so Symlink Fix
+
+The blocker `libEGL.so: undefined symbol: AHardwareBuffer_to_ANativeWindowBuffer, version LIBNATIVEWINDOW_PLATFORM` was fixed by symlinking `libnativewindow.so → gsi_libnativewindow.so` (same established pattern as libbinder_ndk.so). Also symlinked `libz.so → gsi_libz.so`.
+
+## ✅ Mass ANDROID_RELR + ANDROID_RELA Patching
+
+The `patch_relr.py` script was rewritten to find `.dynamic` via ELF program headers (not hardcoded offsets). All 788 GSI libraries were patched for ANDROID_RELR→RELR AND ANDROID_RELA→RELA.
+
+## ✅ New Stubs Added
+
+Three missing symbols added to `bionic_init.c`:
+- `nrand48@@LIBC` — random number function (libEGL.so needs this)
+- `android_dlopen_ext@@LIBC` — Bionic dlopen variant (delegates to dlopen)
+- `futimens@@LIBC` — timestamp function
+
 ### ✅ LIBBINDER_NDK Fixed
 
 The previous blocker was `android.hardware.common-V2-ndk.so` needing `AParcel_getDataPosition` with version `LIBBINDER_NDK` from `libbinder_ndk.so`. The issue:
@@ -198,10 +224,18 @@ New version blocks: LIBC_Q, LIBC_S, LIBC_T, LIBC_U, LIBC_V, LIBDL_ANDROID.
 
 ### ❌ Current Blocker
 ```
-/system/lib64/libEGL.so: undefined symbol: _ZN7android38AHardwareBuffer_to_ANativeWindowBufferEPK15AHardwareBuffer, version LIBNATIVEWINDOW_PLATFORM
+libc++.so: packed APS2 RELA data is unparseable by glibc dynamic linker
 ```
 
-New C++ mangled symbol with new version tag `LIBNATIVEWINDOW_PLATFORM`. This is from `libnativewindow.so`.
+**Root Cause:** libc++.so uses the Android packed relocation format (`yt: "APS2"` at file offset 0x2fab8). After `DT_ANDROID_RELA → DT_RELA` conversion, glibc finds the dynamic tag but can't decode the compressed data. This means ALL `.data.rel.ro` base relocations (for GOT entries, function pointers, virtual table pointers) are NOT applied.
+
+**The crash chain:** init[0] (CPU feature detection at 0x7fbbc) runs, reads un-relocated GOT entries → crash/hang. The 3 init_array entries are:
+- **init[0] (0x7fbbc):** CPU feature detection — reads sysconf + __system_property_get, complex NEON bit manipulation to build a hardware capability mask. Probable hang in the NEON loop.
+- **init[1] (0x7feb0):** TLS init guard — checks a global flag at offset 3976 from a data section, calls through function pointer `blr x1` which reads from un-relocated [0x11e058]. Crash because GOT entry is zero.
+- **init[2] (0xc87d4):** ios_base::Init — calls setlocale + __cxa_atexit. Crashes when run alone (needs entry 1's init to happen first).
+
+**Fix needed:** Decompress APS2 packed RELA data into standard 24-byte RELA entries. Script: `~/unpack_rela.py` (partial implementation — needs APS2 delta-encoded entry reconstruction).
+
 
 ### Auto-Stub Strategy (Recommended)
 
@@ -273,17 +307,55 @@ timeout 45 stdbuf -oL qemu-aarch64 \
 - Each stub has a `return (ret)0` fallback if dlsym returns NULL (safe when function is resolved but not called)
 - `_Unwind_*` stubs try `RTLD_DEFAULT` fallback if `RTLD_NEXT` returns NULL (libgcc_s not yet loaded)
 
+
 ## 🎯 Next Agent — Your Priority Task
 
-### Debug libc++.so init hang after ANDROID_RELR fix
+### Fix libc++.so packed RELA → standard RELA decompression
 
-**Quick start — run the current test:**
+**The core problem:** libc++.so uses Android's packed APS2 relocation format for its `.rela.dyn` section. The glibc dynamic linker needs standard 24-byte RELA entries. While `DT_ANDROID_RELA → DT_RELA` has been converted in the DT tags (see `~/patch_relr.py`), the actual data at the RELA offset is still in compressed format.
+
+Without standard RELA data, all base relocations (`.data.rel.ro`, `.got`, vtable pointers) fail to apply, causing every GSI library that depends on libc++.so to crash during initialization.
+
+**APS2 data:** Starts at file offset 0x2fab8 in `libc++.so`
+- Header: `"APS2"` (4 bytes) + version (ULEB128) = 1
+- Counts: total_relocs (ULEB128), type_count (ULEB128), group_count (ULEB128), group_size (ULEB128)
+- Relocation type(s) (one per type_count, ULEB128)
+- Groups of entries: each group_header has base_offset_delta (ULEB128), then group_size entries each with flags and delta values
+
+**Implement the decompressor in `~/unpack_rela.py`:**
+
+The format packs entries with delta compression. The algorithm is:
+```python
+# For each group:
+#   group_base_offset = delta_value  # absolute base for group
+#   for each entry in group:
+#     flags = read_leb128()
+#     if flags & 1: r_offset_delta = read_leb128()  # ADDED to group_base_offset
+#     if flags & 2: r_info_delta = read_leb128()
+#     if flags & 4: r_addend_delta = read_leb128()
+#     if flags & 8: r_addend = read_sleb128()  # ABSOLUTE addend, not delta
+#
+# For R_AARCH64_RELATIVE (type=1027), r_info = (0 << 32) | 1027
+```
+
+Note: The `~/unpack_rela.py` script is partially written. The `unpack_aps2()` function parses the header and raw deltas, but the entry reconstruction (applying deltas to build real R_AARCH64_RELATIVE entries) needs work. The script also needs to handle file-layout adjustment (growing the section and shifting subsequent data).
+
+**After APS2 decompression:**
+1. The standard RELA data must be written back to the file at the RELA file offset
+2. `DT_RELASZ` size must be updated (likely grows from ~3.8KB packed to ~15KB+ standard)
+3. Program headers/section headers must be updated if file grows
+4. Then test: `timeout 15 qemu-aarch64 [...] -E ROBLOX_LIB="libc++.so" jni_shim`
+
+**Alternative approach if APS2 is too hard:**
+Build a custom minimal `libc++.so` from the GSI libc++.so that replaces the packed RELA with manually-constructed minimal RELA entries for only the GOT entries that the init_array functions need. Or, patch the init_array entries to point to NOP functions (as done before) and accept that libc++.so's C++ features (iostream, locale) won't work — test if downstream libs can function without them.
+
+### Quick-start test
 ```bash
 cd ~/Documents/Projects/open-sober
-
-# Build bionic shim with all stubs
 SYSROOT=~/.cache/open-sober/android-env/system/lib64
 CRATE_SRC=crates/sober-core/src
+
+# Build bionic shim
 aarch64-linux-gnu-gcc -c -fPIC -o /tmp/bs.o "$CRATE_SRC/bionic_init.c"
 aarch64-linux-gnu-gcc -c -o /tmp/ba.o "$CRATE_SRC/bionic_shim.S"
 aarch64-linux-gnu-gcc -shared -fPIC -o "$SYSROOT/libbionic_shim.so" \
@@ -292,17 +364,24 @@ aarch64-linux-gnu-gcc -shared -fPIC -o "$SYSROOT/libbionic_shim.so" \
   -Wl,-rpath,/system/lib64 -L"$SYSROOT" -lglibc -lm -ldl -nostartfiles
 rm -f /tmp/ba.o /tmp/bs.o
 
-# Patch libc++.so ANDROID_RELR → RELR
-python3 ~/patch_relr.py "$SYSROOT/gsi_libc++.so"
-ln -sf "gsi_libc++.so" "$SYSROOT/libc++.so"
+# Re-patch libc++.so (from original, apply RELR + RELA + clear entry 2)
+cp "$SYSROOT/gsi_libc++.so" "$SYSROOT/libc++.so"
+python3 ~/patch_relr.py "$SYSROOT/libc++.so"
+# Clear init_array entry 2 (ios_base::Init crash)
+python3 -c "import struct; f=open('$SYSROOT/libc++.so','r+b'); d=bytearray(f.read()); struct.pack_into('<Q',d,0x115878+16,0); f.seek(0); f.write(bytes(d)); f.truncate()"
 
-# Build JNI shim with unbuffered output
+# Re-patch all GSI libs
+for lib in "$SYSROOT"/gsi_*.so; do
+    r=$(aarch64-linux-gnu-readelf -d "$lib" 2>/dev/null | grep -c "6fffe\|6000001") && [ "$r" -gt 0 ] && python3 ~/patch_relr.py "$lib" 2>/dev/null
+done
+
+# Build JNI shim
 cp "$CRATE_SRC/jni_shim.c" /tmp/js.c
 sed -i 's/int main(int argc, char\*\* argv) {/int main(int argc, char** argv) { setbuf(stderr,NULL); setbuf(stdout,NULL);/' /tmp/js.c
 aarch64-linux-gnu-gcc -static -o ~/.cache/open-sober/android-env/jni_shim /tmp/js.c -ldl
 
 # Test
-timeout 8 qemu-aarch64 \
+timeout 15 stdbuf -oL qemu-aarch64 \
   -L ~/.cache/open-sober/android-env \
   -E LD_LIBRARY_PATH="/system/lib64:/lib" \
   -E LD_PRELOAD="libbionic_shim.so" \
@@ -310,35 +389,11 @@ timeout 8 qemu-aarch64 \
   ~/.cache/open-sober/android-env/jni_shim
 ```
 
-**What's happening:** All ~40 stubs resolve. ANDROID_RELR is patched to RELR. dlopen proceeds past relocation into C++ static init (`.init_array` at offsets 0x7fbbc, 0x7feb0, 0xc87d4) but hangs there. The 3 constructors are likely `std::ios_base::Init`, locale init, and `__cxa_atexit` guard setup.
-
-**To investigate:**
-1. **GDB debug:** Install `gdb-multiarch`, use `qemu-aarch64 -g 1234` and connect:
-   ```bash
-   qemu-aarch64 -g 1234 -L ~/.cache/open-sober/android-env \
-     -E LD_LIBRARY_PATH="/system/lib64:/lib" \
-     -E LD_PRELOAD="libbionic_shim.so" \
-     -E ROBLOX_LIB="libc++.so" \
-     ~/.cache/open-sober/android-env/jni_shim &
-   gdb-multiarch -ex "target remote :1234" -ex "cont" ./jni_shim
-   # Wait 5s, Ctrl+C, bt
-   ```
-2. **Check if constructors loop** on `dlsym(RTLD_NEXT, ...)` calls from our stubs — some of our stubs might be called during C++ init and the dlsym itself might trigger more relocation processing → infinite loop.
-
-3. **Try empty init_array** to confirm constructors are the culprit:
-   ```python
-   with open('gsi_libc++.so', 'r+b') as f:
-       f.seek(0x115878); f.write(b'\x00' * 24)
-   ```
-
-4. **Check `__cxa_*` stubs** — the existing trampoline table entries for `__cxa_finalize` and `__cxa_atexit` might need to be more complete (forwarding to actual glibc versions rather than atomic no-ops).
-
-### After init_array hang is resolved:
+### After libc++.so loads:
+- Test `dlopen("libEGL.so")` (was blocked on libc++.so init)
 - Test `dlopen("libroblox.so")` directly
 - JNI function table (~233 stubs)
 - EGL/GLES→Vulkan (see GRAPHICS_RECOMMENDATION.md)
-- Window creation + input
-- EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
 - Window creation + input handling
 
 ### Environment:
@@ -346,5 +401,5 @@ timeout 8 qemu-aarch64 \
 - Cross-compiler: `aarch64-linux-gnu-gcc`
 - GSI libs: `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
 - Roblox APK: `~/Documents/Projects/open-sober/roblox-android.apk`
-- Android NDK: `/tmp/ndk_extract/`
-- GSI image mount: `/tmp/gsi_mount/`
+- Scripts: `~/patch_relr.py` (DT tag conversion), `~/unpack_rela.py` (APS2 decompressor, WIP)
+- .claude/settings.json: `{"worktree": {"bgIsolation": "none"}}` (allows direct editing without worktree in bg)
