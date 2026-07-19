@@ -80,6 +80,72 @@ char *__strncpy_chk2(char *d, const char *s, size_t n, size_t dl) {
     return d;
 }
 
+/* ===== Common glibc re-exports under LIBC version =====
+ * These are basic C functions referenced from GSI libs with version LIBC
+ * that DON'T have assembly trampolines in bionic_shim.S.
+ * Each stub uses a hidden impl and .symver alias to produce only the
+ * versioned symbol. */
+
+/* free@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void _bf_free_impl(void *p);
+__asm__(".symver _bf_free_impl,free@@LIBC");
+void _bf_free_impl(void *p) {
+    static void (*_r)(void*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "free");
+    if (_r) _r(p);
+}
+
+/* malloc@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_malloc_impl(size_t s);
+__asm__(".symver _bf_malloc_impl,malloc@@LIBC");
+void *_bf_malloc_impl(size_t s) {
+    static void *(*_r)(size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "malloc");
+    return _r ? _r(s) : NULL;
+}
+
+/* calloc@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_calloc_impl(size_t n, size_t s);
+__asm__(".symver _bf_calloc_impl,calloc@@LIBC");
+void *_bf_calloc_impl(size_t n, size_t s) {
+    static void *(*_r)(size_t, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "calloc");
+    return _r ? _r(n, s) : NULL;
+}
+
+/* realloc@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_realloc_impl(void *p, size_t s);
+__asm__(".symver _bf_realloc_impl,realloc@@LIBC");
+void *_bf_realloc_impl(void *p, size_t s) {
+    static void *(*_r)(void*, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "realloc");
+    return _r ? _r(p, s) : NULL;
+}
+
+/* isatty@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_isatty_impl(int fd);
+__asm__(".symver _bf_isatty_impl,isatty@@LIBC");
+int _bf_isatty_impl(int fd) {
+    static int (*_r)(int) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "isatty");
+    return _r ? _r(fd) : 0;
+}
+
+/* aligned_alloc@@LIBC_P */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_aligned_alloc_impl(size_t a, size_t s);
+__asm__(".symver _bf_aligned_alloc_impl,aligned_alloc@@LIBC_P");
+void *_bf_aligned_alloc_impl(size_t a, size_t s) {
+    static void *(*_r)(size_t, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "aligned_alloc");
+    return _r ? _r(a, s) : NULL;
+}
+
 /* ===== Lazy dispatch-table resolver ===== */
 void* __bf_c_resolve(int index) {
     if (index < 0 || index >= 392)

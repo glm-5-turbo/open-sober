@@ -33,11 +33,15 @@ build_libc() {
     fi
 
     if [ -f "$SYSROOT/libc_glibc.so" ]; then
+        # Use --whole-archive to pull all glibc symbols into libc.so
+        # and tag them with the LIBC version via the version script.
         $CROSS_CC -shared -fPIC -o "$SYSROOT/libc.so" \
             "$SCRIPT_DIR/bridge_libc.c" \
             -Wl,--version-script,"$VER_SCRIPT" \
             -Wl,-soname,libc.so \
-            -L "$SYSROOT" -lc_glibc 2>&1
+            -Wl,--whole-archive "$SYSROOT/libc_glibc.so" \
+            -Wl,--no-whole-archive \
+            -lc -lm -ldl 2>&1
     else
         echo "  WARNING: libc_glibc.so not found, building nostdlib"
         $CROSS_CC -shared -fPIC -o "$SYSROOT/libc.so" \

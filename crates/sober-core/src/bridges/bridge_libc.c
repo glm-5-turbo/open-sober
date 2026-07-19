@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /* ===== Bionic-only stubs that GSI libraries reference from libc.so ===== */
 
@@ -34,4 +35,21 @@ int getentropy(void *buf, size_t len) {
     /* Best-effort: zero out. Real Android would use the kernel. */
     __builtin_memset(buf, 0, len);
     return 0;
+}
+
+/* ===== Re-exported glibc symbols under LIBC version =====
+ * These are standard C functions that GSI libraries reference
+ * from libc.so with version LIBC. We use thin wrappers that
+ * call into glibc via dlsym, tagged with @@LIBC via .symver. */
+
+/* memset_explicit — Bionic has this as a LIBC_U symbol.
+ * glibc 2.43+ has it as GLIBC_2.43, but the version bridge
+ * links against the glibc ARM64 .so directly, so we provide
+ * an explicit wrapper to ensure it's available under LIBC_U. */
+void *memset_explicit(void *s, int c, size_t n) {
+    volatile unsigned char *p = s;
+    for (size_t i = 0; i < n; i++) p[i] = (unsigned char)c;
+    /* Prevent optimization */
+    __asm__ volatile("" : : "r"(p) : "memory");
+    return s;
 }

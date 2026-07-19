@@ -127,3 +127,40 @@ Remaining Phase B work:
 - **Bionic libs from GSI:** At `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
 - **Roblox APK:** At `~/Documents/Projects/open-sober/roblox-android.apk`
 - **GitHub token:** Authenticated as `glm-5-turbo`, repo `open-sober`
+## Latest Runtime Test Results (2026-07-19)
+
+### dlopen Progress After Fixes
+- ✅ **JNI shim starts, loads bionic shim, fills dispatch table** — all working
+- ✅ **libc.so bridge** rebuilt linking against real glibc+LIBC version definitions (22 LIBC variants defined)
+- ✅ **Bionic shim extended** with `free@@LIBC`, `malloc@@LIBC`, `calloc@@LIBC`, `realloc@@LIBC`, `isatty@@LIBC`, `aligned_alloc@@LIBC_P`
+- ✅ **libbinder_ndk.so** symlinked to real GSI lib (fixes LIBBINDER_NDK version gap)
+- ✅ **ld-linux-aarch64.so.1, libc.so.6, libm.so.6** replaced with real cross-glibc ARM64 libs
+- ✅ **auto_stub.py** fixed to skip glibc base libs
+- ✅ **memset_explicit@@LIBC_U** added to bridge
+
+### ❌ Current Blocker
+`/system/lib64/libc++.so: undefined symbol: _Unwind_RaiseException, version LIBC_R`
+
+This is a long-tail issue: libc++.so (a real GSI library) references many LIBC-versioned C library symbols that aren't in the bionic shim's trampoline table. Each one needs a `.symver` + C stub in `bionic_init.c` and the corresponding version block in `bionic_version.ver`.
+
+### What's Needed to Finish
+
+**Automated missing-symbol patcher**: instead of iterating one-by-one, write a script that:
+1. Runs `dlopen` under QEMU via the JNI shim
+2. Parses the "undefined symbol: X, version Y" error
+3. Auto-generates the stub entry in `bionic_init.c` (hidden impl + .symver pattern)
+4. Adds the version block to `bionic_version.ver` if needed
+5. Rebuilds and re-runs
+6. Loops until dlopen succeeds
+
+Estimated ~10-30 more iterations.
+
+### Key Architecture Notes
+- `bionic_init.c` now has a proven pattern for adding LIBC-versioned stubs:
+  - `__attribute__((used)) __attribute__((externally_visible))` on the impl
+  - `.symver(name_impl, symbol@@VERSION)` 
+  - dlsym(RTLD_NEXT, ...) to call the real glibc version
+- `bionic_version.ver` must define each version block used (LIBC, LIBC_N, LIBC_O, LIBC_P added so far)
+- `build_bridges.sh` now links against `libc_glibc.so` using `-Wl,--version-script` (no whole-archive needed)
+- The bridge `libc.so` provides the VERDEF table (LIBC et al) while glibc symbols keep their original GLIBC_2.17 versions
+- The bionic shim (LD_PRELOAD'd) provides the @@LIBC-versioned aliases

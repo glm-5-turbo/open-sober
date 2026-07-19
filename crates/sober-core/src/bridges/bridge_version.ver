@@ -21,6 +21,10 @@ LIBC_Q           { global: *; };
 LIBC_R           { global: *; };
 LIBC_S           { global: *; };
 LIBC_T           { global: *; };
-LIBC_U           { global: *; };
+LIBC_U           {
+                   global:
+                     memset_explicit;
+                     *;
+                 };
 LIBC_V           { global: *; };
 LIBC             { global: *; };
