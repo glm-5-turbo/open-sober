@@ -66,7 +66,7 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 
 **Intermittent:** Even with both patches, TCG code generation itself (literal pool fixup, etc.) writes to the JIT buffer during translation. These writes can also trigger SMC at page boundaries (~30% of runs).
 
-### 🟡 Session 5 Progress — JNI_OnLoad init deadlock bypassed
+### 🟡 Session 5 + 5b Progress — JNI_OnLoad init deadlock bypassed; QEMU JIT crash blocks further progress
 
 **What was discovered:**
 - The `0% CPU` hang from session 4 was NOT a thread spawn — it was a one-time init guard using `pthread_mutex_lock` + `pthread_cond_wait` at function `26c0c7c`. The main thread calls into this init, which waits on a condvar that no other thread ever signals.
