@@ -1,6 +1,6 @@
 // Minimal JNI shim to load libroblox.so and call JNI_OnLoad.
 // This bypasses the need for a full Android Java runtime.
-// Compile: gcc -shared -fPIC -o libjni_shim.so jni_shim.c -ldl
+// Compile: gcc -o jni_shim jni_shim.c -ldl
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -9,644 +9,431 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 // Minimal JNI types
 typedef int jint;
+typedef unsigned char jboolean;
+typedef unsigned short jchar;
+typedef short jshort;
+typedef long long jlong;
+typedef float jfloat;
+typedef double jdouble;
 typedef void* jobject;
 typedef void* jclass;
 typedef void* jstring;
 typedef void* jmethodID;
 typedef void* jfieldID;
-typedef void* jvalue;
-typedef unsigned char jboolean;
-typedef short jchar;
+typedef void* jthrowable;
+typedef void* jarray;
+typedef void* jobjectArray;
+typedef union { jboolean z; int b; jchar c; jshort s; jint i; jlong j; jfloat f; jdouble d; jobject l; } jvalue;
 
-#define JNI_TRUE 1
-#define JNI_FALSE 0
 #define JNI_OK 0
-#define JNI_ERR (-1)
 #define JNI_VERSION_1_6 0x00010006
-#define JNI_COMMIT 1
-#define JNI_ABORT 2
 
-// JNI function table (minimal - just what Roblox needs)
+struct JNIEnv_;
+typedef struct JNIEnv_ JNIEnv;
+struct JavaVM_;
 typedef struct JavaVM_ JavaVM;
+typedef struct { const char* name; const char* signature; void* fnPtr; } JNINativeMethod;
 
-typedef struct JNINativeInterface_ {
-    void* reserved0[4];
-    jint (*GetVersion)(JavaVM* vm);
-    jclass (*FindClass)(JavaVM* env, const char* name);
-    // ... many more functions
-    void* reserved[200]; // placeholder for the rest
-} JNINativeInterface;
+#define STUB_LOG(fmt, ...) fprintf(stderr, "[jni] " fmt "\n", ##__VA_ARGS__)
 
-typedef struct JNIEnv_ {
-    const struct JNINativeInterface_* functions;
+// ============== All stub functions ==============
+
+static void* stub_voidp(void) { static char buf[64]; return buf; }
+
+static jint   stub_GetVersion(JNIEnv* e) { return JNI_VERSION_1_6; }
+static jclass stub_FindClass(JNIEnv* e, const char* n) { STUB_LOG("FindClass: %s", n?n:"NULL"); return (jclass)stub_voidp(); }
+static jmethodID stub_GetMethodID(JNIEnv* e, jclass c, const char* n, const char* s) { STUB_LOG("GetMethodID: %s %s", n?n:"NULL", s?s:"NULL"); return (jmethodID)(uintptr_t)0x1001; }
+static jmethodID stub_GetStaticMethodID(JNIEnv* e, jclass c, const char* n, const char* s) { STUB_LOG("GetStaticMethodID: %s %s", n?n:"NULL", s?s:"NULL"); return (jmethodID)(uintptr_t)0x2001; }
+static jfieldID stub_GetFieldID(JNIEnv* e, jclass c, const char* n, const char* s) { return (jfieldID)(uintptr_t)0x3001; }
+static jfieldID stub_GetStaticFieldID(JNIEnv* e, jclass c, const char* n, const char* s) { return (jfieldID)(uintptr_t)0x4001; }
+static jstring stub_NewStringUTF(JNIEnv* e, const char* u) { return (jstring)stub_voidp(); }
+static const char* stub_GetStringUTFChars(JNIEnv* e, jstring s, jboolean* c) { if(c)*c=1; return ""; }
+static void stub_ReleaseStringUTFChars(JNIEnv* e, jstring s, const char* u) {}
+static jint stub_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) { STUB_LOG("RegisterNatives: %d methods", n); return JNI_OK; }
+static jobject stub_NewGlobalRef(JNIEnv* e, jobject o) { return o; }
+static void stub_DeleteGlobalRef(JNIEnv* e, jobject o) {}
+static void stub_DeleteLocalRef(JNIEnv* e, jobject o) {}
+static jint stub_ThrowNew(JNIEnv* e, jclass c, const char* m) { STUB_LOG("ThrowNew: %s", m?m:"NULL"); return 0; }
+static jint stub_GetJavaVM(JNIEnv* e, JavaVM** v) { *v = (JavaVM*)0x1000; return 0; }
+static jobject stub_NewObject(JNIEnv* e, jclass c, jmethodID m, ...) { return stub_voidp(); }
+
+// CallMethod stubs
+#define CALL_METHOD_STUB(prefix, ret_type, ret_val) \
+    static ret_type stub_##prefix##Method(JNIEnv* e, jobject o, jmethodID m, ...) { return ret_val; } \
+    static ret_type stub_##prefix##MethodV(JNIEnv* e, jobject o, jmethodID m, va_list a) { return ret_val; } \
+    static ret_type stub_##prefix##MethodA(JNIEnv* e, jobject o, jmethodID m, const jvalue* a) { return ret_val; }
+
+CALL_METHOD_STUB(CallObject, jobject, stub_voidp())
+CALL_METHOD_STUB(CallBoolean, jboolean, 1)
+CALL_METHOD_STUB(CallByte, jint, 0)
+CALL_METHOD_STUB(CallChar, jint, 0)
+CALL_METHOD_STUB(CallShort, jint, 0)
+CALL_METHOD_STUB(CallInt, jint, 0)
+CALL_METHOD_STUB(CallLong, jlong, 0)
+CALL_METHOD_STUB(CallFloat, jfloat, 0)
+CALL_METHOD_STUB(CallDouble, jdouble, 0)
+static void stub_CallVoidMethod(JNIEnv* e, jobject o, jmethodID m, ...) {}
+static void stub_CallVoidMethodV(JNIEnv* e, jobject o, jmethodID m, va_list a) {}
+static void stub_CallVoidMethodA(JNIEnv* e, jobject o, jmethodID m, const jvalue* a) {}
+
+#define CALL_STATIC_METHOD_STUB(prefix, ret_type, ret_val) \
+    static ret_type stub_##prefix##Method(JNIEnv* e, jclass c, jmethodID m, ...) { return ret_val; } \
+    static ret_type stub_##prefix##MethodV(JNIEnv* e, jclass c, jmethodID m, va_list a) { return ret_val; } \
+    static ret_type stub_##prefix##MethodA(JNIEnv* e, jclass c, jmethodID m, const jvalue* a) { return ret_val; }
+
+CALL_STATIC_METHOD_STUB(CallStaticObject, jobject, stub_voidp())
+CALL_STATIC_METHOD_STUB(CallStaticBoolean, jboolean, 1)
+CALL_STATIC_METHOD_STUB(CallStaticByte, jint, 0)
+CALL_STATIC_METHOD_STUB(CallStaticChar, jint, 0)
+CALL_STATIC_METHOD_STUB(CallStaticShort, jint, 0)
+CALL_STATIC_METHOD_STUB(CallStaticInt, jint, 0)
+CALL_STATIC_METHOD_STUB(CallStaticLong, jlong, 0)
+CALL_STATIC_METHOD_STUB(CallStaticFloat, jfloat, 0)
+CALL_STATIC_METHOD_STUB(CallStaticDouble, jdouble, 0)
+static void stub_CallStaticVoidMethod(JNIEnv* e, jclass c, jmethodID m, ...) {}
+static void stub_CallStaticVoidMethodV(JNIEnv* e, jclass c, jmethodID m, va_list a) {}
+static void stub_CallStaticVoidMethodA(JNIEnv* e, jclass c, jmethodID m, const jvalue* a) {}
+
+// Get/SetField stubs
+static jobject stub_GetObjectField(JNIEnv* e, jobject o, jfieldID f) { return stub_voidp(); }
+static void stub_SetObjectField(JNIEnv* e, jobject o, jfieldID f, jobject v) {}
+static jint stub_GetIntField(JNIEnv* e, jobject o, jfieldID f) { return 0; }
+static void stub_SetIntField(JNIEnv* e, jobject o, jfieldID f, jint v) {}
+static jlong stub_GetLongField(JNIEnv* e, jobject o, jfieldID f) { return 0; }
+static void stub_SetLongField(JNIEnv* e, jobject o, jfieldID f, jlong v) {}
+static jboolean stub_GetBooleanField(JNIEnv* e, jobject o, jfieldID f) { return 0; }
+static jfloat stub_GetFloatField(JNIEnv* e, jobject o, jfieldID f) { return 0; }
+
+// Static field stubs
+static jobject stub_GetStaticObjectField(JNIEnv* e, jclass c, jfieldID f) { return stub_voidp(); }
+static jint stub_GetStaticIntField(JNIEnv* e, jclass c, jfieldID f) { return 0; }
+static void stub_SetStaticIntField(JNIEnv* e, jclass c, jfieldID f, jint v) {}
+static jlong stub_GetStaticLongField(JNIEnv* e, jclass c, jfieldID f) { return 0; }
+
+// Array stubs
+static jint stub_GetArrayLength(JNIEnv* e, jarray a) { return 0; }
+static jobject stub_GetObjectArrayElement(JNIEnv* e, jobjectArray a, jint i) { return stub_voidp(); }
+static void stub_SetObjectArrayElement(JNIEnv* e, jobjectArray a, jint i, jobject v) {}
+static jobjectArray stub_NewObjectArray(JNIEnv* e, jint l, jclass c, jobject i) { return (jobjectArray)stub_voidp(); }
+
+// Exception stubs
+static jthrowable stub_ExceptionOccurred(JNIEnv* e) { return NULL; }
+static void stub_ExceptionDescribe(JNIEnv* e) {}
+static void stub_ExceptionClear(JNIEnv* e) {}
+static jint stub_Throw(JNIEnv* e, jthrowable o) { return 0; }
+
+// ============== JNI function table (opaque, indexed by slot) ==============
+
+// We use a simple function pointer array indexed by JNI slot number.
+// This avoids complex struct typedef dependencies.
+#define JNI_SLOTS 256
+static void* jni_table[JNI_SLOTS];
+
+struct JavaVM_ {
+    const void** functions;  // flat function pointer array
     void* reserved[4];
-} JNIEnv;
-
-typedef struct JavaVMOption_ {
-    char* optionString;
-    void* extraInfo;
-} JavaVMOption;
-
-typedef struct JavaVMInitArgs_ {
-    jint version;
-    jint nOptions;
-    JavaVMOption* options;
-    jboolean ignoreUnrecognized;
-} JavaVMInitArgs;
-
-typedef struct JavaVM_ {
-    const struct JNIInvokeInterface_* functions;
-    void* reserved[4];
-} JavaVM;
-
-typedef struct JNIInvokeInterface_ {
-    void* reserved0[3];
-    jint (*DestroyJavaVM)(JavaVM*);
-    jint (*AttachCurrentThread)(JavaVM*, JNIEnv**, void*);
-    jint (*DetachCurrentThread)(JavaVM*);
-    jint (*GetEnv)(JavaVM*, void**, jint);
-    jint (*AttachCurrentThreadAsDaemon)(JavaVM*, JNIEnv**, void*);
-} JNIInvokeInterface;
-
-// Thread-local JNIEnv
-static __thread JNIEnv tls_env;
-static JavaVM g_vm;
-static JNIInvokeInterface g_vm_functions;
-
-// Stub FindClass - returns NULL (game will need to handle)
-static jclass stub_FindClass(JNIEnv* env, const char* name) {
-    fprintf(stderr, "[jni_shim] FindClass: %s (returning NULL)\n", name);
-    return NULL;
-}
-
-// Stub GetVersion
-static jint stub_GetVersion(JNIEnv* env) {
-    return JNI_VERSION_1_6;
-}
-
-// Stub RegisterNatives
-static jint stub_RegisterNatives(JNIEnv* env, jclass clazz, const void* methods, jint nMethods) {
-    fprintf(stderr, "[jni_shim] RegisterNatives: %d methods\n", nMethods);
-    return JNI_OK;
-}
-
-// Initialize the JNI function table with stubs
-static JNINativeInterface g_env_functions = {0};
-
-__attribute__((visibility("default")))
-__attribute__((constructor))
-static void init_jni_functions() {
-    // Set up the minimal function table
-    g_env_functions.reserved0[0] = NULL; // reserved
-    g_env_functions.reserved0[1] = NULL;
-    g_env_functions.reserved0[2] = NULL;
-    g_env_functions.reserved0[3] = NULL;
-    g_env_functions.GetVersion = (void*)stub_GetVersion;
-    g_env_functions.FindClass = (void*)stub_FindClass;
-    // ... rest remain NULL (stubs)
-
-    // Set up VM
-    g_vm_functions.DestroyJavaVM = NULL;
-    g_vm_functions.AttachCurrentThread = NULL;
-    g_vm_functions.DetachCurrentThread = NULL;
-    g_vm_functions.GetEnv = NULL;
-    g_vm_functions.AttachCurrentThreadAsDaemon = NULL;
-    g_vm.functions = &g_vm_functions;
-}
-
-// JNI_OnLoad - called when libroblox.so is loaded
-// This is the entry point the game expects
-jint JNI_OnLoad(JavaVM* vm, void* reserved) {
-    fprintf(stderr, "[jni_shim] JNI_OnLoad called\n");
-    // Return the JNI version we support
-    return JNI_VERSION_1_6;
-}
-
-// Total: 392 function symbols
-
-static const char *bf_table_syms[] = {
-    "__cxa_finalize",
-    "__cxa_atexit",
-    "__register_atfork",
-    "strlen",
-    "memcmp",
-    "pthread_mutex_init",
-    "pthread_mutex_destroy",
-    "pthread_once",
-    "__memset_chk",
-    "__memcpy_chk",
-    "__strlen_chk",
-    "memchr",
-    "dladdr",
-    "dlerror",
-    "dlopen",
-    "dlsym",
-    "strncmp",
-    "strcmp",
-    "getauxval",
-    "__errno",
-    "close",
-    "__open_2",
-    "__read_chk",
-    "read",
-    "clock_gettime",
-    "syscall",
-    "sched_getcpu",
-    "sysconf",
-    "mmap",
-    "mprotect",
-    "munmap",
-    "pthread_attr_init",
-    "pthread_attr_setstacksize",
-    "pthread_create",
-    "pthread_attr_destroy",
-    "pthread_join",
-    "pthread_self",
-    "memset",
-    "pthread_setspecific",
-    "__strncpy_chk",
-    "sched_get_priority_max",
-    "sched_setscheduler",
-    "pthread_mutex_lock",
-    "pthread_cond_wait",
-    "pthread_mutex_unlock",
-    "pthread_cond_signal",
-    "pthread_cond_init",
-    "gettid",
-    "__vsprintf_chk",
-    "atan2f",
-    "vsnprintf",
-    "fprintf",
-    "rand",
-    "strtoll",
-    "time",
-    "pthread_cond_broadcast",
-    "pthread_cond_destroy",
-    "stat",
-    "opendir",
-    "readdir",
-    "closedir",
-    "posix_fallocate",
-    "open",
-    "pthread_equal",
-    "atoll",
-    "srand",
-    "strtod",
-    "localtime",
-    "fseek",
-    "ftell",
-    "fclose",
-    "atan",
-    "mkdir",
-    "__fread_chk",
-    "fread",
-    "asinf",
-    "dlclose",
-    "access",
-    "getenv",
-    "strncpy",
-    "feof",
-    "fopen",
-    "fseeko",
-    "ftello",
-    "fwrite",
-    "fflush",
-    "gmtime",
-    "mktime",
-    "pipe",
-    "write",
-    "pthread_key_create",
-    "abort",
-    "__assert",
-    "strrchr",
-    "__stack_chk_fail",
-    "atoi",
-    "fcntl",
-    "memcpy",
-    "strcpy",
-    "strerror",
-    "pthread_attr_setdetachstate",
-    "pthread_cond_timedwait",
-    "memmove",
-    "strtol",
-    "getpid",
-    "gettimeofday",
-    "localtime_r",
-    "fputs",
-    "strerror_r",
-    "snprintf",
-    "prctl",
-    "sigaltstack",
-    "getpagesize",
-    "pthread_getspecific",
-    "fork",
-    "waitpid",
-    "execv",
-    "_exit",
-    "execve",
-    "getopt_long",
-    "getppid",
-    "geteuid",
-    "epoll_create1",
-    "eventfd",
-    "epoll_ctl",
-    "getsockopt",
-    "setsockopt",
-    "epoll_wait",
-    "getuid",
-    "pthread_mutex_trylock",
-    "ldexp",
-    "strchr",
-    "getaddrinfo",
-    "socket",
-    "freeaddrinfo",
-    "connect",
-    "poll",
-    "sched_getscheduler",
-    "sched_getparam",
-    "getpriority",
-    "uname",
-    "tzset",
-    "strnlen",
-    "writev",
-    "sscanf",
-    "strtoul",
-    "strtoull",
-    "lseek",
-    "ftruncate",
-    "fstat",
-    "lstat",
-    "rename",
-    "unlink",
-    "rmdir",
-    "nanosleep",
-    "sigemptyset",
-    "sigaction",
-    "raise",
-    "fscanf",
-    "pread64",
-    "ptrace",
-    "socketpair",
-    "sendmsg",
-    "recvmsg",
-    "__cmsg_nxthdr",
-    "readlink",
-    "printf",
-    "wmemchr",
-    "localeconv",
-    "__vsnprintf_chk",
-    "__memmove_chk",
-    "sched_yield",
-    "modf",
-    "strcasecmp",
-    "getnameinfo",
-    "strftime",
-    "__strcpy_chk",
-    "frexpf",
-    "ldexpf",
-    "tanf",
-    "atanf",
-    "erff",
-    "acosf",
-    "strstr",
-    "erfcf",
-    "modff",
-    "coshf",
-    "sinhf",
-    "tanhf",
-    "atan2",
-    "cbrtf",
-    "__strchr_chk",
-    "clock",
-    "fileno",
-    "remainderf",
-    "nan",
-    "qsort",
-    "nextafterf",
-    "acos",
-    "asin",
-    "ilogb",
-    "__FD_SET_chk",
-    "select",
-    "__FD_ISSET_chk",
-    "sendto",
-    "recvfrom",
-    "__strcat_chk",
-    "setpriority",
-    "pthread_mutexattr_init",
-    "pthread_mutexattr_settype",
-    "pthread_mutexattr_destroy",
-    "sem_init",
-    "sem_destroy",
-    "sem_wait",
-    "sem_post",
-    "inet_ntop",
-    "inet_pton",
-    "strncasecmp",
-    "pthread_attr_setschedparam",
-    "bind",
-    "getsockname",
-    "gethostname",
-    "__sendto_chk",
-    "puts",
-    "gai_strerror",
-    "__write_chk",
-    "__poll_chk",
-    "vprintf",
-    "usleep",
-    "pthread_kill",
-    "pthread_detach",
-    "exit",
-    "ferror",
-    "clearerr",
-    "wcslen",
-    "wmemcmp",
-    "exp",
-    "pow",
-    "fmod",
-    "log",
-    "log2",
-    "log10",
-    "round",
-    "frexp",
-    "sin",
-    "sinh",
-    "cos",
-    "cosh",
-    "tan",
-    "tanh",
-    "atol",
-    "atof",
-    "strspn",
-    "strtof",
-    "ioctl",
-    "getpeername",
-    "listen",
-    "accept",
-    "epoll_create",
-    "__FD_CLR_chk",
-    "expm1",
-    "if_indextoname",
-    "sigaddset",
-    "pthread_sigmask",
-    "fgets",
-    "setjmp",
-    "longjmp",
-    "pthread_condattr_init",
-    "pthread_condattr_setclock",
-    "pthread_condattr_destroy",
-    "sched_get_priority_min",
-    "pthread_setschedparam",
-    "getgid",
-    "getegid",
-    "random",
-    "sigfillset",
-    "fdopen",
-    "timerfd_create",
-    "timerfd_settime",
-    "fputc",
-    "bsearch",
-    "vfprintf",
-    "pthread_exit",
-    "finitef",
-    "cbrt",
-    "remquof",
-    "strcspn",
-    "gmtime_r",
-    "difftime",
-    "strpbrk",
-    "shutdown",
-    "memrchr",
-    "accept4",
-    "if_nametoindex",
-    "setvbuf",
-    "realpath",
-    "recvmmsg",
-    "getcwd",
-    "pread",
-    "pwrite",
-    "fchmod",
-    "fchown",
-    "mremap",
-    "fsync",
-    "utimes",
-    "msync",
-    "statvfs",
-    "mallinfo",
-    "__readlink_chk",
-    "__gnu_strerror_r",
-    "pthread_getschedparam",
-    "sinf",
-    "sincosf",
-    "exp2",
-    "sincos",
-    "fmal",
-    "exp2f",
-    "log10f",
-    "logf",
-    "powf",
-    "fmodf",
-    "log2f",
-    "expf",
-    "powl",
-    "cosf",
-    "pthread_key_delete",
-    "sysinfo",
-    "madvise",
-    "pthread_setname_np",
-    "pthread_getattr_np",
-    "pthread_attr_getstack",
-    "mlock",
-    "dl_iterate_phdr",
-    "isspace",
-    "gethostbyname",
-    "strcat",
-    "sendmmsg",
-    "tolower",
-    "pthread_rwlock_destroy",
-    "pthread_rwlock_init",
-    "pthread_rwlock_rdlock",
-    "pthread_rwlock_unlock",
-    "pthread_rwlock_wrlock",
-    "signal",
-    "tcgetattr",
-    "tcsetattr",
-    "utime",
-    "vasprintf",
-    "openlog",
-    "syslog",
-    "closelog",
-    "ungetc",
-    "getc",
-    "ungetwc",
-    "getwc",
-    "fputwc",
-    "newlocale",
-    "uselocale",
-    "vsscanf",
-    "strftime_l",
-    "mbsrtowcs",
-    "freelocale",
-    "strcoll_l",
-    "strxfrm_l",
-    "wcscoll_l",
-    "wcsxfrm_l",
-    "iswlower_l",
-    "iswspace_l",
-    "iswprint_l",
-    "iswblank_l",
-    "iswcntrl_l",
-    "iswupper_l",
-    "iswalpha_l",
-    "iswdigit_l",
-    "iswpunct_l",
-    "iswxdigit_l",
-    "towupper_l",
-    "towlower_l",
-    "btowc",
-    "wctob",
-    "wcsnrtombs",
-    "wcrtomb",
-    "mbsnrtowcs",
-    "mbrtowc",
-    "mbtowc",
-    "__ctype_get_mb_cur_max",
-    "mbrlen",
-    "strtoll_l",
-    "strtoull_l",
-    "strtold_l",
-    "__cxa_thread_atexit_impl",
-    "strncat",
 };
 
-#define BF_TABLE_COUNT (sizeof(bf_table_syms)/sizeof(bf_table_syms[0]))
+struct JNIEnv_ {
+    const void** functions;  // points to jni_table
+    void* reserved[4];
+};
 
-static void fill_bionic_table(void **table) {
-    for (size_t i = 0; i < BF_TABLE_COUNT; i++) {
-        if (!table[i]) {
-            table[i] = dlsym(RTLD_DEFAULT, bf_table_syms[i]);
-        }
-    }
+// JavaVM function table — flat array indexed by slot
+// JNI spec slot layout:
+//   0-2: reserved
+//   3: DestroyJavaVM
+//   4: AttachCurrentThread
+//   5: DetachCurrentThread
+//   6: GetEnv
+//   7: AttachCurrentThreadAsDaemon
+#define VM_SLOTS 16
+static void* vm_table[VM_SLOTS];
+
+
+// Global instances (declared BEFORE stubs that reference them)
+static JNIEnv g_env;
+static JavaVM g_vm;
+
+// AttachCurrentThread / GetEnv implementations
+static jint stub_GetEnv_Attach(JavaVM* vm, void** penv, void* args) {
+    (void)args;
+    if (!g_env.functions) g_env.functions = (const void**)jni_table;
+    *penv = &g_env;
+    return 0;
 }
-// Main function - loads libroblox.so and calls JNI_OnLoad
+
+static jint stub_GetEnv_jint(JavaVM* vm, void** penv, jint version) {
+    (void)version;
+    if (!g_env.functions) g_env.functions = (const void**)jni_table;
+    *penv = &g_env;
+    return 0;
+}
+
+static jint stub_DestroyJavaVM(JavaVM* vm) { return 0; }
+static jint stub_DetachCurrentThread(JavaVM* vm) { return 0; }
+
+__attribute__((constructor))
+static void init_jni_functions() {
+    // Zero out the table
+    memset(jni_table, 0, sizeof(jni_table));
+
+    // Slot 4: GetVersion
+    jni_table[4] = stub_GetVersion;
+    // Slot 5: DefineClass — keep NULL to avoid accidental use
+    // Slot 6: FindClass
+    jni_table[6] = stub_FindClass;
+    // Slot 7: FromReflectedMethod
+    // Slot 8: FromReflectedField
+    // Slot 9: ToReflectedMethod
+    // Slot 10: GetSuperclass
+    // Slot 11: IsAssignableFrom
+    // Slot 12: ToReflectedField
+    // Slot 13: Throw
+    jni_table[13] = stub_Throw;
+    // Slot 14: ThrowNew
+    jni_table[14] = stub_ThrowNew;
+    // Slot 15: ExceptionOccurred
+    jni_table[15] = stub_ExceptionOccurred;
+    // Slot 16: ExceptionDescribe
+    jni_table[16] = stub_ExceptionDescribe;
+    // Slot 17: ExceptionClear
+    jni_table[17] = stub_ExceptionClear;
+    // Slot 18: FatalError — keep NULL (abort if called)
+    // Slot 19: PushLocalFrame
+    // Slot 20: PopLocalFrame
+    // Slot 21: NewGlobalRef
+    jni_table[21] = stub_NewGlobalRef;
+    // Slot 22: DeleteGlobalRef
+    jni_table[22] = stub_DeleteGlobalRef;
+    // Slot 23: DeleteLocalRef
+    jni_table[23] = stub_DeleteLocalRef;
+    // Slot 24: IsSameObject
+    // Slot 25: NewLocalRef
+    // Slot 26: EnsureLocalCapacity
+    // Slot 27: AllocObject
+    // Slot 28: NewObject
+    jni_table[28] = stub_NewObject;
+    // Slot 29: NewObjectV
+    // Slot 30: NewObjectA
+    // Slot 31: GetObjectClass
+    // Slot 32: IsInstanceOf
+    // Slot 33: GetMethodID
+    jni_table[33] = stub_GetMethodID;
+    // Slot 34: GetStringUTFChars
+    jni_table[34] = stub_GetStringUTFChars;
+    // Slot 35: ReleaseStringUTFChars
+    jni_table[35] = stub_ReleaseStringUTFChars;
+    // Slot 36: NewStringUTF
+    jni_table[36] = stub_NewStringUTF;
+    // Slot 37: GetArrayLength
+    jni_table[37] = stub_GetArrayLength;
+    // Slot 38: NewObjectArray
+    jni_table[38] = stub_NewObjectArray;
+    // Slot 39: GetObjectArrayElement
+    jni_table[39] = stub_GetObjectArrayElement;
+    // Slot 40: SetObjectArrayElement
+    jni_table[40] = stub_SetObjectArrayElement;
+    // Slots 41-43: CallObjectMethod(V/A)
+    jni_table[41] = stub_CallObjectMethod;
+    jni_table[42] = stub_CallObjectMethodV;
+    jni_table[43] = stub_CallObjectMethodA;
+    // Slots 44-46: CallBooleanMethod(V/A)
+    jni_table[44] = stub_CallBooleanMethod;
+    jni_table[45] = stub_CallBooleanMethodV;
+    jni_table[46] = stub_CallBooleanMethodA;
+    // Slots 47-49: CallByteMethod(V/A)
+    jni_table[47] = stub_CallByteMethod;
+    jni_table[48] = stub_CallByteMethodV;
+    jni_table[49] = stub_CallByteMethodA;
+    // Slots 50-52: CallCharMethod(V/A)
+    jni_table[50] = stub_CallCharMethod;
+    jni_table[51] = stub_CallCharMethodV;
+    jni_table[52] = stub_CallCharMethodA;
+    // Slots 53-55: CallShortMethod(V/A)
+    jni_table[53] = stub_CallShortMethod;
+    jni_table[54] = stub_CallShortMethodV;
+    jni_table[55] = stub_CallShortMethodA;
+    // Slots 56-58: CallIntMethod(V/A)
+    jni_table[56] = stub_CallIntMethod;
+    jni_table[57] = stub_CallIntMethodV;
+    jni_table[58] = stub_CallIntMethodA;
+    // Slots 59-61: CallLongMethod(V/A)
+    jni_table[59] = stub_CallLongMethod;
+    jni_table[60] = stub_CallLongMethodV;
+    jni_table[61] = stub_CallLongMethodA;
+    // Slots 62-64: CallFloatMethod(V/A)
+    jni_table[62] = stub_CallFloatMethod;
+    jni_table[63] = stub_CallFloatMethodV;
+    jni_table[64] = stub_CallFloatMethodA;
+    // Slots 65-67: CallDoubleMethod(V/A)
+    jni_table[65] = stub_CallDoubleMethod;
+    jni_table[66] = stub_CallDoubleMethodV;
+    jni_table[67] = stub_CallDoubleMethodA;
+    // Slots 68-70: CallVoidMethod(V/A)
+    jni_table[68] = stub_CallVoidMethod;
+    jni_table[69] = stub_CallVoidMethodV;
+    jni_table[70] = stub_CallVoidMethodA;
+    // Slots 71-73: CallStaticObjectMethod(V/A)
+    jni_table[71] = stub_CallStaticObjectMethod;
+    jni_table[72] = stub_CallStaticObjectMethodV;
+    jni_table[73] = stub_CallStaticObjectMethodA;
+    // Slots 74-76: CallStaticBooleanMethod(V/A)
+    jni_table[74] = stub_CallStaticBooleanMethod;
+    jni_table[75] = stub_CallStaticBooleanMethodV;
+    jni_table[76] = stub_CallStaticBooleanMethodA;
+    // Slots 77-79: CallStaticByteMethod(V/A)
+    jni_table[77] = stub_CallStaticByteMethod;
+    jni_table[78] = stub_CallStaticByteMethodV;
+    jni_table[79] = stub_CallStaticByteMethodA;
+    // Slots 80-82: CallStaticCharMethod(V/A)
+    jni_table[80] = stub_CallStaticCharMethod;
+    jni_table[81] = stub_CallStaticCharMethodV;
+    jni_table[82] = stub_CallStaticCharMethodA;
+    // Slots 83-85: CallStaticShortMethod(V/A)
+    jni_table[83] = stub_CallStaticShortMethod;
+    jni_table[84] = stub_CallStaticShortMethodV;
+    jni_table[85] = stub_CallStaticShortMethodA;
+    // Slots 86-88: CallStaticIntMethod(V/A)
+    jni_table[86] = stub_CallStaticIntMethod;
+    jni_table[87] = stub_CallStaticIntMethodV;
+    jni_table[88] = stub_CallStaticIntMethodA;
+    // Slots 89-91: CallStaticLongMethod(V/A)
+    jni_table[89] = stub_CallStaticLongMethod;
+    jni_table[90] = stub_CallStaticLongMethodV;
+    jni_table[91] = stub_CallStaticLongMethodA;
+    // Slots 92-94: CallStaticFloatMethod(V/A)
+    jni_table[92] = stub_CallStaticFloatMethod;
+    jni_table[93] = stub_CallStaticFloatMethodV;
+    jni_table[94] = stub_CallStaticFloatMethodA;
+    // Slots 95-97: CallStaticDoubleMethod(V/A)
+    jni_table[95] = stub_CallStaticDoubleMethod;
+    jni_table[96] = stub_CallStaticDoubleMethodV;
+    jni_table[97] = stub_CallStaticDoubleMethodA;
+    // Slot 98-100: CallNonvirtualVoidMethod(V/A)
+    jni_table[98] = stub_CallVoidMethod;
+    jni_table[99] = stub_CallVoidMethodV;
+    jni_table[100] = stub_CallVoidMethodA;
+    // Slot 101: GetFieldID
+    jni_table[101] = stub_GetFieldID;
+    // Slots 102-103: Get/SetObjectField
+    jni_table[102] = stub_GetObjectField;
+    jni_table[103] = stub_SetObjectField;
+    // Slots 104-105: Get/SetBooleanField — use int variants
+    jni_table[104] = stub_GetBooleanField;
+    // Slots 106-109: Get/SetByte/CharField
+    // Slots 110-111: Get/SetShortField
+    // Slots 112-113: Get/SetIntField
+    jni_table[112] = stub_GetIntField;
+    jni_table[113] = stub_SetIntField;
+    // Slots 114-115: Get/SetLongField
+    jni_table[114] = stub_GetLongField;
+    jni_table[115] = stub_SetLongField;
+    // Slots 116-117: Get/SetFloatField
+    jni_table[116] = stub_GetFloatField;
+    // Slots 118-119: Get/SetDoubleField
+    // Slot 120: GetStaticFieldID
+    jni_table[120] = stub_GetStaticFieldID;
+    // Slots 121-122: Get/SetStaticObjectField
+    jni_table[121] = stub_GetStaticObjectField;
+    // Slots 128-129: Get/SetStaticIntField
+    jni_table[128] = stub_GetStaticIntField;
+    jni_table[129] = stub_SetStaticIntField;
+    // Slots 130-131: Get/SetStaticLongField
+    jni_table[130] = stub_GetStaticLongField;
+    // Slots 142-143: Register/UnregisterNatives
+    jni_table[193] = stub_RegisterNatives;
+    // Slot 194: UnregisterNatives — reuse
+    // Slot 197: GetJavaVM
+    jni_table[197] = stub_GetJavaVM;
+
+    // JavaVM function table — flat array by slot
+    vm_table[3] = stub_DestroyJavaVM;      // DestroyJavaVM
+    vm_table[4] = stub_GetEnv_Attach;       // AttachCurrentThread
+    vm_table[5] = stub_DetachCurrentThread; // DetachCurrentThread
+    vm_table[6] = stub_GetEnv_jint;         // GetEnv
+    vm_table[7] = stub_GetEnv_Attach;       // AttachCurrentThreadAsDaemon
+    g_vm.functions = (const void**)vm_table;
+}
+
 int main(int argc, char** argv) {
     const char* lib_path = getenv("ROBLOX_LIB");
     if (!lib_path) lib_path = "libroblox.so";
 
-    // Load the bionic shim (provides @LIBC versioned symbols)
-    // We fill its dispatch table from THIS binary (not from inside the shim)
-    // to avoid PLT circularity: our calls to dlsym resolve to glibc directly.
     fprintf(stderr, "[jni_shim] Loading bionic shim...\n");
     void *bionic_shim = dlopen("libbionic_shim.so", RTLD_LAZY | RTLD_GLOBAL);
-    if (!bionic_shim) {
+    if (!bionic_shim)
         fprintf(stderr, "[jni_shim] WARNING: libbionic_shim.so not found: %s\n", dlerror());
-    } else {
-        // Get the dispatch table address and fill the CRITICAL entries
-        // (dl* functions: dlopen, dlsym, dlclose, dladdr, dlerror) that
-        // are needed during __bf_c_resolve to avoid circular resolution.
-        // The rest are resolved lazily on first call via __bf_c_resolve.
-        // PREVIOUSLY we pre-filled ALL 392 entries here, but that caused
-        // issues because dlsym(RTLD_DEFAULT) in a static binary returns
-        // addresses from this binary's libc rather than the ARM64 glibc's.
-        void **table = dlsym(bionic_shim, "__bf_tramp_table");
-        if (table) {
-            // Only pre-fill entries 12-15 (dladdr, dlerror, dlopen, dlsym)
-            // plus dlclose (index 76) and __cxa_finalize (index 0)
-            // and __cxa_atexit (index 1) — these are needed for resolution
-            const int critical_indices[] = {0, 1, 2, 12, 13, 14, 15, 76};
-            for (size_t ci = 0; ci < sizeof(critical_indices)/sizeof(critical_indices[0]); ci++) {
-                int idx = critical_indices[ci];
-                if (!table[idx]) {
-                    table[idx] = dlsym(RTLD_DEFAULT, bf_table_syms[idx]);
-                }
-            }
-            fprintf(stderr, "[jni_shim] Pre-filled %zu critical dispatch table entries (lazy for rest)\n",
-                    sizeof(critical_indices)/sizeof(critical_indices[0]));
-        } else {
-            fprintf(stderr, "[jni_shim] WARNING: __bf_tramp_table not found in bionic shim\n");
-        }
-    }
-
-    // Initialize bionic data objects directly from this binary.
-    // We do the dlsym calls HERE (not from the shim) because calling dlsym
-    // from inside the shim goes through its own trampolines, which can
-    // cause infinite recursion. From this binary, dlsym goes to glibc directly.
-    fprintf(stderr, "[jni_shim] Initializing bionic data objects...\n");
-    {
-        // Data symbols to initialize (name, address of data slot in shim)
-        struct { const char *name; const char *glibc_sym; } data_syms[] = {
-            {"__bf_data_stderr",     "stderr"},
-            {"__bf_data___sF",       "_IO_2_1_stderr_"},
-            {"__bf_data_optarg",     "optarg"},
-            {"__bf_data_optind",     "optind"},
-            {"__bf_data_tzname",     "tzname"},
-            {"__bf_data_daylight",   "daylight"},
-            {"__bf_data_timezone",   "timezone"},
-            {"__bf_data_environ",    "environ"},
-            {"__bf_data_in6addr_any","in6addr_any"},
-            {"__bf_data_stdin",      "stdin"},
-            {"__bf_data_stdout",     "stdout"},
-            {"__bf_data_in6addr_loopback", "in6addr_loopback"},
-        };
-        void *rtld_default_handle = dlopen(NULL, RTLD_LAZY | RTLD_NOLOAD);
-        for (size_t i = 0; i < sizeof(data_syms)/sizeof(data_syms[0]); i++) {
-            void **slot = dlsym(bionic_shim, data_syms[i].name);
-            if (slot && !*slot) {
-                *slot = dlsym(rtld_default_handle ? rtld_default_handle : RTLD_DEFAULT,
-                              data_syms[i].glibc_sym);
-            }
-        }
-        if (rtld_default_handle) dlclose(rtld_default_handle);
-
-        // Initialize __stack_chk_guard with a non-zero canary
-        void **canary_slot = dlsym(bionic_shim, "__bf_data___stack_chk_guard");
-        if (canary_slot && !*canary_slot) {
-            unsigned long long c = 0xdeadbeefcafebabeULL;
-            // Try to get a random canary from glibc
-            void *glibc_canary = dlsym(RTLD_DEFAULT, "__stack_chk_guard");
-            if (glibc_canary) c = *(unsigned long long*)glibc_canary;
-            if (!c) c = 0xdeadbeefcafebabeULL;
-            *canary_slot = (void*)c;
-        }
-    }
 
     fprintf(stderr, "[jni_shim] Loading %s...\n", lib_path);
-
     void* handle = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) {
-        fprintf(stderr, "[jni_shim] Failed to load %s: %s\n", lib_path, dlerror());
+        fprintf(stderr, "[jni_shim] Failed: %s\n", dlerror());
         return 1;
     }
+    fprintf(stderr, "[jni_shim] Loaded successfully\n");
 
-    fprintf(stderr, "[jni_shim] Loaded %s successfully\n", lib_path);
+    // Fix __stack_chk_guard in libroblox.so's data section
+    // The code at JNI_OnLoad does: adrp x24, imm; ldr x24, [x24, #1080]; ldr x8, [x24]
+    // This loads a pointer from offset 1080 within a page, then dereferences it.
+    // The pointer is in the library's data/BSS and should point to a non-zero value.
+    // Find the base address of the loaded library
+    Dl_info dl_info;
+    if (dladdr((void*)dlsym(handle, "JNI_OnLoad"), &dl_info)) {
+        uintptr_t base = (uintptr_t)dl_info.dli_fbase;
+        // The GOT pointer is at offset 0x6473438 from the base (file vaddr)
+        // This is in the writable data segment
+        uintptr_t guard_ptr_addr = base + 0x6473438;
+        uintptr_t* guard_ptr = (uintptr_t*)guard_ptr_addr;
+        uintptr_t canary = 0x0A0B0C0D0E0F1011ULL;
+        fprintf(stderr, "[jni_shim] libroblox base=%p, guard_ptr at %p = %p\n",
+                (void*)base, (void*)guard_ptr, (void*)*guard_ptr);
+        if (*guard_ptr == 0) {
+            // Create a canary value in a known location
+            *guard_ptr = (uintptr_t)&canary;
+            canary = 0x0A0B0C0D0E0F1011ULL;
+            fprintf(stderr, "[jni_shim] stack_chk_guard patched\n");
+        }
+    }
+
+    // Set up JNI env — functions pointer is jni_table
+    g_env.functions = (const void**)jni_table;
+
+    // Set up JavaVM with correct interface
+    // g_vm.functions already set in constructor
 
     // Call JNI_OnLoad
-    typedef jint (*jni_onload_t)(JavaVM*, void*);
+    typedef int (*jni_onload_t)(JavaVM*, void*);
     jni_onload_t jni_onload = (jni_onload_t)dlsym(handle, "JNI_OnLoad");
-    if (jni_onload) {
-        jint version = jni_onload(&g_vm, NULL);
-        fprintf(stderr, "[jni_shim] JNI_OnLoad returned version 0x%x\n", version);
+    if (!jni_onload)
+        jni_onload = (jni_onload_t)dlvsym(handle, "JNI_OnLoad", "LIBROBLOX");
+    // Try to set __stack_chk_guard to a non-zero value.
+    // libroblox.so accesses this via the thread pointer (tpidr_el0).
+    // If it's 0, the stack protector crashes on any function entry.
+    void* libc_guard = dlsym(RTLD_DEFAULT, "__stack_chk_guard");
+    if (libc_guard) {
+        uintptr_t* g = (uintptr_t*)libc_guard;
+        if (*g == 0) {
+            *g = 0x0A0B0C0D0E0F1011ULL;
+            fprintf(stderr, "[jni_shim] set __stack_chk_guard at %p = 0x%lx\n", g, *g);
+        }
     } else {
-        fprintf(stderr, "[jni_shim] No JNI_OnLoad symbol found in %s\n", lib_path);
+        fprintf(stderr, "[jni_shim] WARNING: __stack_chk_guard not found\n");
     }
 
-    // Keep running until signal
-    fprintf(stderr, "[jni_shim] Entering main loop...\n");
-
-    // Call the game's main if it exists
-    typedef int (*main_func_t)(int, char**);
-    main_func_t game_main = (main_func_t)dlsym(handle, "main");
-    if (game_main) {
-        fprintf(stderr, "[jni_shim] Calling game main()\n");
-        return game_main(argc, argv);
+    if (jni_onload) {
+        fprintf(stderr, "[jni_shim] JNI_OnLoad at %p, calling...\n", (void*)jni_onload);
+        jint ver = jni_onload(&g_vm, NULL);
+        fprintf(stderr, "[jni_shim] JNI_OnLoad -> 0x%x\n", ver);
+    } else {
+        fprintf(stderr, "[jni_shim] JNI_OnLoad not found\n");
     }
 
-    // Otherwise just wait
+    fprintf(stderr, "[jni_shim] Entering sleep loop\n");
     while (1) sleep(1);
-
-    dlclose(handle);
     return 0;
 }

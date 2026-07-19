@@ -164,8 +164,8 @@ void _bf_android_fdsan_close_with_tag_impl(void) { }
 void _bf_write_chk_libc_n_alias(void);
 __asm__(".symver _bf_write_chk_libc_n_alias, __write_chk@@LIBC_N");
 void _bf_write_chk_libc_n_alias(void) {
-    extern void _bf___write_chk_glibc(void);
-    _bf___write_chk_glibc();
+    extern void __write_chk(void);
+    __write_chk();
 }
 
 /* ===== android_get_application_target_sdk_version@@LIBC_N (Bionic-only) =====
@@ -188,16 +188,16 @@ __asm__(".symver __cfi_slowpath, __cfi_slowpath@@LIBC_OMR1");
 void _bf_getrandom_libc_p_alias(void);
 __asm__(".symver _bf_getrandom_libc_p_alias, getrandom@@LIBC_P");
 void _bf_getrandom_libc_p_alias(void) {
-    extern void _bf_getrandom_glibc(void);
-    _bf_getrandom_glibc();
+    extern void getrandom(void);
+    getrandom();
 }
 
 /* ===== aligned_alloc@@LIBC_P (glibc, needs LIBC_P version alias) */
 void _bf_aligned_alloc_libc_p_alias(void);
 __asm__(".symver _bf_aligned_alloc_libc_p_alias, aligned_alloc@@LIBC_P");
 void _bf_aligned_alloc_libc_p_alias(void) {
-    extern void _bf_aligned_alloc_glibc(void);
-    _bf_aligned_alloc_glibc();
+    extern void aligned_alloc(void);
+    aligned_alloc();
 }
 
 /* ===== Re-exported glibc symbols under LIBC version =====
@@ -266,6 +266,15 @@ ssize_t _bf_sendto_chk_libc_o_alias(int sockfd, const void *buf, size_t len,
 }
 __asm__(".symver _bf_sendto_chk_libc_o_alias, __sendto_chk@@LIBC_O");
 
+/* __mempcpy_chk — glibc checked mempcpy, needed by libselinux.so under LIBC_R.
+ * The glibc __mempcpy_chk exists; we just need it tagged under LIBC_R. */
+void _bf_mempcpy_chk_libc_r_alias(void);
+__asm__(".symver _bf_mempcpy_chk_libc_r_alias, __mempcpy_chk@@LIBC_R");
+void _bf_mempcpy_chk_libc_r_alias(void) {
+    extern void __mempcpy_chk(void);
+    __mempcpy_chk();
+}
+
 /* eventfd_write — needed by libgui.so under LIBC version. */
 int _bf_eventfd_write_impl(int fd, unsigned long long value) {
     extern int eventfd_write(int, unsigned long long);
@@ -305,3 +314,75 @@ __asm__(".symver _bf_pthread_setschedprio_impl, pthread_setschedprio@@LIBC_P");
  * The gen script exports it as @@LIBC which doesn't match. */
 void _bf_android_mallopt_libc_q(void) {}
 __asm__(".symver _bf_android_mallopt_libc_q, android_mallopt@@LIBC_Q");
+
+/* ===== Version aliases for Bionic stubs =====
+ * Bionic stubs defined above are exported as @@LIBC by default.
+ * These aliases provide @@LIBC_Q, @@LIBC_O, @@LIBC_V versions
+ * for GSI libraries that look up the specific version. */
+
+/* __system_properties_init — needs LIBC_Q alias */
+void _bf___system_properties_init_q(void);
+__asm__(".symver _bf___system_properties_init_q, __system_properties_init@@LIBC_Q");
+void _bf___system_properties_init_q(void) {
+    extern void __system_properties_init(void);
+    __system_properties_init();
+}
+
+/* __system_properties_zygote_reload — needs LIBC_V alias */
+void _bf___system_properties_zygote_reload_v(void);
+__asm__(".symver _bf___system_properties_zygote_reload_v, __system_properties_zygote_reload@@LIBC_V");
+void _bf___system_properties_zygote_reload_v(void) {
+    extern void __system_properties_zygote_reload(void);
+    __system_properties_zygote_reload();
+}
+
+/* __system_property_read_callback — needs LIBC_O alias */
+void _bf___system_property_read_callback_o(void);
+__asm__(".symver _bf___system_property_read_callback_o, __system_property_read_callback@@LIBC_O");
+void _bf___system_property_read_callback_o(void) {
+    extern void __system_property_read_callback(void);
+    __system_property_read_callback();
+}
+
+/* __system_property_wait — needs LIBC_O alias */
+void _bf___system_property_wait_o(void);
+__asm__(".symver _bf___system_property_wait_o, __system_property_wait@@LIBC_O");
+void _bf___system_property_wait_o(void) {
+    extern void __system_property_wait(void);
+    __system_property_wait();
+}
+
+/* android_get_device_api_level — needs LIBC_Q alias */
+void _bf_android_get_device_api_level_q(void);
+__asm__(".symver _bf_android_get_device_api_level_q, android_get_device_api_level@@LIBC_Q");
+void _bf_android_get_device_api_level_q(void) {
+    extern void android_get_device_api_level(void);
+    android_get_device_api_level();
+}
+
+/* ===== Bionic malloc debug functions (LIBC_Q) =====
+ * libmemunreachable.so references these Bionic-specific malloc debugging
+ * functions. On glibc these don't exist, so we provide no-op stubs. */
+
+/* malloc_backtrace@@LIBC_Q — get backtrace of malloc caller. */
+int _bf_malloc_backtrace_libc_q(void *addr, void *bt, size_t max_bt) {
+    (void)addr; (void)bt; (void)max_bt;
+    return 0;
+}
+__asm__(".symver _bf_malloc_backtrace_libc_q, malloc_backtrace@@LIBC_Q");
+
+/* malloc_disable@@LIBC_Q — disable malloc (for fork safety). */
+int _bf_malloc_disable_libc_q(void) { return 0; }
+__asm__(".symver _bf_malloc_disable_libc_q, malloc_disable@@LIBC_Q");
+
+/* malloc_enable@@LIBC_Q — re-enable malloc after fork. */
+int _bf_malloc_enable_libc_q(void) { return 0; }
+__asm__(".symver _bf_malloc_enable_libc_q, malloc_enable@@LIBC_Q");
+
+/* malloc_iterate@@LIBC_Q — iterate over malloc chunks. */
+int _bf_malloc_iterate_libc_q(uint64_t base, size_t size,
+                               void (*callback)(uint64_t, uint64_t, void*), void *arg) {
+    (void)base; (void)size; (void)callback; (void)arg;
+    return 0;
+}
+__asm__(".symver _bf_malloc_iterate_libc_q, malloc_iterate@@LIBC_Q");

@@ -35,6 +35,8 @@ int u_hasBinaryProperty(int c, int which) { (void)c;(void)which; return 0; }
 int u_charDirection(int c) { (void)c; return 0; }
 int u_charType(int c) { (void)c; return 13; }  /* U_UNASSIGNED */
 int u_getIntPropertyValue(int c, int which) { (void)c;(void)which; return 0; }
+int u_getIntPropertyMaxValue(int which) { (void)which; return 0; }
+int u_charMirror(int c) { (void)c; return 0; }
 int u_iscntrl(int c) { (void)c; return 0; }
 int uscript_getScript(int c, void *err) { (void)c; if(err)*(int*)err=0; return 0; }
 
@@ -72,3 +74,10 @@ void utext_close(void *ut) { (void)ut; }
 
 /* ===== ustring (Unicode String Utilities) ===== */
 const char *u_errorName(int code) { (void)code; return "U_ZERO_ERROR"; }
+
+/* ===== Additional uchar stubs needed by libpdfium.so ===== */
+int u_isalnum(int c) { (void)c; return 0; }
+int u_isalpha(int c) { (void)c; return 0; }
+int u_isspace(int c) { (void)c; return 0; }
+int u_toupper(int c) { (void)c; return 0; }
+int u_tolower(int c) { (void)c; return 0; }

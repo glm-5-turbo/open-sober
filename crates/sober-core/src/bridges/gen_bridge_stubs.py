@@ -81,6 +81,13 @@ SKIP = {
     # Bionic-only fdsan functions (file descriptor sanitizer)
     'android_fdsan_close_with_tag', 'android_fdsan_create_owner_tag',
     'android_fdsan_exchange_owner_tag', 'android_fdsan_get_owner_tag',
+    # Bionic-only malloc debug functions (defined in bridge_libc.c)
+    'malloc_backtrace', 'malloc_disable', 'malloc_enable', 'malloc_iterate',
+    # LIBC_R version alias for glibc function (defined in bridge_libc.c)
+    '__mempcpy_chk',
+    # These are handled by bridge_libc.c with explicit .symver aliases
+    '__write_chk', 'aligned_alloc', '__fread_chk', '__sendto_chk',
+    'strchrnul', 'pthread_setschedprio', 'android_mallopt',
 }
 
 
@@ -121,30 +128,62 @@ def main():
     print(f"  Data (in bridge_libc.c): {len(objs)}")
     print(f"  Skipped: {len(skipped)}")
 
+    # Collect all version tags per symbol for generating .symver aliases
+    version_map = {}  # name -> set of version tags
+    for sym in to_gen:
+        name = sym['name']
+        if name not in version_map:
+            version_map[name] = set()
+        version_map[name].add(sym['version'])
+
     lines = [
         '/* AUTO-GENERATED LIBC forwarding stubs */',
         f'/* {len(to_gen)} functions from {len(files)} libraries */',
-        '/* Each: extern decl → tail-call wrapper → version script tags @@LIBC */',
+        '/* Each: glibc tail-call wrapper + .symver aliases for LIBC_* version tags */',
         '',
     ]
 
-    # Deduplicate by name (if multiple have different versions, use the default LIBC)
+    # Generate wrappers and version aliases
     seen = set()
     for sym in sorted(to_gen, key=lambda s: (s['name'], s['version'])):
         name = sym['name']
         if name in seen:
             continue
         seen.add(name)
-        version = sym['version']
+        versions = sorted(version_map.get(name, set()))
+        has_libc = 'LIBC' in versions
+        default_ver = 'LIBC' if has_libc else versions[0]
+
+        # Generate the wrapper function, renamed to {name}
+        # If there's ONLY a non-LIBC version (e.g. LIBC_Q), we still export it
+        # as @@LIBC (the version script's default), and also create a .symver
+        # alias for the specific version (e.g. reallocarray@LIBC_Q).
+        # Note: use single @ for non-default, @@ for default/only version.
         lines += [
-            f'extern void _bf_{name}_glibc(void);',
             f'void _bf_{name}_wrapper(void) __asm__("{name}");',
             f'void _bf_{name}_wrapper(void)',
             '{',
-            f'    _bf_{name}_glibc();',
+            f'    extern void _bf_glibc_{name}(void) __asm__("{name}");',
+            f'    _bf_glibc_{name}();',
             '}',
-            '',
         ]
+
+        # Generate .symver aliases for non-LIBC versions.
+        # The version script tags everything as @@LIBC by default.
+        # We need additional aliases so GSI libs can look up "name@LIBC_Q" etc.
+        for ver in versions:
+            if ver != 'LIBC':
+                ver_lower = ver.replace('LIBC_', '').lower()
+                lines += [
+                    f'void _bf_{name}_{ver_lower}_alias(void);',
+                    f'__asm__(".symver _bf_{name}_{ver_lower}_alias, {name}@@{ver}");',
+                    f'void _bf_{name}_{ver_lower}_alias(void)',
+                    '{',
+                    f'    extern void _bf_glibc_{name}(void) __asm__("{name}");',
+                    f'    _bf_glibc_{name}();',
+                    '}',
+                ]
+        lines.append('')
 
     # Add data objects — NOTE: these use __asm__(".symver") which can cause
     # linker conflicts. Data objects are already handled in bridge_libc.c
