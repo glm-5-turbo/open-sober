@@ -158,21 +158,42 @@ The following new stubs were added to `bionic_init.c` + `bionic_version.ver`:
 - `chdir`, `pathconf`, `truncate`, `remove`, `link`, `symlink`
 - `fchmodat`, `openat`, `fdopendir`, `unlinkat`, `utimensat`
 
+### ✅ ANDROID_RELR → RELR Patch (2026-07-19, MAJOR BREAKTHROUGH)
+
+**Root cause identified:** `libc++.so` uses `ANDROID_RELR` (`.relr.dyn` section) for relative relocations. The ARM64 glibc `ld-linux-aarch64.so.1` does NOT recognize `DT_ANDROID_RELR` (tag `0x6fffe000`) — it only understands standard `DT_RELR` (tag `0x24`). This left the entire `.init_array` and all other RELR-format relocations unprocessed, causing the segfault when `call_init` tried to read unrelocated function pointers.
+
+**Fix:** Patch the dynamic section to convert `ANDROID_RELR` → `RELR` tags:
+
+```
+DT_ANDROID_RELR (0x6fffe000)  → DT_RELR (0x24)
+DT_ANDROID_RELRSZ (0x6fffe001) → DT_RELRSZ (0x23)
+DT_ANDROID_RELRENT (0x6fffe003) → DT_RELRENT (0x25)
+```
+
+The underlying bit-packed RELR data format is identical between Android and glibc — only the DT tags differ.
+
+**Usage:** `python3 ~/patch_relr.py gsi_libc++.so`
+
+**Current status:** After patching, `dlopen("libc++.so")` no longer segfaults. The library transitions past relocation into C++ static initialization (`.init_array` constructors run). However, it now **hangs** during one of the 3 constructors rather than crashing. The last syscall is `getrandom`, suggesting the issue is in C++ runtime init (possibly `std::ios_base::Init` or `__cxa_atexit` registering).
+
 ### ❌ Current Blocker
-`dlopen("libc++.so")` segfaults in `.init_array` (C++ static constructor) at address 0x7fbbc.
+```
+dlopen("libc++.so")" — HANGS during C++ static initialization.
+```
 
-All symbols now resolve cleanly (RTLD_NOW succeeds for the symbol phase). The segfault happens during libc++.so's 3 static constructors (`.init_array` has 3 entries). The crash address 0x7fbbc matches the first init_array entry.
-
-**Hypothesis:** libc++.so's C++ static initializers manage global C++ objects (ios_base::Init, locale, etc.) that need working `new`/`delete` or `__cxa_*` runtime support. The bionic shim provides `__cxa_finalize@@LIBC` and `__cxa_atexit@@LIBC` but these may not be sufficient for full C++ runtime init under GSI libc++.
+After ANDROID_RELR→RELR patching and adding all ~40 LIBC-versioned stubs, `libc++.so` loads without crashing. It hangs during the 3rd phase of dlopen: running `.init_array` constructors. The three functions at offsets `0x7fbbc`, `0x7feb0`, `0xc87d4` in the patched binary are likely `std::ios_base::Init`, static locale init, or `__cxa_atexit` guard setup.
 
 **To debug:**
-1. Install `gdb-multiarch` and use QEMU's `-g` flag for GDB server:
-   ```
-   qemu-aarch64 -g 1234 -L ... ./jni_shim
-   gdb-multiarch -ex "target remote :1234" ./jni_shim
-   ```
-2. Or try with `LD_BIND_NOW=1` and `LD_DEBUG=all` or `GLIBC_TUNABLES=glibc.rtld.dynamic_sort=1`
-3. The three init array entries are at offsets 0x7fbbc, 0x7feb0, 0xc87d4 in libc++.so
+1. Use GDB to catch dlopen completion and identify which constructor is hanging
+2. Set breakpoints at the init function addresses after RELR patch
+3. Check if the constructors are calling back into glibc functions that expect glibc-internal state that isn't set up properly (e.g., `__libc_single_threaded`, `__ctype_b_loc`, etc.)
+4. Try running with `GLIBC_TUNABLES=glibc.cpu.hwcaps=-XSAVEC` or similar to disable slow init paths
+
+### After init_array hang is resolved:
+- Test `dlopen("libroblox.so")` directly (the main Roblox game library)
+- Then JNI function table (~233 functions to stub)
+- EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
+- Window creation + input handling
 
 ### Key Architecture Notes
 - `bionic_init.c` pattern for LIBC-versioned stubs:
@@ -187,49 +208,69 @@ All symbols now resolve cleanly (RTLD_NOW succeeds for the symbol phase). The se
 
 ## 🎯 Next Agent — Your Priority Task
 
-### Debug libc++.so .init_array crash
+### Debug libc++.so init hang after ANDROID_RELR fix
 
-All 8 `_Unwind_*` (`@@LIBC_R`) and ~30 other LIBC-versioned symbols are now stubbed. The symbol resolution phase of `dlopen("libc++.so")` completes — no more "undefined symbol" errors.
+**Quick start — run the current test:**
+```bash
+cd ~/Documents/Projects/open-sober
 
-**New blocker:** `libc++.so` crashes during its 3 static C++ constructors (`.init_array` entries at offsets 0x7fbbc, 0x7feb0, 0xc87d4). The segfault is at address 0x7fbbc (the first init function address itself), suggesting an unrelocated pointer or missing C++ runtime symbol.
+# Build bionic shim with all stubs
+SYSROOT=~/.cache/open-sober/android-env/system/lib64
+CRATE_SRC=crates/sober-core/src
+aarch64-linux-gnu-gcc -c -fPIC -o /tmp/bs.o "$CRATE_SRC/bionic_init.c"
+aarch64-linux-gnu-gcc -c -o /tmp/ba.o "$CRATE_SRC/bionic_shim.S"
+aarch64-linux-gnu-gcc -shared -fPIC -o "$SYSROOT/libbionic_shim.so" \
+  /tmp/ba.o /tmp/bs.o \
+  -Wl,--version-script,"$CRATE_SRC/bionic_version.ver" \
+  -Wl,-rpath,/system/lib64 -L"$SYSROOT" -lglibc -lm -ldl -nostartfiles
+rm -f /tmp/ba.o /tmp/bs.o
+
+# Patch libc++.so ANDROID_RELR → RELR
+python3 ~/patch_relr.py "$SYSROOT/gsi_libc++.so"
+ln -sf "gsi_libc++.so" "$SYSROOT/libc++.so"
+
+# Build JNI shim with unbuffered output
+cp "$CRATE_SRC/jni_shim.c" /tmp/js.c
+sed -i 's/int main(int argc, char\*\* argv) {/int main(int argc, char** argv) { setbuf(stderr,NULL); setbuf(stdout,NULL);/' /tmp/js.c
+aarch64-linux-gnu-gcc -static -o ~/.cache/open-sober/android-env/jni_shim /tmp/js.c -ldl
+
+# Test
+timeout 8 qemu-aarch64 \
+  -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E ROBLOX_LIB="libc++.so" \
+  ~/.cache/open-sober/android-env/jni_shim
+```
+
+**What's happening:** All ~40 stubs resolve. ANDROID_RELR is patched to RELR. dlopen proceeds past relocation into C++ static init (`.init_array` at offsets 0x7fbbc, 0x7feb0, 0xc87d4) but hangs there. The 3 constructors are likely `std::ios_base::Init`, locale init, and `__cxa_atexit` guard setup.
 
 **To investigate:**
-
-1. **Install gdb-multiarch** for QEMU GDB debugging:
-   ```
-   sudo apt install gdb-multiarch
+1. **GDB debug:** Install `gdb-multiarch`, use `qemu-aarch64 -g 1234` and connect:
+   ```bash
    qemu-aarch64 -g 1234 -L ~/.cache/open-sober/android-env \
      -E LD_LIBRARY_PATH="/system/lib64:/lib" \
      -E LD_PRELOAD="libbionic_shim.so" \
      -E ROBLOX_LIB="libc++.so" \
      ~/.cache/open-sober/android-env/jni_shim &
-   gdb-multiarch -ex "target remote :1234" ~/.cache/open-sober/android-env/jni_shim
+   gdb-multiarch -ex "target remote :1234" -ex "cont" ./jni_shim
+   # Wait 5s, Ctrl+C, bt
+   ```
+2. **Check if constructors loop** on `dlsym(RTLD_NEXT, ...)` calls from our stubs — some of our stubs might be called during C++ init and the dlsym itself might trigger more relocation processing → infinite loop.
+
+3. **Try empty init_array** to confirm constructors are the culprit:
+   ```python
+   with open('gsi_libc++.so', 'r+b') as f:
+       f.seek(0x115878); f.write(b'\x00' * 24)
    ```
 
-2. **Check if `__cxa_*` functions need more complete stubs.** libc++.so's constructors may need working `__cxa_atexit`, `__cxa_finalize`, or `__cxa_guard_*` that go beyond simple dlsym forwarding. The trampoline table entries for these may be incomplete or wrong.
+4. **Check `__cxa_*` stubs** — the existing trampoline table entries for `__cxa_finalize` and `__cxa_atexit` might need to be more complete (forwarding to actual glibc versions rather than atomic no-ops).
 
-3. **Check if the `--whole-archive` bridge libc.so is causing symbol conflicts** with the real glibc `libc.so.6`. Consider rebuilding the bridge without `--whole-archive`:
-   ```
-   aarch64-linux-gnu-gcc -shared -fPIC -o libc.so bridge_libc.c \
-     -Wl,--version-script,bridge_version.ver \
-     -Wl,-soname,libc.so \
-     -L. -lc_glibc -lm -ldl
-   ```
-
-4. **Check if `libgcc_s.so.1` needs to be in the sysroot** for the `_Unwind_*` stubs' `dlsym(RTLD_NEXT)` to resolve:
-   ```
-   cp /usr/aarch64-linux-gnu/lib/libgcc_s.so.1 ~/.cache/open-sober/android-env/system/lib64/
-   ```
-
-5. **Try simpler _Unwind stubs** that are true no-ops (no dlsym call at all) to isolate whether the crash is from the _Unwind stubs or from other init code.
-
-### If init_array crash is resolved:
-- Test `dlopen("libroblox.so")` directly (the main Roblox game library)
-- Then JNI function table (~233 functions to stub)
-- EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
-- Window creation + input handling
-
-### Do NOT create worktrees or feature branches. Work on `dev` directly.
+### After init_array hang is resolved:
+- Test `dlopen("libroblox.so")` directly
+- JNI function table (~233 stubs)
+- EGL/GLES→Vulkan (see GRAPHICS_RECOMMENDATION.md)
+- Window creation + input
 - EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
 - Window creation + input handling
 
