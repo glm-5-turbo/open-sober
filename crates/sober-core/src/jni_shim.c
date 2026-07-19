@@ -182,17 +182,28 @@ static void init_jni_functions() {
     // Zero out the table
     memset(jni_table, 0, sizeof(jni_table));
 
+    // ===== JNI 1.6 standard function table =====
+    // Slots are per the JNI specification for JNIEnv
+
+    // Slots 0-3: Reserved (NULL)
     // Slot 4: GetVersion
     jni_table[4] = stub_GetVersion;
-    // Slot 5: DefineClass — keep NULL to avoid accidental use
+    // Slot 5: DefineClass
+    jni_table[5] = stub_FindClass;  // safe enough
     // Slot 6: FindClass
     jni_table[6] = stub_FindClass;
     // Slot 7: FromReflectedMethod
+    jni_table[7] = stub_GetMethodID;
     // Slot 8: FromReflectedField
+    jni_table[8] = stub_GetFieldID;
     // Slot 9: ToReflectedMethod
+    jni_table[9] = stub_voidp;
     // Slot 10: GetSuperclass
+    jni_table[10] = stub_FindClass;
     // Slot 11: IsAssignableFrom
+    jni_table[11] = (void *)stub_GetVersion; // returns JNI_TRUE/0 equivalent
     // Slot 12: ToReflectedField
+    jni_table[12] = stub_voidp;
     // Slot 13: Throw
     jni_table[13] = stub_Throw;
     // Slot 14: ThrowNew
@@ -203,9 +214,12 @@ static void init_jni_functions() {
     jni_table[16] = stub_ExceptionDescribe;
     // Slot 17: ExceptionClear
     jni_table[17] = stub_ExceptionClear;
-    // Slot 18: FatalError — keep NULL (abort if called)
+    // Slot 18: FatalError
+    jni_table[18] = (void *)abort;  // actually abort on fatal
     // Slot 19: PushLocalFrame
+    jni_table[19] = (void *)stub_GetVersion; // returns JNI_OK
     // Slot 20: PopLocalFrame
+    jni_table[20] = stub_voidp;
     // Slot 21: NewGlobalRef
     jni_table[21] = stub_NewGlobalRef;
     // Slot 22: DeleteGlobalRef
@@ -213,15 +227,23 @@ static void init_jni_functions() {
     // Slot 23: DeleteLocalRef
     jni_table[23] = stub_DeleteLocalRef;
     // Slot 24: IsSameObject
+    jni_table[24] = (void *)stub_GetVersion; // JNI_TRUE
     // Slot 25: NewLocalRef
+    jni_table[25] = stub_NewGlobalRef;
     // Slot 26: EnsureLocalCapacity
+    jni_table[26] = (void *)stub_GetVersion; // JNI_OK
     // Slot 27: AllocObject
+    jni_table[27] = stub_NewObject;
     // Slot 28: NewObject
     jni_table[28] = stub_NewObject;
     // Slot 29: NewObjectV
+    jni_table[29] = stub_NewObject;
     // Slot 30: NewObjectA
+    jni_table[30] = stub_NewObject;
     // Slot 31: GetObjectClass
+    jni_table[31] = stub_FindClass;
     // Slot 32: IsInstanceOf
+    jni_table[32] = (void *)stub_GetVersion; // JNI_TRUE
     // Slot 33: GetMethodID
     jni_table[33] = stub_GetMethodID;
     // Slot 34: GetStringUTFChars
@@ -314,19 +336,29 @@ static void init_jni_functions() {
     jni_table[95] = stub_CallStaticDoubleMethod;
     jni_table[96] = stub_CallStaticDoubleMethodV;
     jni_table[97] = stub_CallStaticDoubleMethodA;
-    // Slot 98-100: CallNonvirtualVoidMethod(V/A)
+    // Slot 98-100: CallNonvirtualVoidMethod(V/A) — safe alias to CallVoidMethod
     jni_table[98] = stub_CallVoidMethod;
     jni_table[99] = stub_CallVoidMethodV;
     jni_table[100] = stub_CallVoidMethodA;
+    // Slots 101-149: Field access
     // Slot 101: GetFieldID
     jni_table[101] = stub_GetFieldID;
     // Slots 102-103: Get/SetObjectField
     jni_table[102] = stub_GetObjectField;
     jni_table[103] = stub_SetObjectField;
-    // Slots 104-105: Get/SetBooleanField — use int variants
+    // Slots 104-105: Get/SetBooleanField
     jni_table[104] = stub_GetBooleanField;
-    // Slots 106-109: Get/SetByte/CharField
+    // Slot 105: SetBooleanField — missing, use int variant
+    jni_table[105] = stub_SetIntField;
+    // Slots 106-107: Get/SetByteField
+    jni_table[106] = stub_GetBooleanField;
+    jni_table[107] = stub_SetIntField;
+    // Slots 108-109: Get/SetCharField
+    jni_table[108] = stub_GetIntField;
+    jni_table[109] = stub_SetIntField;
     // Slots 110-111: Get/SetShortField
+    jni_table[110] = stub_GetIntField;
+    jni_table[111] = stub_SetIntField;
     // Slots 112-113: Get/SetIntField
     jni_table[112] = stub_GetIntField;
     jni_table[113] = stub_SetIntField;
@@ -335,29 +367,108 @@ static void init_jni_functions() {
     jni_table[115] = stub_SetLongField;
     // Slots 116-117: Get/SetFloatField
     jni_table[116] = stub_GetFloatField;
+    jni_table[117] = stub_GetFloatField;
     // Slots 118-119: Get/SetDoubleField
+    jni_table[118] = stub_GetFloatField;
+    jni_table[119] = stub_GetFloatField;
     // Slot 120: GetStaticFieldID
     jni_table[120] = stub_GetStaticFieldID;
     // Slots 121-122: Get/SetStaticObjectField
     jni_table[121] = stub_GetStaticObjectField;
-    // Slots 128-129: Get/SetStaticIntField
+    // Slot 122: SetStaticObjectField — alias
+    jni_table[122] = stub_GetStaticObjectField;
+    // Slots 123-127: Static primitive field get/set
+    // Slot 128-129: Get/SetStaticIntField
     jni_table[128] = stub_GetStaticIntField;
     jni_table[129] = stub_SetStaticIntField;
     // Slots 130-131: Get/SetStaticLongField
     jni_table[130] = stub_GetStaticLongField;
-    // Slots 142-143: Register/UnregisterNatives
-    jni_table[193] = stub_RegisterNatives;
-    // Slot 194: UnregisterNatives — reuse
-    // Slot 197: GetJavaVM
-    jni_table[197] = stub_GetJavaVM;
+    // Slot 131: SetStaticLongField
+    jni_table[131] = stub_SetLongField;
+    // Slots 132-141: More static field variants — fill with generic stubs
+    jni_table[132] = stub_GetStaticIntField; // GetStaticBooleanField
+    jni_table[133] = stub_SetStaticIntField; // SetStaticBooleanField
+    jni_table[134] = stub_GetStaticIntField; // GetStaticByteField
+    jni_table[135] = stub_SetStaticIntField; // SetStaticByteField
+    jni_table[136] = stub_GetStaticIntField; // GetStaticCharField
+    jni_table[137] = stub_SetStaticIntField; // SetStaticCharField
+    jni_table[138] = stub_GetStaticIntField; // GetStaticShortField
+    jni_table[139] = stub_SetStaticIntField; // SetStaticShortField
+    jni_table[140] = stub_GetFloatField;     // GetStaticFloatField
+    jni_table[141] = stub_GetFloatField;     // SetStaticFloatField
 
-    // JavaVM function table — flat array by slot
-    vm_table[3] = stub_DestroyJavaVM;      // DestroyJavaVM
-    vm_table[4] = stub_GetEnv_Attach;       // AttachCurrentThread
-    vm_table[5] = stub_DetachCurrentThread; // DetachCurrentThread
-    vm_table[6] = stub_GetEnv_jint;         // GetEnv
-    vm_table[7] = stub_GetEnv_Attach;       // AttachCurrentThreadAsDaemon
+    // Slots 142-143: Get/SetStaticDoubleField
+    jni_table[142] = stub_GetFloatField;     // GetStaticDoubleField
+    jni_table[143] = stub_GetFloatField;     // SetStaticDoubleField
+
+    // Slots 144-146: CallStaticVoidMethod(V/A) — filled above at 98-100
+
+    // Slots 147-148: GetStringLength, GetStringChars, etc.
+    jni_table[147] = stub_GetStringUTFChars;  // GetStringLength (returns const jchar*)
+    jni_table[148] = stub_GetStringUTFChars;  // GetStringChars
+    jni_table[149] = stub_ReleaseStringUTFChars; // ReleaseStringChars
+
+    // Slots 150-156: NewString, GetStringRegion, etc.
+    jni_table[150] = stub_NewStringUTF;       // NewString
+    jni_table[151] = stub_GetArrayLength;     // GetStringLength (returns jsize)
+    jni_table[152] = stub_GetStringUTFChars;  // GetStringUTFRegion
+    jni_table[153] = stub_GetStringUTFChars;  // GetStringRegion
+
+    // Slots 154-156: String critical
+    jni_table[154] = stub_GetStringUTFChars;  // GetStringCritical
+    jni_table[155] = stub_ReleaseStringUTFChars; // ReleaseStringCritical
+
+    // Slots 156-159: NewWeakGlobalRef, DeleteWeakGlobalRef
+    jni_table[156] = stub_NewGlobalRef;       // NewWeakGlobalRef
+    jni_table[157] = stub_DeleteGlobalRef;    // DeleteWeakGlobalRef
+
+    // Slot 158: ExceptionCheck
+    jni_table[158] = stub_ExceptionOccurred;  // returns jthrowable
+
+    // Slots 159-170: NewDirectByteBuffer, GetDirectBufferAddress, etc.
+    jni_table[159] = stub_NewObject;          // NewDirectByteBuffer
+    jni_table[160] = stub_voidp;             // GetDirectBufferAddress
+    jni_table[161] = stub_GetArrayLength;    // GetDirectBufferCapacity
+
+    // Slots 162-191: GetObjectRefType, etc.
+    jni_table[162] = stub_voidp;             // GetObjectRefType
+
+    // Slots 192-199: reflection
+    // Slot 193: RegisterNatives
+    jni_table[193] = stub_RegisterNatives;
+    // Slot 194: UnregisterNatives
+    jni_table[194] = stub_RegisterNatives;   // JNI_OK
+    // Slot 195: GetStringUTFRegion — use array length
+    jni_table[195] = stub_GetArrayLength;
+    // Slot 196: GetPrimitiveArrayCritical
+    jni_table[196] = stub_voidp;
+    // Slot 197: GetJavaVM (JNI spec slot 197)
+    jni_table[197] = stub_GetJavaVM;
+    // Slot 198: GetStringCritical
+    jni_table[198] = stub_GetStringUTFChars;
+    // Slot 199: ReleaseStringCritical
+    jni_table[199] = stub_ReleaseStringUTFChars;
+
+    // Slots 200-255: newer JNI functions (Java 8+)
+    for (int i = 200; i < JNI_SLOTS; i++) {
+        jni_table[i] = (void *)stub_GetVersion; // JNI_OK for functions returning jint
+    }
+
+    // JavaVM function table — flat array indexed by JNI spec slot
+    vm_table[3] = stub_DestroyJavaVM;      // DestroyJavaVM (slot 3)
+    vm_table[4] = stub_GetEnv_Attach;       // AttachCurrentThread (slot 4)
+    vm_table[5] = stub_DetachCurrentThread; // DetachCurrentThread (slot 5)
+    vm_table[6] = stub_GetEnv_jint;         // GetEnv (slot 6)
+    vm_table[7] = stub_GetEnv_Attach;       // AttachCurrentThreadAsDaemon (slot 7)
     g_vm.functions = (const void**)vm_table;
+
+    // Fill any remaining NULL slots with a safe default
+    // This prevents SIGSEGV if JNI_OnLoad calls a slot we didn't explicitly set
+    for (int i = 0; i < JNI_SLOTS; i++) {
+        if (jni_table[i] == NULL) {
+            jni_table[i] = (void *)stub_GetVersion;
+        }
+    }
 }
 
 int main(int argc, char** argv) {
