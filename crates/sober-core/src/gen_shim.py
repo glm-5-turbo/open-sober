@@ -22,18 +22,48 @@ RENAME_MAP = {'__errno': '__errno_location'}
 CHK_TO_BASE = {'__strlen_chk': 'strlen', '__strchr_chk': 'strchr',
                '__FD_SET_chk': 'FD_SET', '__FD_ISSET_chk': 'FD_ISSET',
                '__FD_CLR_chk': 'FD_CLR'}
-SPECIAL_STUBS = {'__assert2', '__strncpy_chk2'}
+SPECIAL_STUBS = {'__assert2', '__strncpy_chk2', '__bf_c_resolve', '__bf_init_data'}
+
+# Unwind stubs referenced from libc++.so under LIBC_R version.
+# These DWARF unwind functions live in libgcc_s.so.1 (GCC_3.0/3.3 on glibc).
+# The bionic shim provides them so libc++.so's symbol lookup succeeds.
+UNWIND_STUBS = [('_Unwind_RaiseException', 'LIBC_R', 'int'),
+                ('_Unwind_DeleteException', 'LIBC_R', 'void'),
+                ('_Unwind_SetGR', 'LIBC_R', 'void'),
+                ('_Unwind_SetIP', 'LIBC_R', 'void'),
+                ('_Unwind_GetLanguageSpecificData', 'LIBC_R', 'void*'),
+                ('_Unwind_GetIP', 'LIBC_R', 'unsigned long'),
+                ('_Unwind_GetRegionStart', 'LIBC_R', 'unsigned long'),
+                ('_Unwind_GetTextRelBase', 'LIBC_R', 'unsigned long'),
+                ('_Unwind_Backtrace', 'LIBC_R', 'int'),
+                ('_Unwind_FindEnclosingFunction', 'LIBC_R', 'void*'),
+                ('_Unwind_Find_FDE', 'LIBC_R', 'void*'),
+                ('_Unwind_GetCFA', 'LIBC_R', 'unsigned long'),
+                ('_Unwind_GetIPInfo', 'LIBC_R', 'unsigned long'),
+                ('_Unwind_GetDataRelBase', 'LIBC_R', 'unsigned long'),
+                ('_Unwind_Resume', 'LIBC_R', 'void'),
+                ]
+
+# Symbols provided by bridge_libc.c, NOT by the bionic shim.
+# These are dl* functions which Bionic puts in libc but glibc puts in libdl.
+# If the bionic shim intercepts these, its own __bf_c_resolve() (which calls
+# dlsym to resolve symbols) will infinite-recurse through the shim's PLT.
+BRIDGE_LIBC_SYMS = {'dlopen', 'dlsym', 'dlclose', 'dlerror', 'dladdr'}
 DATA_ALIAS = {'__sF': '_IO_2_1_stderr_'}
 
 
-def get_needed_symbols(lib_path):
+def get_needed_symbols(lib_path, extra_lib_dirs=None):
+    """Get LIBC-versioned UNDEF symbols from a library and optionally from extra libs."""
     result = subprocess.run(
         ["aarch64-linux-gnu-objdump", "-T", lib_path],
         capture_output=True, text=True, check=True)
     symbols = []
+    found_vers = set()
     for line in result.stdout.splitlines():
         ver_m = None
-        for v in ['LIBC_N', 'LIBC_O', 'LIBC']:
+        for v in ['LIBC', 'LIBC_N', 'LIBC_O', 'LIBC_P', 'LIBC_Q', 'LIBC_R',
+                       'LIBC_S', 'LIBC_T', 'LIBC_U', 'LIBC_V', 'LIBC_OMR1',
+                       'LIBC_36', 'LIBC_37', 'LIBDL_ANDROID']:
             if f'({v})' in line:
                 ver_m = v
                 break
@@ -43,13 +73,52 @@ def get_needed_symbols(lib_path):
         sym = cols[-1]
         is_data = ' DO ' in line
         symbols.append((sym, ver_m, is_data))
+
+    # Also scan extra libraries for LIBC-versioned UNDEF symbols they import.
+    # These are transitive dependencies (libc++.so, libbase.so, etc.)
+    # that need LIBC-versioned symbols resolved through the bionic shim.
+    if extra_lib_dirs:
+        seen_syms = {s for s, v, d in symbols}
+        for libdir in extra_lib_dirs:
+            if not os.path.isdir(libdir):
+                continue
+            for fname in sorted(os.listdir(libdir)):
+                if not fname.endswith('.so') or fname.startswith('gsi_'):
+                    continue
+                libpath = os.path.join(libdir, fname)
+                if not os.path.isfile(libpath):
+                    continue
+                try:
+                    r2 = subprocess.run(
+                        ["aarch64-linux-gnu-objdump", "-T", libpath],
+                        capture_output=True, text=True, timeout=30)
+                except:
+                    continue
+                for line in r2.stdout.splitlines():
+                    ver_m = None
+                    for v in ['LIBC', 'LIBC_N', 'LIBC_O', 'LIBC_P', 'LIBC_Q', 'LIBC_R',
+                                   'LIBC_S', 'LIBC_T', 'LIBC_U', 'LIBC_V', 'LIBC_OMR1',
+                                   'LIBC_36', 'LIBC_37', 'LIBDL_ANDROID']:
+                        if f'({v})' in line:
+                            ver_m = v
+                            break
+                    if not ver_m:
+                        continue
+                    if '*UND*' not in line:
+                        continue
+                    cols = line.split()
+                    sym = cols[-1]
+                    if sym not in seen_syms:
+                        is_data = ' DO ' in line
+                        symbols.append((sym, ver_m, is_data))
+                        seen_syms.add(sym)
     return symbols
 
 
 def generate_shim(symbols, output_path):
     """Generate .S file with lazy-resolving trampolines."""
     sym_list = list(symbols)
-    all_stubs = sorted(BIONIC_ONLY | SPECIAL_STUBS)
+    all_stubs = sorted(BIONIC_ONLY | SPECIAL_STUBS | BRIDGE_LIBC_SYMS)
     func_syms = [(s, v) for s, v, d in sym_list if not d and s not in all_stubs]
     data_syms = [(s, v) for s, v, d in sym_list if d]
 
@@ -135,7 +204,7 @@ def generate_shim(symbols, output_path):
 
 def generate_c_init(func_syms, data_syms, output_path):
     """Generate C file: lazy resolver + stub_init + bionic stubs."""
-    real_tramp = [(s, v) for s, v in func_syms if s not in (BIONIC_ONLY | SPECIAL_STUBS)]
+    real_tramp = [(s, v) for s, v in func_syms if s not in (BIONIC_ONLY | SPECIAL_STUBS | BRIDGE_LIBC_SYMS)]
     all_stubs = sorted(BIONIC_ONLY | SPECIAL_STUBS)
 
     lines = []
@@ -182,11 +251,11 @@ def generate_c_init(func_syms, data_syms, output_path):
     lines.append('        register long r0 asm("x0") = fd;')
     lines.append('        register void *r1 asm("x1") = buf;')
     lines.append('        register size_t r2 asm("x2") = n;')
-    lines.append('        register long r8 asm("x8") = 63;')
-    lines.append('        asm volatile("svc #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r8));')
+    lines.append('        register long r8_rd asm("x8") = 63;')
+    lines.append('        asm volatile("svc #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r8_rd));')
     lines.append('        register long c0 asm("x0") = fd;')
-    lines.append('        register long r8 asm("x8") = 57;')
-    lines.append('        asm volatile("svc #0" : : "r"(c0), "r"(r8));')
+    lines.append('        register long r8_cl asm("x8") = 57;')
+    lines.append('        asm volatile("svc #0" : : "r"(c0), "r"(r8_cl));')
     lines.append('    }')
     lines.append('}')
     lines.append('')
@@ -214,6 +283,8 @@ def generate_c_init(func_syms, data_syms, output_path):
     lines.append('}')
     lines.append('')
 
+    # _Unwind_* DWARF unwinding stubs — referenced from libc++.so under LIBC_R
+    lines.append('')
     # Lazy resolver — called from assembly when a trampoline entry is NULL
     lines.append('/* ===== Lazy dispatch-table resolver ===== */')
     lines.append('void* __bf_c_resolve(int index) {')
@@ -229,13 +300,14 @@ def generate_c_init(func_syms, data_syms, output_path):
     for i, (sym, _) in enumerate(real_tramp):
         target = RENAME_MAP.get(sym, CHK_TO_BASE.get(sym, sym))
         lines.append(f'    if (index == {i}) {{ __bf_tramp_table[{i}] = (void*)(unsigned long long)__bf_tramp_table[{i}]; }}')
-        lines.append(f'    if (index == {i}) __bf_tramp_table[{i}] = dlsym(RTLD_DEFAULT, "{target}");')
+        lines.append(f'    if (index == {i}) __bf_tramp_table[{i}] = dlsym(RTLD_NEXT, "{target}");')
         lines.append(f'    if (index == {i}) return __bf_tramp_table[{i}];')
 
     lines.append('    return NULL;')
     lines.append('}')
     lines.append('')
 
+    lines.append('')
     # Data object init — called from JNI shim
     lines.append('/* ===== Init function (called from JNI shim) ===== */')
     lines.append('__attribute__((visibility("default")))')
@@ -256,10 +328,11 @@ def generate_c_init(func_syms, data_syms, output_path):
 
 def main():
     if len(sys.argv) < 4:
-        print("Usage: gen_shim.py <libroblox.so> <output.S> <output.c>")
+        print("Usage: gen_shim.py <libroblox.so> <output.S> <output.c> [extra_lib_dir...]")
         sys.exit(1)
 
-    symbols = get_needed_symbols(sys.argv[1])
+    extra_dirs = sys.argv[4:] if len(sys.argv) > 4 else None
+    symbols = get_needed_symbols(sys.argv[1], extra_dirs)
     if not symbols:
         print("Error: no LIBC-versioned symbols found")
         sys.exit(1)

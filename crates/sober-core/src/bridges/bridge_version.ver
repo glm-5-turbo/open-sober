@@ -27,4 +27,5 @@ LIBC_U           {
                      *;
                  };
 LIBC_V           { global: *; };
+LIBDL_ANDROID    { global: *; };
 LIBC             { global: *; };

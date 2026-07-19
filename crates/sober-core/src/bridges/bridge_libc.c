@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <stdio.h>
+#include <dlfcn.h>
 
 /* ===== Bionic-only stubs that GSI libraries reference from libc.so ===== */
 
@@ -315,6 +316,60 @@ __asm__(".symver _bf_pthread_setschedprio_impl, pthread_setschedprio@@LIBC_P");
  * The gen script exports it as @@LIBC which doesn't match. */
 void _bf_android_mallopt_libc_q(void) {}
 __asm__(".symver _bf_android_mallopt_libc_q, android_mallopt@@LIBC_Q");
+
+/* ===== dl* symbols under LIBC version =====
+ * Bionic merges libdl into libc, so dlsym/dlopen/dlclose/dlerror/dladdr
+ * are all libc symbols in Android. The glibc dynamic linker resolves
+ * these from the real libdl when linked directly. We provide LIBC-versioned
+ * wrappers that forward to glibc/libdl's implementations.
+ *
+ * IMPORTANT: These MUST be in bridge_libc.c (not the bionic shim) because
+ * the bionic shim's __bf_c_resolve() calls dlsym() to resolve symbols.
+ * If dlsym@@LIBC is in the bionic shim (LD_PRELOAD'ed), the dlsym call
+ * inside __bf_c_resolve resolves to the shim's own trampoline, creating
+ * infinite recursion -> stack overflow -> SIGSEGV.
+ *
+ * By placing them here in bridge_libc.so, which has proper DT_NEEDED
+ * entries for libdl, the PLT resolution goes directly to glibc's libdl
+ * without any interposition. */
+
+/* dlopen@@LIBC — open a shared library. Forward to glibc's dlopen. */
+void *_bf_dlopen_impl(const char *filename, int flags);
+__asm__(".symver _bf_dlopen_impl, dlopen@@LIBC");
+void *_bf_dlopen_impl(const char *filename, int flags) {
+    return dlopen(filename, flags);
+}
+
+/* dlsym@@LIBC — look up a symbol in a shared library. */
+void *_bf_dlsym_impl(void *handle, const char *symbol);
+__asm__(".symver _bf_dlsym_impl, dlsym@@LIBC");
+void *_bf_dlsym_impl(void *handle, const char *symbol) {
+    return dlsym(handle, symbol);
+}
+
+/* dlclose@@LIBC — close a shared library. */
+int _bf_dlclose_impl(void *handle);
+__asm__(".symver _bf_dlclose_impl, dlclose@@LIBC");
+int _bf_dlclose_impl(void *handle) {
+    return dlclose(handle);
+}
+
+/* dlerror@@LIBC — get last dl error. */
+char *_bf_dlerror_impl(void);
+__asm__(".symver _bf_dlerror_impl, dlerror@@LIBC");
+char *_bf_dlerror_impl(void) {
+    return dlerror();
+}
+
+/* dladdr@@LIBC — resolve address to symbol info.
+ * Forward to glibc's dladdr. We declare it manually to avoid
+ * the Dl_info typedef requirement (_GNU_SOURCE needed). */
+int _bf_dladdr_impl(const void *addr, void *info);
+__asm__(".symver _bf_dladdr_impl, dladdr@@LIBC");
+int _bf_dladdr_impl(const void *addr, void *info) {
+    extern int dladdr(const void *, void *);
+    return dladdr(addr, info);
+}
 
 /* ===== Version aliases for Bionic stubs =====
  * Bionic stubs defined above are exported as @@LIBC by default.

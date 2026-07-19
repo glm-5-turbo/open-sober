@@ -1,14 +1,14 @@
 /* Auto-generated Bionic symbol shim with lazy dispatch. DO NOT EDIT.
- * 392 trampolines, 13 data objs.
+ * 785 trampolines, 14 data objs.
  */
 
 .section .data.bionic_tramp, "aw"
 .balign 8
 .globl __bf_tramp_table
 .type __bf_tramp_table, %object
-.size __bf_tramp_table, 3136
+.size __bf_tramp_table, 6280
 __bf_tramp_table:
-.zero 3136
+.zero 6280
 
 .section .text.bionic_resolver, "ax"
 .balign 4
@@ -199,71 +199,15 @@ __bf_memchr:
 .symver __bf_memchr, memchr@@LIBC
 
 .balign 4
-.globl __bf_dladdr
-.type __bf_dladdr, %function
-__bf_dladdr:
+.globl __bf_strncmp
+.type __bf_strncmp, %function
+__bf_strncmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
     ldr x17, [x16, #96]
     cbz x17, 1f
     br x17
 1:  mov x0, #12
-    bl __bf_resolve_and_call
-    br x0
-.symver __bf_dladdr, dladdr@@LIBC
-
-.balign 4
-.globl __bf_dlerror
-.type __bf_dlerror, %function
-__bf_dlerror:
-    adrp x16, :got:__bf_tramp_table
-    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #104]
-    cbz x17, 1f
-    br x17
-1:  mov x0, #13
-    bl __bf_resolve_and_call
-    br x0
-.symver __bf_dlerror, dlerror@@LIBC
-
-.balign 4
-.globl __bf_dlopen
-.type __bf_dlopen, %function
-__bf_dlopen:
-    adrp x16, :got:__bf_tramp_table
-    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #112]
-    cbz x17, 1f
-    br x17
-1:  mov x0, #14
-    bl __bf_resolve_and_call
-    br x0
-.symver __bf_dlopen, dlopen@@LIBC
-
-.balign 4
-.globl __bf_dlsym
-.type __bf_dlsym, %function
-__bf_dlsym:
-    adrp x16, :got:__bf_tramp_table
-    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #120]
-    cbz x17, 1f
-    br x17
-1:  mov x0, #15
-    bl __bf_resolve_and_call
-    br x0
-.symver __bf_dlsym, dlsym@@LIBC
-
-.balign 4
-.globl __bf_strncmp
-.type __bf_strncmp, %function
-__bf_strncmp:
-    adrp x16, :got:__bf_tramp_table
-    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #128]
-    cbz x17, 1f
-    br x17
-1:  mov x0, #16
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strncmp, strncmp@@LIBC
@@ -274,10 +218,10 @@ __bf_strncmp:
 __bf_strcmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #136]
+    ldr x17, [x16, #104]
     cbz x17, 1f
     br x17
-1:  mov x0, #17
+1:  mov x0, #13
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strcmp, strcmp@@LIBC
@@ -288,10 +232,10 @@ __bf_strcmp:
 __bf_getauxval:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #144]
+    ldr x17, [x16, #112]
     cbz x17, 1f
     br x17
-1:  mov x0, #18
+1:  mov x0, #14
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getauxval, getauxval@@LIBC
@@ -302,10 +246,10 @@ __bf_getauxval:
 __bf___errno:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #152]
+    ldr x17, [x16, #120]
     cbz x17, 1f
     br x17
-1:  mov x0, #19
+1:  mov x0, #15
     bl __bf_resolve_and_call
     br x0
 .symver __bf___errno, __errno@@LIBC
@@ -316,10 +260,10 @@ __bf___errno:
 __bf_close:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #160]
+    ldr x17, [x16, #128]
     cbz x17, 1f
     br x17
-1:  mov x0, #20
+1:  mov x0, #16
     bl __bf_resolve_and_call
     br x0
 .symver __bf_close, close@@LIBC
@@ -330,10 +274,10 @@ __bf_close:
 __bf___open_2:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #168]
+    ldr x17, [x16, #136]
     cbz x17, 1f
     br x17
-1:  mov x0, #21
+1:  mov x0, #17
     bl __bf_resolve_and_call
     br x0
 .symver __bf___open_2, __open_2@@LIBC
@@ -344,10 +288,10 @@ __bf___open_2:
 __bf___read_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #176]
+    ldr x17, [x16, #144]
     cbz x17, 1f
     br x17
-1:  mov x0, #22
+1:  mov x0, #18
     bl __bf_resolve_and_call
     br x0
 .symver __bf___read_chk, __read_chk@@LIBC
@@ -358,10 +302,10 @@ __bf___read_chk:
 __bf_read:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #184]
+    ldr x17, [x16, #152]
     cbz x17, 1f
     br x17
-1:  mov x0, #23
+1:  mov x0, #19
     bl __bf_resolve_and_call
     br x0
 .symver __bf_read, read@@LIBC
@@ -372,10 +316,10 @@ __bf_read:
 __bf_clock_gettime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #192]
+    ldr x17, [x16, #160]
     cbz x17, 1f
     br x17
-1:  mov x0, #24
+1:  mov x0, #20
     bl __bf_resolve_and_call
     br x0
 .symver __bf_clock_gettime, clock_gettime@@LIBC
@@ -386,10 +330,10 @@ __bf_clock_gettime:
 __bf_syscall:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #200]
+    ldr x17, [x16, #168]
     cbz x17, 1f
     br x17
-1:  mov x0, #25
+1:  mov x0, #21
     bl __bf_resolve_and_call
     br x0
 .symver __bf_syscall, syscall@@LIBC
@@ -400,10 +344,10 @@ __bf_syscall:
 __bf_sched_getcpu:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #208]
+    ldr x17, [x16, #176]
     cbz x17, 1f
     br x17
-1:  mov x0, #26
+1:  mov x0, #22
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_getcpu, sched_getcpu@@LIBC
@@ -414,10 +358,10 @@ __bf_sched_getcpu:
 __bf_sysconf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #216]
+    ldr x17, [x16, #184]
     cbz x17, 1f
     br x17
-1:  mov x0, #27
+1:  mov x0, #23
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sysconf, sysconf@@LIBC
@@ -428,10 +372,10 @@ __bf_sysconf:
 __bf_mmap:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #224]
+    ldr x17, [x16, #192]
     cbz x17, 1f
     br x17
-1:  mov x0, #28
+1:  mov x0, #24
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mmap, mmap@@LIBC
@@ -442,10 +386,10 @@ __bf_mmap:
 __bf_mprotect:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #232]
+    ldr x17, [x16, #200]
     cbz x17, 1f
     br x17
-1:  mov x0, #29
+1:  mov x0, #25
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mprotect, mprotect@@LIBC
@@ -456,10 +400,10 @@ __bf_mprotect:
 __bf_munmap:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #240]
+    ldr x17, [x16, #208]
     cbz x17, 1f
     br x17
-1:  mov x0, #30
+1:  mov x0, #26
     bl __bf_resolve_and_call
     br x0
 .symver __bf_munmap, munmap@@LIBC
@@ -470,10 +414,10 @@ __bf_munmap:
 __bf_pthread_attr_init:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #248]
+    ldr x17, [x16, #216]
     cbz x17, 1f
     br x17
-1:  mov x0, #31
+1:  mov x0, #27
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_attr_init, pthread_attr_init@@LIBC
@@ -484,10 +428,10 @@ __bf_pthread_attr_init:
 __bf_pthread_attr_setstacksize:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #256]
+    ldr x17, [x16, #224]
     cbz x17, 1f
     br x17
-1:  mov x0, #32
+1:  mov x0, #28
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_attr_setstacksize, pthread_attr_setstacksize@@LIBC
@@ -498,10 +442,10 @@ __bf_pthread_attr_setstacksize:
 __bf_pthread_create:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #264]
+    ldr x17, [x16, #232]
     cbz x17, 1f
     br x17
-1:  mov x0, #33
+1:  mov x0, #29
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_create, pthread_create@@LIBC
@@ -512,10 +456,10 @@ __bf_pthread_create:
 __bf_pthread_attr_destroy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #272]
+    ldr x17, [x16, #240]
     cbz x17, 1f
     br x17
-1:  mov x0, #34
+1:  mov x0, #30
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_attr_destroy, pthread_attr_destroy@@LIBC
@@ -526,10 +470,10 @@ __bf_pthread_attr_destroy:
 __bf_pthread_join:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #280]
+    ldr x17, [x16, #248]
     cbz x17, 1f
     br x17
-1:  mov x0, #35
+1:  mov x0, #31
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_join, pthread_join@@LIBC
@@ -540,10 +484,10 @@ __bf_pthread_join:
 __bf_pthread_self:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #288]
+    ldr x17, [x16, #256]
     cbz x17, 1f
     br x17
-1:  mov x0, #36
+1:  mov x0, #32
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_self, pthread_self@@LIBC
@@ -554,10 +498,10 @@ __bf_pthread_self:
 __bf_memset:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #296]
+    ldr x17, [x16, #264]
     cbz x17, 1f
     br x17
-1:  mov x0, #37
+1:  mov x0, #33
     bl __bf_resolve_and_call
     br x0
 .symver __bf_memset, memset@@LIBC
@@ -568,10 +512,10 @@ __bf_memset:
 __bf_pthread_setspecific:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #304]
+    ldr x17, [x16, #272]
     cbz x17, 1f
     br x17
-1:  mov x0, #38
+1:  mov x0, #34
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_setspecific, pthread_setspecific@@LIBC
@@ -582,10 +526,10 @@ __bf_pthread_setspecific:
 __bf___strncpy_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #312]
+    ldr x17, [x16, #280]
     cbz x17, 1f
     br x17
-1:  mov x0, #39
+1:  mov x0, #35
     bl __bf_resolve_and_call
     br x0
 .symver __bf___strncpy_chk, __strncpy_chk@@LIBC
@@ -596,10 +540,10 @@ __bf___strncpy_chk:
 __bf_sched_get_priority_max:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #320]
+    ldr x17, [x16, #288]
     cbz x17, 1f
     br x17
-1:  mov x0, #40
+1:  mov x0, #36
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_get_priority_max, sched_get_priority_max@@LIBC
@@ -610,10 +554,10 @@ __bf_sched_get_priority_max:
 __bf_sched_setscheduler:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #328]
+    ldr x17, [x16, #296]
     cbz x17, 1f
     br x17
-1:  mov x0, #41
+1:  mov x0, #37
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_setscheduler, sched_setscheduler@@LIBC
@@ -624,10 +568,10 @@ __bf_sched_setscheduler:
 __bf_pthread_mutex_lock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #336]
+    ldr x17, [x16, #304]
     cbz x17, 1f
     br x17
-1:  mov x0, #42
+1:  mov x0, #38
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_mutex_lock, pthread_mutex_lock@@LIBC
@@ -638,10 +582,10 @@ __bf_pthread_mutex_lock:
 __bf_pthread_cond_wait:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #344]
+    ldr x17, [x16, #312]
     cbz x17, 1f
     br x17
-1:  mov x0, #43
+1:  mov x0, #39
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_cond_wait, pthread_cond_wait@@LIBC
@@ -652,10 +596,10 @@ __bf_pthread_cond_wait:
 __bf_pthread_mutex_unlock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #352]
+    ldr x17, [x16, #320]
     cbz x17, 1f
     br x17
-1:  mov x0, #44
+1:  mov x0, #40
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_mutex_unlock, pthread_mutex_unlock@@LIBC
@@ -666,10 +610,10 @@ __bf_pthread_mutex_unlock:
 __bf_pthread_cond_signal:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #360]
+    ldr x17, [x16, #328]
     cbz x17, 1f
     br x17
-1:  mov x0, #45
+1:  mov x0, #41
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_cond_signal, pthread_cond_signal@@LIBC
@@ -680,10 +624,10 @@ __bf_pthread_cond_signal:
 __bf_pthread_cond_init:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #368]
+    ldr x17, [x16, #336]
     cbz x17, 1f
     br x17
-1:  mov x0, #46
+1:  mov x0, #42
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_cond_init, pthread_cond_init@@LIBC
@@ -694,10 +638,10 @@ __bf_pthread_cond_init:
 __bf_gettid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #376]
+    ldr x17, [x16, #344]
     cbz x17, 1f
     br x17
-1:  mov x0, #47
+1:  mov x0, #43
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gettid, gettid@@LIBC
@@ -708,10 +652,10 @@ __bf_gettid:
 __bf___vsprintf_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #384]
+    ldr x17, [x16, #352]
     cbz x17, 1f
     br x17
-1:  mov x0, #48
+1:  mov x0, #44
     bl __bf_resolve_and_call
     br x0
 .symver __bf___vsprintf_chk, __vsprintf_chk@@LIBC
@@ -722,10 +666,10 @@ __bf___vsprintf_chk:
 __bf_atan2f:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #392]
+    ldr x17, [x16, #360]
     cbz x17, 1f
     br x17
-1:  mov x0, #49
+1:  mov x0, #45
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atan2f, atan2f@@LIBC
@@ -736,10 +680,10 @@ __bf_atan2f:
 __bf_vsnprintf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #400]
+    ldr x17, [x16, #368]
     cbz x17, 1f
     br x17
-1:  mov x0, #50
+1:  mov x0, #46
     bl __bf_resolve_and_call
     br x0
 .symver __bf_vsnprintf, vsnprintf@@LIBC
@@ -750,10 +694,10 @@ __bf_vsnprintf:
 __bf_fprintf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #408]
+    ldr x17, [x16, #376]
     cbz x17, 1f
     br x17
-1:  mov x0, #51
+1:  mov x0, #47
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fprintf, fprintf@@LIBC
@@ -764,10 +708,10 @@ __bf_fprintf:
 __bf_rand:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #416]
+    ldr x17, [x16, #384]
     cbz x17, 1f
     br x17
-1:  mov x0, #52
+1:  mov x0, #48
     bl __bf_resolve_and_call
     br x0
 .symver __bf_rand, rand@@LIBC
@@ -778,10 +722,10 @@ __bf_rand:
 __bf_strtoll:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #424]
+    ldr x17, [x16, #392]
     cbz x17, 1f
     br x17
-1:  mov x0, #53
+1:  mov x0, #49
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtoll, strtoll@@LIBC
@@ -792,10 +736,10 @@ __bf_strtoll:
 __bf_time:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #432]
+    ldr x17, [x16, #400]
     cbz x17, 1f
     br x17
-1:  mov x0, #54
+1:  mov x0, #50
     bl __bf_resolve_and_call
     br x0
 .symver __bf_time, time@@LIBC
@@ -806,10 +750,10 @@ __bf_time:
 __bf_pthread_cond_broadcast:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #440]
+    ldr x17, [x16, #408]
     cbz x17, 1f
     br x17
-1:  mov x0, #55
+1:  mov x0, #51
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_cond_broadcast, pthread_cond_broadcast@@LIBC
@@ -820,10 +764,10 @@ __bf_pthread_cond_broadcast:
 __bf_pthread_cond_destroy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #448]
+    ldr x17, [x16, #416]
     cbz x17, 1f
     br x17
-1:  mov x0, #56
+1:  mov x0, #52
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_cond_destroy, pthread_cond_destroy@@LIBC
@@ -834,10 +778,10 @@ __bf_pthread_cond_destroy:
 __bf_stat:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #456]
+    ldr x17, [x16, #424]
     cbz x17, 1f
     br x17
-1:  mov x0, #57
+1:  mov x0, #53
     bl __bf_resolve_and_call
     br x0
 .symver __bf_stat, stat@@LIBC
@@ -848,10 +792,10 @@ __bf_stat:
 __bf_opendir:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #464]
+    ldr x17, [x16, #432]
     cbz x17, 1f
     br x17
-1:  mov x0, #58
+1:  mov x0, #54
     bl __bf_resolve_and_call
     br x0
 .symver __bf_opendir, opendir@@LIBC
@@ -862,10 +806,10 @@ __bf_opendir:
 __bf_readdir:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #472]
+    ldr x17, [x16, #440]
     cbz x17, 1f
     br x17
-1:  mov x0, #59
+1:  mov x0, #55
     bl __bf_resolve_and_call
     br x0
 .symver __bf_readdir, readdir@@LIBC
@@ -876,10 +820,10 @@ __bf_readdir:
 __bf_closedir:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #480]
+    ldr x17, [x16, #448]
     cbz x17, 1f
     br x17
-1:  mov x0, #60
+1:  mov x0, #56
     bl __bf_resolve_and_call
     br x0
 .symver __bf_closedir, closedir@@LIBC
@@ -890,10 +834,10 @@ __bf_closedir:
 __bf_posix_fallocate:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #488]
+    ldr x17, [x16, #456]
     cbz x17, 1f
     br x17
-1:  mov x0, #61
+1:  mov x0, #57
     bl __bf_resolve_and_call
     br x0
 .symver __bf_posix_fallocate, posix_fallocate@@LIBC
@@ -904,10 +848,10 @@ __bf_posix_fallocate:
 __bf_open:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #496]
+    ldr x17, [x16, #464]
     cbz x17, 1f
     br x17
-1:  mov x0, #62
+1:  mov x0, #58
     bl __bf_resolve_and_call
     br x0
 .symver __bf_open, open@@LIBC
@@ -918,10 +862,10 @@ __bf_open:
 __bf_pthread_equal:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #504]
+    ldr x17, [x16, #472]
     cbz x17, 1f
     br x17
-1:  mov x0, #63
+1:  mov x0, #59
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_equal, pthread_equal@@LIBC
@@ -932,10 +876,10 @@ __bf_pthread_equal:
 __bf_atoll:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #512]
+    ldr x17, [x16, #480]
     cbz x17, 1f
     br x17
-1:  mov x0, #64
+1:  mov x0, #60
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atoll, atoll@@LIBC
@@ -946,10 +890,10 @@ __bf_atoll:
 __bf_srand:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #520]
+    ldr x17, [x16, #488]
     cbz x17, 1f
     br x17
-1:  mov x0, #65
+1:  mov x0, #61
     bl __bf_resolve_and_call
     br x0
 .symver __bf_srand, srand@@LIBC
@@ -960,10 +904,10 @@ __bf_srand:
 __bf_strtod:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #528]
+    ldr x17, [x16, #496]
     cbz x17, 1f
     br x17
-1:  mov x0, #66
+1:  mov x0, #62
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtod, strtod@@LIBC
@@ -974,10 +918,10 @@ __bf_strtod:
 __bf_localtime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #536]
+    ldr x17, [x16, #504]
     cbz x17, 1f
     br x17
-1:  mov x0, #67
+1:  mov x0, #63
     bl __bf_resolve_and_call
     br x0
 .symver __bf_localtime, localtime@@LIBC
@@ -988,10 +932,10 @@ __bf_localtime:
 __bf_fseek:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #544]
+    ldr x17, [x16, #512]
     cbz x17, 1f
     br x17
-1:  mov x0, #68
+1:  mov x0, #64
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fseek, fseek@@LIBC
@@ -1002,10 +946,10 @@ __bf_fseek:
 __bf_ftell:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #552]
+    ldr x17, [x16, #520]
     cbz x17, 1f
     br x17
-1:  mov x0, #69
+1:  mov x0, #65
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ftell, ftell@@LIBC
@@ -1016,10 +960,10 @@ __bf_ftell:
 __bf_fclose:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #560]
+    ldr x17, [x16, #528]
     cbz x17, 1f
     br x17
-1:  mov x0, #70
+1:  mov x0, #66
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fclose, fclose@@LIBC
@@ -1030,10 +974,10 @@ __bf_fclose:
 __bf_atan:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #568]
+    ldr x17, [x16, #536]
     cbz x17, 1f
     br x17
-1:  mov x0, #71
+1:  mov x0, #67
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atan, atan@@LIBC
@@ -1044,10 +988,10 @@ __bf_atan:
 __bf_mkdir:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #576]
+    ldr x17, [x16, #544]
     cbz x17, 1f
     br x17
-1:  mov x0, #72
+1:  mov x0, #68
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mkdir, mkdir@@LIBC
@@ -1058,10 +1002,10 @@ __bf_mkdir:
 __bf___fread_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #584]
+    ldr x17, [x16, #552]
     cbz x17, 1f
     br x17
-1:  mov x0, #73
+1:  mov x0, #69
     bl __bf_resolve_and_call
     br x0
 .symver __bf___fread_chk, __fread_chk@@LIBC_N
@@ -1072,10 +1016,10 @@ __bf___fread_chk:
 __bf_fread:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #592]
+    ldr x17, [x16, #560]
     cbz x17, 1f
     br x17
-1:  mov x0, #74
+1:  mov x0, #70
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fread, fread@@LIBC
@@ -1086,27 +1030,13 @@ __bf_fread:
 __bf_asinf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #600]
+    ldr x17, [x16, #568]
     cbz x17, 1f
     br x17
-1:  mov x0, #75
+1:  mov x0, #71
     bl __bf_resolve_and_call
     br x0
 .symver __bf_asinf, asinf@@LIBC
-
-.balign 4
-.globl __bf_dlclose
-.type __bf_dlclose, %function
-__bf_dlclose:
-    adrp x16, :got:__bf_tramp_table
-    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #608]
-    cbz x17, 1f
-    br x17
-1:  mov x0, #76
-    bl __bf_resolve_and_call
-    br x0
-.symver __bf_dlclose, dlclose@@LIBC
 
 .balign 4
 .globl __bf_access
@@ -1114,10 +1044,10 @@ __bf_dlclose:
 __bf_access:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #616]
+    ldr x17, [x16, #576]
     cbz x17, 1f
     br x17
-1:  mov x0, #77
+1:  mov x0, #72
     bl __bf_resolve_and_call
     br x0
 .symver __bf_access, access@@LIBC
@@ -1128,10 +1058,10 @@ __bf_access:
 __bf_getenv:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #624]
+    ldr x17, [x16, #584]
     cbz x17, 1f
     br x17
-1:  mov x0, #78
+1:  mov x0, #73
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getenv, getenv@@LIBC
@@ -1142,10 +1072,10 @@ __bf_getenv:
 __bf_strncpy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #632]
+    ldr x17, [x16, #592]
     cbz x17, 1f
     br x17
-1:  mov x0, #79
+1:  mov x0, #74
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strncpy, strncpy@@LIBC
@@ -1156,10 +1086,10 @@ __bf_strncpy:
 __bf_feof:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #640]
+    ldr x17, [x16, #600]
     cbz x17, 1f
     br x17
-1:  mov x0, #80
+1:  mov x0, #75
     bl __bf_resolve_and_call
     br x0
 .symver __bf_feof, feof@@LIBC
@@ -1170,10 +1100,10 @@ __bf_feof:
 __bf_fopen:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #648]
+    ldr x17, [x16, #608]
     cbz x17, 1f
     br x17
-1:  mov x0, #81
+1:  mov x0, #76
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fopen, fopen@@LIBC
@@ -1184,10 +1114,10 @@ __bf_fopen:
 __bf_fseeko:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #656]
+    ldr x17, [x16, #616]
     cbz x17, 1f
     br x17
-1:  mov x0, #82
+1:  mov x0, #77
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fseeko, fseeko@@LIBC
@@ -1198,10 +1128,10 @@ __bf_fseeko:
 __bf_ftello:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #664]
+    ldr x17, [x16, #624]
     cbz x17, 1f
     br x17
-1:  mov x0, #83
+1:  mov x0, #78
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ftello, ftello@@LIBC
@@ -1212,10 +1142,10 @@ __bf_ftello:
 __bf_fwrite:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #672]
+    ldr x17, [x16, #632]
     cbz x17, 1f
     br x17
-1:  mov x0, #84
+1:  mov x0, #79
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fwrite, fwrite@@LIBC
@@ -1226,10 +1156,10 @@ __bf_fwrite:
 __bf_fflush:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #680]
+    ldr x17, [x16, #640]
     cbz x17, 1f
     br x17
-1:  mov x0, #85
+1:  mov x0, #80
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fflush, fflush@@LIBC
@@ -1240,10 +1170,10 @@ __bf_fflush:
 __bf_gmtime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #688]
+    ldr x17, [x16, #648]
     cbz x17, 1f
     br x17
-1:  mov x0, #86
+1:  mov x0, #81
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gmtime, gmtime@@LIBC
@@ -1254,10 +1184,10 @@ __bf_gmtime:
 __bf_mktime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #696]
+    ldr x17, [x16, #656]
     cbz x17, 1f
     br x17
-1:  mov x0, #87
+1:  mov x0, #82
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mktime, mktime@@LIBC
@@ -1268,10 +1198,10 @@ __bf_mktime:
 __bf_pipe:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #704]
+    ldr x17, [x16, #664]
     cbz x17, 1f
     br x17
-1:  mov x0, #88
+1:  mov x0, #83
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pipe, pipe@@LIBC
@@ -1282,10 +1212,10 @@ __bf_pipe:
 __bf_write:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #712]
+    ldr x17, [x16, #672]
     cbz x17, 1f
     br x17
-1:  mov x0, #89
+1:  mov x0, #84
     bl __bf_resolve_and_call
     br x0
 .symver __bf_write, write@@LIBC
@@ -1296,10 +1226,10 @@ __bf_write:
 __bf_pthread_key_create:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #720]
+    ldr x17, [x16, #680]
     cbz x17, 1f
     br x17
-1:  mov x0, #90
+1:  mov x0, #85
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_key_create, pthread_key_create@@LIBC
@@ -1310,10 +1240,10 @@ __bf_pthread_key_create:
 __bf_abort:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #728]
+    ldr x17, [x16, #688]
     cbz x17, 1f
     br x17
-1:  mov x0, #91
+1:  mov x0, #86
     bl __bf_resolve_and_call
     br x0
 .symver __bf_abort, abort@@LIBC
@@ -1324,10 +1254,10 @@ __bf_abort:
 __bf___assert:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #736]
+    ldr x17, [x16, #696]
     cbz x17, 1f
     br x17
-1:  mov x0, #92
+1:  mov x0, #87
     bl __bf_resolve_and_call
     br x0
 .symver __bf___assert, __assert@@LIBC
@@ -1338,10 +1268,10 @@ __bf___assert:
 __bf_strrchr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #744]
+    ldr x17, [x16, #704]
     cbz x17, 1f
     br x17
-1:  mov x0, #93
+1:  mov x0, #88
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strrchr, strrchr@@LIBC
@@ -1352,10 +1282,10 @@ __bf_strrchr:
 __bf___stack_chk_fail:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #752]
+    ldr x17, [x16, #712]
     cbz x17, 1f
     br x17
-1:  mov x0, #94
+1:  mov x0, #89
     bl __bf_resolve_and_call
     br x0
 .symver __bf___stack_chk_fail, __stack_chk_fail@@LIBC
@@ -1366,10 +1296,10 @@ __bf___stack_chk_fail:
 __bf_atoi:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #760]
+    ldr x17, [x16, #720]
     cbz x17, 1f
     br x17
-1:  mov x0, #95
+1:  mov x0, #90
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atoi, atoi@@LIBC
@@ -1380,10 +1310,10 @@ __bf_atoi:
 __bf_fcntl:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #768]
+    ldr x17, [x16, #728]
     cbz x17, 1f
     br x17
-1:  mov x0, #96
+1:  mov x0, #91
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fcntl, fcntl@@LIBC
@@ -1394,10 +1324,10 @@ __bf_fcntl:
 __bf_memcpy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #776]
+    ldr x17, [x16, #736]
     cbz x17, 1f
     br x17
-1:  mov x0, #97
+1:  mov x0, #92
     bl __bf_resolve_and_call
     br x0
 .symver __bf_memcpy, memcpy@@LIBC
@@ -1408,10 +1338,10 @@ __bf_memcpy:
 __bf_strcpy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #784]
+    ldr x17, [x16, #744]
     cbz x17, 1f
     br x17
-1:  mov x0, #98
+1:  mov x0, #93
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strcpy, strcpy@@LIBC
@@ -1422,10 +1352,10 @@ __bf_strcpy:
 __bf_strerror:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #792]
+    ldr x17, [x16, #752]
     cbz x17, 1f
     br x17
-1:  mov x0, #99
+1:  mov x0, #94
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strerror, strerror@@LIBC
@@ -1436,10 +1366,10 @@ __bf_strerror:
 __bf_pthread_attr_setdetachstate:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #800]
+    ldr x17, [x16, #760]
     cbz x17, 1f
     br x17
-1:  mov x0, #100
+1:  mov x0, #95
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_attr_setdetachstate, pthread_attr_setdetachstate@@LIBC
@@ -1450,10 +1380,10 @@ __bf_pthread_attr_setdetachstate:
 __bf_pthread_cond_timedwait:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #808]
+    ldr x17, [x16, #768]
     cbz x17, 1f
     br x17
-1:  mov x0, #101
+1:  mov x0, #96
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_cond_timedwait, pthread_cond_timedwait@@LIBC
@@ -1464,10 +1394,10 @@ __bf_pthread_cond_timedwait:
 __bf_memmove:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #816]
+    ldr x17, [x16, #776]
     cbz x17, 1f
     br x17
-1:  mov x0, #102
+1:  mov x0, #97
     bl __bf_resolve_and_call
     br x0
 .symver __bf_memmove, memmove@@LIBC
@@ -1478,10 +1408,10 @@ __bf_memmove:
 __bf_strtol:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #824]
+    ldr x17, [x16, #784]
     cbz x17, 1f
     br x17
-1:  mov x0, #103
+1:  mov x0, #98
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtol, strtol@@LIBC
@@ -1492,10 +1422,10 @@ __bf_strtol:
 __bf_getpid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #832]
+    ldr x17, [x16, #792]
     cbz x17, 1f
     br x17
-1:  mov x0, #104
+1:  mov x0, #99
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getpid, getpid@@LIBC
@@ -1506,10 +1436,10 @@ __bf_getpid:
 __bf_gettimeofday:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #840]
+    ldr x17, [x16, #800]
     cbz x17, 1f
     br x17
-1:  mov x0, #105
+1:  mov x0, #100
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gettimeofday, gettimeofday@@LIBC
@@ -1520,10 +1450,10 @@ __bf_gettimeofday:
 __bf_localtime_r:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #848]
+    ldr x17, [x16, #808]
     cbz x17, 1f
     br x17
-1:  mov x0, #106
+1:  mov x0, #101
     bl __bf_resolve_and_call
     br x0
 .symver __bf_localtime_r, localtime_r@@LIBC
@@ -1534,10 +1464,10 @@ __bf_localtime_r:
 __bf_fputs:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #856]
+    ldr x17, [x16, #816]
     cbz x17, 1f
     br x17
-1:  mov x0, #107
+1:  mov x0, #102
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fputs, fputs@@LIBC
@@ -1548,10 +1478,10 @@ __bf_fputs:
 __bf_strerror_r:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #864]
+    ldr x17, [x16, #824]
     cbz x17, 1f
     br x17
-1:  mov x0, #108
+1:  mov x0, #103
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strerror_r, strerror_r@@LIBC
@@ -1562,10 +1492,10 @@ __bf_strerror_r:
 __bf_snprintf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #872]
+    ldr x17, [x16, #832]
     cbz x17, 1f
     br x17
-1:  mov x0, #109
+1:  mov x0, #104
     bl __bf_resolve_and_call
     br x0
 .symver __bf_snprintf, snprintf@@LIBC
@@ -1576,10 +1506,10 @@ __bf_snprintf:
 __bf_prctl:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #880]
+    ldr x17, [x16, #840]
     cbz x17, 1f
     br x17
-1:  mov x0, #110
+1:  mov x0, #105
     bl __bf_resolve_and_call
     br x0
 .symver __bf_prctl, prctl@@LIBC
@@ -1590,10 +1520,10 @@ __bf_prctl:
 __bf_sigaltstack:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #888]
+    ldr x17, [x16, #848]
     cbz x17, 1f
     br x17
-1:  mov x0, #111
+1:  mov x0, #106
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sigaltstack, sigaltstack@@LIBC
@@ -1604,10 +1534,10 @@ __bf_sigaltstack:
 __bf_getpagesize:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #896]
+    ldr x17, [x16, #856]
     cbz x17, 1f
     br x17
-1:  mov x0, #112
+1:  mov x0, #107
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getpagesize, getpagesize@@LIBC
@@ -1618,10 +1548,10 @@ __bf_getpagesize:
 __bf_pthread_getspecific:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #904]
+    ldr x17, [x16, #864]
     cbz x17, 1f
     br x17
-1:  mov x0, #113
+1:  mov x0, #108
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_getspecific, pthread_getspecific@@LIBC
@@ -1632,10 +1562,10 @@ __bf_pthread_getspecific:
 __bf_fork:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #912]
+    ldr x17, [x16, #872]
     cbz x17, 1f
     br x17
-1:  mov x0, #114
+1:  mov x0, #109
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fork, fork@@LIBC
@@ -1646,10 +1576,10 @@ __bf_fork:
 __bf_waitpid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #920]
+    ldr x17, [x16, #880]
     cbz x17, 1f
     br x17
-1:  mov x0, #115
+1:  mov x0, #110
     bl __bf_resolve_and_call
     br x0
 .symver __bf_waitpid, waitpid@@LIBC
@@ -1660,10 +1590,10 @@ __bf_waitpid:
 __bf_execv:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #928]
+    ldr x17, [x16, #888]
     cbz x17, 1f
     br x17
-1:  mov x0, #116
+1:  mov x0, #111
     bl __bf_resolve_and_call
     br x0
 .symver __bf_execv, execv@@LIBC
@@ -1674,10 +1604,10 @@ __bf_execv:
 __bf__exit:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #936]
+    ldr x17, [x16, #896]
     cbz x17, 1f
     br x17
-1:  mov x0, #117
+1:  mov x0, #112
     bl __bf_resolve_and_call
     br x0
 .symver __bf__exit, _exit@@LIBC
@@ -1688,10 +1618,10 @@ __bf__exit:
 __bf_execve:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #944]
+    ldr x17, [x16, #904]
     cbz x17, 1f
     br x17
-1:  mov x0, #118
+1:  mov x0, #113
     bl __bf_resolve_and_call
     br x0
 .symver __bf_execve, execve@@LIBC
@@ -1702,10 +1632,10 @@ __bf_execve:
 __bf_getopt_long:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #952]
+    ldr x17, [x16, #912]
     cbz x17, 1f
     br x17
-1:  mov x0, #119
+1:  mov x0, #114
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getopt_long, getopt_long@@LIBC
@@ -1716,10 +1646,10 @@ __bf_getopt_long:
 __bf_getppid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #960]
+    ldr x17, [x16, #920]
     cbz x17, 1f
     br x17
-1:  mov x0, #120
+1:  mov x0, #115
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getppid, getppid@@LIBC
@@ -1730,10 +1660,10 @@ __bf_getppid:
 __bf_geteuid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #968]
+    ldr x17, [x16, #928]
     cbz x17, 1f
     br x17
-1:  mov x0, #121
+1:  mov x0, #116
     bl __bf_resolve_and_call
     br x0
 .symver __bf_geteuid, geteuid@@LIBC
@@ -1744,10 +1674,10 @@ __bf_geteuid:
 __bf_epoll_create1:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #976]
+    ldr x17, [x16, #936]
     cbz x17, 1f
     br x17
-1:  mov x0, #122
+1:  mov x0, #117
     bl __bf_resolve_and_call
     br x0
 .symver __bf_epoll_create1, epoll_create1@@LIBC
@@ -1758,10 +1688,10 @@ __bf_epoll_create1:
 __bf_eventfd:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #984]
+    ldr x17, [x16, #944]
     cbz x17, 1f
     br x17
-1:  mov x0, #123
+1:  mov x0, #118
     bl __bf_resolve_and_call
     br x0
 .symver __bf_eventfd, eventfd@@LIBC
@@ -1772,10 +1702,10 @@ __bf_eventfd:
 __bf_epoll_ctl:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #992]
+    ldr x17, [x16, #952]
     cbz x17, 1f
     br x17
-1:  mov x0, #124
+1:  mov x0, #119
     bl __bf_resolve_and_call
     br x0
 .symver __bf_epoll_ctl, epoll_ctl@@LIBC
@@ -1786,10 +1716,10 @@ __bf_epoll_ctl:
 __bf_getsockopt:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1000]
+    ldr x17, [x16, #960]
     cbz x17, 1f
     br x17
-1:  mov x0, #125
+1:  mov x0, #120
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getsockopt, getsockopt@@LIBC
@@ -1800,10 +1730,10 @@ __bf_getsockopt:
 __bf_setsockopt:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1008]
+    ldr x17, [x16, #968]
     cbz x17, 1f
     br x17
-1:  mov x0, #126
+1:  mov x0, #121
     bl __bf_resolve_and_call
     br x0
 .symver __bf_setsockopt, setsockopt@@LIBC
@@ -1814,10 +1744,10 @@ __bf_setsockopt:
 __bf_epoll_wait:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1016]
+    ldr x17, [x16, #976]
     cbz x17, 1f
     br x17
-1:  mov x0, #127
+1:  mov x0, #122
     bl __bf_resolve_and_call
     br x0
 .symver __bf_epoll_wait, epoll_wait@@LIBC
@@ -1828,10 +1758,10 @@ __bf_epoll_wait:
 __bf_getuid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1024]
+    ldr x17, [x16, #984]
     cbz x17, 1f
     br x17
-1:  mov x0, #128
+1:  mov x0, #123
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getuid, getuid@@LIBC
@@ -1842,10 +1772,10 @@ __bf_getuid:
 __bf_pthread_mutex_trylock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1032]
+    ldr x17, [x16, #992]
     cbz x17, 1f
     br x17
-1:  mov x0, #129
+1:  mov x0, #124
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_mutex_trylock, pthread_mutex_trylock@@LIBC
@@ -1856,10 +1786,10 @@ __bf_pthread_mutex_trylock:
 __bf_ldexp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1040]
+    ldr x17, [x16, #1000]
     cbz x17, 1f
     br x17
-1:  mov x0, #130
+1:  mov x0, #125
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ldexp, ldexp@@LIBC
@@ -1870,10 +1800,10 @@ __bf_ldexp:
 __bf_strchr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1048]
+    ldr x17, [x16, #1008]
     cbz x17, 1f
     br x17
-1:  mov x0, #131
+1:  mov x0, #126
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strchr, strchr@@LIBC
@@ -1884,10 +1814,10 @@ __bf_strchr:
 __bf_getaddrinfo:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1056]
+    ldr x17, [x16, #1016]
     cbz x17, 1f
     br x17
-1:  mov x0, #132
+1:  mov x0, #127
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getaddrinfo, getaddrinfo@@LIBC
@@ -1898,10 +1828,10 @@ __bf_getaddrinfo:
 __bf_socket:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1064]
+    ldr x17, [x16, #1024]
     cbz x17, 1f
     br x17
-1:  mov x0, #133
+1:  mov x0, #128
     bl __bf_resolve_and_call
     br x0
 .symver __bf_socket, socket@@LIBC
@@ -1912,10 +1842,10 @@ __bf_socket:
 __bf_freeaddrinfo:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1072]
+    ldr x17, [x16, #1032]
     cbz x17, 1f
     br x17
-1:  mov x0, #134
+1:  mov x0, #129
     bl __bf_resolve_and_call
     br x0
 .symver __bf_freeaddrinfo, freeaddrinfo@@LIBC
@@ -1926,10 +1856,10 @@ __bf_freeaddrinfo:
 __bf_connect:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1080]
+    ldr x17, [x16, #1040]
     cbz x17, 1f
     br x17
-1:  mov x0, #135
+1:  mov x0, #130
     bl __bf_resolve_and_call
     br x0
 .symver __bf_connect, connect@@LIBC
@@ -1940,10 +1870,10 @@ __bf_connect:
 __bf_poll:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1088]
+    ldr x17, [x16, #1048]
     cbz x17, 1f
     br x17
-1:  mov x0, #136
+1:  mov x0, #131
     bl __bf_resolve_and_call
     br x0
 .symver __bf_poll, poll@@LIBC
@@ -1954,10 +1884,10 @@ __bf_poll:
 __bf_sched_getscheduler:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1096]
+    ldr x17, [x16, #1056]
     cbz x17, 1f
     br x17
-1:  mov x0, #137
+1:  mov x0, #132
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_getscheduler, sched_getscheduler@@LIBC
@@ -1968,10 +1898,10 @@ __bf_sched_getscheduler:
 __bf_sched_getparam:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1104]
+    ldr x17, [x16, #1064]
     cbz x17, 1f
     br x17
-1:  mov x0, #138
+1:  mov x0, #133
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_getparam, sched_getparam@@LIBC
@@ -1982,10 +1912,10 @@ __bf_sched_getparam:
 __bf_getpriority:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1112]
+    ldr x17, [x16, #1072]
     cbz x17, 1f
     br x17
-1:  mov x0, #139
+1:  mov x0, #134
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getpriority, getpriority@@LIBC
@@ -1996,10 +1926,10 @@ __bf_getpriority:
 __bf_uname:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1120]
+    ldr x17, [x16, #1080]
     cbz x17, 1f
     br x17
-1:  mov x0, #140
+1:  mov x0, #135
     bl __bf_resolve_and_call
     br x0
 .symver __bf_uname, uname@@LIBC
@@ -2010,10 +1940,10 @@ __bf_uname:
 __bf_tzset:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1128]
+    ldr x17, [x16, #1088]
     cbz x17, 1f
     br x17
-1:  mov x0, #141
+1:  mov x0, #136
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tzset, tzset@@LIBC
@@ -2024,10 +1954,10 @@ __bf_tzset:
 __bf_strnlen:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1136]
+    ldr x17, [x16, #1096]
     cbz x17, 1f
     br x17
-1:  mov x0, #142
+1:  mov x0, #137
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strnlen, strnlen@@LIBC
@@ -2038,10 +1968,10 @@ __bf_strnlen:
 __bf_writev:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1144]
+    ldr x17, [x16, #1104]
     cbz x17, 1f
     br x17
-1:  mov x0, #143
+1:  mov x0, #138
     bl __bf_resolve_and_call
     br x0
 .symver __bf_writev, writev@@LIBC
@@ -2052,10 +1982,10 @@ __bf_writev:
 __bf_sscanf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1152]
+    ldr x17, [x16, #1112]
     cbz x17, 1f
     br x17
-1:  mov x0, #144
+1:  mov x0, #139
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sscanf, sscanf@@LIBC
@@ -2066,10 +1996,10 @@ __bf_sscanf:
 __bf_strtoul:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1160]
+    ldr x17, [x16, #1120]
     cbz x17, 1f
     br x17
-1:  mov x0, #145
+1:  mov x0, #140
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtoul, strtoul@@LIBC
@@ -2080,10 +2010,10 @@ __bf_strtoul:
 __bf_strtoull:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1168]
+    ldr x17, [x16, #1128]
     cbz x17, 1f
     br x17
-1:  mov x0, #146
+1:  mov x0, #141
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtoull, strtoull@@LIBC
@@ -2094,10 +2024,10 @@ __bf_strtoull:
 __bf_lseek:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1176]
+    ldr x17, [x16, #1136]
     cbz x17, 1f
     br x17
-1:  mov x0, #147
+1:  mov x0, #142
     bl __bf_resolve_and_call
     br x0
 .symver __bf_lseek, lseek@@LIBC
@@ -2108,10 +2038,10 @@ __bf_lseek:
 __bf_ftruncate:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1184]
+    ldr x17, [x16, #1144]
     cbz x17, 1f
     br x17
-1:  mov x0, #148
+1:  mov x0, #143
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ftruncate, ftruncate@@LIBC
@@ -2122,10 +2052,10 @@ __bf_ftruncate:
 __bf_fstat:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1192]
+    ldr x17, [x16, #1152]
     cbz x17, 1f
     br x17
-1:  mov x0, #149
+1:  mov x0, #144
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fstat, fstat@@LIBC
@@ -2136,10 +2066,10 @@ __bf_fstat:
 __bf_lstat:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1200]
+    ldr x17, [x16, #1160]
     cbz x17, 1f
     br x17
-1:  mov x0, #150
+1:  mov x0, #145
     bl __bf_resolve_and_call
     br x0
 .symver __bf_lstat, lstat@@LIBC
@@ -2150,10 +2080,10 @@ __bf_lstat:
 __bf_rename:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1208]
+    ldr x17, [x16, #1168]
     cbz x17, 1f
     br x17
-1:  mov x0, #151
+1:  mov x0, #146
     bl __bf_resolve_and_call
     br x0
 .symver __bf_rename, rename@@LIBC
@@ -2164,10 +2094,10 @@ __bf_rename:
 __bf_unlink:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1216]
+    ldr x17, [x16, #1176]
     cbz x17, 1f
     br x17
-1:  mov x0, #152
+1:  mov x0, #147
     bl __bf_resolve_and_call
     br x0
 .symver __bf_unlink, unlink@@LIBC
@@ -2178,10 +2108,10 @@ __bf_unlink:
 __bf_rmdir:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1224]
+    ldr x17, [x16, #1184]
     cbz x17, 1f
     br x17
-1:  mov x0, #153
+1:  mov x0, #148
     bl __bf_resolve_and_call
     br x0
 .symver __bf_rmdir, rmdir@@LIBC
@@ -2192,10 +2122,10 @@ __bf_rmdir:
 __bf_nanosleep:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1232]
+    ldr x17, [x16, #1192]
     cbz x17, 1f
     br x17
-1:  mov x0, #154
+1:  mov x0, #149
     bl __bf_resolve_and_call
     br x0
 .symver __bf_nanosleep, nanosleep@@LIBC
@@ -2206,10 +2136,10 @@ __bf_nanosleep:
 __bf_sigemptyset:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1240]
+    ldr x17, [x16, #1200]
     cbz x17, 1f
     br x17
-1:  mov x0, #155
+1:  mov x0, #150
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sigemptyset, sigemptyset@@LIBC
@@ -2220,10 +2150,10 @@ __bf_sigemptyset:
 __bf_sigaction:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1248]
+    ldr x17, [x16, #1208]
     cbz x17, 1f
     br x17
-1:  mov x0, #156
+1:  mov x0, #151
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sigaction, sigaction@@LIBC
@@ -2234,10 +2164,10 @@ __bf_sigaction:
 __bf_raise:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1256]
+    ldr x17, [x16, #1216]
     cbz x17, 1f
     br x17
-1:  mov x0, #157
+1:  mov x0, #152
     bl __bf_resolve_and_call
     br x0
 .symver __bf_raise, raise@@LIBC
@@ -2248,10 +2178,10 @@ __bf_raise:
 __bf_fscanf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1264]
+    ldr x17, [x16, #1224]
     cbz x17, 1f
     br x17
-1:  mov x0, #158
+1:  mov x0, #153
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fscanf, fscanf@@LIBC
@@ -2262,10 +2192,10 @@ __bf_fscanf:
 __bf_pread64:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1272]
+    ldr x17, [x16, #1232]
     cbz x17, 1f
     br x17
-1:  mov x0, #159
+1:  mov x0, #154
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pread64, pread64@@LIBC
@@ -2276,10 +2206,10 @@ __bf_pread64:
 __bf_ptrace:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1280]
+    ldr x17, [x16, #1240]
     cbz x17, 1f
     br x17
-1:  mov x0, #160
+1:  mov x0, #155
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ptrace, ptrace@@LIBC
@@ -2290,10 +2220,10 @@ __bf_ptrace:
 __bf_socketpair:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1288]
+    ldr x17, [x16, #1248]
     cbz x17, 1f
     br x17
-1:  mov x0, #161
+1:  mov x0, #156
     bl __bf_resolve_and_call
     br x0
 .symver __bf_socketpair, socketpair@@LIBC
@@ -2304,10 +2234,10 @@ __bf_socketpair:
 __bf_sendmsg:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1296]
+    ldr x17, [x16, #1256]
     cbz x17, 1f
     br x17
-1:  mov x0, #162
+1:  mov x0, #157
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sendmsg, sendmsg@@LIBC
@@ -2318,10 +2248,10 @@ __bf_sendmsg:
 __bf_recvmsg:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1304]
+    ldr x17, [x16, #1264]
     cbz x17, 1f
     br x17
-1:  mov x0, #163
+1:  mov x0, #158
     bl __bf_resolve_and_call
     br x0
 .symver __bf_recvmsg, recvmsg@@LIBC
@@ -2332,10 +2262,10 @@ __bf_recvmsg:
 __bf___cmsg_nxthdr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1312]
+    ldr x17, [x16, #1272]
     cbz x17, 1f
     br x17
-1:  mov x0, #164
+1:  mov x0, #159
     bl __bf_resolve_and_call
     br x0
 .symver __bf___cmsg_nxthdr, __cmsg_nxthdr@@LIBC
@@ -2346,10 +2276,10 @@ __bf___cmsg_nxthdr:
 __bf_readlink:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1320]
+    ldr x17, [x16, #1280]
     cbz x17, 1f
     br x17
-1:  mov x0, #165
+1:  mov x0, #160
     bl __bf_resolve_and_call
     br x0
 .symver __bf_readlink, readlink@@LIBC
@@ -2360,10 +2290,10 @@ __bf_readlink:
 __bf_printf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1328]
+    ldr x17, [x16, #1288]
     cbz x17, 1f
     br x17
-1:  mov x0, #166
+1:  mov x0, #161
     bl __bf_resolve_and_call
     br x0
 .symver __bf_printf, printf@@LIBC
@@ -2374,10 +2304,10 @@ __bf_printf:
 __bf_wmemchr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1336]
+    ldr x17, [x16, #1296]
     cbz x17, 1f
     br x17
-1:  mov x0, #167
+1:  mov x0, #162
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wmemchr, wmemchr@@LIBC
@@ -2388,10 +2318,10 @@ __bf_wmemchr:
 __bf_localeconv:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1344]
+    ldr x17, [x16, #1304]
     cbz x17, 1f
     br x17
-1:  mov x0, #168
+1:  mov x0, #163
     bl __bf_resolve_and_call
     br x0
 .symver __bf_localeconv, localeconv@@LIBC
@@ -2402,10 +2332,10 @@ __bf_localeconv:
 __bf___vsnprintf_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1352]
+    ldr x17, [x16, #1312]
     cbz x17, 1f
     br x17
-1:  mov x0, #169
+1:  mov x0, #164
     bl __bf_resolve_and_call
     br x0
 .symver __bf___vsnprintf_chk, __vsnprintf_chk@@LIBC
@@ -2416,10 +2346,10 @@ __bf___vsnprintf_chk:
 __bf___memmove_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1360]
+    ldr x17, [x16, #1320]
     cbz x17, 1f
     br x17
-1:  mov x0, #170
+1:  mov x0, #165
     bl __bf_resolve_and_call
     br x0
 .symver __bf___memmove_chk, __memmove_chk@@LIBC
@@ -2430,10 +2360,10 @@ __bf___memmove_chk:
 __bf_sched_yield:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1368]
+    ldr x17, [x16, #1328]
     cbz x17, 1f
     br x17
-1:  mov x0, #171
+1:  mov x0, #166
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_yield, sched_yield@@LIBC
@@ -2444,10 +2374,10 @@ __bf_sched_yield:
 __bf_modf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1376]
+    ldr x17, [x16, #1336]
     cbz x17, 1f
     br x17
-1:  mov x0, #172
+1:  mov x0, #167
     bl __bf_resolve_and_call
     br x0
 .symver __bf_modf, modf@@LIBC
@@ -2458,10 +2388,10 @@ __bf_modf:
 __bf_strcasecmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1384]
+    ldr x17, [x16, #1344]
     cbz x17, 1f
     br x17
-1:  mov x0, #173
+1:  mov x0, #168
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strcasecmp, strcasecmp@@LIBC
@@ -2472,10 +2402,10 @@ __bf_strcasecmp:
 __bf_getnameinfo:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1392]
+    ldr x17, [x16, #1352]
     cbz x17, 1f
     br x17
-1:  mov x0, #174
+1:  mov x0, #169
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getnameinfo, getnameinfo@@LIBC
@@ -2486,10 +2416,10 @@ __bf_getnameinfo:
 __bf_strftime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1400]
+    ldr x17, [x16, #1360]
     cbz x17, 1f
     br x17
-1:  mov x0, #175
+1:  mov x0, #170
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strftime, strftime@@LIBC
@@ -2500,10 +2430,10 @@ __bf_strftime:
 __bf___strcpy_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1408]
+    ldr x17, [x16, #1368]
     cbz x17, 1f
     br x17
-1:  mov x0, #176
+1:  mov x0, #171
     bl __bf_resolve_and_call
     br x0
 .symver __bf___strcpy_chk, __strcpy_chk@@LIBC
@@ -2514,10 +2444,10 @@ __bf___strcpy_chk:
 __bf_frexpf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1416]
+    ldr x17, [x16, #1376]
     cbz x17, 1f
     br x17
-1:  mov x0, #177
+1:  mov x0, #172
     bl __bf_resolve_and_call
     br x0
 .symver __bf_frexpf, frexpf@@LIBC
@@ -2528,10 +2458,10 @@ __bf_frexpf:
 __bf_ldexpf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1424]
+    ldr x17, [x16, #1384]
     cbz x17, 1f
     br x17
-1:  mov x0, #178
+1:  mov x0, #173
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ldexpf, ldexpf@@LIBC
@@ -2542,10 +2472,10 @@ __bf_ldexpf:
 __bf_tanf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1432]
+    ldr x17, [x16, #1392]
     cbz x17, 1f
     br x17
-1:  mov x0, #179
+1:  mov x0, #174
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tanf, tanf@@LIBC
@@ -2556,10 +2486,10 @@ __bf_tanf:
 __bf_atanf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1440]
+    ldr x17, [x16, #1400]
     cbz x17, 1f
     br x17
-1:  mov x0, #180
+1:  mov x0, #175
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atanf, atanf@@LIBC
@@ -2570,10 +2500,10 @@ __bf_atanf:
 __bf_erff:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1448]
+    ldr x17, [x16, #1408]
     cbz x17, 1f
     br x17
-1:  mov x0, #181
+1:  mov x0, #176
     bl __bf_resolve_and_call
     br x0
 .symver __bf_erff, erff@@LIBC
@@ -2584,10 +2514,10 @@ __bf_erff:
 __bf_acosf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1456]
+    ldr x17, [x16, #1416]
     cbz x17, 1f
     br x17
-1:  mov x0, #182
+1:  mov x0, #177
     bl __bf_resolve_and_call
     br x0
 .symver __bf_acosf, acosf@@LIBC
@@ -2598,10 +2528,10 @@ __bf_acosf:
 __bf_strstr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1464]
+    ldr x17, [x16, #1424]
     cbz x17, 1f
     br x17
-1:  mov x0, #183
+1:  mov x0, #178
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strstr, strstr@@LIBC
@@ -2612,10 +2542,10 @@ __bf_strstr:
 __bf_erfcf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1472]
+    ldr x17, [x16, #1432]
     cbz x17, 1f
     br x17
-1:  mov x0, #184
+1:  mov x0, #179
     bl __bf_resolve_and_call
     br x0
 .symver __bf_erfcf, erfcf@@LIBC
@@ -2626,10 +2556,10 @@ __bf_erfcf:
 __bf_modff:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1480]
+    ldr x17, [x16, #1440]
     cbz x17, 1f
     br x17
-1:  mov x0, #185
+1:  mov x0, #180
     bl __bf_resolve_and_call
     br x0
 .symver __bf_modff, modff@@LIBC
@@ -2640,10 +2570,10 @@ __bf_modff:
 __bf_coshf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1488]
+    ldr x17, [x16, #1448]
     cbz x17, 1f
     br x17
-1:  mov x0, #186
+1:  mov x0, #181
     bl __bf_resolve_and_call
     br x0
 .symver __bf_coshf, coshf@@LIBC
@@ -2654,10 +2584,10 @@ __bf_coshf:
 __bf_sinhf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1496]
+    ldr x17, [x16, #1456]
     cbz x17, 1f
     br x17
-1:  mov x0, #187
+1:  mov x0, #182
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sinhf, sinhf@@LIBC
@@ -2668,10 +2598,10 @@ __bf_sinhf:
 __bf_tanhf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1504]
+    ldr x17, [x16, #1464]
     cbz x17, 1f
     br x17
-1:  mov x0, #188
+1:  mov x0, #183
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tanhf, tanhf@@LIBC
@@ -2682,10 +2612,10 @@ __bf_tanhf:
 __bf_atan2:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1512]
+    ldr x17, [x16, #1472]
     cbz x17, 1f
     br x17
-1:  mov x0, #189
+1:  mov x0, #184
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atan2, atan2@@LIBC
@@ -2696,10 +2626,10 @@ __bf_atan2:
 __bf_cbrtf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1520]
+    ldr x17, [x16, #1480]
     cbz x17, 1f
     br x17
-1:  mov x0, #190
+1:  mov x0, #185
     bl __bf_resolve_and_call
     br x0
 .symver __bf_cbrtf, cbrtf@@LIBC
@@ -2710,10 +2640,10 @@ __bf_cbrtf:
 __bf___strchr_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1528]
+    ldr x17, [x16, #1488]
     cbz x17, 1f
     br x17
-1:  mov x0, #191
+1:  mov x0, #186
     bl __bf_resolve_and_call
     br x0
 .symver __bf___strchr_chk, __strchr_chk@@LIBC
@@ -2724,10 +2654,10 @@ __bf___strchr_chk:
 __bf_clock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1536]
+    ldr x17, [x16, #1496]
     cbz x17, 1f
     br x17
-1:  mov x0, #192
+1:  mov x0, #187
     bl __bf_resolve_and_call
     br x0
 .symver __bf_clock, clock@@LIBC
@@ -2738,10 +2668,10 @@ __bf_clock:
 __bf_fileno:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1544]
+    ldr x17, [x16, #1504]
     cbz x17, 1f
     br x17
-1:  mov x0, #193
+1:  mov x0, #188
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fileno, fileno@@LIBC
@@ -2752,10 +2682,10 @@ __bf_fileno:
 __bf_remainderf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1552]
+    ldr x17, [x16, #1512]
     cbz x17, 1f
     br x17
-1:  mov x0, #194
+1:  mov x0, #189
     bl __bf_resolve_and_call
     br x0
 .symver __bf_remainderf, remainderf@@LIBC
@@ -2766,10 +2696,10 @@ __bf_remainderf:
 __bf_nan:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1560]
+    ldr x17, [x16, #1520]
     cbz x17, 1f
     br x17
-1:  mov x0, #195
+1:  mov x0, #190
     bl __bf_resolve_and_call
     br x0
 .symver __bf_nan, nan@@LIBC
@@ -2780,10 +2710,10 @@ __bf_nan:
 __bf_qsort:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1568]
+    ldr x17, [x16, #1528]
     cbz x17, 1f
     br x17
-1:  mov x0, #196
+1:  mov x0, #191
     bl __bf_resolve_and_call
     br x0
 .symver __bf_qsort, qsort@@LIBC
@@ -2794,10 +2724,10 @@ __bf_qsort:
 __bf_nextafterf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1576]
+    ldr x17, [x16, #1536]
     cbz x17, 1f
     br x17
-1:  mov x0, #197
+1:  mov x0, #192
     bl __bf_resolve_and_call
     br x0
 .symver __bf_nextafterf, nextafterf@@LIBC
@@ -2808,10 +2738,10 @@ __bf_nextafterf:
 __bf_acos:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1584]
+    ldr x17, [x16, #1544]
     cbz x17, 1f
     br x17
-1:  mov x0, #198
+1:  mov x0, #193
     bl __bf_resolve_and_call
     br x0
 .symver __bf_acos, acos@@LIBC
@@ -2822,10 +2752,10 @@ __bf_acos:
 __bf_asin:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1592]
+    ldr x17, [x16, #1552]
     cbz x17, 1f
     br x17
-1:  mov x0, #199
+1:  mov x0, #194
     bl __bf_resolve_and_call
     br x0
 .symver __bf_asin, asin@@LIBC
@@ -2836,10 +2766,10 @@ __bf_asin:
 __bf_ilogb:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1600]
+    ldr x17, [x16, #1560]
     cbz x17, 1f
     br x17
-1:  mov x0, #200
+1:  mov x0, #195
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ilogb, ilogb@@LIBC
@@ -2850,10 +2780,10 @@ __bf_ilogb:
 __bf___FD_SET_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1608]
+    ldr x17, [x16, #1568]
     cbz x17, 1f
     br x17
-1:  mov x0, #201
+1:  mov x0, #196
     bl __bf_resolve_and_call
     br x0
 .symver __bf___FD_SET_chk, __FD_SET_chk@@LIBC
@@ -2864,10 +2794,10 @@ __bf___FD_SET_chk:
 __bf_select:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1616]
+    ldr x17, [x16, #1576]
     cbz x17, 1f
     br x17
-1:  mov x0, #202
+1:  mov x0, #197
     bl __bf_resolve_and_call
     br x0
 .symver __bf_select, select@@LIBC
@@ -2878,10 +2808,10 @@ __bf_select:
 __bf___FD_ISSET_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1624]
+    ldr x17, [x16, #1584]
     cbz x17, 1f
     br x17
-1:  mov x0, #203
+1:  mov x0, #198
     bl __bf_resolve_and_call
     br x0
 .symver __bf___FD_ISSET_chk, __FD_ISSET_chk@@LIBC
@@ -2892,10 +2822,10 @@ __bf___FD_ISSET_chk:
 __bf_sendto:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1632]
+    ldr x17, [x16, #1592]
     cbz x17, 1f
     br x17
-1:  mov x0, #204
+1:  mov x0, #199
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sendto, sendto@@LIBC
@@ -2906,10 +2836,10 @@ __bf_sendto:
 __bf_recvfrom:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1640]
+    ldr x17, [x16, #1600]
     cbz x17, 1f
     br x17
-1:  mov x0, #205
+1:  mov x0, #200
     bl __bf_resolve_and_call
     br x0
 .symver __bf_recvfrom, recvfrom@@LIBC
@@ -2920,10 +2850,10 @@ __bf_recvfrom:
 __bf___strcat_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1648]
+    ldr x17, [x16, #1608]
     cbz x17, 1f
     br x17
-1:  mov x0, #206
+1:  mov x0, #201
     bl __bf_resolve_and_call
     br x0
 .symver __bf___strcat_chk, __strcat_chk@@LIBC
@@ -2934,10 +2864,10 @@ __bf___strcat_chk:
 __bf_setpriority:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1656]
+    ldr x17, [x16, #1616]
     cbz x17, 1f
     br x17
-1:  mov x0, #207
+1:  mov x0, #202
     bl __bf_resolve_and_call
     br x0
 .symver __bf_setpriority, setpriority@@LIBC
@@ -2948,10 +2878,10 @@ __bf_setpriority:
 __bf_pthread_mutexattr_init:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1664]
+    ldr x17, [x16, #1624]
     cbz x17, 1f
     br x17
-1:  mov x0, #208
+1:  mov x0, #203
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_mutexattr_init, pthread_mutexattr_init@@LIBC
@@ -2962,10 +2892,10 @@ __bf_pthread_mutexattr_init:
 __bf_pthread_mutexattr_settype:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1672]
+    ldr x17, [x16, #1632]
     cbz x17, 1f
     br x17
-1:  mov x0, #209
+1:  mov x0, #204
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_mutexattr_settype, pthread_mutexattr_settype@@LIBC
@@ -2976,10 +2906,10 @@ __bf_pthread_mutexattr_settype:
 __bf_pthread_mutexattr_destroy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1680]
+    ldr x17, [x16, #1640]
     cbz x17, 1f
     br x17
-1:  mov x0, #210
+1:  mov x0, #205
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_mutexattr_destroy, pthread_mutexattr_destroy@@LIBC
@@ -2990,10 +2920,10 @@ __bf_pthread_mutexattr_destroy:
 __bf_sem_init:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1688]
+    ldr x17, [x16, #1648]
     cbz x17, 1f
     br x17
-1:  mov x0, #211
+1:  mov x0, #206
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sem_init, sem_init@@LIBC
@@ -3004,10 +2934,10 @@ __bf_sem_init:
 __bf_sem_destroy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1696]
+    ldr x17, [x16, #1656]
     cbz x17, 1f
     br x17
-1:  mov x0, #212
+1:  mov x0, #207
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sem_destroy, sem_destroy@@LIBC
@@ -3018,10 +2948,10 @@ __bf_sem_destroy:
 __bf_sem_wait:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1704]
+    ldr x17, [x16, #1664]
     cbz x17, 1f
     br x17
-1:  mov x0, #213
+1:  mov x0, #208
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sem_wait, sem_wait@@LIBC
@@ -3032,10 +2962,10 @@ __bf_sem_wait:
 __bf_sem_post:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1712]
+    ldr x17, [x16, #1672]
     cbz x17, 1f
     br x17
-1:  mov x0, #214
+1:  mov x0, #209
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sem_post, sem_post@@LIBC
@@ -3046,10 +2976,10 @@ __bf_sem_post:
 __bf_inet_ntop:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1720]
+    ldr x17, [x16, #1680]
     cbz x17, 1f
     br x17
-1:  mov x0, #215
+1:  mov x0, #210
     bl __bf_resolve_and_call
     br x0
 .symver __bf_inet_ntop, inet_ntop@@LIBC
@@ -3060,10 +2990,10 @@ __bf_inet_ntop:
 __bf_inet_pton:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1728]
+    ldr x17, [x16, #1688]
     cbz x17, 1f
     br x17
-1:  mov x0, #216
+1:  mov x0, #211
     bl __bf_resolve_and_call
     br x0
 .symver __bf_inet_pton, inet_pton@@LIBC
@@ -3074,10 +3004,10 @@ __bf_inet_pton:
 __bf_strncasecmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1736]
+    ldr x17, [x16, #1696]
     cbz x17, 1f
     br x17
-1:  mov x0, #217
+1:  mov x0, #212
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strncasecmp, strncasecmp@@LIBC
@@ -3088,10 +3018,10 @@ __bf_strncasecmp:
 __bf_pthread_attr_setschedparam:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1744]
+    ldr x17, [x16, #1704]
     cbz x17, 1f
     br x17
-1:  mov x0, #218
+1:  mov x0, #213
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_attr_setschedparam, pthread_attr_setschedparam@@LIBC
@@ -3102,10 +3032,10 @@ __bf_pthread_attr_setschedparam:
 __bf_bind:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1752]
+    ldr x17, [x16, #1712]
     cbz x17, 1f
     br x17
-1:  mov x0, #219
+1:  mov x0, #214
     bl __bf_resolve_and_call
     br x0
 .symver __bf_bind, bind@@LIBC
@@ -3116,10 +3046,10 @@ __bf_bind:
 __bf_getsockname:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1760]
+    ldr x17, [x16, #1720]
     cbz x17, 1f
     br x17
-1:  mov x0, #220
+1:  mov x0, #215
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getsockname, getsockname@@LIBC
@@ -3130,10 +3060,10 @@ __bf_getsockname:
 __bf_gethostname:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1768]
+    ldr x17, [x16, #1728]
     cbz x17, 1f
     br x17
-1:  mov x0, #221
+1:  mov x0, #216
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gethostname, gethostname@@LIBC
@@ -3144,10 +3074,10 @@ __bf_gethostname:
 __bf___sendto_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1776]
+    ldr x17, [x16, #1736]
     cbz x17, 1f
     br x17
-1:  mov x0, #222
+1:  mov x0, #217
     bl __bf_resolve_and_call
     br x0
 .symver __bf___sendto_chk, __sendto_chk@@LIBC_O
@@ -3158,10 +3088,10 @@ __bf___sendto_chk:
 __bf_puts:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1784]
+    ldr x17, [x16, #1744]
     cbz x17, 1f
     br x17
-1:  mov x0, #223
+1:  mov x0, #218
     bl __bf_resolve_and_call
     br x0
 .symver __bf_puts, puts@@LIBC
@@ -3172,10 +3102,10 @@ __bf_puts:
 __bf_gai_strerror:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1792]
+    ldr x17, [x16, #1752]
     cbz x17, 1f
     br x17
-1:  mov x0, #224
+1:  mov x0, #219
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gai_strerror, gai_strerror@@LIBC
@@ -3186,10 +3116,10 @@ __bf_gai_strerror:
 __bf___write_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1800]
+    ldr x17, [x16, #1760]
     cbz x17, 1f
     br x17
-1:  mov x0, #225
+1:  mov x0, #220
     bl __bf_resolve_and_call
     br x0
 .symver __bf___write_chk, __write_chk@@LIBC_N
@@ -3200,10 +3130,10 @@ __bf___write_chk:
 __bf___poll_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1808]
+    ldr x17, [x16, #1768]
     cbz x17, 1f
     br x17
-1:  mov x0, #226
+1:  mov x0, #221
     bl __bf_resolve_and_call
     br x0
 .symver __bf___poll_chk, __poll_chk@@LIBC
@@ -3214,10 +3144,10 @@ __bf___poll_chk:
 __bf_vprintf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1816]
+    ldr x17, [x16, #1776]
     cbz x17, 1f
     br x17
-1:  mov x0, #227
+1:  mov x0, #222
     bl __bf_resolve_and_call
     br x0
 .symver __bf_vprintf, vprintf@@LIBC
@@ -3228,10 +3158,10 @@ __bf_vprintf:
 __bf_usleep:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1824]
+    ldr x17, [x16, #1784]
     cbz x17, 1f
     br x17
-1:  mov x0, #228
+1:  mov x0, #223
     bl __bf_resolve_and_call
     br x0
 .symver __bf_usleep, usleep@@LIBC
@@ -3242,10 +3172,10 @@ __bf_usleep:
 __bf_pthread_kill:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1832]
+    ldr x17, [x16, #1792]
     cbz x17, 1f
     br x17
-1:  mov x0, #229
+1:  mov x0, #224
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_kill, pthread_kill@@LIBC
@@ -3256,10 +3186,10 @@ __bf_pthread_kill:
 __bf_pthread_detach:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1840]
+    ldr x17, [x16, #1800]
     cbz x17, 1f
     br x17
-1:  mov x0, #230
+1:  mov x0, #225
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_detach, pthread_detach@@LIBC
@@ -3270,10 +3200,10 @@ __bf_pthread_detach:
 __bf_exit:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1848]
+    ldr x17, [x16, #1808]
     cbz x17, 1f
     br x17
-1:  mov x0, #231
+1:  mov x0, #226
     bl __bf_resolve_and_call
     br x0
 .symver __bf_exit, exit@@LIBC
@@ -3284,10 +3214,10 @@ __bf_exit:
 __bf_ferror:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1856]
+    ldr x17, [x16, #1816]
     cbz x17, 1f
     br x17
-1:  mov x0, #232
+1:  mov x0, #227
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ferror, ferror@@LIBC
@@ -3298,10 +3228,10 @@ __bf_ferror:
 __bf_clearerr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1864]
+    ldr x17, [x16, #1824]
     cbz x17, 1f
     br x17
-1:  mov x0, #233
+1:  mov x0, #228
     bl __bf_resolve_and_call
     br x0
 .symver __bf_clearerr, clearerr@@LIBC
@@ -3312,10 +3242,10 @@ __bf_clearerr:
 __bf_wcslen:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1872]
+    ldr x17, [x16, #1832]
     cbz x17, 1f
     br x17
-1:  mov x0, #234
+1:  mov x0, #229
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wcslen, wcslen@@LIBC
@@ -3326,10 +3256,10 @@ __bf_wcslen:
 __bf_wmemcmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1880]
+    ldr x17, [x16, #1840]
     cbz x17, 1f
     br x17
-1:  mov x0, #235
+1:  mov x0, #230
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wmemcmp, wmemcmp@@LIBC
@@ -3340,10 +3270,10 @@ __bf_wmemcmp:
 __bf_exp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1888]
+    ldr x17, [x16, #1848]
     cbz x17, 1f
     br x17
-1:  mov x0, #236
+1:  mov x0, #231
     bl __bf_resolve_and_call
     br x0
 .symver __bf_exp, exp@@LIBC
@@ -3354,10 +3284,10 @@ __bf_exp:
 __bf_pow:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1896]
+    ldr x17, [x16, #1856]
     cbz x17, 1f
     br x17
-1:  mov x0, #237
+1:  mov x0, #232
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pow, pow@@LIBC
@@ -3368,10 +3298,10 @@ __bf_pow:
 __bf_fmod:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1904]
+    ldr x17, [x16, #1864]
     cbz x17, 1f
     br x17
-1:  mov x0, #238
+1:  mov x0, #233
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fmod, fmod@@LIBC
@@ -3382,10 +3312,10 @@ __bf_fmod:
 __bf_log:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1912]
+    ldr x17, [x16, #1872]
     cbz x17, 1f
     br x17
-1:  mov x0, #239
+1:  mov x0, #234
     bl __bf_resolve_and_call
     br x0
 .symver __bf_log, log@@LIBC
@@ -3396,10 +3326,10 @@ __bf_log:
 __bf_log2:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1920]
+    ldr x17, [x16, #1880]
     cbz x17, 1f
     br x17
-1:  mov x0, #240
+1:  mov x0, #235
     bl __bf_resolve_and_call
     br x0
 .symver __bf_log2, log2@@LIBC
@@ -3410,10 +3340,10 @@ __bf_log2:
 __bf_log10:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1928]
+    ldr x17, [x16, #1888]
     cbz x17, 1f
     br x17
-1:  mov x0, #241
+1:  mov x0, #236
     bl __bf_resolve_and_call
     br x0
 .symver __bf_log10, log10@@LIBC
@@ -3424,10 +3354,10 @@ __bf_log10:
 __bf_round:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1936]
+    ldr x17, [x16, #1896]
     cbz x17, 1f
     br x17
-1:  mov x0, #242
+1:  mov x0, #237
     bl __bf_resolve_and_call
     br x0
 .symver __bf_round, round@@LIBC
@@ -3438,10 +3368,10 @@ __bf_round:
 __bf_frexp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1944]
+    ldr x17, [x16, #1904]
     cbz x17, 1f
     br x17
-1:  mov x0, #243
+1:  mov x0, #238
     bl __bf_resolve_and_call
     br x0
 .symver __bf_frexp, frexp@@LIBC
@@ -3452,10 +3382,10 @@ __bf_frexp:
 __bf_sin:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1952]
+    ldr x17, [x16, #1912]
     cbz x17, 1f
     br x17
-1:  mov x0, #244
+1:  mov x0, #239
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sin, sin@@LIBC
@@ -3466,10 +3396,10 @@ __bf_sin:
 __bf_sinh:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1960]
+    ldr x17, [x16, #1920]
     cbz x17, 1f
     br x17
-1:  mov x0, #245
+1:  mov x0, #240
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sinh, sinh@@LIBC
@@ -3480,10 +3410,10 @@ __bf_sinh:
 __bf_cos:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1968]
+    ldr x17, [x16, #1928]
     cbz x17, 1f
     br x17
-1:  mov x0, #246
+1:  mov x0, #241
     bl __bf_resolve_and_call
     br x0
 .symver __bf_cos, cos@@LIBC
@@ -3494,10 +3424,10 @@ __bf_cos:
 __bf_cosh:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1976]
+    ldr x17, [x16, #1936]
     cbz x17, 1f
     br x17
-1:  mov x0, #247
+1:  mov x0, #242
     bl __bf_resolve_and_call
     br x0
 .symver __bf_cosh, cosh@@LIBC
@@ -3508,10 +3438,10 @@ __bf_cosh:
 __bf_tan:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1984]
+    ldr x17, [x16, #1944]
     cbz x17, 1f
     br x17
-1:  mov x0, #248
+1:  mov x0, #243
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tan, tan@@LIBC
@@ -3522,10 +3452,10 @@ __bf_tan:
 __bf_tanh:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #1992]
+    ldr x17, [x16, #1952]
     cbz x17, 1f
     br x17
-1:  mov x0, #249
+1:  mov x0, #244
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tanh, tanh@@LIBC
@@ -3536,10 +3466,10 @@ __bf_tanh:
 __bf_atol:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2000]
+    ldr x17, [x16, #1960]
     cbz x17, 1f
     br x17
-1:  mov x0, #250
+1:  mov x0, #245
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atol, atol@@LIBC
@@ -3550,10 +3480,10 @@ __bf_atol:
 __bf_atof:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2008]
+    ldr x17, [x16, #1968]
     cbz x17, 1f
     br x17
-1:  mov x0, #251
+1:  mov x0, #246
     bl __bf_resolve_and_call
     br x0
 .symver __bf_atof, atof@@LIBC
@@ -3564,10 +3494,10 @@ __bf_atof:
 __bf_strspn:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2016]
+    ldr x17, [x16, #1976]
     cbz x17, 1f
     br x17
-1:  mov x0, #252
+1:  mov x0, #247
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strspn, strspn@@LIBC
@@ -3578,10 +3508,10 @@ __bf_strspn:
 __bf_strtof:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2024]
+    ldr x17, [x16, #1984]
     cbz x17, 1f
     br x17
-1:  mov x0, #253
+1:  mov x0, #248
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtof, strtof@@LIBC
@@ -3592,10 +3522,10 @@ __bf_strtof:
 __bf_ioctl:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2032]
+    ldr x17, [x16, #1992]
     cbz x17, 1f
     br x17
-1:  mov x0, #254
+1:  mov x0, #249
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ioctl, ioctl@@LIBC
@@ -3606,10 +3536,10 @@ __bf_ioctl:
 __bf_getpeername:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2040]
+    ldr x17, [x16, #2000]
     cbz x17, 1f
     br x17
-1:  mov x0, #255
+1:  mov x0, #250
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getpeername, getpeername@@LIBC
@@ -3620,10 +3550,10 @@ __bf_getpeername:
 __bf_listen:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2048]
+    ldr x17, [x16, #2008]
     cbz x17, 1f
     br x17
-1:  mov x0, #256
+1:  mov x0, #251
     bl __bf_resolve_and_call
     br x0
 .symver __bf_listen, listen@@LIBC
@@ -3634,10 +3564,10 @@ __bf_listen:
 __bf_accept:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2056]
+    ldr x17, [x16, #2016]
     cbz x17, 1f
     br x17
-1:  mov x0, #257
+1:  mov x0, #252
     bl __bf_resolve_and_call
     br x0
 .symver __bf_accept, accept@@LIBC
@@ -3648,10 +3578,10 @@ __bf_accept:
 __bf_epoll_create:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2064]
+    ldr x17, [x16, #2024]
     cbz x17, 1f
     br x17
-1:  mov x0, #258
+1:  mov x0, #253
     bl __bf_resolve_and_call
     br x0
 .symver __bf_epoll_create, epoll_create@@LIBC
@@ -3662,10 +3592,10 @@ __bf_epoll_create:
 __bf___FD_CLR_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2072]
+    ldr x17, [x16, #2032]
     cbz x17, 1f
     br x17
-1:  mov x0, #259
+1:  mov x0, #254
     bl __bf_resolve_and_call
     br x0
 .symver __bf___FD_CLR_chk, __FD_CLR_chk@@LIBC
@@ -3676,10 +3606,10 @@ __bf___FD_CLR_chk:
 __bf_expm1:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2080]
+    ldr x17, [x16, #2040]
     cbz x17, 1f
     br x17
-1:  mov x0, #260
+1:  mov x0, #255
     bl __bf_resolve_and_call
     br x0
 .symver __bf_expm1, expm1@@LIBC
@@ -3690,10 +3620,10 @@ __bf_expm1:
 __bf_if_indextoname:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2088]
+    ldr x17, [x16, #2048]
     cbz x17, 1f
     br x17
-1:  mov x0, #261
+1:  mov x0, #256
     bl __bf_resolve_and_call
     br x0
 .symver __bf_if_indextoname, if_indextoname@@LIBC
@@ -3704,10 +3634,10 @@ __bf_if_indextoname:
 __bf_sigaddset:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2096]
+    ldr x17, [x16, #2056]
     cbz x17, 1f
     br x17
-1:  mov x0, #262
+1:  mov x0, #257
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sigaddset, sigaddset@@LIBC
@@ -3718,10 +3648,10 @@ __bf_sigaddset:
 __bf_pthread_sigmask:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2104]
+    ldr x17, [x16, #2064]
     cbz x17, 1f
     br x17
-1:  mov x0, #263
+1:  mov x0, #258
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_sigmask, pthread_sigmask@@LIBC
@@ -3732,10 +3662,10 @@ __bf_pthread_sigmask:
 __bf_fgets:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2112]
+    ldr x17, [x16, #2072]
     cbz x17, 1f
     br x17
-1:  mov x0, #264
+1:  mov x0, #259
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fgets, fgets@@LIBC
@@ -3746,10 +3676,10 @@ __bf_fgets:
 __bf_setjmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2120]
+    ldr x17, [x16, #2080]
     cbz x17, 1f
     br x17
-1:  mov x0, #265
+1:  mov x0, #260
     bl __bf_resolve_and_call
     br x0
 .symver __bf_setjmp, setjmp@@LIBC
@@ -3760,10 +3690,10 @@ __bf_setjmp:
 __bf_longjmp:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2128]
+    ldr x17, [x16, #2088]
     cbz x17, 1f
     br x17
-1:  mov x0, #266
+1:  mov x0, #261
     bl __bf_resolve_and_call
     br x0
 .symver __bf_longjmp, longjmp@@LIBC
@@ -3774,10 +3704,10 @@ __bf_longjmp:
 __bf_pthread_condattr_init:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2136]
+    ldr x17, [x16, #2096]
     cbz x17, 1f
     br x17
-1:  mov x0, #267
+1:  mov x0, #262
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_condattr_init, pthread_condattr_init@@LIBC
@@ -3788,10 +3718,10 @@ __bf_pthread_condattr_init:
 __bf_pthread_condattr_setclock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2144]
+    ldr x17, [x16, #2104]
     cbz x17, 1f
     br x17
-1:  mov x0, #268
+1:  mov x0, #263
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_condattr_setclock, pthread_condattr_setclock@@LIBC
@@ -3802,10 +3732,10 @@ __bf_pthread_condattr_setclock:
 __bf_pthread_condattr_destroy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2152]
+    ldr x17, [x16, #2112]
     cbz x17, 1f
     br x17
-1:  mov x0, #269
+1:  mov x0, #264
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_condattr_destroy, pthread_condattr_destroy@@LIBC
@@ -3816,10 +3746,10 @@ __bf_pthread_condattr_destroy:
 __bf_sched_get_priority_min:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2160]
+    ldr x17, [x16, #2120]
     cbz x17, 1f
     br x17
-1:  mov x0, #270
+1:  mov x0, #265
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sched_get_priority_min, sched_get_priority_min@@LIBC
@@ -3830,10 +3760,10 @@ __bf_sched_get_priority_min:
 __bf_pthread_setschedparam:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2168]
+    ldr x17, [x16, #2128]
     cbz x17, 1f
     br x17
-1:  mov x0, #271
+1:  mov x0, #266
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_setschedparam, pthread_setschedparam@@LIBC
@@ -3844,10 +3774,10 @@ __bf_pthread_setschedparam:
 __bf_getgid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2176]
+    ldr x17, [x16, #2136]
     cbz x17, 1f
     br x17
-1:  mov x0, #272
+1:  mov x0, #267
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getgid, getgid@@LIBC
@@ -3858,10 +3788,10 @@ __bf_getgid:
 __bf_getegid:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2184]
+    ldr x17, [x16, #2144]
     cbz x17, 1f
     br x17
-1:  mov x0, #273
+1:  mov x0, #268
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getegid, getegid@@LIBC
@@ -3872,10 +3802,10 @@ __bf_getegid:
 __bf_random:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2192]
+    ldr x17, [x16, #2152]
     cbz x17, 1f
     br x17
-1:  mov x0, #274
+1:  mov x0, #269
     bl __bf_resolve_and_call
     br x0
 .symver __bf_random, random@@LIBC
@@ -3886,10 +3816,10 @@ __bf_random:
 __bf_sigfillset:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2200]
+    ldr x17, [x16, #2160]
     cbz x17, 1f
     br x17
-1:  mov x0, #275
+1:  mov x0, #270
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sigfillset, sigfillset@@LIBC
@@ -3900,10 +3830,10 @@ __bf_sigfillset:
 __bf_fdopen:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2208]
+    ldr x17, [x16, #2168]
     cbz x17, 1f
     br x17
-1:  mov x0, #276
+1:  mov x0, #271
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fdopen, fdopen@@LIBC
@@ -3914,10 +3844,10 @@ __bf_fdopen:
 __bf_timerfd_create:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2216]
+    ldr x17, [x16, #2176]
     cbz x17, 1f
     br x17
-1:  mov x0, #277
+1:  mov x0, #272
     bl __bf_resolve_and_call
     br x0
 .symver __bf_timerfd_create, timerfd_create@@LIBC
@@ -3928,10 +3858,10 @@ __bf_timerfd_create:
 __bf_timerfd_settime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2224]
+    ldr x17, [x16, #2184]
     cbz x17, 1f
     br x17
-1:  mov x0, #278
+1:  mov x0, #273
     bl __bf_resolve_and_call
     br x0
 .symver __bf_timerfd_settime, timerfd_settime@@LIBC
@@ -3942,10 +3872,10 @@ __bf_timerfd_settime:
 __bf_fputc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2232]
+    ldr x17, [x16, #2192]
     cbz x17, 1f
     br x17
-1:  mov x0, #279
+1:  mov x0, #274
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fputc, fputc@@LIBC
@@ -3956,10 +3886,10 @@ __bf_fputc:
 __bf_bsearch:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2240]
+    ldr x17, [x16, #2200]
     cbz x17, 1f
     br x17
-1:  mov x0, #280
+1:  mov x0, #275
     bl __bf_resolve_and_call
     br x0
 .symver __bf_bsearch, bsearch@@LIBC
@@ -3970,10 +3900,10 @@ __bf_bsearch:
 __bf_vfprintf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2248]
+    ldr x17, [x16, #2208]
     cbz x17, 1f
     br x17
-1:  mov x0, #281
+1:  mov x0, #276
     bl __bf_resolve_and_call
     br x0
 .symver __bf_vfprintf, vfprintf@@LIBC
@@ -3984,10 +3914,10 @@ __bf_vfprintf:
 __bf_pthread_exit:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2256]
+    ldr x17, [x16, #2216]
     cbz x17, 1f
     br x17
-1:  mov x0, #282
+1:  mov x0, #277
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_exit, pthread_exit@@LIBC
@@ -3998,10 +3928,10 @@ __bf_pthread_exit:
 __bf_finitef:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2264]
+    ldr x17, [x16, #2224]
     cbz x17, 1f
     br x17
-1:  mov x0, #283
+1:  mov x0, #278
     bl __bf_resolve_and_call
     br x0
 .symver __bf_finitef, finitef@@LIBC
@@ -4012,10 +3942,10 @@ __bf_finitef:
 __bf_cbrt:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2272]
+    ldr x17, [x16, #2232]
     cbz x17, 1f
     br x17
-1:  mov x0, #284
+1:  mov x0, #279
     bl __bf_resolve_and_call
     br x0
 .symver __bf_cbrt, cbrt@@LIBC
@@ -4026,10 +3956,10 @@ __bf_cbrt:
 __bf_remquof:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2280]
+    ldr x17, [x16, #2240]
     cbz x17, 1f
     br x17
-1:  mov x0, #285
+1:  mov x0, #280
     bl __bf_resolve_and_call
     br x0
 .symver __bf_remquof, remquof@@LIBC
@@ -4040,10 +3970,10 @@ __bf_remquof:
 __bf_strcspn:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2288]
+    ldr x17, [x16, #2248]
     cbz x17, 1f
     br x17
-1:  mov x0, #286
+1:  mov x0, #281
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strcspn, strcspn@@LIBC
@@ -4054,10 +3984,10 @@ __bf_strcspn:
 __bf_gmtime_r:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2296]
+    ldr x17, [x16, #2256]
     cbz x17, 1f
     br x17
-1:  mov x0, #287
+1:  mov x0, #282
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gmtime_r, gmtime_r@@LIBC
@@ -4068,10 +3998,10 @@ __bf_gmtime_r:
 __bf_difftime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2304]
+    ldr x17, [x16, #2264]
     cbz x17, 1f
     br x17
-1:  mov x0, #288
+1:  mov x0, #283
     bl __bf_resolve_and_call
     br x0
 .symver __bf_difftime, difftime@@LIBC
@@ -4082,10 +4012,10 @@ __bf_difftime:
 __bf_strpbrk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2312]
+    ldr x17, [x16, #2272]
     cbz x17, 1f
     br x17
-1:  mov x0, #289
+1:  mov x0, #284
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strpbrk, strpbrk@@LIBC
@@ -4096,10 +4026,10 @@ __bf_strpbrk:
 __bf_shutdown:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2320]
+    ldr x17, [x16, #2280]
     cbz x17, 1f
     br x17
-1:  mov x0, #290
+1:  mov x0, #285
     bl __bf_resolve_and_call
     br x0
 .symver __bf_shutdown, shutdown@@LIBC
@@ -4110,10 +4040,10 @@ __bf_shutdown:
 __bf_memrchr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2328]
+    ldr x17, [x16, #2288]
     cbz x17, 1f
     br x17
-1:  mov x0, #291
+1:  mov x0, #286
     bl __bf_resolve_and_call
     br x0
 .symver __bf_memrchr, memrchr@@LIBC
@@ -4124,10 +4054,10 @@ __bf_memrchr:
 __bf_accept4:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2336]
+    ldr x17, [x16, #2296]
     cbz x17, 1f
     br x17
-1:  mov x0, #292
+1:  mov x0, #287
     bl __bf_resolve_and_call
     br x0
 .symver __bf_accept4, accept4@@LIBC
@@ -4138,10 +4068,10 @@ __bf_accept4:
 __bf_if_nametoindex:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2344]
+    ldr x17, [x16, #2304]
     cbz x17, 1f
     br x17
-1:  mov x0, #293
+1:  mov x0, #288
     bl __bf_resolve_and_call
     br x0
 .symver __bf_if_nametoindex, if_nametoindex@@LIBC
@@ -4152,10 +4082,10 @@ __bf_if_nametoindex:
 __bf_setvbuf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2352]
+    ldr x17, [x16, #2312]
     cbz x17, 1f
     br x17
-1:  mov x0, #294
+1:  mov x0, #289
     bl __bf_resolve_and_call
     br x0
 .symver __bf_setvbuf, setvbuf@@LIBC
@@ -4166,10 +4096,10 @@ __bf_setvbuf:
 __bf_realpath:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2360]
+    ldr x17, [x16, #2320]
     cbz x17, 1f
     br x17
-1:  mov x0, #295
+1:  mov x0, #290
     bl __bf_resolve_and_call
     br x0
 .symver __bf_realpath, realpath@@LIBC
@@ -4180,10 +4110,10 @@ __bf_realpath:
 __bf_recvmmsg:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2368]
+    ldr x17, [x16, #2328]
     cbz x17, 1f
     br x17
-1:  mov x0, #296
+1:  mov x0, #291
     bl __bf_resolve_and_call
     br x0
 .symver __bf_recvmmsg, recvmmsg@@LIBC
@@ -4194,10 +4124,10 @@ __bf_recvmmsg:
 __bf_getcwd:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2376]
+    ldr x17, [x16, #2336]
     cbz x17, 1f
     br x17
-1:  mov x0, #297
+1:  mov x0, #292
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getcwd, getcwd@@LIBC
@@ -4208,10 +4138,10 @@ __bf_getcwd:
 __bf_pread:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2384]
+    ldr x17, [x16, #2344]
     cbz x17, 1f
     br x17
-1:  mov x0, #298
+1:  mov x0, #293
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pread, pread@@LIBC
@@ -4222,10 +4152,10 @@ __bf_pread:
 __bf_pwrite:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2392]
+    ldr x17, [x16, #2352]
     cbz x17, 1f
     br x17
-1:  mov x0, #299
+1:  mov x0, #294
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pwrite, pwrite@@LIBC
@@ -4236,10 +4166,10 @@ __bf_pwrite:
 __bf_fchmod:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2400]
+    ldr x17, [x16, #2360]
     cbz x17, 1f
     br x17
-1:  mov x0, #300
+1:  mov x0, #295
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fchmod, fchmod@@LIBC
@@ -4250,10 +4180,10 @@ __bf_fchmod:
 __bf_fchown:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2408]
+    ldr x17, [x16, #2368]
     cbz x17, 1f
     br x17
-1:  mov x0, #301
+1:  mov x0, #296
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fchown, fchown@@LIBC
@@ -4264,10 +4194,10 @@ __bf_fchown:
 __bf_mremap:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2416]
+    ldr x17, [x16, #2376]
     cbz x17, 1f
     br x17
-1:  mov x0, #302
+1:  mov x0, #297
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mremap, mremap@@LIBC
@@ -4278,10 +4208,10 @@ __bf_mremap:
 __bf_fsync:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2424]
+    ldr x17, [x16, #2384]
     cbz x17, 1f
     br x17
-1:  mov x0, #303
+1:  mov x0, #298
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fsync, fsync@@LIBC
@@ -4292,10 +4222,10 @@ __bf_fsync:
 __bf_utimes:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2432]
+    ldr x17, [x16, #2392]
     cbz x17, 1f
     br x17
-1:  mov x0, #304
+1:  mov x0, #299
     bl __bf_resolve_and_call
     br x0
 .symver __bf_utimes, utimes@@LIBC
@@ -4306,10 +4236,10 @@ __bf_utimes:
 __bf_msync:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2440]
+    ldr x17, [x16, #2400]
     cbz x17, 1f
     br x17
-1:  mov x0, #305
+1:  mov x0, #300
     bl __bf_resolve_and_call
     br x0
 .symver __bf_msync, msync@@LIBC
@@ -4320,10 +4250,10 @@ __bf_msync:
 __bf_statvfs:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2448]
+    ldr x17, [x16, #2408]
     cbz x17, 1f
     br x17
-1:  mov x0, #306
+1:  mov x0, #301
     bl __bf_resolve_and_call
     br x0
 .symver __bf_statvfs, statvfs@@LIBC
@@ -4334,10 +4264,10 @@ __bf_statvfs:
 __bf_mallinfo:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2456]
+    ldr x17, [x16, #2416]
     cbz x17, 1f
     br x17
-1:  mov x0, #307
+1:  mov x0, #302
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mallinfo, mallinfo@@LIBC
@@ -4348,10 +4278,10 @@ __bf_mallinfo:
 __bf___readlink_chk:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2464]
+    ldr x17, [x16, #2424]
     cbz x17, 1f
     br x17
-1:  mov x0, #308
+1:  mov x0, #303
     bl __bf_resolve_and_call
     br x0
 .symver __bf___readlink_chk, __readlink_chk@@LIBC
@@ -4362,10 +4292,10 @@ __bf___readlink_chk:
 __bf___gnu_strerror_r:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2472]
+    ldr x17, [x16, #2432]
     cbz x17, 1f
     br x17
-1:  mov x0, #309
+1:  mov x0, #304
     bl __bf_resolve_and_call
     br x0
 .symver __bf___gnu_strerror_r, __gnu_strerror_r@@LIBC
@@ -4376,10 +4306,10 @@ __bf___gnu_strerror_r:
 __bf_pthread_getschedparam:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2480]
+    ldr x17, [x16, #2440]
     cbz x17, 1f
     br x17
-1:  mov x0, #310
+1:  mov x0, #305
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_getschedparam, pthread_getschedparam@@LIBC
@@ -4390,10 +4320,10 @@ __bf_pthread_getschedparam:
 __bf_sinf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2488]
+    ldr x17, [x16, #2448]
     cbz x17, 1f
     br x17
-1:  mov x0, #311
+1:  mov x0, #306
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sinf, sinf@@LIBC
@@ -4404,10 +4334,10 @@ __bf_sinf:
 __bf_sincosf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2496]
+    ldr x17, [x16, #2456]
     cbz x17, 1f
     br x17
-1:  mov x0, #312
+1:  mov x0, #307
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sincosf, sincosf@@LIBC
@@ -4418,10 +4348,10 @@ __bf_sincosf:
 __bf_exp2:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2504]
+    ldr x17, [x16, #2464]
     cbz x17, 1f
     br x17
-1:  mov x0, #313
+1:  mov x0, #308
     bl __bf_resolve_and_call
     br x0
 .symver __bf_exp2, exp2@@LIBC
@@ -4432,10 +4362,10 @@ __bf_exp2:
 __bf_sincos:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2512]
+    ldr x17, [x16, #2472]
     cbz x17, 1f
     br x17
-1:  mov x0, #314
+1:  mov x0, #309
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sincos, sincos@@LIBC
@@ -4446,10 +4376,10 @@ __bf_sincos:
 __bf_fmal:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2520]
+    ldr x17, [x16, #2480]
     cbz x17, 1f
     br x17
-1:  mov x0, #315
+1:  mov x0, #310
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fmal, fmal@@LIBC
@@ -4460,10 +4390,10 @@ __bf_fmal:
 __bf_exp2f:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2528]
+    ldr x17, [x16, #2488]
     cbz x17, 1f
     br x17
-1:  mov x0, #316
+1:  mov x0, #311
     bl __bf_resolve_and_call
     br x0
 .symver __bf_exp2f, exp2f@@LIBC
@@ -4474,10 +4404,10 @@ __bf_exp2f:
 __bf_log10f:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2536]
+    ldr x17, [x16, #2496]
     cbz x17, 1f
     br x17
-1:  mov x0, #317
+1:  mov x0, #312
     bl __bf_resolve_and_call
     br x0
 .symver __bf_log10f, log10f@@LIBC
@@ -4488,10 +4418,10 @@ __bf_log10f:
 __bf_logf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2544]
+    ldr x17, [x16, #2504]
     cbz x17, 1f
     br x17
-1:  mov x0, #318
+1:  mov x0, #313
     bl __bf_resolve_and_call
     br x0
 .symver __bf_logf, logf@@LIBC
@@ -4502,10 +4432,10 @@ __bf_logf:
 __bf_powf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2552]
+    ldr x17, [x16, #2512]
     cbz x17, 1f
     br x17
-1:  mov x0, #319
+1:  mov x0, #314
     bl __bf_resolve_and_call
     br x0
 .symver __bf_powf, powf@@LIBC
@@ -4516,10 +4446,10 @@ __bf_powf:
 __bf_fmodf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2560]
+    ldr x17, [x16, #2520]
     cbz x17, 1f
     br x17
-1:  mov x0, #320
+1:  mov x0, #315
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fmodf, fmodf@@LIBC
@@ -4530,10 +4460,10 @@ __bf_fmodf:
 __bf_log2f:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2568]
+    ldr x17, [x16, #2528]
     cbz x17, 1f
     br x17
-1:  mov x0, #321
+1:  mov x0, #316
     bl __bf_resolve_and_call
     br x0
 .symver __bf_log2f, log2f@@LIBC
@@ -4544,10 +4474,10 @@ __bf_log2f:
 __bf_expf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2576]
+    ldr x17, [x16, #2536]
     cbz x17, 1f
     br x17
-1:  mov x0, #322
+1:  mov x0, #317
     bl __bf_resolve_and_call
     br x0
 .symver __bf_expf, expf@@LIBC
@@ -4558,10 +4488,10 @@ __bf_expf:
 __bf_powl:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2584]
+    ldr x17, [x16, #2544]
     cbz x17, 1f
     br x17
-1:  mov x0, #323
+1:  mov x0, #318
     bl __bf_resolve_and_call
     br x0
 .symver __bf_powl, powl@@LIBC
@@ -4572,10 +4502,10 @@ __bf_powl:
 __bf_cosf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2592]
+    ldr x17, [x16, #2552]
     cbz x17, 1f
     br x17
-1:  mov x0, #324
+1:  mov x0, #319
     bl __bf_resolve_and_call
     br x0
 .symver __bf_cosf, cosf@@LIBC
@@ -4586,10 +4516,10 @@ __bf_cosf:
 __bf_pthread_key_delete:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2600]
+    ldr x17, [x16, #2560]
     cbz x17, 1f
     br x17
-1:  mov x0, #325
+1:  mov x0, #320
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_key_delete, pthread_key_delete@@LIBC
@@ -4600,10 +4530,10 @@ __bf_pthread_key_delete:
 __bf_sysinfo:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2608]
+    ldr x17, [x16, #2568]
     cbz x17, 1f
     br x17
-1:  mov x0, #326
+1:  mov x0, #321
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sysinfo, sysinfo@@LIBC
@@ -4614,10 +4544,10 @@ __bf_sysinfo:
 __bf_madvise:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2616]
+    ldr x17, [x16, #2576]
     cbz x17, 1f
     br x17
-1:  mov x0, #327
+1:  mov x0, #322
     bl __bf_resolve_and_call
     br x0
 .symver __bf_madvise, madvise@@LIBC
@@ -4628,10 +4558,10 @@ __bf_madvise:
 __bf_pthread_setname_np:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2624]
+    ldr x17, [x16, #2584]
     cbz x17, 1f
     br x17
-1:  mov x0, #328
+1:  mov x0, #323
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_setname_np, pthread_setname_np@@LIBC
@@ -4642,10 +4572,10 @@ __bf_pthread_setname_np:
 __bf_pthread_getattr_np:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2632]
+    ldr x17, [x16, #2592]
     cbz x17, 1f
     br x17
-1:  mov x0, #329
+1:  mov x0, #324
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_getattr_np, pthread_getattr_np@@LIBC
@@ -4656,10 +4586,10 @@ __bf_pthread_getattr_np:
 __bf_pthread_attr_getstack:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2640]
+    ldr x17, [x16, #2600]
     cbz x17, 1f
     br x17
-1:  mov x0, #330
+1:  mov x0, #325
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_attr_getstack, pthread_attr_getstack@@LIBC
@@ -4670,10 +4600,10 @@ __bf_pthread_attr_getstack:
 __bf_mlock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2648]
+    ldr x17, [x16, #2608]
     cbz x17, 1f
     br x17
-1:  mov x0, #331
+1:  mov x0, #326
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mlock, mlock@@LIBC
@@ -4684,10 +4614,10 @@ __bf_mlock:
 __bf_dl_iterate_phdr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2656]
+    ldr x17, [x16, #2616]
     cbz x17, 1f
     br x17
-1:  mov x0, #332
+1:  mov x0, #327
     bl __bf_resolve_and_call
     br x0
 .symver __bf_dl_iterate_phdr, dl_iterate_phdr@@LIBC
@@ -4698,10 +4628,10 @@ __bf_dl_iterate_phdr:
 __bf_isspace:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2664]
+    ldr x17, [x16, #2624]
     cbz x17, 1f
     br x17
-1:  mov x0, #333
+1:  mov x0, #328
     bl __bf_resolve_and_call
     br x0
 .symver __bf_isspace, isspace@@LIBC
@@ -4712,10 +4642,10 @@ __bf_isspace:
 __bf_gethostbyname:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2672]
+    ldr x17, [x16, #2632]
     cbz x17, 1f
     br x17
-1:  mov x0, #334
+1:  mov x0, #329
     bl __bf_resolve_and_call
     br x0
 .symver __bf_gethostbyname, gethostbyname@@LIBC
@@ -4726,10 +4656,10 @@ __bf_gethostbyname:
 __bf_strcat:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2680]
+    ldr x17, [x16, #2640]
     cbz x17, 1f
     br x17
-1:  mov x0, #335
+1:  mov x0, #330
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strcat, strcat@@LIBC
@@ -4740,10 +4670,10 @@ __bf_strcat:
 __bf_sendmmsg:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2688]
+    ldr x17, [x16, #2648]
     cbz x17, 1f
     br x17
-1:  mov x0, #336
+1:  mov x0, #331
     bl __bf_resolve_and_call
     br x0
 .symver __bf_sendmmsg, sendmmsg@@LIBC
@@ -4754,10 +4684,10 @@ __bf_sendmmsg:
 __bf_tolower:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2696]
+    ldr x17, [x16, #2656]
     cbz x17, 1f
     br x17
-1:  mov x0, #337
+1:  mov x0, #332
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tolower, tolower@@LIBC
@@ -4768,10 +4698,10 @@ __bf_tolower:
 __bf_pthread_rwlock_destroy:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2704]
+    ldr x17, [x16, #2664]
     cbz x17, 1f
     br x17
-1:  mov x0, #338
+1:  mov x0, #333
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_rwlock_destroy, pthread_rwlock_destroy@@LIBC
@@ -4782,10 +4712,10 @@ __bf_pthread_rwlock_destroy:
 __bf_pthread_rwlock_init:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2712]
+    ldr x17, [x16, #2672]
     cbz x17, 1f
     br x17
-1:  mov x0, #339
+1:  mov x0, #334
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_rwlock_init, pthread_rwlock_init@@LIBC
@@ -4796,10 +4726,10 @@ __bf_pthread_rwlock_init:
 __bf_pthread_rwlock_rdlock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2720]
+    ldr x17, [x16, #2680]
     cbz x17, 1f
     br x17
-1:  mov x0, #340
+1:  mov x0, #335
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_rwlock_rdlock, pthread_rwlock_rdlock@@LIBC
@@ -4810,10 +4740,10 @@ __bf_pthread_rwlock_rdlock:
 __bf_pthread_rwlock_unlock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2728]
+    ldr x17, [x16, #2688]
     cbz x17, 1f
     br x17
-1:  mov x0, #341
+1:  mov x0, #336
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_rwlock_unlock, pthread_rwlock_unlock@@LIBC
@@ -4824,10 +4754,10 @@ __bf_pthread_rwlock_unlock:
 __bf_pthread_rwlock_wrlock:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2736]
+    ldr x17, [x16, #2696]
     cbz x17, 1f
     br x17
-1:  mov x0, #342
+1:  mov x0, #337
     bl __bf_resolve_and_call
     br x0
 .symver __bf_pthread_rwlock_wrlock, pthread_rwlock_wrlock@@LIBC
@@ -4838,10 +4768,10 @@ __bf_pthread_rwlock_wrlock:
 __bf_signal:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2744]
+    ldr x17, [x16, #2704]
     cbz x17, 1f
     br x17
-1:  mov x0, #343
+1:  mov x0, #338
     bl __bf_resolve_and_call
     br x0
 .symver __bf_signal, signal@@LIBC
@@ -4852,10 +4782,10 @@ __bf_signal:
 __bf_tcgetattr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2752]
+    ldr x17, [x16, #2712]
     cbz x17, 1f
     br x17
-1:  mov x0, #344
+1:  mov x0, #339
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tcgetattr, tcgetattr@@LIBC
@@ -4866,10 +4796,10 @@ __bf_tcgetattr:
 __bf_tcsetattr:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2760]
+    ldr x17, [x16, #2720]
     cbz x17, 1f
     br x17
-1:  mov x0, #345
+1:  mov x0, #340
     bl __bf_resolve_and_call
     br x0
 .symver __bf_tcsetattr, tcsetattr@@LIBC
@@ -4880,10 +4810,10 @@ __bf_tcsetattr:
 __bf_utime:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2768]
+    ldr x17, [x16, #2728]
     cbz x17, 1f
     br x17
-1:  mov x0, #346
+1:  mov x0, #341
     bl __bf_resolve_and_call
     br x0
 .symver __bf_utime, utime@@LIBC
@@ -4894,10 +4824,10 @@ __bf_utime:
 __bf_vasprintf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2776]
+    ldr x17, [x16, #2736]
     cbz x17, 1f
     br x17
-1:  mov x0, #347
+1:  mov x0, #342
     bl __bf_resolve_and_call
     br x0
 .symver __bf_vasprintf, vasprintf@@LIBC
@@ -4908,10 +4838,10 @@ __bf_vasprintf:
 __bf_openlog:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2784]
+    ldr x17, [x16, #2744]
     cbz x17, 1f
     br x17
-1:  mov x0, #348
+1:  mov x0, #343
     bl __bf_resolve_and_call
     br x0
 .symver __bf_openlog, openlog@@LIBC
@@ -4922,10 +4852,10 @@ __bf_openlog:
 __bf_syslog:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2792]
+    ldr x17, [x16, #2752]
     cbz x17, 1f
     br x17
-1:  mov x0, #349
+1:  mov x0, #344
     bl __bf_resolve_and_call
     br x0
 .symver __bf_syslog, syslog@@LIBC
@@ -4936,10 +4866,10 @@ __bf_syslog:
 __bf_closelog:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2800]
+    ldr x17, [x16, #2760]
     cbz x17, 1f
     br x17
-1:  mov x0, #350
+1:  mov x0, #345
     bl __bf_resolve_and_call
     br x0
 .symver __bf_closelog, closelog@@LIBC
@@ -4950,10 +4880,10 @@ __bf_closelog:
 __bf_ungetc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2808]
+    ldr x17, [x16, #2768]
     cbz x17, 1f
     br x17
-1:  mov x0, #351
+1:  mov x0, #346
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ungetc, ungetc@@LIBC
@@ -4964,10 +4894,10 @@ __bf_ungetc:
 __bf_getc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2816]
+    ldr x17, [x16, #2776]
     cbz x17, 1f
     br x17
-1:  mov x0, #352
+1:  mov x0, #347
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getc, getc@@LIBC
@@ -4978,10 +4908,10 @@ __bf_getc:
 __bf_ungetwc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2824]
+    ldr x17, [x16, #2784]
     cbz x17, 1f
     br x17
-1:  mov x0, #353
+1:  mov x0, #348
     bl __bf_resolve_and_call
     br x0
 .symver __bf_ungetwc, ungetwc@@LIBC
@@ -4992,10 +4922,10 @@ __bf_ungetwc:
 __bf_getwc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2832]
+    ldr x17, [x16, #2792]
     cbz x17, 1f
     br x17
-1:  mov x0, #354
+1:  mov x0, #349
     bl __bf_resolve_and_call
     br x0
 .symver __bf_getwc, getwc@@LIBC
@@ -5006,10 +4936,10 @@ __bf_getwc:
 __bf_fputwc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2840]
+    ldr x17, [x16, #2800]
     cbz x17, 1f
     br x17
-1:  mov x0, #355
+1:  mov x0, #350
     bl __bf_resolve_and_call
     br x0
 .symver __bf_fputwc, fputwc@@LIBC
@@ -5020,10 +4950,10 @@ __bf_fputwc:
 __bf_newlocale:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2848]
+    ldr x17, [x16, #2808]
     cbz x17, 1f
     br x17
-1:  mov x0, #356
+1:  mov x0, #351
     bl __bf_resolve_and_call
     br x0
 .symver __bf_newlocale, newlocale@@LIBC
@@ -5034,10 +4964,10 @@ __bf_newlocale:
 __bf_uselocale:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2856]
+    ldr x17, [x16, #2816]
     cbz x17, 1f
     br x17
-1:  mov x0, #357
+1:  mov x0, #352
     bl __bf_resolve_and_call
     br x0
 .symver __bf_uselocale, uselocale@@LIBC
@@ -5048,10 +4978,10 @@ __bf_uselocale:
 __bf_vsscanf:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2864]
+    ldr x17, [x16, #2824]
     cbz x17, 1f
     br x17
-1:  mov x0, #358
+1:  mov x0, #353
     bl __bf_resolve_and_call
     br x0
 .symver __bf_vsscanf, vsscanf@@LIBC
@@ -5062,10 +4992,10 @@ __bf_vsscanf:
 __bf_strftime_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2872]
+    ldr x17, [x16, #2832]
     cbz x17, 1f
     br x17
-1:  mov x0, #359
+1:  mov x0, #354
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strftime_l, strftime_l@@LIBC
@@ -5076,10 +5006,10 @@ __bf_strftime_l:
 __bf_mbsrtowcs:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2880]
+    ldr x17, [x16, #2840]
     cbz x17, 1f
     br x17
-1:  mov x0, #360
+1:  mov x0, #355
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mbsrtowcs, mbsrtowcs@@LIBC
@@ -5090,10 +5020,10 @@ __bf_mbsrtowcs:
 __bf_freelocale:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2888]
+    ldr x17, [x16, #2848]
     cbz x17, 1f
     br x17
-1:  mov x0, #361
+1:  mov x0, #356
     bl __bf_resolve_and_call
     br x0
 .symver __bf_freelocale, freelocale@@LIBC
@@ -5104,10 +5034,10 @@ __bf_freelocale:
 __bf_strcoll_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2896]
+    ldr x17, [x16, #2856]
     cbz x17, 1f
     br x17
-1:  mov x0, #362
+1:  mov x0, #357
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strcoll_l, strcoll_l@@LIBC
@@ -5118,10 +5048,10 @@ __bf_strcoll_l:
 __bf_strxfrm_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2904]
+    ldr x17, [x16, #2864]
     cbz x17, 1f
     br x17
-1:  mov x0, #363
+1:  mov x0, #358
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strxfrm_l, strxfrm_l@@LIBC
@@ -5132,10 +5062,10 @@ __bf_strxfrm_l:
 __bf_wcscoll_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2912]
+    ldr x17, [x16, #2872]
     cbz x17, 1f
     br x17
-1:  mov x0, #364
+1:  mov x0, #359
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wcscoll_l, wcscoll_l@@LIBC
@@ -5146,10 +5076,10 @@ __bf_wcscoll_l:
 __bf_wcsxfrm_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2920]
+    ldr x17, [x16, #2880]
     cbz x17, 1f
     br x17
-1:  mov x0, #365
+1:  mov x0, #360
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wcsxfrm_l, wcsxfrm_l@@LIBC
@@ -5160,10 +5090,10 @@ __bf_wcsxfrm_l:
 __bf_iswlower_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2928]
+    ldr x17, [x16, #2888]
     cbz x17, 1f
     br x17
-1:  mov x0, #366
+1:  mov x0, #361
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswlower_l, iswlower_l@@LIBC
@@ -5174,10 +5104,10 @@ __bf_iswlower_l:
 __bf_iswspace_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2936]
+    ldr x17, [x16, #2896]
     cbz x17, 1f
     br x17
-1:  mov x0, #367
+1:  mov x0, #362
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswspace_l, iswspace_l@@LIBC
@@ -5188,10 +5118,10 @@ __bf_iswspace_l:
 __bf_iswprint_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2944]
+    ldr x17, [x16, #2904]
     cbz x17, 1f
     br x17
-1:  mov x0, #368
+1:  mov x0, #363
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswprint_l, iswprint_l@@LIBC
@@ -5202,10 +5132,10 @@ __bf_iswprint_l:
 __bf_iswblank_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2952]
+    ldr x17, [x16, #2912]
     cbz x17, 1f
     br x17
-1:  mov x0, #369
+1:  mov x0, #364
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswblank_l, iswblank_l@@LIBC
@@ -5216,10 +5146,10 @@ __bf_iswblank_l:
 __bf_iswcntrl_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2960]
+    ldr x17, [x16, #2920]
     cbz x17, 1f
     br x17
-1:  mov x0, #370
+1:  mov x0, #365
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswcntrl_l, iswcntrl_l@@LIBC
@@ -5230,10 +5160,10 @@ __bf_iswcntrl_l:
 __bf_iswupper_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2968]
+    ldr x17, [x16, #2928]
     cbz x17, 1f
     br x17
-1:  mov x0, #371
+1:  mov x0, #366
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswupper_l, iswupper_l@@LIBC
@@ -5244,10 +5174,10 @@ __bf_iswupper_l:
 __bf_iswalpha_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2976]
+    ldr x17, [x16, #2936]
     cbz x17, 1f
     br x17
-1:  mov x0, #372
+1:  mov x0, #367
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswalpha_l, iswalpha_l@@LIBC
@@ -5258,10 +5188,10 @@ __bf_iswalpha_l:
 __bf_iswdigit_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2984]
+    ldr x17, [x16, #2944]
     cbz x17, 1f
     br x17
-1:  mov x0, #373
+1:  mov x0, #368
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswdigit_l, iswdigit_l@@LIBC
@@ -5272,10 +5202,10 @@ __bf_iswdigit_l:
 __bf_iswpunct_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #2992]
+    ldr x17, [x16, #2952]
     cbz x17, 1f
     br x17
-1:  mov x0, #374
+1:  mov x0, #369
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswpunct_l, iswpunct_l@@LIBC
@@ -5286,10 +5216,10 @@ __bf_iswpunct_l:
 __bf_iswxdigit_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3000]
+    ldr x17, [x16, #2960]
     cbz x17, 1f
     br x17
-1:  mov x0, #375
+1:  mov x0, #370
     bl __bf_resolve_and_call
     br x0
 .symver __bf_iswxdigit_l, iswxdigit_l@@LIBC
@@ -5300,10 +5230,10 @@ __bf_iswxdigit_l:
 __bf_towupper_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3008]
+    ldr x17, [x16, #2968]
     cbz x17, 1f
     br x17
-1:  mov x0, #376
+1:  mov x0, #371
     bl __bf_resolve_and_call
     br x0
 .symver __bf_towupper_l, towupper_l@@LIBC
@@ -5314,10 +5244,10 @@ __bf_towupper_l:
 __bf_towlower_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3016]
+    ldr x17, [x16, #2976]
     cbz x17, 1f
     br x17
-1:  mov x0, #377
+1:  mov x0, #372
     bl __bf_resolve_and_call
     br x0
 .symver __bf_towlower_l, towlower_l@@LIBC
@@ -5328,10 +5258,10 @@ __bf_towlower_l:
 __bf_btowc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3024]
+    ldr x17, [x16, #2984]
     cbz x17, 1f
     br x17
-1:  mov x0, #378
+1:  mov x0, #373
     bl __bf_resolve_and_call
     br x0
 .symver __bf_btowc, btowc@@LIBC
@@ -5342,10 +5272,10 @@ __bf_btowc:
 __bf_wctob:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3032]
+    ldr x17, [x16, #2992]
     cbz x17, 1f
     br x17
-1:  mov x0, #379
+1:  mov x0, #374
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wctob, wctob@@LIBC
@@ -5356,10 +5286,10 @@ __bf_wctob:
 __bf_wcsnrtombs:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3040]
+    ldr x17, [x16, #3000]
     cbz x17, 1f
     br x17
-1:  mov x0, #380
+1:  mov x0, #375
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wcsnrtombs, wcsnrtombs@@LIBC
@@ -5370,10 +5300,10 @@ __bf_wcsnrtombs:
 __bf_wcrtomb:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3048]
+    ldr x17, [x16, #3008]
     cbz x17, 1f
     br x17
-1:  mov x0, #381
+1:  mov x0, #376
     bl __bf_resolve_and_call
     br x0
 .symver __bf_wcrtomb, wcrtomb@@LIBC
@@ -5384,10 +5314,10 @@ __bf_wcrtomb:
 __bf_mbsnrtowcs:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3056]
+    ldr x17, [x16, #3016]
     cbz x17, 1f
     br x17
-1:  mov x0, #382
+1:  mov x0, #377
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mbsnrtowcs, mbsnrtowcs@@LIBC
@@ -5398,10 +5328,10 @@ __bf_mbsnrtowcs:
 __bf_mbrtowc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3064]
+    ldr x17, [x16, #3024]
     cbz x17, 1f
     br x17
-1:  mov x0, #383
+1:  mov x0, #378
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mbrtowc, mbrtowc@@LIBC
@@ -5412,10 +5342,10 @@ __bf_mbrtowc:
 __bf_mbtowc:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3072]
+    ldr x17, [x16, #3032]
     cbz x17, 1f
     br x17
-1:  mov x0, #384
+1:  mov x0, #379
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mbtowc, mbtowc@@LIBC
@@ -5426,10 +5356,10 @@ __bf_mbtowc:
 __bf___ctype_get_mb_cur_max:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3080]
+    ldr x17, [x16, #3040]
     cbz x17, 1f
     br x17
-1:  mov x0, #385
+1:  mov x0, #380
     bl __bf_resolve_and_call
     br x0
 .symver __bf___ctype_get_mb_cur_max, __ctype_get_mb_cur_max@@LIBC
@@ -5440,10 +5370,10 @@ __bf___ctype_get_mb_cur_max:
 __bf_mbrlen:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3088]
+    ldr x17, [x16, #3048]
     cbz x17, 1f
     br x17
-1:  mov x0, #386
+1:  mov x0, #381
     bl __bf_resolve_and_call
     br x0
 .symver __bf_mbrlen, mbrlen@@LIBC
@@ -5454,10 +5384,10 @@ __bf_mbrlen:
 __bf_strtoll_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3096]
+    ldr x17, [x16, #3056]
     cbz x17, 1f
     br x17
-1:  mov x0, #387
+1:  mov x0, #382
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtoll_l, strtoll_l@@LIBC
@@ -5468,10 +5398,10 @@ __bf_strtoll_l:
 __bf_strtoull_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3104]
+    ldr x17, [x16, #3064]
     cbz x17, 1f
     br x17
-1:  mov x0, #388
+1:  mov x0, #383
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtoull_l, strtoull_l@@LIBC
@@ -5482,10 +5412,10 @@ __bf_strtoull_l:
 __bf_strtold_l:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3112]
+    ldr x17, [x16, #3072]
     cbz x17, 1f
     br x17
-1:  mov x0, #389
+1:  mov x0, #384
     bl __bf_resolve_and_call
     br x0
 .symver __bf_strtold_l, strtold_l@@LIBC
@@ -5496,10 +5426,10 @@ __bf_strtold_l:
 __bf___cxa_thread_atexit_impl:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
-    ldr x17, [x16, #3120]
+    ldr x17, [x16, #3080]
     cbz x17, 1f
     br x17
-1:  mov x0, #390
+1:  mov x0, #385
     bl __bf_resolve_and_call
     br x0
 .symver __bf___cxa_thread_atexit_impl, __cxa_thread_atexit_impl@@LIBC
@@ -5510,13 +5440,5585 @@ __bf___cxa_thread_atexit_impl:
 __bf_strncat:
     adrp x16, :got:__bf_tramp_table
     ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3088]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #386
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strncat, strncat@@LIBC
+
+.balign 4
+.globl __bf___cfi_slowpath
+.type __bf___cfi_slowpath, %function
+__bf___cfi_slowpath:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3096]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #387
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___cfi_slowpath, __cfi_slowpath@@LIBC_OMR1
+
+.balign 4
+.globl __bf_android_fdsan_close_with_tag
+.type __bf_android_fdsan_close_with_tag, %function
+__bf_android_fdsan_close_with_tag:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3104]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #388
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_fdsan_close_with_tag, android_fdsan_close_with_tag@@LIBC_Q
+
+.balign 4
+.globl __bf_android_fdsan_create_owner_tag
+.type __bf_android_fdsan_create_owner_tag, %function
+__bf_android_fdsan_create_owner_tag:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3112]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #389
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_fdsan_create_owner_tag, android_fdsan_create_owner_tag@@LIBC_Q
+
+.balign 4
+.globl __bf_android_fdsan_exchange_owner_tag
+.type __bf_android_fdsan_exchange_owner_tag, %function
+__bf_android_fdsan_exchange_owner_tag:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3120]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #390
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_fdsan_exchange_owner_tag, android_fdsan_exchange_owner_tag@@LIBC_Q
+
+.balign 4
+.globl __bf_free
+.type __bf_free, %function
+__bf_free:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
     ldr x17, [x16, #3128]
     cbz x17, 1f
     br x17
 1:  mov x0, #391
     bl __bf_resolve_and_call
     br x0
-.symver __bf_strncat, strncat@@LIBC
+.symver __bf_free, free@@LIBC
+
+.balign 4
+.globl __bf_malloc
+.type __bf_malloc, %function
+__bf_malloc:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3136]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #392
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc, malloc@@LIBC
+
+.balign 4
+.globl __bf_dup
+.type __bf_dup, %function
+__bf_dup:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3144]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #393
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_dup, dup@@LIBC
+
+.balign 4
+.globl __bf_android_mallopt
+.type __bf_android_mallopt, %function
+__bf_android_mallopt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3152]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #394
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_mallopt, android_mallopt@@LIBC_Q
+
+.balign 4
+.globl __bf___system_property_find
+.type __bf___system_property_find, %function
+__bf___system_property_find:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3160]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #395
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_find, __system_property_find@@LIBC
+
+.balign 4
+.globl __bf___system_property_read_callback
+.type __bf___system_property_read_callback, %function
+__bf___system_property_read_callback:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3168]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #396
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_read_callback, __system_property_read_callback@@LIBC_O
+
+.balign 4
+.globl __bf_getprogname
+.type __bf_getprogname, %function
+__bf_getprogname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3176]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #397
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getprogname, getprogname@@LIBC
+
+.balign 4
+.globl __bf_sleep
+.type __bf_sleep, %function
+__bf_sleep:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3184]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #398
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sleep, sleep@@LIBC
+
+.balign 4
+.globl __bf_android_dlopen_ext
+.type __bf_android_dlopen_ext, %function
+__bf_android_dlopen_ext:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3192]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #399
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_dlopen_ext, android_dlopen_ext@@LIBC
+
+.balign 4
+.globl __bf_nrand48
+.type __bf_nrand48, %function
+__bf_nrand48:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3200]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #400
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_nrand48, nrand48@@LIBC
+
+.balign 4
+.globl __bf_remove
+.type __bf_remove, %function
+__bf_remove:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3208]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #401
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_remove, remove@@LIBC
+
+.balign 4
+.globl __bf_utimensat
+.type __bf_utimensat, %function
+__bf_utimensat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3216]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #402
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_utimensat, utimensat@@LIBC
+
+.balign 4
+.globl __bf_futimens
+.type __bf_futimens, %function
+__bf_futimens:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3224]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #403
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_futimens, futimens@@LIBC
+
+.balign 4
+.globl __bf_getpwuid
+.type __bf_getpwuid, %function
+__bf_getpwuid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3232]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #404
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getpwuid, getpwuid@@LIBC
+
+.balign 4
+.globl __bf_getgrgid
+.type __bf_getgrgid, %function
+__bf_getgrgid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3240]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #405
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getgrgid, getgrgid@@LIBC
+
+.balign 4
+.globl __bf_aligned_alloc
+.type __bf_aligned_alloc, %function
+__bf_aligned_alloc:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3248]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #406
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_aligned_alloc, aligned_alloc@@LIBC_P
+
+.balign 4
+.globl __bf__Unwind_RaiseException
+.type __bf__Unwind_RaiseException, %function
+__bf__Unwind_RaiseException:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3256]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #407
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_RaiseException, _Unwind_RaiseException@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_Resume
+.type __bf__Unwind_Resume, %function
+__bf__Unwind_Resume:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3264]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #408
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_Resume, _Unwind_Resume@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_SetGR
+.type __bf__Unwind_SetGR, %function
+__bf__Unwind_SetGR:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3272]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #409
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_SetGR, _Unwind_SetGR@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_SetIP
+.type __bf__Unwind_SetIP, %function
+__bf__Unwind_SetIP:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3280]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #410
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_SetIP, _Unwind_SetIP@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_GetLanguageSpecificData
+.type __bf__Unwind_GetLanguageSpecificData, %function
+__bf__Unwind_GetLanguageSpecificData:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3288]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #411
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetLanguageSpecificData, _Unwind_GetLanguageSpecificData@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_GetIP
+.type __bf__Unwind_GetIP, %function
+__bf__Unwind_GetIP:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3296]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #412
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetIP, _Unwind_GetIP@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_GetRegionStart
+.type __bf__Unwind_GetRegionStart, %function
+__bf__Unwind_GetRegionStart:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3304]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #413
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetRegionStart, _Unwind_GetRegionStart@@LIBC_R
+
+.balign 4
+.globl __bf_realloc
+.type __bf_realloc, %function
+__bf_realloc:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3312]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #414
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_realloc, realloc@@LIBC
+
+.balign 4
+.globl __bf_posix_memalign
+.type __bf_posix_memalign, %function
+__bf_posix_memalign:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3320]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #415
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_posix_memalign, posix_memalign@@LIBC
+
+.balign 4
+.globl __bf_pthread_cond_clockwait
+.type __bf_pthread_cond_clockwait, %function
+__bf_pthread_cond_clockwait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3328]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #416
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pthread_cond_clockwait, pthread_cond_clockwait@@LIBC_R
+
+.balign 4
+.globl __bf_asinhf
+.type __bf_asinhf, %function
+__bf_asinhf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3336]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #417
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_asinhf, asinhf@@LIBC
+
+.balign 4
+.globl __bf_acoshf
+.type __bf_acoshf, %function
+__bf_acoshf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3344]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #418
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_acoshf, acoshf@@LIBC
+
+.balign 4
+.globl __bf_atanhf
+.type __bf_atanhf, %function
+__bf_atanhf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3352]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #419
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_atanhf, atanhf@@LIBC
+
+.balign 4
+.globl __bf_calloc
+.type __bf_calloc, %function
+__bf_calloc:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3360]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #420
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_calloc, calloc@@LIBC
+
+.balign 4
+.globl __bf_memalign
+.type __bf_memalign, %function
+__bf_memalign:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3368]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #421
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_memalign, memalign@@LIBC
+
+.balign 4
+.globl __bf_unsetenv
+.type __bf_unsetenv, %function
+__bf_unsetenv:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3376]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #422
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_unsetenv, unsetenv@@LIBC
+
+.balign 4
+.globl __bf_setenv
+.type __bf_setenv, %function
+__bf_setenv:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3384]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #423
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setenv, setenv@@LIBC
+
+.balign 4
+.globl __bf__Unwind_DeleteException
+.type __bf__Unwind_DeleteException, %function
+__bf__Unwind_DeleteException:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3392]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #424
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_DeleteException, _Unwind_DeleteException@@LIBC_R
+
+.balign 4
+.globl __bf_setbuf
+.type __bf_setbuf, %function
+__bf_setbuf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3400]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #425
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setbuf, setbuf@@LIBC
+
+.balign 4
+.globl __bf_strtof_l
+.type __bf_strtof_l, %function
+__bf_strtof_l:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3408]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #426
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strtof_l, strtof_l@@LIBC_O
+
+.balign 4
+.globl __bf_strtod_l
+.type __bf_strtod_l, %function
+__bf_strtod_l:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3416]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #427
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strtod_l, strtod_l@@LIBC_O
+
+.balign 4
+.globl __bf_strdup
+.type __bf_strdup, %function
+__bf_strdup:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3424]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #428
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strdup, strdup@@LIBC
+
+.balign 4
+.globl __bf_fabs
+.type __bf_fabs, %function
+__bf_fabs:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3432]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #429
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fabs, fabs@@LIBC
+
+.balign 4
+.globl __bf_ceil
+.type __bf_ceil, %function
+__bf_ceil:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3440]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #430
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ceil, ceil@@LIBC
+
+.balign 4
+.globl __bf_floor
+.type __bf_floor, %function
+__bf_floor:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3448]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #431
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_floor, floor@@LIBC
+
+.balign 4
+.globl __bf_sqrt
+.type __bf_sqrt, %function
+__bf_sqrt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3456]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #432
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sqrt, sqrt@@LIBC
+
+.balign 4
+.globl __bf_sigprocmask
+.type __bf_sigprocmask, %function
+__bf_sigprocmask:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3464]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #433
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigprocmask, sigprocmask@@LIBC
+
+.balign 4
+.globl __bf___pread_chk
+.type __bf___pread_chk, %function
+__bf___pread_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3472]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #434
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___pread_chk, __pread_chk@@LIBC
+
+.balign 4
+.globl __bf_statfs
+.type __bf_statfs, %function
+__bf_statfs:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3480]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #435
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_statfs, statfs@@LIBC
+
+.balign 4
+.globl __bf_symlink
+.type __bf_symlink, %function
+__bf_symlink:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3488]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #436
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_symlink, symlink@@LIBC
+
+.balign 4
+.globl __bf_strsep
+.type __bf_strsep, %function
+__bf_strsep:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3496]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #437
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strsep, strsep@@LIBC
+
+.balign 4
+.globl __bf_setrlimit
+.type __bf_setrlimit, %function
+__bf_setrlimit:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3504]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #438
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setrlimit, setrlimit@@LIBC
+
+.balign 4
+.globl __bf_dup2
+.type __bf_dup2, %function
+__bf_dup2:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3512]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #439
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_dup2, dup2@@LIBC
+
+.balign 4
+.globl __bf_isatty
+.type __bf_isatty, %function
+__bf_isatty:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3520]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #440
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_isatty, isatty@@LIBC
+
+.balign 4
+.globl __bf_getrusage
+.type __bf_getrusage, %function
+__bf_getrusage:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3528]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #441
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getrusage, getrusage@@LIBC
+
+.balign 4
+.globl __bf_alarm
+.type __bf_alarm, %function
+__bf_alarm:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3536]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #442
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_alarm, alarm@@LIBC
+
+.balign 4
+.globl __bf_kill
+.type __bf_kill, %function
+__bf_kill:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3544]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #443
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_kill, kill@@LIBC
+
+.balign 4
+.globl __bf_wait
+.type __bf_wait, %function
+__bf_wait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3552]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #444
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wait, wait@@LIBC
+
+.balign 4
+.globl __bf_strsignal
+.type __bf_strsignal, %function
+__bf_strsignal:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3560]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #445
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strsignal, strsignal@@LIBC
+
+.balign 4
+.globl __bf_getrlimit
+.type __bf_getrlimit, %function
+__bf_getrlimit:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3568]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #446
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getrlimit, getrlimit@@LIBC
+
+.balign 4
+.globl __bf___register_frame
+.type __bf___register_frame, %function
+__bf___register_frame:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3576]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #447
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___register_frame, __register_frame@@LIBC_R
+
+.balign 4
+.globl __bf___deregister_frame
+.type __bf___deregister_frame, %function
+__bf___deregister_frame:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3584]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #448
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___deregister_frame, __deregister_frame@@LIBC_R
+
+.balign 4
+.globl __bf___strlcpy_chk
+.type __bf___strlcpy_chk, %function
+__bf___strlcpy_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3592]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #449
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___strlcpy_chk, __strlcpy_chk@@LIBC
+
+.balign 4
+.globl __bf_arc4random
+.type __bf_arc4random, %function
+__bf_arc4random:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3600]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #450
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_arc4random, arc4random@@LIBC
+
+.balign 4
+.globl __bf___strrchr_chk
+.type __bf___strrchr_chk, %function
+__bf___strrchr_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3608]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #451
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___strrchr_chk, __strrchr_chk@@LIBC
+
+.balign 4
+.globl __bf___strncat_chk
+.type __bf___strncat_chk, %function
+__bf___strncat_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3616]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #452
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___strncat_chk, __strncat_chk@@LIBC
+
+.balign 4
+.globl __bf_tgammaf
+.type __bf_tgammaf, %function
+__bf_tgammaf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3624]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #453
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tgammaf, tgammaf@@LIBC
+
+.balign 4
+.globl __bf_expm1f
+.type __bf_expm1f, %function
+__bf_expm1f:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3632]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #454
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_expm1f, expm1f@@LIBC
+
+.balign 4
+.globl __bf_fdimf
+.type __bf_fdimf, %function
+__bf_fdimf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3640]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #455
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fdimf, fdimf@@LIBC
+
+.balign 4
+.globl __bf_hypotf
+.type __bf_hypotf, %function
+__bf_hypotf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3648]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #456
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_hypotf, hypotf@@LIBC
+
+.balign 4
+.globl __bf_ilogbf
+.type __bf_ilogbf, %function
+__bf_ilogbf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3656]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #457
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ilogbf, ilogbf@@LIBC
+
+.balign 4
+.globl __bf_lgammaf
+.type __bf_lgammaf, %function
+__bf_lgammaf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3664]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #458
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lgammaf, lgammaf@@LIBC
+
+.balign 4
+.globl __bf_lgammaf_r
+.type __bf_lgammaf_r, %function
+__bf_lgammaf_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3672]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #459
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lgammaf_r, lgammaf_r@@LIBC
+
+.balign 4
+.globl __bf_log1pf
+.type __bf_log1pf, %function
+__bf_log1pf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3680]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #460
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_log1pf, log1pf@@LIBC
+
+.balign 4
+.globl __bf_logbf
+.type __bf_logbf, %function
+__bf_logbf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3688]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #461
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_logbf, logbf@@LIBC
+
+.balign 4
+.globl __bf_strndup
+.type __bf_strndup, %function
+__bf_strndup:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3696]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #462
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strndup, strndup@@LIBC
+
+.balign 4
+.globl __bf_strlcpy
+.type __bf_strlcpy, %function
+__bf_strlcpy:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3704]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #463
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strlcpy, strlcpy@@LIBC
+
+.balign 4
+.globl __bf_setpgid
+.type __bf_setpgid, %function
+__bf_setpgid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3712]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #464
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setpgid, setpgid@@LIBC
+
+.balign 4
+.globl __bf___strlcat_chk
+.type __bf___strlcat_chk, %function
+__bf___strlcat_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3720]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #465
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___strlcat_chk, __strlcat_chk@@LIBC
+
+.balign 4
+.globl __bf_clock_nanosleep
+.type __bf_clock_nanosleep, %function
+__bf_clock_nanosleep:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3728]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #466
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_clock_nanosleep, clock_nanosleep@@LIBC
+
+.balign 4
+.globl __bf__Unwind_GetCFA
+.type __bf__Unwind_GetCFA, %function
+__bf__Unwind_GetCFA:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3736]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #467
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetCFA, _Unwind_GetCFA@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_FindEnclosingFunction
+.type __bf__Unwind_FindEnclosingFunction, %function
+__bf__Unwind_FindEnclosingFunction:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3744]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #468
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_FindEnclosingFunction, _Unwind_FindEnclosingFunction@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_Backtrace
+.type __bf__Unwind_Backtrace, %function
+__bf__Unwind_Backtrace:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3752]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #469
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_Backtrace, _Unwind_Backtrace@@LIBC_R
+
+.balign 4
+.globl __bf_asprintf
+.type __bf_asprintf, %function
+__bf_asprintf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3760]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #470
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_asprintf, asprintf@@LIBC
+
+.balign 4
+.globl __bf___system_property_area_serial
+.type __bf___system_property_area_serial, %function
+__bf___system_property_area_serial:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3768]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #471
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_area_serial, __system_property_area_serial@@LIBC
+
+.balign 4
+.globl __bf___system_property_serial
+.type __bf___system_property_serial, %function
+__bf___system_property_serial:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3776]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #472
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_serial, __system_property_serial@@LIBC
+
+.balign 4
+.globl __bf___system_property_read
+.type __bf___system_property_read, %function
+__bf___system_property_read:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3784]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #473
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_read, __system_property_read@@LIBC
+
+.balign 4
+.globl __bf_fnmatch
+.type __bf_fnmatch, %function
+__bf_fnmatch:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3792]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #474
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fnmatch, fnmatch@@LIBC
+
+.balign 4
+.globl __bf_timerfd_gettime
+.type __bf_timerfd_gettime, %function
+__bf_timerfd_gettime:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3800]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #475
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_timerfd_gettime, timerfd_gettime@@LIBC
+
+.balign 4
+.globl __bf___openat_2
+.type __bf___openat_2, %function
+__bf___openat_2:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3808]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #476
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___openat_2, __openat_2@@LIBC
+
+.balign 4
+.globl __bf_android_getaddrinfofornet
+.type __bf_android_getaddrinfofornet, %function
+__bf_android_getaddrinfofornet:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3816]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #477
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_getaddrinfofornet, android_getaddrinfofornet@@LIBC_Q
+
+.balign 4
+.globl __bf___system_property_set
+.type __bf___system_property_set, %function
+__bf___system_property_set:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3824]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #478
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_set, __system_property_set@@LIBC
+
+.balign 4
+.globl __bf_setprogname
+.type __bf_setprogname, %function
+__bf_setprogname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3832]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #479
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setprogname, setprogname@@LIBC
+
+.balign 4
+.globl __bf_fallocate
+.type __bf_fallocate, %function
+__bf_fallocate:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3840]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #480
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fallocate, fallocate@@LIBC
+
+.balign 4
+.globl __bf_lstat64
+.type __bf_lstat64, %function
+__bf_lstat64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3848]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #481
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lstat64, lstat64@@LIBC
+
+.balign 4
+.globl __bf_mkstemp
+.type __bf_mkstemp, %function
+__bf_mkstemp:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3856]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #482
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mkstemp, mkstemp@@LIBC
+
+.balign 4
+.globl __bf_chmod
+.type __bf_chmod, %function
+__bf_chmod:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3864]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #483
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_chmod, chmod@@LIBC
+
+.balign 4
+.globl __bf_statfs64
+.type __bf_statfs64, %function
+__bf_statfs64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3872]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #484
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_statfs64, statfs64@@LIBC
+
+.balign 4
+.globl __bf_android_dlwarning
+.type __bf_android_dlwarning, %function
+__bf_android_dlwarning:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3880]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #485
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_dlwarning, android_dlwarning@@LIBDL_ANDROID
+
+.balign 4
+.globl __bf_mallopt
+.type __bf_mallopt, %function
+__bf_mallopt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3888]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #486
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mallopt, mallopt@@LIBC_O
+
+.balign 4
+.globl __bf_malloc_info
+.type __bf_malloc_info, %function
+__bf_malloc_info:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3896]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #487
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc_info, malloc_info@@LIBC
+
+.balign 4
+.globl __bf_fdatasync
+.type __bf_fdatasync, %function
+__bf_fdatasync:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3904]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #488
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fdatasync, fdatasync@@LIBC
+
+.balign 4
+.globl __bf_android_get_application_target_sdk_version
+.type __bf_android_get_application_target_sdk_version, %function
+__bf_android_get_application_target_sdk_version:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3912]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #489
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_get_application_target_sdk_version, android_get_application_target_sdk_version@@LIBC_N
+
+.balign 4
+.globl __bf_getpwnam
+.type __bf_getpwnam, %function
+__bf_getpwnam:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3920]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #490
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getpwnam, getpwnam@@LIBC
+
+.balign 4
+.globl __bf_getgrnam
+.type __bf_getgrnam, %function
+__bf_getgrnam:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3928]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #491
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getgrnam, getgrnam@@LIBC
+
+.balign 4
+.globl __bf___sched_cpucount
+.type __bf___sched_cpucount, %function
+__bf___sched_cpucount:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3936]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #492
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___sched_cpucount, __sched_cpucount@@LIBC
+
+.balign 4
+.globl __bf_sched_getaffinity
+.type __bf_sched_getaffinity, %function
+__bf_sched_getaffinity:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3944]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #493
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sched_getaffinity, sched_getaffinity@@LIBC
+
+.balign 4
+.globl __bf_get_nprocs_conf
+.type __bf_get_nprocs_conf, %function
+__bf_get_nprocs_conf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3952]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #494
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_get_nprocs_conf, get_nprocs_conf@@LIBC
+
+.balign 4
+.globl __bf_setuid
+.type __bf_setuid, %function
+__bf_setuid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3960]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #495
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setuid, setuid@@LIBC
+
+.balign 4
+.globl __bf_setgid
+.type __bf_setgid, %function
+__bf_setgid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3968]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #496
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setgid, setgid@@LIBC
+
+.balign 4
+.globl __bf_tgkill
+.type __bf_tgkill, %function
+__bf_tgkill:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3976]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #497
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tgkill, tgkill@@LIBC
+
+.balign 4
+.globl __bf_getline
+.type __bf_getline, %function
+__bf_getline:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3984]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #498
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getline, getline@@LIBC
+
+.balign 4
+.globl __bf_strtok_r
+.type __bf_strtok_r, %function
+__bf_strtok_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #3992]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #499
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strtok_r, strtok_r@@LIBC
+
+.balign 4
+.globl __bf_pidfd_open
+.type __bf_pidfd_open, %function
+__bf_pidfd_open:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4000]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #500
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pidfd_open, pidfd_open@@LIBC_S
+
+.balign 4
+.globl __bf_tcflush
+.type __bf_tcflush, %function
+__bf_tcflush:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4008]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #501
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tcflush, tcflush@@LIBC
+
+.balign 4
+.globl __bf_tcsendbreak
+.type __bf_tcsendbreak, %function
+__bf_tcsendbreak:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4016]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #502
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tcsendbreak, tcsendbreak@@LIBC
+
+.balign 4
+.globl __bf_inotify_init1
+.type __bf_inotify_init1, %function
+__bf_inotify_init1:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4024]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #503
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inotify_init1, inotify_init1@@LIBC
+
+.balign 4
+.globl __bf_inotify_add_watch
+.type __bf_inotify_add_watch, %function
+__bf_inotify_add_watch:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4032]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #504
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inotify_add_watch, inotify_add_watch@@LIBC
+
+.balign 4
+.globl __bf_inotify_rm_watch
+.type __bf_inotify_rm_watch, %function
+__bf_inotify_rm_watch:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4040]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #505
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inotify_rm_watch, inotify_rm_watch@@LIBC
+
+.balign 4
+.globl __bf_android_fdsan_get_error_level
+.type __bf_android_fdsan_get_error_level, %function
+__bf_android_fdsan_get_error_level:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4048]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #506
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_fdsan_get_error_level, android_fdsan_get_error_level@@LIBC_Q
+
+.balign 4
+.globl __bf_android_reset_stack_guards
+.type __bf_android_reset_stack_guards, %function
+__bf_android_reset_stack_guards:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4056]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #507
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_reset_stack_guards, android_reset_stack_guards@@LIBC_S
+
+.balign 4
+.globl __bf_android_fdsan_set_error_level
+.type __bf_android_fdsan_set_error_level, %function
+__bf_android_fdsan_set_error_level:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4064]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #508
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_fdsan_set_error_level, android_fdsan_set_error_level@@LIBC_Q
+
+.balign 4
+.globl __bf_dup3
+.type __bf_dup3, %function
+__bf_dup3:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4072]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #509
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_dup3, dup3@@LIBC
+
+.balign 4
+.globl __bf_capget
+.type __bf_capget, %function
+__bf_capget:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4080]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #510
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_capget, capget@@LIBC
+
+.balign 4
+.globl __bf_setresgid
+.type __bf_setresgid, %function
+__bf_setresgid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4088]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #511
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setresgid, setresgid@@LIBC
+
+.balign 4
+.globl __bf_setresuid
+.type __bf_setresuid, %function
+__bf_setresuid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4096]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #512
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setresuid, setresuid@@LIBC
+
+.balign 4
+.globl __bf_android_set_16kb_appcompat_mode
+.type __bf_android_set_16kb_appcompat_mode, %function
+__bf_android_set_16kb_appcompat_mode:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4104]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #513
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_set_16kb_appcompat_mode, android_set_16kb_appcompat_mode@@LIBDL_ANDROID
+
+.balign 4
+.globl __bf_capset
+.type __bf_capset, %function
+__bf_capset:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4112]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #514
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_capset, capset@@LIBC
+
+.balign 4
+.globl __bf_mount
+.type __bf_mount, %function
+__bf_mount:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4120]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #515
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mount, mount@@LIBC
+
+.balign 4
+.globl __bf_unshare
+.type __bf_unshare, %function
+__bf_unshare:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4128]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #516
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_unshare, unshare@@LIBC
+
+.balign 4
+.globl __bf___system_properties_zygote_reload
+.type __bf___system_properties_zygote_reload, %function
+__bf___system_properties_zygote_reload:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4136]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #517
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_properties_zygote_reload, __system_properties_zygote_reload@@LIBC_V
+
+.balign 4
+.globl __bf_setgroups
+.type __bf_setgroups, %function
+__bf_setgroups:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4144]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #518
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setgroups, setgroups@@LIBC
+
+.balign 4
+.globl __bf_setmntent
+.type __bf_setmntent, %function
+__bf_setmntent:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4152]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #519
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setmntent, setmntent@@LIBC
+
+.balign 4
+.globl __bf_getmntent
+.type __bf_getmntent, %function
+__bf_getmntent:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4160]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #520
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getmntent, getmntent@@LIBC
+
+.balign 4
+.globl __bf_endmntent
+.type __bf_endmntent, %function
+__bf_endmntent:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4168]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #521
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_endmntent, endmntent@@LIBC
+
+.balign 4
+.globl __bf_umount2
+.type __bf_umount2, %function
+__bf_umount2:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4176]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #522
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_umount2, umount2@@LIBC
+
+.balign 4
+.globl __bf_statx
+.type __bf_statx, %function
+__bf_statx:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4184]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #523
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_statx, statx@@LIBC_R
+
+.balign 4
+.globl __bf_memset_explicit
+.type __bf_memset_explicit, %function
+__bf_memset_explicit:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4192]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #524
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_memset_explicit, memset_explicit@@LIBC_U
+
+.balign 4
+.globl __bf_lseek64
+.type __bf_lseek64, %function
+__bf_lseek64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4200]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #525
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lseek64, lseek64@@LIBC
+
+.balign 4
+.globl __bf_dirfd
+.type __bf_dirfd, %function
+__bf_dirfd:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4208]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #526
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_dirfd, dirfd@@LIBC
+
+.balign 4
+.globl __bf_malloc_usable_size
+.type __bf_malloc_usable_size, %function
+__bf_malloc_usable_size:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4216]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #527
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc_usable_size, malloc_usable_size@@LIBC
+
+.balign 4
+.globl __bf_fstatfs
+.type __bf_fstatfs, %function
+__bf_fstatfs:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4224]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #528
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fstatfs, fstatfs@@LIBC
+
+.balign 4
+.globl __bf__Unwind_GetTextRelBase
+.type __bf__Unwind_GetTextRelBase, %function
+__bf__Unwind_GetTextRelBase:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4232]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #529
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetTextRelBase, _Unwind_GetTextRelBase@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_GetDataRelBase
+.type __bf__Unwind_GetDataRelBase, %function
+__bf__Unwind_GetDataRelBase:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4240]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #530
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetDataRelBase, _Unwind_GetDataRelBase@@LIBC_R
+
+.balign 4
+.globl __bf__Unwind_GetIPInfo
+.type __bf__Unwind_GetIPInfo, %function
+__bf__Unwind_GetIPInfo:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4248]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #531
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf__Unwind_GetIPInfo, _Unwind_GetIPInfo@@LIBC_R
+
+.balign 4
+.globl __bf_settimeofday
+.type __bf_settimeofday, %function
+__bf_settimeofday:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4256]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #532
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_settimeofday, settimeofday@@LIBC
+
+.balign 4
+.globl __bf_sigqueue
+.type __bf_sigqueue, %function
+__bf_sigqueue:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4264]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #533
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigqueue, sigqueue@@LIBC
+
+.balign 4
+.globl __bf_eventfd_write
+.type __bf_eventfd_write, %function
+__bf_eventfd_write:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4272]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #534
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_eventfd_write, eventfd_write@@LIBC
+
+.balign 4
+.globl __bf_process_madvise
+.type __bf_process_madvise, %function
+__bf_process_madvise:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4280]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #535
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_process_madvise, process_madvise@@LIBC_S
+
+.balign 4
+.globl __bf_inotify_init
+.type __bf_inotify_init, %function
+__bf_inotify_init:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4288]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #536
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inotify_init, inotify_init@@LIBC
+
+.balign 4
+.globl __bf_flock
+.type __bf_flock, %function
+__bf_flock:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4296]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #537
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_flock, flock@@LIBC
+
+.balign 4
+.globl __bf_execvp
+.type __bf_execvp, %function
+__bf_execvp:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4304]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #538
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_execvp, execvp@@LIBC
+
+.balign 4
+.globl __bf_putchar
+.type __bf_putchar, %function
+__bf_putchar:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4312]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #539
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_putchar, putchar@@LIBC
+
+.balign 4
+.globl __bf_dprintf
+.type __bf_dprintf, %function
+__bf_dprintf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4320]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #540
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_dprintf, dprintf@@LIBC
+
+.balign 4
+.globl __bf_memfd_create
+.type __bf_memfd_create, %function
+__bf_memfd_create:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4328]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #541
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_memfd_create, memfd_create@@LIBC_R
+
+.balign 4
+.globl __bf_android_get_exported_namespace
+.type __bf_android_get_exported_namespace, %function
+__bf_android_get_exported_namespace:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4336]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #542
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_get_exported_namespace, android_get_exported_namespace@@LIBDL_ANDROID
+
+.balign 4
+.globl __bf_readv
+.type __bf_readv, %function
+__bf_readv:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4344]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #543
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_readv, readv@@LIBC
+
+.balign 4
+.globl __bf_mkdtemp
+.type __bf_mkdtemp, %function
+__bf_mkdtemp:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4352]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #544
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mkdtemp, mkdtemp@@LIBC
+
+.balign 4
+.globl __bf_pthread_gettid_np
+.type __bf_pthread_gettid_np, %function
+__bf_pthread_gettid_np:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4360]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #545
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pthread_gettid_np, pthread_gettid_np@@LIBC
+
+.balign 4
+.globl __bf_isnanf
+.type __bf_isnanf, %function
+__bf_isnanf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4368]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #546
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_isnanf, isnanf@@LIBC
+
+.balign 4
+.globl __bf_sched_setaffinity
+.type __bf_sched_setaffinity, %function
+__bf_sched_setaffinity:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4376]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #547
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sched_setaffinity, sched_setaffinity@@LIBC
+
+.balign 4
+.globl __bf_pthread_getname_np
+.type __bf_pthread_getname_np, %function
+__bf_pthread_getname_np:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4384]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #548
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pthread_getname_np, pthread_getname_np@@LIBC_O
+
+.balign 4
+.globl __bf_nftw
+.type __bf_nftw, %function
+__bf_nftw:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4392]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #549
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_nftw, nftw@@LIBC
+
+.balign 4
+.globl __bf___pwrite_chk
+.type __bf___pwrite_chk, %function
+__bf___pwrite_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4400]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #550
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___pwrite_chk, __pwrite_chk@@LIBC_N
+
+.balign 4
+.globl __bf_basename
+.type __bf_basename, %function
+__bf_basename:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4408]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #551
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_basename, basename@@LIBC
+
+.balign 4
+.globl __bf___system_property_wait
+.type __bf___system_property_wait, %function
+__bf___system_property_wait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4416]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #552
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_wait, __system_property_wait@@LIBC_O
+
+.balign 4
+.globl __bf_inet_ntoa
+.type __bf_inet_ntoa, %function
+__bf_inet_ntoa:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4424]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #553
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inet_ntoa, inet_ntoa@@LIBC
+
+.balign 4
+.globl __bf_pipe2
+.type __bf_pipe2, %function
+__bf_pipe2:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4432]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #554
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pipe2, pipe2@@LIBC
+
+.balign 4
+.globl __bf_hypot
+.type __bf_hypot, %function
+__bf_hypot:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4440]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #555
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_hypot, hypot@@LIBC
+
+.balign 4
+.globl __bf_faccessat
+.type __bf_faccessat, %function
+__bf_faccessat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4448]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #556
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_faccessat, faccessat@@LIBC
+
+.balign 4
+.globl __bf_fmemopen
+.type __bf_fmemopen, %function
+__bf_fmemopen:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4456]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #557
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fmemopen, fmemopen@@LIBC
+
+.balign 4
+.globl __bf_dirname
+.type __bf_dirname, %function
+__bf_dirname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4464]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #558
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_dirname, dirname@@LIBC
+
+.balign 4
+.globl __bf_memccpy
+.type __bf_memccpy, %function
+__bf_memccpy:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4472]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #559
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_memccpy, memccpy@@LIBC
+
+.balign 4
+.globl __bf_tsearch
+.type __bf_tsearch, %function
+__bf_tsearch:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4480]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #560
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tsearch, tsearch@@LIBC
+
+.balign 4
+.globl __bf_tfind
+.type __bf_tfind, %function
+__bf_tfind:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4488]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #561
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tfind, tfind@@LIBC
+
+.balign 4
+.globl __bf_tdelete
+.type __bf_tdelete, %function
+__bf_tdelete:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4496]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #562
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tdelete, tdelete@@LIBC
+
+.balign 4
+.globl __bf_tdestroy
+.type __bf_tdestroy, %function
+__bf_tdestroy:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4504]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #563
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_tdestroy, tdestroy@@LIBC
+
+.balign 4
+.globl __bf_android_get_device_api_level
+.type __bf_android_get_device_api_level, %function
+__bf_android_get_device_api_level:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4512]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #564
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_get_device_api_level, android_get_device_api_level@@LIBC_Q
+
+.balign 4
+.globl __bf_chown
+.type __bf_chown, %function
+__bf_chown:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4520]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #565
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_chown, chown@@LIBC
+
+.balign 4
+.globl __bf_perror
+.type __bf_perror, %function
+__bf_perror:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4528]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #566
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_perror, perror@@LIBC
+
+.balign 4
+.globl __bf_clone
+.type __bf_clone, %function
+__bf_clone:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4536]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #567
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_clone, clone@@LIBC
+
+.balign 4
+.globl __bf_getpwnam_r
+.type __bf_getpwnam_r, %function
+__bf_getpwnam_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4544]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #568
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getpwnam_r, getpwnam_r@@LIBC
+
+.balign 4
+.globl __bf_getgrnam_r
+.type __bf_getgrnam_r, %function
+__bf_getgrnam_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4552]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #569
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getgrnam_r, getgrnam_r@@LIBC_N
+
+.balign 4
+.globl __bf_signalfd
+.type __bf_signalfd, %function
+__bf_signalfd:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4560]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #570
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_signalfd, signalfd@@LIBC
+
+.balign 4
+.globl __bf_sigdelset
+.type __bf_sigdelset, %function
+__bf_sigdelset:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4568]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #571
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigdelset, sigdelset@@LIBC
+
+.balign 4
+.globl __bf_sigismember
+.type __bf_sigismember, %function
+__bf_sigismember:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4576]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #572
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigismember, sigismember@@LIBC
+
+.balign 4
+.globl __bf_mkdirat
+.type __bf_mkdirat, %function
+__bf_mkdirat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4584]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #573
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mkdirat, mkdirat@@LIBC
+
+.balign 4
+.globl __bf_openat
+.type __bf_openat, %function
+__bf_openat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4592]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #574
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_openat, openat@@LIBC
+
+.balign 4
+.globl __bf_waitid
+.type __bf_waitid, %function
+__bf_waitid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4600]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #575
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_waitid, waitid@@LIBC
+
+.balign 4
+.globl __bf_strtold
+.type __bf_strtold, %function
+__bf_strtold:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4608]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #576
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strtold, strtold@@LIBC
+
+.balign 4
+.globl __bf_wcstol
+.type __bf_wcstol, %function
+__bf_wcstol:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4616]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #577
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstol, wcstol@@LIBC
+
+.balign 4
+.globl __bf_wcstoul
+.type __bf_wcstoul, %function
+__bf_wcstoul:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4624]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #578
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstoul, wcstoul@@LIBC
+
+.balign 4
+.globl __bf_wcstoll
+.type __bf_wcstoll, %function
+__bf_wcstoll:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4632]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #579
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstoll, wcstoll@@LIBC
+
+.balign 4
+.globl __bf_wcstoull
+.type __bf_wcstoull, %function
+__bf_wcstoull:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4640]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #580
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstoull, wcstoull@@LIBC
+
+.balign 4
+.globl __bf_wcstof
+.type __bf_wcstof, %function
+__bf_wcstof:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4648]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #581
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstof, wcstof@@LIBC
+
+.balign 4
+.globl __bf_wcstod
+.type __bf_wcstod, %function
+__bf_wcstod:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4656]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #582
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstod, wcstod@@LIBC
+
+.balign 4
+.globl __bf_wcstold
+.type __bf_wcstold, %function
+__bf_wcstold:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4664]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #583
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcstold, wcstold@@LIBC
+
+.balign 4
+.globl __bf_swprintf
+.type __bf_swprintf, %function
+__bf_swprintf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4672]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #584
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_swprintf, swprintf@@LIBC
+
+.balign 4
+.globl __bf_setlocale
+.type __bf_setlocale, %function
+__bf_setlocale:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4680]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #585
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setlocale, setlocale@@LIBC
+
+.balign 4
+.globl __bf_link
+.type __bf_link, %function
+__bf_link:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4688]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #586
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_link, link@@LIBC
+
+.balign 4
+.globl __bf_pathconf
+.type __bf_pathconf, %function
+__bf_pathconf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4696]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #587
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pathconf, pathconf@@LIBC
+
+.balign 4
+.globl __bf_chdir
+.type __bf_chdir, %function
+__bf_chdir:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4704]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #588
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_chdir, chdir@@LIBC
+
+.balign 4
+.globl __bf_fchmodat
+.type __bf_fchmodat, %function
+__bf_fchmodat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4712]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #589
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fchmodat, fchmodat@@LIBC
+
+.balign 4
+.globl __bf_truncate
+.type __bf_truncate, %function
+__bf_truncate:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4720]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #590
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_truncate, truncate@@LIBC
+
+.balign 4
+.globl __bf_sendfile
+.type __bf_sendfile, %function
+__bf_sendfile:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4728]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #591
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sendfile, sendfile@@LIBC
+
+.balign 4
+.globl __bf_fdopendir
+.type __bf_fdopendir, %function
+__bf_fdopendir:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4736]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #592
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fdopendir, fdopendir@@LIBC
+
+.balign 4
+.globl __bf_unlinkat
+.type __bf_unlinkat, %function
+__bf_unlinkat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4744]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #593
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_unlinkat, unlinkat@@LIBC
+
+.balign 4
+.globl __bf_fgetxattr
+.type __bf_fgetxattr, %function
+__bf_fgetxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4752]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #594
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fgetxattr, fgetxattr@@LIBC
+
+.balign 4
+.globl __bf_getxattr
+.type __bf_getxattr, %function
+__bf_getxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4760]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #595
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getxattr, getxattr@@LIBC
+
+.balign 4
+.globl __bf_fremovexattr
+.type __bf_fremovexattr, %function
+__bf_fremovexattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4768]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #596
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fremovexattr, fremovexattr@@LIBC
+
+.balign 4
+.globl __bf_fsetxattr
+.type __bf_fsetxattr, %function
+__bf_fsetxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4776]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #597
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fsetxattr, fsetxattr@@LIBC
+
+.balign 4
+.globl __bf_removexattr
+.type __bf_removexattr, %function
+__bf_removexattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4784]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #598
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_removexattr, removexattr@@LIBC
+
+.balign 4
+.globl __bf_setxattr
+.type __bf_setxattr, %function
+__bf_setxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4792]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #599
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setxattr, setxattr@@LIBC
+
+.balign 4
+.globl __bf_chroot
+.type __bf_chroot, %function
+__bf_chroot:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4800]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #600
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_chroot, chroot@@LIBC
+
+.balign 4
+.globl __bf___pwrite64_chk
+.type __bf___pwrite64_chk, %function
+__bf___pwrite64_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4808]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #601
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___pwrite64_chk, __pwrite64_chk@@LIBC_N
+
+.balign 4
+.globl __bf_fstat64
+.type __bf_fstat64, %function
+__bf_fstat64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4816]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #602
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fstat64, fstat64@@LIBC
+
+.balign 4
+.globl __bf_creat
+.type __bf_creat, %function
+__bf_creat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4824]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #603
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_creat, creat@@LIBC
+
+.balign 4
+.globl __bf_stat64
+.type __bf_stat64, %function
+__bf_stat64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4832]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #604
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_stat64, stat64@@LIBC
+
+.balign 4
+.globl __bf_iswspace
+.type __bf_iswspace, %function
+__bf_iswspace:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4840]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #605
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_iswspace, iswspace@@LIBC
+
+.balign 4
+.globl __bf_wcschr
+.type __bf_wcschr, %function
+__bf_wcschr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4848]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #606
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wcschr, wcschr@@LIBC
+
+.balign 4
+.globl __bf_timegm
+.type __bf_timegm, %function
+__bf_timegm:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4856]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #607
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_timegm, timegm@@LIBC
+
+.balign 4
+.globl __bf_personality
+.type __bf_personality, %function
+__bf_personality:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4864]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #608
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_personality, personality@@LIBC
+
+.balign 4
+.globl __bf_ppoll
+.type __bf_ppoll, %function
+__bf_ppoll:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4872]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #609
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ppoll, ppoll@@LIBC
+
+.balign 4
+.globl __bf_logb
+.type __bf_logb, %function
+__bf_logb:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4880]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #610
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_logb, logb@@LIBC
+
+.balign 4
+.globl __bf_scalbn
+.type __bf_scalbn, %function
+__bf_scalbn:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4888]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #611
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_scalbn, scalbn@@LIBC
+
+.balign 4
+.globl __bf_scalbnf
+.type __bf_scalbnf, %function
+__bf_scalbnf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4896]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #612
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_scalbnf, scalbnf@@LIBC
+
+.balign 4
+.globl __bf_logbl
+.type __bf_logbl, %function
+__bf_logbl:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4904]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #613
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_logbl, logbl@@LIBC
+
+.balign 4
+.globl __bf_scalbnl
+.type __bf_scalbnl, %function
+__bf_scalbnl:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4912]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #614
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_scalbnl, scalbnl@@LIBC
+
+.balign 4
+.globl __bf_fmaxl
+.type __bf_fmaxl, %function
+__bf_fmaxl:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4920]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #615
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fmaxl, fmaxl@@LIBC
+
+.balign 4
+.globl __bf_putc
+.type __bf_putc, %function
+__bf_putc:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4928]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #616
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_putc, putc@@LIBC
+
+.balign 4
+.globl __bf_rewinddir
+.type __bf_rewinddir, %function
+__bf_rewinddir:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4936]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #617
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_rewinddir, rewinddir@@LIBC
+
+.balign 4
+.globl __bf_lockf
+.type __bf_lockf, %function
+__bf_lockf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4944]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #618
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lockf, lockf@@LIBC_N
+
+.balign 4
+.globl __bf___umask_chk
+.type __bf___umask_chk, %function
+__bf___umask_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4952]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #619
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___umask_chk, __umask_chk@@LIBC
+
+.balign 4
+.globl __bf_getservbyname
+.type __bf_getservbyname, %function
+__bf_getservbyname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4960]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #620
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getservbyname, getservbyname@@LIBC
+
+.balign 4
+.globl __bf_regcomp
+.type __bf_regcomp, %function
+__bf_regcomp:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4968]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #621
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_regcomp, regcomp@@LIBC
+
+.balign 4
+.globl __bf_regerror
+.type __bf_regerror, %function
+__bf_regerror:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4976]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #622
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_regerror, regerror@@LIBC
+
+.balign 4
+.globl __bf_regexec
+.type __bf_regexec, %function
+__bf_regexec:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4984]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #623
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_regexec, regexec@@LIBC
+
+.balign 4
+.globl __bf_regfree
+.type __bf_regfree, %function
+__bf_regfree:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #4992]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #624
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_regfree, regfree@@LIBC
+
+.balign 4
+.globl __bf___fwrite_chk
+.type __bf___fwrite_chk, %function
+__bf___fwrite_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5000]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #625
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___fwrite_chk, __fwrite_chk@@LIBC_N
+
+.balign 4
+.globl __bf_getifaddrs
+.type __bf_getifaddrs, %function
+__bf_getifaddrs:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5008]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #626
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getifaddrs, getifaddrs@@LIBC_N
+
+.balign 4
+.globl __bf_freeifaddrs
+.type __bf_freeifaddrs, %function
+__bf_freeifaddrs:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5016]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #627
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_freeifaddrs, freeifaddrs@@LIBC_N
+
+.balign 4
+.globl __bf_getpwuid_r
+.type __bf_getpwuid_r, %function
+__bf_getpwuid_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5024]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #628
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getpwuid_r, getpwuid_r@@LIBC
+
+.balign 4
+.globl __bf_android_fdsan_get_owner_tag
+.type __bf_android_fdsan_get_owner_tag, %function
+__bf_android_fdsan_get_owner_tag:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5032]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #629
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_fdsan_get_owner_tag, android_fdsan_get_owner_tag@@LIBC_Q
+
+.balign 4
+.globl __bf___system_property_foreach
+.type __bf___system_property_foreach, %function
+__bf___system_property_foreach:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5040]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #630
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_property_foreach, __system_property_foreach@@LIBC
+
+.balign 4
+.globl __bf_strtoimax
+.type __bf_strtoimax, %function
+__bf_strtoimax:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5048]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #631
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strtoimax, strtoimax@@LIBC
+
+.balign 4
+.globl __bf_fstatat
+.type __bf_fstatat, %function
+__bf_fstatat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5056]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #632
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fstatat, fstatat@@LIBC
+
+.balign 4
+.globl __bf_readdir_r
+.type __bf_readdir_r, %function
+__bf_readdir_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5064]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #633
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_readdir_r, readdir_r@@LIBC
+
+.balign 4
+.globl __bf_mknod
+.type __bf_mknod, %function
+__bf_mknod:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5072]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #634
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mknod, mknod@@LIBC
+
+.balign 4
+.globl __bf_open_memstream
+.type __bf_open_memstream, %function
+__bf_open_memstream:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5080]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #635
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_open_memstream, open_memstream@@LIBC
+
+.balign 4
+.globl __bf_vfork
+.type __bf_vfork, %function
+__bf_vfork:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5088]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #636
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_vfork, vfork@@LIBC
+
+.balign 4
+.globl __bf_getprotobynumber
+.type __bf_getprotobynumber, %function
+__bf_getprotobynumber:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5096]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #637
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getprotobynumber, getprotobynumber@@LIBC
+
+.balign 4
+.globl __bf___fgets_chk
+.type __bf___fgets_chk, %function
+__bf___fgets_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5104]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #638
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___fgets_chk, __fgets_chk@@LIBC
+
+.balign 4
+.globl __bf_strtok
+.type __bf_strtok, %function
+__bf_strtok:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5112]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #639
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strtok, strtok@@LIBC
+
+.balign 4
+.globl __bf_ctime
+.type __bf_ctime, %function
+__bf_ctime:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5120]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #640
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ctime, ctime@@LIBC
+
+.balign 4
+.globl __bf_scandir
+.type __bf_scandir, %function
+__bf_scandir:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5128]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #641
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_scandir, scandir@@LIBC
+
+.balign 4
+.globl __bf_alphasort
+.type __bf_alphasort, %function
+__bf_alphasort:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5136]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #642
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_alphasort, alphasort@@LIBC
+
+.balign 4
+.globl __bf_rewind
+.type __bf_rewind, %function
+__bf_rewind:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5144]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #643
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_rewind, rewind@@LIBC
+
+.balign 4
+.globl __bf_hasmntopt
+.type __bf_hasmntopt, %function
+__bf_hasmntopt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5152]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #644
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_hasmntopt, hasmntopt@@LIBC_O
+
+.balign 4
+.globl __bf___pread64_chk
+.type __bf___pread64_chk, %function
+__bf___pread64_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5160]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #645
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___pread64_chk, __pread64_chk@@LIBC
+
+.balign 4
+.globl __bf_posix_fadvise
+.type __bf_posix_fadvise, %function
+__bf_posix_fadvise:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5168]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #646
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_posix_fadvise, posix_fadvise@@LIBC
+
+.balign 4
+.globl __bf_ftruncate64
+.type __bf_ftruncate64, %function
+__bf_ftruncate64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5176]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #647
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ftruncate64, ftruncate64@@LIBC
+
+.balign 4
+.globl __bf_process_vm_readv
+.type __bf_process_vm_readv, %function
+__bf_process_vm_readv:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5184]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #648
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_process_vm_readv, process_vm_readv@@LIBC
+
+.balign 4
+.globl __bf_umount
+.type __bf_umount, %function
+__bf_umount:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5192]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #649
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_umount, umount@@LIBC
+
+.balign 4
+.globl __bf_swapon
+.type __bf_swapon, %function
+__bf_swapon:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5200]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #650
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_swapon, swapon@@LIBC
+
+.balign 4
+.globl __bf_system
+.type __bf_system, %function
+__bf_system:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5208]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #651
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_system, system@@LIBC
+
+.balign 4
+.globl __bf_fstatfs64
+.type __bf_fstatfs64, %function
+__bf_fstatfs64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5216]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #652
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fstatfs64, fstatfs64@@LIBC
+
+.balign 4
+.globl __bf_sync
+.type __bf_sync, %function
+__bf_sync:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5224]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #653
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sync, sync@@LIBC
+
+.balign 4
+.globl __bf_posix_openpt
+.type __bf_posix_openpt, %function
+__bf_posix_openpt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5232]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #654
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_posix_openpt, posix_openpt@@LIBC
+
+.balign 4
+.globl __bf_grantpt
+.type __bf_grantpt, %function
+__bf_grantpt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5240]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #655
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_grantpt, grantpt@@LIBC
+
+.balign 4
+.globl __bf_unlockpt
+.type __bf_unlockpt, %function
+__bf_unlockpt:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5248]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #656
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_unlockpt, unlockpt@@LIBC
+
+.balign 4
+.globl __bf_ptsname_r
+.type __bf_ptsname_r, %function
+__bf_ptsname_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5256]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #657
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ptsname_r, ptsname_r@@LIBC
+
+.balign 4
+.globl __bf_setsid
+.type __bf_setsid, %function
+__bf_setsid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5264]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #658
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setsid, setsid@@LIBC
+
+.balign 4
+.globl __bf_android_link_namespaces
+.type __bf_android_link_namespaces, %function
+__bf_android_link_namespaces:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5272]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #659
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_link_namespaces, android_link_namespaces@@LIBDL_ANDROID
+
+.balign 4
+.globl __bf_android_create_namespace
+.type __bf_android_create_namespace, %function
+__bf_android_create_namespace:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5280]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #660
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_create_namespace, android_create_namespace@@LIBDL_ANDROID
+
+.balign 4
+.globl __bf_eventfd_read
+.type __bf_eventfd_read, %function
+__bf_eventfd_read:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5288]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #661
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_eventfd_read, eventfd_read@@LIBC
+
+.balign 4
+.globl __bf_sem_clockwait
+.type __bf_sem_clockwait, %function
+__bf_sem_clockwait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5296]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #662
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sem_clockwait, sem_clockwait@@LIBC_R
+
+.balign 4
+.globl __bf_asinh
+.type __bf_asinh, %function
+__bf_asinh:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5304]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #663
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_asinh, asinh@@LIBC
+
+.balign 4
+.globl __bf_acosh
+.type __bf_acosh, %function
+__bf_acosh:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5312]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #664
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_acosh, acosh@@LIBC
+
+.balign 4
+.globl __bf_atanh
+.type __bf_atanh, %function
+__bf_atanh:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5320]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #665
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_atanh, atanh@@LIBC
+
+.balign 4
+.globl __bf_remainder
+.type __bf_remainder, %function
+__bf_remainder:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5328]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #666
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_remainder, remainder@@LIBC
+
+.balign 4
+.globl __bf_getrandom
+.type __bf_getrandom, %function
+__bf_getrandom:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5336]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #667
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getrandom, getrandom@@LIBC_P
+
+.balign 4
+.globl __bf_erf
+.type __bf_erf, %function
+__bf_erf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5344]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #668
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_erf, erf@@LIBC
+
+.balign 4
+.globl __bf_asctime
+.type __bf_asctime, %function
+__bf_asctime:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5352]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #669
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_asctime, asctime@@LIBC
+
+.balign 4
+.globl __bf_getprotobyname
+.type __bf_getprotobyname, %function
+__bf_getprotobyname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5360]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #670
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getprotobyname, getprotobyname@@LIBC
+
+.balign 4
+.globl __bf_setns
+.type __bf_setns, %function
+__bf_setns:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5368]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #671
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setns, setns@@LIBC
+
+.balign 4
+.globl __bf___gnu_basename
+.type __bf___gnu_basename, %function
+__bf___gnu_basename:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5376]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #672
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___gnu_basename, __gnu_basename@@LIBC
+
+.balign 4
+.globl __bf_fgetc
+.type __bf_fgetc, %function
+__bf_fgetc:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5384]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #673
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fgetc, fgetc@@LIBC
+
+.balign 4
+.globl __bf_glob
+.type __bf_glob, %function
+__bf_glob:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5392]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #674
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_glob, glob@@LIBC_P
+
+.balign 4
+.globl __bf_globfree
+.type __bf_globfree, %function
+__bf_globfree:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5400]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #675
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_globfree, globfree@@LIBC_P
+
+.balign 4
+.globl __bf_getgroups
+.type __bf_getgroups, %function
+__bf_getgroups:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5408]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #676
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getgroups, getgroups@@LIBC
+
+.balign 4
+.globl __bf_getopt_long_only
+.type __bf_getopt_long_only, %function
+__bf_getopt_long_only:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5416]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #677
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getopt_long_only, getopt_long_only@@LIBC
+
+.balign 4
+.globl __bf_inet_aton
+.type __bf_inet_aton, %function
+__bf_inet_aton:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5424]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #678
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inet_aton, inet_aton@@LIBC
+
+.balign 4
+.globl __bf_strcasestr
+.type __bf_strcasestr, %function
+__bf_strcasestr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5432]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #679
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strcasestr, strcasestr@@LIBC
+
+.balign 4
+.globl __bf_inet_addr
+.type __bf_inet_addr, %function
+__bf_inet_addr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5440]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #680
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_inet_addr, inet_addr@@LIBC
+
+.balign 4
+.globl __bf_pthread_setschedprio
+.type __bf_pthread_setschedprio, %function
+__bf_pthread_setschedprio:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5448]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #681
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pthread_setschedprio, pthread_setschedprio@@LIBC_P
+
+.balign 4
+.globl __bf_pwrite64
+.type __bf_pwrite64, %function
+__bf_pwrite64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5456]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #682
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pwrite64, pwrite64@@LIBC
+
+.balign 4
+.globl __bf_mmap64
+.type __bf_mmap64, %function
+__bf_mmap64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5464]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #683
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mmap64, mmap64@@LIBC
+
+.balign 4
+.globl __bf_munlock
+.type __bf_munlock, %function
+__bf_munlock:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5472]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #684
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_munlock, munlock@@LIBC
+
+.balign 4
+.globl __bf_malloc_backtrace
+.type __bf_malloc_backtrace, %function
+__bf_malloc_backtrace:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5480]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #685
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc_backtrace, malloc_backtrace@@LIBC_Q
+
+.balign 4
+.globl __bf_malloc_disable
+.type __bf_malloc_disable, %function
+__bf_malloc_disable:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5488]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #686
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc_disable, malloc_disable@@LIBC_Q
+
+.balign 4
+.globl __bf_malloc_enable
+.type __bf_malloc_enable, %function
+__bf_malloc_enable:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5496]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #687
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc_enable, malloc_enable@@LIBC_Q
+
+.balign 4
+.globl __bf_malloc_iterate
+.type __bf_malloc_iterate, %function
+__bf_malloc_iterate:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5504]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #688
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_malloc_iterate, malloc_iterate@@LIBC_Q
+
+.balign 4
+.globl __bf_sethostname
+.type __bf_sethostname, %function
+__bf_sethostname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5512]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #689
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sethostname, sethostname@@LIBC
+
+.balign 4
+.globl __bf_mknodat
+.type __bf_mknodat, %function
+__bf_mknodat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5520]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #690
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mknodat, mknodat@@LIBC
+
+.balign 4
+.globl __bf_symlinkat
+.type __bf_symlinkat, %function
+__bf_symlinkat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5528]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #691
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_symlinkat, symlinkat@@LIBC
+
+.balign 4
+.globl __bf_fchdir
+.type __bf_fchdir, %function
+__bf_fchdir:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5536]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #692
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fchdir, fchdir@@LIBC
+
+.balign 4
+.globl __bf_initgroups
+.type __bf_initgroups, %function
+__bf_initgroups:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5544]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #693
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_initgroups, initgroups@@LIBC
+
+.balign 4
+.globl __bf_sigtimedwait
+.type __bf_sigtimedwait, %function
+__bf_sigtimedwait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5552]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #694
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigtimedwait, sigtimedwait@@LIBC
+
+.balign 4
+.globl __bf___libc_current_sigrtmax
+.type __bf___libc_current_sigrtmax, %function
+__bf___libc_current_sigrtmax:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5560]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #695
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___libc_current_sigrtmax, __libc_current_sigrtmax@@LIBC
+
+.balign 4
+.globl __bf_fexecve
+.type __bf_fexecve, %function
+__bf_fexecve:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5568]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #696
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fexecve, fexecve@@LIBC_P
+
+.balign 4
+.globl __bf___libc_current_sigrtmin
+.type __bf___libc_current_sigrtmin, %function
+__bf___libc_current_sigrtmin:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5576]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #697
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___libc_current_sigrtmin, __libc_current_sigrtmin@@LIBC
+
+.balign 4
+.globl __bf_prlimit
+.type __bf_prlimit, %function
+__bf_prlimit:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5584]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #698
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_prlimit, prlimit@@LIBC
+
+.balign 4
+.globl __bf_vsyslog
+.type __bf_vsyslog, %function
+__bf_vsyslog:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5592]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #699
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_vsyslog, vsyslog@@LIBC
+
+.balign 4
+.globl __bf_vdprintf
+.type __bf_vdprintf, %function
+__bf_vdprintf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5600]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #700
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_vdprintf, vdprintf@@LIBC
+
+.balign 4
+.globl __bf_posix_madvise
+.type __bf_posix_madvise, %function
+__bf_posix_madvise:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5608]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #701
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_posix_madvise, posix_madvise@@LIBC
+
+.balign 4
+.globl __bf_android_set_application_target_sdk_version
+.type __bf_android_set_application_target_sdk_version, %function
+__bf_android_set_application_target_sdk_version:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5616]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #702
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_android_set_application_target_sdk_version, android_set_application_target_sdk_version@@LIBDL_ANDROID
+
+.balign 4
+.globl __bf_res_mkquery
+.type __bf_res_mkquery, %function
+__bf_res_mkquery:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5624]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #703
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_res_mkquery, res_mkquery@@LIBC
+
+.balign 4
+.globl __bf___b64_ntop
+.type __bf___b64_ntop, %function
+__bf___b64_ntop:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5632]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #704
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___b64_ntop, __b64_ntop@@LIBC
+
+.balign 4
+.globl __bf_vfscanf
+.type __bf_vfscanf, %function
+__bf_vfscanf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5640]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #705
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_vfscanf, vfscanf@@LIBC
+
+.balign 4
+.globl __bf_clock_getcpuclockid
+.type __bf_clock_getcpuclockid, %function
+__bf_clock_getcpuclockid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5648]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #706
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_clock_getcpuclockid, clock_getcpuclockid@@LIBC
+
+.balign 4
+.globl __bf_clock_getres
+.type __bf_clock_getres, %function
+__bf_clock_getres:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5656]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #707
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_clock_getres, clock_getres@@LIBC
+
+.balign 4
+.globl __bf_clock_settime
+.type __bf_clock_settime, %function
+__bf_clock_settime:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5664]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #708
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_clock_settime, clock_settime@@LIBC
+
+.balign 4
+.globl __bf_getgrgid_r
+.type __bf_getgrgid_r, %function
+__bf_getgrgid_r:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5672]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #709
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getgrgid_r, getgrgid_r@@LIBC_N
+
+.balign 4
+.globl __bf_sigwait
+.type __bf_sigwait, %function
+__bf_sigwait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5680]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #710
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigwait, sigwait@@LIBC
+
+.balign 4
+.globl __bf_sigsuspend
+.type __bf_sigsuspend, %function
+__bf_sigsuspend:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5688]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #711
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sigsuspend, sigsuspend@@LIBC
+
+.balign 4
+.globl __bf_getgrouplist
+.type __bf_getgrouplist, %function
+__bf_getgrouplist:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5696]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #712
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getgrouplist, getgrouplist@@LIBC
+
+.balign 4
+.globl __bf_daemon
+.type __bf_daemon, %function
+__bf_daemon:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5704]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #713
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_daemon, daemon@@LIBC
+
+.balign 4
+.globl __bf_setfsgid
+.type __bf_setfsgid, %function
+__bf_setfsgid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5712]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #714
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setfsgid, setfsgid@@LIBC
+
+.balign 4
+.globl __bf_setfsuid
+.type __bf_setfsuid, %function
+__bf_setfsuid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5720]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #715
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setfsuid, setfsuid@@LIBC
+
+.balign 4
+.globl __bf_process_vm_writev
+.type __bf_process_vm_writev, %function
+__bf_process_vm_writev:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5728]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #716
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_process_vm_writev, process_vm_writev@@LIBC
+
+.balign 4
+.globl __bf_munlockall
+.type __bf_munlockall, %function
+__bf_munlockall:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5736]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #717
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_munlockall, munlockall@@LIBC
+
+.balign 4
+.globl __bf_mlockall
+.type __bf_mlockall, %function
+__bf_mlockall:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5744]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #718
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mlockall, mlockall@@LIBC
+
+.balign 4
+.globl __bf_umask
+.type __bf_umask, %function
+__bf_umask:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5752]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #719
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_umask, umask@@LIBC
+
+.balign 4
+.globl __bf_recv
+.type __bf_recv, %function
+__bf_recv:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5760]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #720
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_recv, recv@@LIBC
+
+.balign 4
+.globl __bf_send
+.type __bf_send, %function
+__bf_send:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5768]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #721
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_send, send@@LIBC
+
+.balign 4
+.globl __bf_cfsetspeed
+.type __bf_cfsetspeed, %function
+__bf_cfsetspeed:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5776]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #722
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_cfsetspeed, cfsetspeed@@LIBC
+
+.balign 4
+.globl __bf_cfgetispeed
+.type __bf_cfgetispeed, %function
+__bf_cfgetispeed:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5784]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #723
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_cfgetispeed, cfgetispeed@@LIBC
+
+.balign 4
+.globl __bf_cfgetospeed
+.type __bf_cfgetospeed, %function
+__bf_cfgetospeed:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5792]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #724
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_cfgetospeed, cfgetospeed@@LIBC
+
+.balign 4
+.globl __bf_cfsetispeed
+.type __bf_cfsetispeed, %function
+__bf_cfsetispeed:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5800]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #725
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_cfsetispeed, cfsetispeed@@LIBC
+
+.balign 4
+.globl __bf_cfsetospeed
+.type __bf_cfsetospeed, %function
+__bf_cfsetospeed:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5808]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #726
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_cfsetospeed, cfsetospeed@@LIBC
+
+.balign 4
+.globl __bf_cfmakeraw
+.type __bf_cfmakeraw, %function
+__bf_cfmakeraw:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5816]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #727
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_cfmakeraw, cfmakeraw@@LIBC
+
+.balign 4
+.globl __bf_getnetbyname
+.type __bf_getnetbyname, %function
+__bf_getnetbyname:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5824]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #728
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getnetbyname, getnetbyname@@LIBC
+
+.balign 4
+.globl __bf_iswdigit
+.type __bf_iswdigit, %function
+__bf_iswdigit:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5832]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #729
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_iswdigit, iswdigit@@LIBC
+
+.balign 4
+.globl __bf_wait4
+.type __bf_wait4, %function
+__bf_wait4:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5840]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #730
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_wait4, wait4@@LIBC
+
+.balign 4
+.globl __bf_getpgid
+.type __bf_getpgid, %function
+__bf_getpgid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5848]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #731
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_getpgid, getpgid@@LIBC
+
+.balign 4
+.globl __bf_lchown
+.type __bf_lchown, %function
+__bf_lchown:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5856]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #732
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lchown, lchown@@LIBC
+
+.balign 4
+.globl __bf_nanf
+.type __bf_nanf, %function
+__bf_nanf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5864]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #733
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_nanf, nanf@@LIBC
+
+.balign 4
+.globl __bf_strptime
+.type __bf_strptime, %function
+__bf_strptime:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5872]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #734
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strptime, strptime@@LIBC
+
+.balign 4
+.globl __bf_sem_timedwait
+.type __bf_sem_timedwait, %function
+__bf_sem_timedwait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5880]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #735
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sem_timedwait, sem_timedwait@@LIBC
+
+.balign 4
+.globl __bf_frexpl
+.type __bf_frexpl, %function
+__bf_frexpl:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5888]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #736
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_frexpl, frexpl@@LIBC
+
+.balign 4
+.globl __bf_ldexpl
+.type __bf_ldexpl, %function
+__bf_ldexpl:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5896]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #737
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ldexpl, ldexpl@@LIBC
+
+.balign 4
+.globl __bf___recvfrom_chk
+.type __bf___recvfrom_chk, %function
+__bf___recvfrom_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5904]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #738
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___recvfrom_chk, __recvfrom_chk@@LIBC
+
+.balign 4
+.globl __bf_readdir64
+.type __bf_readdir64, %function
+__bf_readdir64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5912]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #739
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_readdir64, readdir64@@LIBC
+
+.balign 4
+.globl __bf_readlinkat
+.type __bf_readlinkat, %function
+__bf_readlinkat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5920]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #740
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_readlinkat, readlinkat@@LIBC
+
+.balign 4
+.globl __bf_flistxattr
+.type __bf_flistxattr, %function
+__bf_flistxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5928]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #741
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_flistxattr, flistxattr@@LIBC
+
+.balign 4
+.globl __bf_llistxattr
+.type __bf_llistxattr, %function
+__bf_llistxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5936]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #742
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_llistxattr, llistxattr@@LIBC
+
+.balign 4
+.globl __bf_lremovexattr
+.type __bf_lremovexattr, %function
+__bf_lremovexattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5944]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #743
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lremovexattr, lremovexattr@@LIBC
+
+.balign 4
+.globl __bf_linkat
+.type __bf_linkat, %function
+__bf_linkat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5952]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #744
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_linkat, linkat@@LIBC
+
+.balign 4
+.globl __bf_openat64
+.type __bf_openat64, %function
+__bf_openat64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5960]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #745
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_openat64, openat64@@LIBC
+
+.balign 4
+.globl __bf_fstatat64
+.type __bf_fstatat64, %function
+__bf_fstatat64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5968]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #746
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fstatat64, fstatat64@@LIBC
+
+.balign 4
+.globl __bf_fchownat
+.type __bf_fchownat, %function
+__bf_fchownat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5976]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #747
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fchownat, fchownat@@LIBC
+
+.balign 4
+.globl __bf_posix_fadvise64
+.type __bf_posix_fadvise64, %function
+__bf_posix_fadvise64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5984]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #748
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_posix_fadvise64, posix_fadvise64@@LIBC
+
+.balign 4
+.globl __bf_fstatvfs64
+.type __bf_fstatvfs64, %function
+__bf_fstatvfs64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #5992]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #749
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fstatvfs64, fstatvfs64@@LIBC
+
+.balign 4
+.globl __bf_renameat
+.type __bf_renameat, %function
+__bf_renameat:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6000]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #750
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_renameat, renameat@@LIBC
+
+.balign 4
+.globl __bf_fallocate64
+.type __bf_fallocate64, %function
+__bf_fallocate64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6008]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #751
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fallocate64, fallocate64@@LIBC
+
+.balign 4
+.globl __bf_lgetxattr
+.type __bf_lgetxattr, %function
+__bf_lgetxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6016]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #752
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lgetxattr, lgetxattr@@LIBC
+
+.balign 4
+.globl __bf_listxattr
+.type __bf_listxattr, %function
+__bf_listxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6024]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #753
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_listxattr, listxattr@@LIBC
+
+.balign 4
+.globl __bf_lsetxattr
+.type __bf_lsetxattr, %function
+__bf_lsetxattr:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6032]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #754
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_lsetxattr, lsetxattr@@LIBC
+
+.balign 4
+.globl __bf_pause
+.type __bf_pause, %function
+__bf_pause:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6040]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #755
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pause, pause@@LIBC
+
+.balign 4
+.globl __bf___stpcpy_chk
+.type __bf___stpcpy_chk, %function
+__bf___stpcpy_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6048]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #756
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___stpcpy_chk, __stpcpy_chk@@LIBC
+
+.balign 4
+.globl __bf___fsetlocking
+.type __bf___fsetlocking, %function
+__bf___fsetlocking:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6056]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #757
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___fsetlocking, __fsetlocking@@LIBC
+
+.balign 4
+.globl __bf___mempcpy_chk
+.type __bf___mempcpy_chk, %function
+__bf___mempcpy_chk:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6064]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #758
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___mempcpy_chk, __mempcpy_chk@@LIBC_R
+
+.balign 4
+.globl __bf_reallocarray
+.type __bf_reallocarray, %function
+__bf_reallocarray:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6072]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #759
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_reallocarray, reallocarray@@LIBC_Q
+
+.balign 4
+.globl __bf___system_properties_init
+.type __bf___system_properties_init, %function
+__bf___system_properties_init:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6080]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #760
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf___system_properties_init, __system_properties_init@@LIBC_Q
+
+.balign 4
+.globl __bf_fts_open
+.type __bf_fts_open, %function
+__bf_fts_open:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6088]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #761
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fts_open, fts_open@@LIBC
+
+.balign 4
+.globl __bf_fts_read
+.type __bf_fts_read, %function
+__bf_fts_read:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6096]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #762
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fts_read, fts_read@@LIBC
+
+.balign 4
+.globl __bf_fts_set
+.type __bf_fts_set, %function
+__bf_fts_set:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6104]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #763
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fts_set, fts_set@@LIBC
+
+.balign 4
+.globl __bf_fts_close
+.type __bf_fts_close, %function
+__bf_fts_close:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6112]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #764
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fts_close, fts_close@@LIBC
+
+.balign 4
+.globl __bf_stpcpy
+.type __bf_stpcpy, %function
+__bf_stpcpy:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6120]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #765
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_stpcpy, stpcpy@@LIBC
+
+.balign 4
+.globl __bf_popen
+.type __bf_popen, %function
+__bf_popen:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6128]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #766
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_popen, popen@@LIBC
+
+.balign 4
+.globl __bf_pclose
+.type __bf_pclose, %function
+__bf_pclose:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6136]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #767
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pclose, pclose@@LIBC
+
+.balign 4
+.globl __bf_pwritev
+.type __bf_pwritev, %function
+__bf_pwritev:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6144]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #768
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pwritev, pwritev@@LIBC_N
+
+.balign 4
+.globl __bf_fpathconf
+.type __bf_fpathconf, %function
+__bf_fpathconf:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6152]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #769
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fpathconf, fpathconf@@LIBC
+
+.balign 4
+.globl __bf_memmem
+.type __bf_memmem, %function
+__bf_memmem:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6160]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #770
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_memmem, memmem@@LIBC
+
+.balign 4
+.globl __bf_strchrnul
+.type __bf_strchrnul, %function
+__bf_strchrnul:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6168]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #771
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strchrnul, strchrnul@@LIBC_N
+
+.balign 4
+.globl __bf_open64
+.type __bf_open64, %function
+__bf_open64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6176]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #772
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_open64, open64@@LIBC
+
+.balign 4
+.globl __bf_mkfifo
+.type __bf_mkfifo, %function
+__bf_mkfifo:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6184]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #773
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_mkfifo, mkfifo@@LIBC
+
+.balign 4
+.globl __bf_preadv
+.type __bf_preadv, %function
+__bf_preadv:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6192]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #774
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_preadv, preadv@@LIBC_N
+
+.balign 4
+.globl __bf_splice
+.type __bf_splice, %function
+__bf_splice:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6200]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #775
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_splice, splice@@LIBC
+
+.balign 4
+.globl __bf_copy_file_range
+.type __bf_copy_file_range, %function
+__bf_copy_file_range:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6208]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #776
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_copy_file_range, copy_file_range@@LIBC_U
+
+.balign 4
+.globl __bf_fseeko64
+.type __bf_fseeko64, %function
+__bf_fseeko64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6216]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #777
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_fseeko64, fseeko64@@LIBC_N
+
+.balign 4
+.globl __bf_ftello64
+.type __bf_ftello64, %function
+__bf_ftello64:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6224]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #778
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_ftello64, ftello64@@LIBC_N
+
+.balign 4
+.globl __bf_sem_trywait
+.type __bf_sem_trywait, %function
+__bf_sem_trywait:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6232]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #779
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_sem_trywait, sem_trywait@@LIBC
+
+.balign 4
+.globl __bf_pthread_mutex_timedlock
+.type __bf_pthread_mutex_timedlock, %function
+__bf_pthread_mutex_timedlock:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6240]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #780
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_pthread_mutex_timedlock, pthread_mutex_timedlock@@LIBC
+
+.balign 4
+.globl __bf_strerrorname_np
+.type __bf_strerrorname_np, %function
+__bf_strerrorname_np:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6248]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #781
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_strerrorname_np, strerrorname_np@@LIBC_V
+
+.balign 4
+.globl __bf_clone3
+.type __bf_clone3, %function
+__bf_clone3:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6256]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #782
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_clone3, clone3@@LIBC
+
+.balign 4
+.globl __bf_setregid
+.type __bf_setregid, %function
+__bf_setregid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6264]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #783
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setregid, setregid@@LIBC
+
+.balign 4
+.globl __bf_setreuid
+.type __bf_setreuid, %function
+__bf_setreuid:
+    adrp x16, :got:__bf_tramp_table
+    ldr x16, [x16, #:got_lo12:__bf_tramp_table]
+    ldr x17, [x16, #6272]
+    cbz x17, 1f
+    br x17
+1:  mov x0, #784
+    bl __bf_resolve_and_call
+    br x0
+.symver __bf_setreuid, setreuid@@LIBC
 
 .section .data.bionic_data, "aw"
 
@@ -5623,3 +11125,11 @@ __bf_data_in6addr_loopback:
 __bf_data___stack_chk_guard:
     .dword 0
 .symver __bf_data___stack_chk_guard, __stack_chk_guard@@LIBC
+
+.balign 8
+.globl __bf_data_signgam
+.type __bf_data_signgam, %object
+.size __bf_data_signgam, 8
+__bf_data_signgam:
+    .dword 0
+.symver __bf_data_signgam, signgam@@LIBC
