@@ -10,6 +10,10 @@ LIBC_O {
     global: *;
 };
 
+LIBC_OMR1 {
+    global: *;
+};
+
 LIBC_P {
     global:
         aligned_alloc;

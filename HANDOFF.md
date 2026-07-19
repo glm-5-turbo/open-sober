@@ -178,7 +178,7 @@ Remaining Phase B work:
 
 - **GPU:** NVIDIA RTX 3060 Mobile + Intel Iris Xe (Mesa drivers active)
 - **OS:** Ubuntu 26.04 LTS
-- **QEMU:** qemu-aarch64 10.2.1 installed
+- **QEMU:** Custom build at `/tmp/qemu-build/qemu-10.2.1/build/qemu-aarch64` (VDSO disabled)
 - **Cross-compiler:** `aarch64-linux-gnu-gcc` (gcc-15)
 - **Android NDK r28:** Extracted at `/tmp/ndk_extract/` and `/tmp/ndk.zip`
 - **GSI ARM64 image:** Downloaded at `/tmp/gsi_arm64.zip`, mounted at `/tmp/gsi_mount/`
@@ -187,96 +187,55 @@ Remaining Phase B work:
 - **GitHub token:** Authenticated as `glm-5-turbo`, repo `open-sober`
 ## Latest Runtime Test Results (2026-07-19)
 
-### 🚀 MAJOR MILESTONE: dlopen("libroblox.so") SUCCEEDS!
+### ✅ FIXED: QEMU VDSO Crash — Custom QEMU built without VDSO
 
-Both `libandroid_runtime.so` and `libroblox.so` now load via `dlopen()` under QEMU-aarch64:
-- `libc++.so`, `liblog.so`, `libbase.so`, `libcutils.so`, `libutils.so` — ✅
-- `libhardware.so`, `libcodec2.so`, `libbinder.so`, `libfmq.so`, `libEGL.so` — ✅
-- `libgui.so`, `libui.so`, `libselinux.so`, `libpdfium.so`, `libmemunreachable.so` — ✅
-- `libandroid_runtime.so`: ✅ Working
-- `libroblox.so`: ✅ dlopen SUCCESS, dlclose OK
+**The VDSO crash is now fixed.** QEMU 10.2.1 was rebuilt from source with the ARM64 VDSO disabled
+(commented out `VDSO_HEADER` in `linux-user/aarch64/target_elf.h` so `get_vdso_image_info()` returns NULL).
+Custom binary at `/tmp/qemu-build/qemu-10.2.1/build/qemu-aarch64`.
 
-### 🔧 Fixes Applied This Session
+### 🚀 NEXT: dlopen + JNI_OnLoad crash at JNI function call
 
-**1. Version alias system for LIBC_* symbols**
-- rewrote `gen_bridge_stubs.py` to generate `.symver` aliases for ALL non-default
-  LIBC_ version tags (LIBC_Q, LIBC_N, LIBC_O, LIBC_P, LIBC_R, LIBC_S, LIBC_U, LIBC_V)
-- 74 `.symver` aliases generated for 44 symbols across all GSI libs
-- Uses separate wrapper functions per version to avoid BFD ld 'multiple definition'
+`dlopen("libroblox.so")` succeeds under no-VDSO QEMU. JNI_OnLoad is called, but crashes with a
+target SIGSEGV (not a QEMU crash!) — likely a NULL JNI table entry being called, or stack canary issue.
 
-**2. New Bionic stubs in bridge_libc.c**
-- `malloc_backtrace@@LIBC_Q`, `malloc_disable@@LIBC_Q`
-- `malloc_enable@@LIBC_Q`, `malloc_iterate@@LIBC_Q`
-- `__mempcpy_chk@@LIBC_R` (libselinux.so dependency)
-- `__system_properties_init@@LIBC_Q`, `__system_properties_zygote_reload@@LIBC_V`
-- `__system_property_read_callback@@LIBC_O`, `__system_property_wait@@LIBC_O`
-- `android_get_device_api_level@@LIBC_Q`
-- Fixed 3 bridge_libc.c stubs referencing `_bf_*_glibc` nonexistent symbols
+### 🔧 Fixes Applied This Session (2026-07-19)
 
-**3. New ICU stubs in bridge_icu.c**
-- libpdfium.so needs: u_isalnum, u_isalpha, u_isspace, u_toupper, u_tolower
-- libandroid_runtime.so needs: u_charMirror, u_getIntPropertyMaxValue
+**1. QEMU built from source with VDSO disabled**
+- Patched `linux-user/aarch64/target_elf.h` to comment out `#define VDSO_HEADER`
+- This causes `get_vdso_image_info()` to return NULL, skipping all VDSO loading
+- Build output: `/tmp/qemu-build/qemu-10.2.1/build/qemu-aarch64`
+- Source: `/tmp/qemu-build/qemu-10.2.1/`
+- The patch is specific to aarch64; other architectures unaffected
 
-**4. jni_shim.c rewritten with comprehensive JNI table**
-- ~120+ JNI stubs covering all Call<Type>Method variants
-- Uses slot-indexed function pointer arrays (avoids struct layout issues)
-- Proper JavaVM function table matching JNI spec (flat array indexed by slot)
-- Compiles cleanly under aarch64-linux-gnu-gcc (0 errors)
+**2. Bridge libc compilation fixes**
+- `bridge_libc.c`: Fixed `aligned_alloc`, `__fread_chk`, `__mempcpy_chk` compilation errors
+- All bridges now compile cleanly under aarch64-linux-gnu-gcc
 
-**5. libroblox.so patched** — GNU_RELRO cleared, BIND_NOW cleared, INIT/FINI nulled
+**3. Batch auto-generated stubs for 322 missing LIBC symbols**
+- Created `gen_bionic_stubs.py` that scans ALL GSI libs for LIBC-versioned UND symbols
+- Generated `missing_stubs.h` with 322 `.symver` stubs (included from `bionic_init.c`)
+- Added `LIBC_OMR1` version block to `bionic_version.ver`
+- This makes ALL 840 LIBC symbols referenced by GSI libs available, not just the 392 from libroblox.so
 
-### ⚠️ Current Blocker: QEMU VDSO crash on JNI_OnLoad call
+**4. Added strcasestr, ppoll, fallocate stubs to bionic_shim**
 
-`dlopen("libroblox.so")` succeeds. The GOT entry for `__stack_chk_guard` at
-`base + 0x6473438` is manually patched with a global canary pointer. The
-`__stack_chk_guard` TLS variable is set via dlsym. Stack is verified working
-(64MB via `-s`). No init/fini arrays run. No RELRO mprotect.
+### ⚠️ Current Blocker: GUEST SIGSEGV in JNI_OnLoad
 
-When JNI_OnLoad is called, QEMU 10.2.1 immediately crashes with SIGSEGV
-`si_code=2` (SEGV_ACCERR) at `0x...100000 - 0x10` pattern. The `-d in_asm`
-trace shows QEMU is translating code in the **VDSO page** (addresses
-`0x7f...fff000` range) when it crashes.
-
-**Root cause**: QEMU 10.2.1 user-mode VDSO translation bug triggered by the
-large guest binary (105MB + 788 GSI libs). The VDSO (virtual dynamic shared
-object) is QEMU's kernel emulation for fast syscalls. When too many guest
-libraries are loaded, VDSO interaction causes an internal QEMU crash.
-
-**Attempted fixes that didn't help:**
-- Stack size: `-s 64MB`, `-s 128MB`, `-s 512MB`
-- Reserved VA: `-R 512M`, `-R 4G`, `-R 0`
-- TCG cache: `-tb-size 256`
-- Kernel version: `-r 4.14.0`, `-r 5.0.0`
-- Removing PT_GNU_RELRO from ALL bridge libraries
-- Building bridges with `-Wl,-z,norelro`
-- Static global canary, heap canary, dlsym-based canary
-- RTLD_NOW vs RTLD_LAZY
-- All signal handler attempts
-
-**Possible fixes:**
-1. **Build QEMU with --disable-vdso** — the VDSO is not essential for
-   user-mode. `./configure --target-list=aarch64-linux-user --disable-vdso`
-2. **Try QEMU 9.x** — the VDSO bug may be a regression in 10.x
-3. **Use an Ubuntu PPA or different QEMU build**
-4. **Try running under Docker with a different QEMU version**
+`dlopen("libroblox.so")` now succeeds. The previous QEMU VDSO crash is gone.
+When JNI_OnLoad is called, the guest process crashes with SIGSEGV (not a QEMU crash).
+Likely causes:
+- NULL JNI function table slot being called
+- `__stack_chk_guard` not properly accessible via thread pointer in libroblox
+- libroblox expecting real ART runtime data structures
+- Debug: run with `-d in_asm,cpu` to find the faulting instruction
 
 ### 🎯 Next Agent — Priority Actions
 
-1. **Fix QEMU VDSO crash** — build QEMU with `--disable-vdso` or install an
-   older QEMU version. The crash is NOT in our code.
+1. **Debug JNI_OnLoad crash** — dlopen works under no-VDSO QEMU, JNI_OnLoad called but crashes.
+   Try running with QEMU's `-d in_asm,cpu` to find the faulting instruction.
 
-2. **Complete JNI stubs** (Phase B) — once JNI_OnLoad runs, extend stubs for
-   missing JNI calls Roblox makes.
+2. **Complete JNI stubs** — extend JNI function table with remaining missing slots.
 
-3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled
-   QEMU launch via `open-sober play` command.
+3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU launch.
 
-4. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md. Symlink libEGL.so
-   and libGLESv2.so to Mesa system libs. Set MESA_LOADER_DRIVER_OVERRIDE=zink.
-
-**Regarding graphics timeline:** Graphics begins AFTER JNI_OnLoad runs.
-Current blocker is QEMU VDSO — once resolved:
-- JNI stubs (~20-30 needed)
-- EGL/GLES symlinks to Mesa
-- X11/Wayland window creation
-- Input handling
+4. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md.

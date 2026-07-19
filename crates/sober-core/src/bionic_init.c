@@ -925,6 +925,36 @@ int _bf_isatty_impl(int fd) {
     return _r ? _r(fd) : 0;
 }
 
+/* strcasestr@@LIBC — case-insensitive string search (BSD/GNU extension) */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_strcasestr_impl(const char *h, const char *n);
+__asm__(".symver _bf_strcasestr_impl,strcasestr@@LIBC");
+char *_bf_strcasestr_impl(const char *h, const char *n) {
+    static char *(*_r)(const char*, const char*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "strcasestr");
+    return _r ? _r(h, n) : NULL;
+}
+
+/* ppoll@@LIBC — Linux ppoll with sigmask, needed by libcodec2_vndk.so */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_ppoll_impl(void *fds, unsigned long nfds, void *ts, const void *sigmask);
+__asm__(".symver _bf_ppoll_impl,ppoll@@LIBC");
+int _bf_ppoll_impl(void *fds, unsigned long nfds, void *ts, const void *sigmask) {
+    static int (*_r)(void*, unsigned long, void*, const void*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "ppoll");
+    return _r ? _r(fds, nfds, ts, sigmask) : -1;
+}
+
+/* fallocate@@LIBC — file space management, needed by libgui.so */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_fallocate_impl(int fd, int mode, unsigned long long off, unsigned long long len);
+__asm__(".symver _bf_fallocate_impl,fallocate@@LIBC");
+int _bf_fallocate_impl(int fd, int mode, unsigned long long off, unsigned long long len) {
+    static int (*_r)(int, int, unsigned long long, unsigned long long) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "fallocate");
+    return _r ? _r(fd, mode, off, len) : -1;
+}
+
 /* aligned_alloc@@LIBC_P */
 __attribute__((used)) __attribute__((externally_visible))
 void *_bf_aligned_alloc_impl(size_t a, size_t s);
@@ -934,6 +964,9 @@ void *_bf_aligned_alloc_impl(size_t a, size_t s) {
     if (!_r) _r = dlsym(RTLD_NEXT, "aligned_alloc");
     return _r ? _r(a, s) : NULL;
 }
+
+/* Pull in auto-generated stubs for missing LIBC symbols from GSI libs */
+#include "missing_stubs.h"
 
 /* ===== Lazy dispatch-table resolver ===== */
 void* __bf_c_resolve(int index) {

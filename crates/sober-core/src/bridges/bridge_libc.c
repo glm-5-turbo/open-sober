@@ -193,11 +193,12 @@ void _bf_getrandom_libc_p_alias(void) {
 }
 
 /* ===== aligned_alloc@@LIBC_P (glibc, needs LIBC_P version alias) */
-void _bf_aligned_alloc_libc_p_alias(void);
+/* aligned_alloc is a built-in in GCC; we use __builtin_aligned_alloc
+ * to suppress the built-in warning, then symver the wrapper. */
+void *_bf_aligned_alloc_libc_p_alias(size_t alignment, size_t size);
 __asm__(".symver _bf_aligned_alloc_libc_p_alias, aligned_alloc@@LIBC_P");
-void _bf_aligned_alloc_libc_p_alias(void) {
-    extern void aligned_alloc(void);
-    aligned_alloc();
+void *_bf_aligned_alloc_libc_p_alias(size_t alignment, size_t size) {
+    return __builtin_aligned_alloc(alignment, size);
 }
 
 /* ===== Re-exported glibc symbols under LIBC version =====
@@ -248,8 +249,8 @@ __asm__(".symver _bf_getaddrinfofornet_impl, android_getaddrinfofornet@@LIBC_Q")
  * Already exported as @@LIBC; provide LIBC_N alias too. */
 
 /* __fread_chk — libroblox.so references this under LIBC_N.
- * The check version __fread_chk has 5 params: ptr, ptrlen, size, nmemb, stream.
- * Provide a thin wrapper matching Bionic's 4-arg signature. */
+ * glibc's __fread_chk has 5 params: ptr, ptrlen, size, nmemb, stream. */
+extern size_t __fread_chk(void *ptr, size_t ptrlen, size_t size, size_t nmemb, void *stream);
 size_t _bf_fread_chk_libc_n_alias(void *ptr, size_t ptrlen, size_t size, size_t nmemb) {
     return __fread_chk(ptr, ptrlen, size, nmemb, (FILE*)0);
 }
@@ -268,11 +269,11 @@ __asm__(".symver _bf_sendto_chk_libc_o_alias, __sendto_chk@@LIBC_O");
 
 /* __mempcpy_chk — glibc checked mempcpy, needed by libselinux.so under LIBC_R.
  * The glibc __mempcpy_chk exists; we just need it tagged under LIBC_R. */
+extern void *__mempcpy_chk(void *dest, const void *src, size_t len, size_t dstlen);
 void _bf_mempcpy_chk_libc_r_alias(void);
 __asm__(".symver _bf_mempcpy_chk_libc_r_alias, __mempcpy_chk@@LIBC_R");
 void _bf_mempcpy_chk_libc_r_alias(void) {
-    extern void __mempcpy_chk(void);
-    __mempcpy_chk();
+    __mempcpy_chk((void*)0, (void*)0, 0, 0);
 }
 
 /* eventfd_write — needed by libgui.so under LIBC version. */
