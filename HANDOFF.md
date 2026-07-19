@@ -252,74 +252,141 @@ All of the following libraries load via `dlopen()` under QEMU-aarch64:
 
 ### 📈 dlopen("libroblox.so") Progress
 
-Roblox loads through its full dependency chain (~170 libraries) and fails at:
-```
-libprotobuf-cpp-lite-6.33.5-absl20260526.so: cannot allocate memory in static TLS block
-```
+**Current blocker:** `libandroid_runtime.so` crashes with SIGILL at base+0.
 
-**Root cause:** The library uses TLS (Thread-Local Storage) and is loaded via `dlopen()`.
-Glibc's static TLS reserve is exceeded by cumulative TLS usage from all loaded GSI
-libraries. The TLS segment itself is only 97 bytes (0x61 memsz), but the cumulative
-total of all TLS segments across ~170 libraries overflows the 1664-byte default reserve.
+`gsi_libandroid_runtime.so` was patched with `patch_gsi.py` (APS2→RELA, GNU_RELRO removed, BIND_NOW removed). DT_INIT_ARRAY tag still exists with value=0 and DT_INIT_ARRAYSZ=0. Glibc's `call_init` sees `l_info[DT_INIT_ARRAY] != NULL` and computes `base + 0 = base = ELF header = SIGILL`. See instructions below for the fix.
 
-**Fixed with:** `GLIBC_TUNABLES="glibc.rtld.optional_static_tls=4096"` QEMU env variable.
-
-After TLS fix, next blocker:
-```
-libxml2.so: undefined symbol: UCNV_TO_U_CALLBACK_STOP_android, version LIBANDROIDICU_EXTERNAL_1
-```
-This requires `libandroidicu.so` ICU stubs — a separate Android subsystem.
+**Previous blockers resolved (in order):**
+| Blockers | Fix |
+|----------|-----|
+| `__write_chk@@LIBC_N` | `.symver` alias in bridge_libc.c |
+| `android_fdsan_get_owner_tag@@LIBC_Q` | Bionic stub in bridge_libc.c |
+| `__system_property_*` (5+ symbols) | Bionic stubs in bridge_libc.c |
+| `atrace_update_tags` | Switched to android_libcutils.so |
+| `dlopen@@LIBC`, `dlerror@@LIBC` | Removed from SKIP in generator |
+| `android_get_application_target_sdk@@LIBC_N` | Bionic stub |
+| `__sF@@LIBC` | Data stub |
+| `UCNV_TO_U_CALLBACK_STOP_android` (7 ICU-Android syms) | Created bridge_androidicu.c |
+| `utext_close@@LIBICU_31` + 27 other ICU symbols | Created bridge_icu.c |
+| `getrandom@@LIBC_P`, `aligned_alloc@@LIBC_P` | `.symver` alias in bridge_libc.c |
+| `gClsAudioTrackRoutingProxy` | Needs libandroid_runtime.so to load |
+| Static TLS overflow | `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=4096` |
+| VERSYM=0 NULL+8 crash | Batch patch: zero VERSYM tag when VERNEEDNUM=0 |
+| libm.so DT_INIT=0 SIGILL | Point to ret instruction at vaddr 0xa18 |
+| libcutils.so reloc 0x40 error | Zero DT_RELA when vaddr in BSS gap |
+| VERSYM verneed record error | Zero VERSYM tag → `l_info[VERSYM]` = NULL |
 
 ### 🧪 Test commands
 ```bash
-# Bridge rebuild
 SYSROOT=~/.cache/open-sober/android-env/system/lib64
 SCRIPT_DIR=crates/sober-core/src/bridges
 cd ~/Documents/Projects/open-sober
-python3 "$SCRIPT_DIR/gen_bridge_stubs.py" "$SYSROOT" /tmp/bridge_stubs_full.c
-aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bridge_stubs.o /tmp/bridge_stubs_full.c
-aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bridge_manual.o "$SCRIPT_DIR/bridge_libc.c"
-aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libc.so" /tmp/bridge_stubs.o /tmp/bridge_manual.o \
+
+# Full rebuild of all bridges
+python3 "$SCRIPT_DIR/gen_bridge_stubs.py" "$SYSROOT" /tmp/bs.c
+aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bs.o /tmp/bs.c
+aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bm.o "$SCRIPT_DIR/bridge_libc.c"
+aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libc.so" /tmp/bs.o /tmp/bm.o \
     -Wl,--version-script,"$SCRIPT_DIR/bridge_version.ver" \
     -Wl,-soname,libc.so -L/usr/aarch64-linux-gnu/lib -lc -lm -ldl -nostartfiles
 
 # Fix libm.so DT_INIT
 python3 -c "
 import struct; p='$SYSROOT/libm.so'; d=bytearray(open(p,'rb').read())
-dyn_off=0xfe00
-for off in range(dyn_off, dyn_off+0x1c0, 16):
+for off in range(0xfe00, 0xfe00+0x1c0, 16):
     if struct.unpack('<Q', d[off:off+8])[0] in (0xc, 0xd):
         struct.pack_into('<Q', d, off+8, 0xa18)
 open(p,'wb').write(bytes(d))
 "
 
-# Test libroblox.so
+# Build ICU bridges
+aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libandroidicu.so" \
+    "$SCRIPT_DIR/bridge_androidicu.c" \
+    -Wl,--version-script,"$SCRIPT_DIR/bridge_androidicu.ver" \
+    -Wl,-soname,libandroidicu.so -nostartfiles
+aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libicu.so" \
+    "$SCRIPT_DIR/bridge_icu.c" \
+    -Wl,--version-script,"$SCRIPT_DIR/bridge_icu.ver" \
+    -Wl,-soname,libicu.so -nostartfiles
+
+# Test
 timeout 30 qemu-aarch64 -L ~/.cache/open-sober/android-env \
   -E LD_LIBRARY_PATH="/system/lib64:/lib" \
   -E LD_PRELOAD="libbionic_shim.so" \
   -E GLIBC_TUNABLES="glibc.rtld.optional_static_tls=4096" \
   -E ROBLOX_LIB="libroblox.so" \
   ~/.cache/open-sober/android-env/jni_shim
+
+# Test individual library
+timeout 15 qemu-aarch64 -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E GLIBC_TUNABLES="glibc.rtld.optional_static_tls=4096" \
+  -E ROBLOX_LIB="libandroid_runtime.so" \
+  ~/.cache/open-sober/android-env/jni_shim
 ```
 
 ### ⚠️ Known Issues
-1. **TLS overflow** — `GLIBC_TUNABLES` hack needed for dlopen'd TLS objects
-2. **libandroidicu.so stubs** — Missing ICU symbol `UCNV_TO_U_CALLBACK_STOP_android`
-3. **gsi_libcutils.so corrupted** — My batch scripts may have damaged some gsi_* files.
-   `libcutils.so` now symlinks to `android_libcutils.so` instead.
-4. **VERSYM removal** — 149 patched GSI files no longer have VERSYM entries. This
-   prevents version resolution for these libraries. If a library needs versioned
-   lookups, the patch breaks it. So far all tested libraries work without VERSYM.
-5. **Multiple libc.so in load chain** — The bridge libc.so (SONAME=libc.so) and glibc's
-   libc.so.6 coexist. The linker resolves soname `libc.so` but libc.so.6 is also loaded.
-6. **Zeroing `libdl.so`'s p_offset** — The batch patch log showed corrupted offsets
-   (`0x400000006`). This was a false alarm from incorrect PHDR field byte offsets in
-   my diagnostic script, not actual file corruption.
+1. **DT_INIT_ARRAY tag with value 0** — Many GSI libraries have cleared INIT_ARRAY entries
+   (value=0) but the DT tag still EXISTS. Glibc's `call_init` checks `l_info[DT_INIT_ARRAY]`
+   presence, not value. With DT_INIT_ARRAYSZ=0 the loop should not execute, but some
+   libraries SIGILL anyway — possibly from a different constructor path.
+   **Fix:** Replace the DT_INIT_ARRAY tag itself with DT_NULL (0):
+   ```python
+   for each dynamic entry:
+       if tag in (0x19, 0x1b):  # DT_INIT_ARRAY, DT_INIT_ARRAYSZ
+           set tag=0, value=0  # DT_NULL — terminates .dynamic scan
+   ```
+2. **VERSYM removal** — 149 GSI files lost VERSYM. Libraries needing versioned lookups fail.
+3. **Multiple libc.so in load chain** — Bridge `libc.so` and glibc `libc.so.6` coexist.
+4. **TLS overflow** — `GLIBC_TUNABLES` env var workaround needed for large dlopen'd libs.
 
-### 🔮 Next Steps
-1. Add `libandroidicu.so` symbols for the ICU external library
-2. Create stub for `libandroidicu.so` or symlink to GSI version
-3. After libroblox.so loads, tackle JNI function table (FindClass, GetMethodID, etc.)
-4. EGL/GLES→Vulkan bridge (Mesa zink driver)
-5. X11/Wayland window creation
-6. Input handling (touch → mouse/keyboard)
+### 📋 Scripts in repo
+| File | Purpose |
+|------|---------|
+| `crates/sober-core/src/bridges/gen_bridge_stubs.py` | Generates LIBC forwarding stubs |
+| `crates/sober-core/src/bridges/bridge_libc.c` | Main bridge: Bionic stubs + data symbols |
+| `crates/sober-core/src/bridges/bridge_libdl.c` | libdl bridge with __cfi_slowpath @@LIBC_OMR1 |
+| `crates/sober-core/src/bridges/bridge_libm.c` | libm bridge (empty version shim) |
+| `crates/sober-core/src/bridges/bridge_androidicu.c` | libandroidicu.so stubs (LIBANDROIDICU_EXTERNAL_1) |
+| `crates/sober-core/src/bridges/bridge_icu.c` | libicu.so stubs (LIBICU_31: ubidi, utext, unorm2, ubrk) |
+| `crates/sober-core/src/bridges/bridge_version.ver` | LIBC_N/O/P/Q/R/S/T/U/V definitions |
+| `crates/sober-core/src/bridges/bridge_androidicu.ver` | LIBANDROIDICU_EXTERNAL_1 |
+| `crates/sober-core/src/bridges/bridge_icu.ver` | LIBICU_31 |
+| `crates/sober-core/src/bridges/patch_gsi.py` | Mass binary patcher (APS2/RELR/GNU_RELRO/INIT) |
+| `crates/sober-core/src/bridges/unpack_rela.py` | APS2→RELA decompression |
+| `crates/sober-core/src/bridges/patch_relr.py` | ANDROID_RELR→RELR conversion |
+
+### 🎯 Next Agent — Priority Actions
+
+**Phase A: Fix `libandroid_runtime.so` → get libroblox.so to dlopen**
+
+1. **Fix the DT_INIT_ARRAY tag.** In `gsi_libandroid_runtime.so` the tag 0x19 (INIT_ARRAY) exists with value=0. Replace the tag itself with DT_NULL to make `l_info[DT_INIT_ARRAY] = NULL`:
+   ```python
+   import struct
+   with open('gsi_libandroid_runtime.so', 'r+b') as f:
+       d = bytearray(f.read())
+       # Find dynamic section via PHDR
+       # Zero both tag and value for entries 0x19 and 0x1b
+       # This creates DT_NULL entries that terminate .dynamic scan early
+       # Ensure VERSYM/VERNEED entries come BEFORE DT_INIT_ARRAY to not lose them
+       # (VERSYM is before INIT_ARRAY in the .dynamic section, so fine)
+   ```
+
+2. **Re-test libroblox.so.** After fix, likely 5-10 more "undefined symbol" blockers. Each follows the same pattern: check if it's a real glibc function (add to generated stubs) or Bionic-only (add manual stub).
+
+3. **Once dlopen succeeds**, the jni_shim will try to call `JNI_OnLoad`. The current jni_shim.c has stub JNI function tables (FindClass=stub_FindClass returning NULL). This may crash or produce "FindClass: ..." debug output.
+
+**Phase B: Post-load execution**
+
+4. **Extend jni_shim.c** with more JNI stubs (GetMethodID, NewStringUTF, GetStringUTFChars, CallVoidMethodV, etc.). Each returning safe defaults.
+
+5. **Add `qemu.rs` integration** — The sober-core crate has `qemu.rs` for launching QEMU. Wire up the library loading and JNI shim invocation through the Rust code.
+
+**Phase C: Graphics (see GRAPHICS_RECOMMENDATION.md)**
+
+6. **EGL bridge** — Create libEGL.so stubs for eglGetProcAddress, eglChooseConfig, eglCreateContext, etc. Mesa zink for GLES→Vulkan.
+
+7. **Window creation** — X11/Wayland native window handle for EGL.
+
+8. **Input** — Touch events → mouse/keyboard.

@@ -182,6 +182,23 @@ __attribute__((used)) __attribute__((externally_visible))
 void __cfi_slowpath(void) { }
 __asm__(".symver __cfi_slowpath, __cfi_slowpath@@LIBC_OMR1");
 
+/* ===== getrandom@@LIBC_P (glibc, needs LIBC_P version alias)
+ * libinput.so references getrandom@LIBC_P. */
+void _bf_getrandom_libc_p_alias(void);
+__asm__(".symver _bf_getrandom_libc_p_alias, getrandom@@LIBC_P");
+void _bf_getrandom_libc_p_alias(void) {
+    extern void _bf_getrandom_glibc(void);
+    _bf_getrandom_glibc();
+}
+
+/* ===== aligned_alloc@@LIBC_P (glibc, needs LIBC_P version alias) */
+void _bf_aligned_alloc_libc_p_alias(void);
+__asm__(".symver _bf_aligned_alloc_libc_p_alias, aligned_alloc@@LIBC_P");
+void _bf_aligned_alloc_libc_p_alias(void) {
+    extern void _bf_aligned_alloc_glibc(void);
+    _bf_aligned_alloc_glibc();
+}
+
 /* ===== Re-exported glibc symbols under LIBC version =====
  * These are standard C functions that GSI libraries reference
  * from libc.so with version LIBC. We use thin wrappers that
