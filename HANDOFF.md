@@ -158,69 +158,117 @@ The following new stubs were added to `bionic_init.c` + `bionic_version.ver`:
 - `chdir`, `pathconf`, `truncate`, `remove`, `link`, `symlink`
 - `fchmodat`, `openat`, `fdopendir`, `unlinkat`, `utimensat`
 
-### ✅ ANDROID_RELR → RELR Patch (2026-07-19, MAJOR BREAKTHROUGH)
+### ✅ ANDROID_RELR → RELR Patch (MAJOR BREAKTHROUGH)
 
-**Root cause identified:** `libc++.so` uses `ANDROID_RELR` (`.relr.dyn` section) for relative relocations. The ARM64 glibc `ld-linux-aarch64.so.1` does NOT recognize `DT_ANDROID_RELR` (tag `0x6fffe000`) — it only understands standard `DT_RELR` (tag `0x24`). This left the entire `.init_array` and all other RELR-format relocations unprocessed, causing the segfault when `call_init` tried to read unrelocated function pointers.
+GSI libc++.so uses `ANDROID_RELR` relocations (`.relr.dyn` with `DT_ANDROID_RELR = 0x6fffe000`). The ARM64 glibc dynamic linker doesn't understand this format — only `DT_RELR = 0x24`. Fix: patch 3 DT tags in the dynamic section. The bit-packed RELR data format is identical; only the tag values differ.
 
-**Fix:** Patch the dynamic section to convert `ANDROID_RELR` → `RELR` tags:
+Script: `python3 ~/patch_relr.py <gsi_lib>.so`
+
+### ✅ libc++.so Workaround
+
+The GSI `libc++.so` has 3 init_array entries that cause problems:
+- **Entry 3 (offset 0xc87d4):** `ios_base::Init` constructor calling `setlocale` + `__cxa_atexit` — **crashes** when run alone
+- **Entry 1 (offset 0x7fbbc):** `getauxval(AT_HWCAP)` reader — **hangs** in CPU loop
+- **Entry 2 (offset 0x7feb0):** Complex init with `sysconf` + NEON — **crashes** when run alone
+
+**Fix:** Apply RELR patch, then clear init_array entry 3 only (which crashes). Entries 1+2 hang together but no crash:
+```python
+# Clear entry 3 at file offset 0x115878 + 16
+f.seek(0x115878 + 16); f.write(b'\x00' * 8)
+```
+
+### ✅ JNI Shim — Lazy Trampoline Resolution
+
+The JNI shim no longer pre-fills all 392 trampoline table entries (which pointed to NULL since `dlsym(RTLD_DEFAULT)` in a static binary returns NULL). Instead:
+- Only 8 critical symbols pre-filled: `dlopen`, `dlsym`, `dlclose`, `dladdr`, `dlerror`, `__cxa_finalize`, `__cxa_atexit`, `__register_atfork`
+- All others resolve lazily via `__bf_c_resolve` using `dlsym(RTLD_DEFAULT, ...)` under QEMU
+
+### ✅ Current dlopen("libroblox.so") Progress
+
+The real Roblox library (100MB+) is now loading through its GSI dependency chain. Each iteration resolves the next missing symbol. Current progress through the chain:
 
 ```
-DT_ANDROID_RELR (0x6fffe000)  → DT_RELR (0x24)
-DT_ANDROID_RELRSZ (0x6fffe001) → DT_RELRSZ (0x23)
-DT_ANDROID_RELRENT (0x6fffe003) → DT_RELRENT (0x25)
+libroblox.so → liblog.so → libbase.so → libcutils.so → libutils.so → 
+libvndksupport.so → libhidlbase.so → libapexsupport.so → libbinder.so → 
+libEGL.so (CURRENT)
 ```
 
-The underlying bit-packed RELR data format is identical between Android and glibc — only the DT tags differ.
-
-**Usage:** `python3 ~/patch_relr.py gsi_libc++.so`
-
-**Current status:** After patching, `dlopen("libc++.so")` no longer segfaults. It transitions past relocation into C++ static initialization (`.init_array` constructors run). However, it now **hangs** in a pure CPU loop (no blocking syscalls after `getrandom`).
-
-**Isolated to function 1 (offset 0x7fbbc):** This function calls `getauxval(AT_HWCAP)` via PLT then checks bit 8. If clear, stores 0 to a `.bss` global and returns. This is a simple function that should take microseconds — but it hangs. Functions 2 and 3 crash (segfault) when run alone. Together with function 1 (which runs first in init_array order), the hang occurs before functions 2/3 get a chance to crash.
-
-The PLT dispatch for `getauxval` goes through the bionic shim's trampoline (pre-filled with real glibc address by the JNI shim), so `getauxval` should work. The hang might be in the trampoline resolution path itself, or in the `strb` to `.bss` at `0x122F80`.
-
-**Suspected cause:** The trampoline table entries are filled by the JNI shim via `dlsym(RTLD_DEFAULT, "getauxval")` from the JNI shim's host context. But these are addresses from the HOST process's glibc, not the GUEST's ARM64 glibc. Under QEMU user-mode, the ARM64 JNI shim binary runs with its own ARM64 glibc (linked statically into the JNI shim). The `dlsym(RTLD_DEFAULT, "getauxval")` returns the JNI shim's own `getauxval` (from its statically-linked glibc), not the ARM64 glibc's `getauxval`. These are different functions with different expectations about the auxiliary vector layout.
-
-**To fix:** Instead of pre-filling the trampoline table from the JNI shim's `dlsym`, the trampoline should lazily resolve using `dlsym(RTLD_DEFAULT, ...)` from WITHIN the bionic shim itself (which runs under QEMU and sees the guest dynamic linker's symbol tables). OR the trampoline should resolve via the PLT (using the dynamic linker's native symbol resolution), not via pre-filled host pointers.
-
-**Alternative approach:** Skip testing libc++.so entirely and test `libroblox.so` directly. Or create a minimal test that just checks symbol resolution without running C++ constructors.
+~50+ stubs added across version tags LIBC, LIBC_N, LIBC_O, LIBC_Q, LIBC_R, LIBDL_ANDROID.
+New version blocks: LIBC_Q, LIBC_S, LIBC_T, LIBC_U, LIBC_V, LIBDL_ANDROID.
 
 ### ❌ Current Blocker
 ```
-dlopen("libc++.so")" — HANGS during C++ static initialization.
+/system/lib64/libEGL.so: undefined symbol: _ZN7android38AHardwareBuffer_to_ANativeWindowBufferEPK15AHardwareBuffer, version LIBNATIVEWINDOW_PLATFORM
 ```
 
-After ANDROID_RELR→RELR patching and adding all ~40 LIBC-versioned stubs, `libc++.so` loads without crashing. It hangs during the 3rd phase of dlopen: running `.init_array` constructors. The three functions at offsets `0x7fbbc`, `0x7feb0`, `0xc87d4` in the patched binary are likely `std::ios_base::Init`, static locale init, or `__cxa_atexit` guard setup.
+New C++ mangled symbol with new version tag `LIBNATIVEWINDOW_PLATFORM`. This is from `libnativewindow.so`.
 
-**To debug:**
-1. The trampoline table pre-fill in the JNI shim (`jni_shim.c` lines 548-555) fills dispatch table entries with `dlsym(RTLD_DEFAULT, sym_name)`. These are HOST addresses that get written to the table. Under QEMU user-mode, the guest ARM64 process uses these as function pointers. If the host and guest glibc are different versions, calling a host glibc function from guest code WILL crash or hang.
-2. Fix: Either skip the pre-fill step and let the trampolines resolve lazily via `__bf_c_resolve` (which calls `dlsym(RTLD_DEFAULT, ...)` from inside the bionic shim under QEMU), OR verify that the JNI shim's `dlsym` returns addresses from the guest's ARM64 glibc, not the host's.
-3. Alternative: Try with the JNI shim's pre-fill disabled by commenting out the fill loop (lines 552-555 in jni_shim.c) and relying on lazy resolution.
-4. Alternative: Test `libroblox.so` directly instead; libc++.so might not actually be needed (Roblox may bundle its own C++ runtime).
+### Auto-Stub Strategy (Recommended)
 
-### After init_array hang is resolved:
-- Test `dlopen("libroblox.so")` directly (the main Roblox game library)
-- Then JNI function table (~233 functions to stub)
-- EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
-- Window creation + input handling
-
-### ANDROID_RELR Patch Script
-Located at `~/patch_relr.py`. Converts Android RELR tags to standard RELR for glibc compatibility:
+Instead of manually adding one stub at a time (which requires ~50+ more iterations through the deep dep chain), **automate the process**:
 
 ```bash
-python3 ~/patch_relr.py gsi_libc++.so
+# 1. Walk the full NEEDED chain from libroblox.so
+# 2. Extract all UNDEF @VERSION symbols NOT in bionic_shim.S or bionic_init.c
+# 3. Auto-generate stubs using the .symver pattern
+# 4. Add all missing version blocks
+# 5. Rebuild and test once
+
+SYSROOT=~/.cache/open-sober/android-env/system/lib64
+for lib in $(find "$SYSROOT" -name "*.so" -type f | sort); do
+    aarch64-linux-gnu-readelf -sW "$lib" 2>/dev/null | 
+        grep "UND .*@" | 
+        grep -v "GLIBC\|GCC_\|LIBSTDCXX" >> /tmp/all_undef.txt
+done
+# Then parse and generate stubs
 ```
 
-The data format is identical — only DT tag values differ (0x6fffe000 → 0x24, 0x6fffe001 → 0x23, 0x6fffe003 → 0x25).
+### Current Build Chain for Testing
+
+```bash
+SYSROOT=~/.cache/open-sober/android-env/system/lib64
+CRATE_SRC=crates/sober-core/src
+
+# 1. Patch libc++.so (RELR fix + clear entry 3)
+cp "$SYSROOT/gsi_libc++.so" "$SYSROOT/gsi_libc++.so.patched2"
+python3 -c "
+import struct
+with open('$SYSROOT/gsi_libc++.so.patched2', 'r+b') as f:
+    data = bytearray(f.read())
+    dyn_off = 0x115890
+    for off in range(dyn_off, dyn_off + 0x3dae, 16):
+        tag = struct.unpack('<Q', data[off:off+8])[0]
+        if tag == 0x6fffe000: struct.pack_into('<Q', data, off, 0x24)
+        elif tag == 0x6fffe001: struct.pack_into('<Q', data, off, 0x23)
+        elif tag == 0x6fffe003: struct.pack_into('<Q', data, off, 0x25)
+    f.seek(0x115878 + 16); f.write(b'\x00' * 8)  # clear entry 3
+    f.seek(0); f.write(bytes(data)); f.truncate()
+"
+cp "$SYSROOT/gsi_libc++.so.patched2" "$SYSROOT/libc++.so"
+
+# 2. Build bionic shim
+aarch64-linux-gnu-gcc -c -o "$SYSROOT/bs.o" "$CRATE_SRC/bionic_shim.S"
+aarch64-linux-gnu-gcc -c -fPIC -o "$SYSROOT/bc.o" "$CRATE_SRC/bionic_init.c"
+aarch64-linux-gnu-gcc -shared -fPIC -o "$SYSROOT/libbionic_shim.so" \
+  "$SYSROOT/bs.o" "$SYSROOT/bc.o" \
+  -Wl,--version-script,"$CRATE_SRC/bionic_version.ver" \
+  -Wl,-rpath,/system/lib64 -L"$SYSROOT" -lglibc -lm -ldl -nostartfiles
+rm -f "$SYSROOT/bs.o" "$SYSROOT/bc.o"
+
+# 3. Test
+timeout 45 stdbuf -oL qemu-aarch64 \
+  -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E ROBLOX_LIB="libroblox.so" \
+  ~/.cache/open-sober/android-env/jni_shim
+```
 
 ### Key Architecture Notes
-- `bionic_init.c` pattern for LIBC-versioned stubs:
-  - `__attribute__((used)) __attribute__((externally_visible))` on the impl
-  - `.symver(name_impl, symbol@@VERSION)` 
-  - dlsym(RTLD_NEXT, ...) to call the real glibc version
-- `bionic_version.ver` defines version blocks: LIBC_R, LIBC, LIBC_N, LIBC_O, LIBC_P
-- The bridge `libc.so` provides the VERDEF table (22 LIBC variants) while glibc symbols keep their original GLIBC_2.17 versions
+- `bionic_init.c` pattern: `.symver(name_impl, symbol@@VERSION)`, dlsym(RTLD_NEXT) forwarding
+- `bionic_version.ver` defines version blocks: LIBC, LIBC_N, LIBC_O, LIBC_P, LIBC_R, LIBC_Q, LIBC_S, LIBC_T, LIBC_U, LIBC_V, LIBDL_ANDROID
+- JNI shim pre-fills 8 critical dl*/cxa entries; rest lazy resolve via `__bf_c_resolve`
+- `~/patch_relr.py` converts ANDROID_RELR DT tags to RELR; also clears init_array if needed
 - The bionic shim (LD_PRELOAD'd) provides the @@LIBC-versioned aliases
 - Each stub has a `return (ret)0` fallback if dlsym returns NULL (safe when function is resolved but not called)
 - `_Unwind_*` stubs try `RTLD_DEFAULT` fallback if `RTLD_NEXT` returns NULL (libgcc_s not yet loaded)
