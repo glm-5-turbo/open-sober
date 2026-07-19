@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 #include <stdio.h>
 
 /* ===== Bionic-only stubs that GSI libraries reference from libc.so ===== */
@@ -215,3 +216,52 @@ void *memset_explicit(void *s, int c, size_t n) {
     __asm__ volatile("" : : "r"(p) : "memory");
     return s;
 }
+/* pthread_cond_clockwait — glibc 2.30+ function needed by libandroid.so
+ * under LIBC_R. Thin wrapper calling into glibc. */
+int _bf_pthread_cond_clockwait_impl(void *cond, void *mutex, int clockid,
+                                     const struct timespec *ts) {
+    extern int pthread_cond_clockwait(void *, void *, int, const struct timespec *);
+    return pthread_cond_clockwait(cond, mutex, clockid, ts);
+}
+__asm__(".symver _bf_pthread_cond_clockwait_impl, pthread_cond_clockwait@@LIBC_R");
+
+/* __assert — Bionic's assert, maps to glibc's __assert_fail.
+ * GSI libraries reference __assert@@LIBC from libc.so. */
+void __assert(const char *expr, const char *file, int line) {
+    extern void __assert_fail(const char *, const char *, int, const char *);
+    __assert_fail(expr, file, line, __func__);
+}
+
+/* android_getaddrinfofornet — Bionic-only DNS resolution function.
+ * GSI libs reference android_getaddrinfofornet@@LIBC_Q from libc.so. */
+/* android_getaddrinfofornet — Bionic-only DNS resolution function.
+ * GSI libs reference android_getaddrinfofornet@@LIBC_Q from libc.so.
+ * Re-export getaddrinfo under LIBC_Q version. */
+int _bf_getaddrinfofornet_impl(const char *node, const char *service,
+                                const void *hints, void **res) {
+    extern int getaddrinfo(const char *, const char *, const void *, void **);
+    return getaddrinfo(node, service, hints, res);
+}
+__asm__(".symver _bf_getaddrinfofornet_impl, android_getaddrinfofornet@@LIBC_Q");
+
+/* __fread_chk — libroblox.so references __fread_chk@@LIBC_N.
+ * Already exported as @@LIBC; provide LIBC_N alias too. */
+
+/* __fread_chk — libroblox.so references this under LIBC_N.
+ * The check version __fread_chk has 5 params: ptr, ptrlen, size, nmemb, stream.
+ * Provide a thin wrapper matching Bionic's 4-arg signature. */
+size_t _bf_fread_chk_libc_n_alias(void *ptr, size_t ptrlen, size_t size, size_t nmemb) {
+    return __fread_chk(ptr, ptrlen, size, nmemb, (FILE*)0);
+}
+__asm__(".symver _bf_fread_chk_libc_n_alias, __fread_chk@@LIBC_N");
+
+/* __sendto_chk — Bionic checked sendto, needed by libroblox.so under LIBC_O.
+ * Provide a thin wrapper around glibc's sendto. */
+#include <sys/types.h>
+#include <sys/socket.h>
+ssize_t _bf_sendto_chk_libc_o_alias(int sockfd, const void *buf, size_t len, 
+                                     size_t buflen, int flags,
+                                     const struct sockaddr *dest_addr, socklen_t addrlen) {
+    return sendto(sockfd, buf, len, flags, dest_addr, addrlen);
+}
+__asm__(".symver _bf_sendto_chk_libc_o_alias, __sendto_chk@@LIBC_O");

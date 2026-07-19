@@ -194,23 +194,125 @@ def main():
     # CRITICAL: Glibc's call_init checks l_info[DT_INIT_ARRAY] presence (not value),
     # so zeroing the value is NOT enough — it still sees the tag and jumps to base+0.
     # We must replace the ENTIRE dynamic entry (tag + value) with DT_NULL (0, 0).
-    # However, replacing entries with DT_NULL can terminate the .dynamic scan early,
-    # so we MUST scan the full dynamic section and do replacements AFTER reading all tags.
-    # Also handle DT_FINI_ARRAY (same caller, same crash pattern).
-    init_entries = []  # (offset, name) for entries to null out
+    # However, replacing entries with DT_NULL can terminate the .dynamic scan early
+    # (DT_NULL is the terminator), so if INIT/FINI entries come BEFORE VERSYM/VERNEED,
+    # we must restructure: move nulled INIT/FINI entries to after VERSYM/VERNEED.
+    init_entries = []  # (file_offset, name) for INIT/FINI entries
+    versym_entries = []  # (file_offset, name, tag, val) for VERSYM/VERNEED/VERNEEDNUM
+    other_entries = []  # (file_offset, tag, val) for everything else
+    null_offset = None  # file offset of the DT_NULL terminator
+
+    # First pass: read all entries up to the terminator
     for off in range(dyn_fo, dyn_fo + dyn_sz, 16):
         tag = struct.unpack('<Q', elf_data[off:off+8])[0]
-        if tag == 0: break
-        if tag == 12:   # DT_INIT — set value to 0 (safe, presence doesn't crash)
-            struct.pack_into('<Q', elf_data, off+8, 0)
-            print("  ✓ DT_INIT cleared")
-        elif tag in (25, 26, 27, 28):  # DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ
-            init_entries.append((off, {25: "DT_INIT_ARRAY", 26: "DT_FINI_ARRAY", 27: "DT_INIT_ARRAYSZ", 28: "DT_FINI_ARRAYSZ"}.get(tag, hex(tag))))
+        val = struct.unpack('<Q', elf_data[off+8:off+16])[0]
+        if tag == 0:
+            null_offset = off
+            break
 
-    # Replace with DT_NULL to prevent glibc call_init from seeing the tag
-    for off, name in init_entries:
-        struct.pack_into('<QQ', elf_data, off, 0, 0)
-        print(f"  ✓ {name} tag replaced with DT_NULL")
+        init_name = {25: "DT_INIT_ARRAY", 26: "DT_FINI_ARRAY", 27: "DT_INIT_ARRAYSZ", 28: "DT_FINI_ARRAYSZ"}.get(tag)
+        versym_name = {0x6ffffff0: "VERSYM", 0x6ffffffc: "VERDEF", 0x6ffffffd: "VERDEFNUM", 0x6ffffffe: "VERNEED", 0x6fffffff: "VERNEEDNUM"}.get(tag)
+
+        if init_name:
+            init_entries.append((off, init_name))
+        elif versym_name:
+            versym_entries.append((off, versym_name, tag, val))
+        elif tag == 12:  # DT_INIT — set value to 0 in place (safe)
+            struct.pack_into('<Q', elf_data, off+8, 0)
+            other_entries.append((off, tag, 0))
+        else:
+            other_entries.append((off, tag, val))
+
+    if init_entries:
+        print(f"  Found {len(init_entries)} INIT/FINI entries, {len(versym_entries)} version entries")
+
+        # If any VERSYM entries come AFTER the INIT entries, the scan will
+        # terminate early when we null the INIT entries. Restructure.
+        last_init_off = max(off for off, _ in init_entries)
+        if versym_entries and min(off for off, _, _, _ in versym_entries) > last_init_off:
+            print("  ▲ VERSYM/VERNEED after INIT/FINI — restructuring .dynamic section")
+
+            # Build new dynamic layout: other + versym + nulled_INIT + NULL
+            new_section = bytearray()
+            # Fix flags during restructure too
+            for _, tag, val in other_entries:
+                if tag == 0x1e:  # DT_FLAGS
+                    val = val & ~(2 | 8)  # Clear DF_BIND_NOW, DF_SYMBOLIC
+                elif tag == 0x6ffffffb:  # DT_FLAGS_1
+                    val = val & ~1  # Clear DF_1_NOW
+                new_section.extend(struct.pack('<QQ', tag, val))
+            for _, _, tag, val in versym_entries:
+                new_section.extend(struct.pack('<QQ', tag, val))
+            for _ in init_entries:
+                new_section.extend(struct.pack('<QQ', 0, 0))  # DT_NULL
+            new_section.extend(struct.pack('<QQ', 0, 0))  # DT_NULL terminator
+
+            # Compute how many extra bytes needed
+            old_end = null_offset + 16  # past the original NULL
+            new_size = len(new_section)
+            old_size = null_offset - dyn_fo + 16
+            extra = new_size - old_size
+
+            if extra > 0:
+                # Need to insert bytes — rewrite everything from dynamic onward
+                print(f"  Inserting {extra} bytes in .dynamic section")
+                # Build the new file: data before .dynamic + new dynamic + data after .dynamic
+                before_dyn = bytearray(elf_data[:dyn_fo])
+                after_dyn = bytearray(elf_data[old_end:])
+                elf_data = before_dyn + new_section + after_dyn
+
+                # Update PT_DYNAMIC filesz/memsz
+                for i in range(e_phnum):
+                    poff = e_phoff + i * e_phentsize
+                    pt = struct.unpack('<I', elf_data[poff:poff+4])[0]
+                    if pt == 2:
+                        struct.pack_into('<Q', elf_data, poff+32, new_size)
+                        struct.pack_into('<Q', elf_data, poff+40, new_size)
+                        break
+
+                # Update containing PT_LOAD filesz if needed
+                for i in range(e_phnum):
+                    poff = e_phoff + i * e_phentsize
+                    pt = struct.unpack('<I', elf_data[poff:poff+4])[0]
+                    if pt == 1:
+                        p_vaddr = struct.unpack('<Q', elf_data[poff+16:poff+24])[0]
+                        p_filesz = struct.unpack('<Q', elf_data[poff+32:poff+40])[0]
+                        if p_vaddr <= dyn_vaddr < p_vaddr + p_filesz:
+                            new_p_filesz = p_filesz + extra
+                            struct.pack_into('<Q', elf_data, poff+32, new_p_filesz)
+                            print(f"  PT_LOAD[{i}] filesz: 0x{p_filesz:x} → 0x{new_p_filesz:x}")
+                            break
+
+                # Update segment endings for subsequent LOAD segments
+                # (their offsets shift by extra bytes)
+                for i in range(e_phnum):
+                    poff = e_phoff + i * e_phentsize
+                    pt = struct.unpack('<I', elf_data[poff:poff+4])[0]
+                    if pt == 1:
+                        p_offset = struct.unpack('<Q', elf_data[poff+8:poff+16])[0]
+                        p_filesz = struct.unpack('<Q', elf_data[poff+32:poff+40])[0]
+                        # If this segment starts AFTER our insertion point, shift it
+                        if p_offset > dyn_fo:
+                            struct.pack_into('<Q', elf_data, poff+8, p_offset + extra)
+            else:
+                # The new section fits in place — just write it
+                elf_data[dyn_fo:dyn_fo + new_size] = new_section
+
+            for _, name in init_entries:
+                print(f"  ✓ {name} → DT_NULL (moved after VERSYM)")
+            for _, name, _, _ in versym_entries:
+                print(f"  ✓ {name} preserved")
+        else:
+            # VERSYM is before INIT entries — simple nulling is safe
+            for off, name in init_entries:
+                struct.pack_into('<QQ', elf_data, off, 0, 0)
+                print(f"  ✓ {name} → DT_NULL")
+    else:
+        # No INIT/FINI entries — also null DT_INIT if present
+        pass  # already handled in the first pass loop
+
+    # Update has_init flag for the rest of the function
+    has_init = bool(init_entries)
 
     # Step 5: Remove BIND_NOW / SYMBOLIC
     if has_bind_now:

@@ -252,21 +252,24 @@ All of the following libraries load via `dlopen()` under QEMU-aarch64:
 
 ### 📈 dlopen("libroblox.so") Progress
 
-**Current blocker:** `libandroid_runtime.so` crashes in `do_lookup_x` during symbol resolution.
+**✅ MAJOR BREAKTHROUGH — libandroid_runtime.so and libroblox.so LOAD SUCCESSFULLY!**
 
-The crash is at PC=0x44b000 (`ubfiz x0, x0, #3, #26` then `ldr x2, [x2, x0]` in `do_lookup_x`) — glibc's dynamic linker crashing on a hash chain lookup. This occurs because:
+Both `libandroid_runtime.so` and `libroblox.so` now load via `dlopen()` under QEMU-aarch64:
+- `libandroid_runtime.so`: `SUCCESS: loaded from 0x4a9600`
+- `libroblox.so`: `SUCCESS: loaded from 0x4a9600`, `dlclose OK`
 
-1. **DT_INIT_ARRAY/DT_FINI_ARRAY → DT_NULL fixed** in `patch_gsi.py`: Previously only zeroed values (not tags), so glibc's `call_init` jumped to base+0. Now replaces tags with DT_NULL. CRITICAL: must move DT_NULL entries to AFTER VERSYM/VERNEED or the scan terminates early.
-2. **VERSYM/VERNEED nulled by batch process**: The earlier batch-patching of GSI libs nulled VERSYM/VERNEED dynamic entries (tags at 0x2e8338+) but the data still exists on disk at vaddr 0x1cf78. Need to restore VERSYM dynamic tag.
-3. **`libdl_android.so` chain setup**: Now correctly symlinked: `ld-android.so → gsi_ld-android.so`, `libdl_android.so` restored from `android_libdl_android.so` with RELRO/BIND_NOW removal applied.
-
-**GSI lib symlinks expanded:**
-| Stub → GSI | Status |
-|---|---|
-| `libandroidfw.so → gsi_libandroidfw.so` | ✅ |
-| `libGLESv1_CM.so → gsi_libGLESv1_CM.so` | ✅ |
-| `libGLESv3.so → gsi_libGLESv3.so` | ✅ |
-| `libvulkan.so → gsi_libvulkan.so` | ✅ |
+**Fixes applied this session:**
+1. **DT_INIT_ARRAY/DT_FINI_ARRAY → DT_NULL with VERSYM preservation** (`patch_gsi.py`) — replaces INIT/FINI array tags with DT_NULL but moves them to AFTER VERSYM/VERNEED/VERNEEDNUM entries so the .dynamic scan doesn't terminate early.
+2. **VERSYM/VERNEED restoration** — The earlier batch patcher nulled dynamic entries 122-129 (INIT_ARRAY, FINI_ARRAY, VERSYM, VERNEED, VERNEEDNUM). Restored VERSYM/VERNEED/VERNEEDNUM at indices 122-124 and updated PT_DYNAMIC filesz.
+3. **New bridge stubs added to bridge_libc.c:**
+   - `pthread_cond_clockwait@@LIBC_R` — glibc wrapper needed by libandroid.so
+   - `__assert@@LIBC` — maps to glibc `__assert_fail`
+   - `android_getaddrinfofornet@@LIBC_Q` — Bionic DNS, wraps getaddrinfo
+   - `__fread_chk@@LIBC_N` — checked fread variant
+   - `__sendto_chk@@LIBC_O` — checked sendto variant
+4. **libcom.android.tethering.connectivity_native.so** — rebuilt with missing `AConnectivityNative_getNetworkBlockedReason@@LIBCONNECTIVITY_NATIVE` symbol
+5. **GSI lib symlinks expanded**: libandroidfw.so, libGLESv1_CM.so, libGLESv3.so, libvulkan.so now point to real GSI libs (patched with APS2→RELA, RELR fix, INIT/FINI nulling, VERSYM preserved)
+6. **improved patch_gsi.py** — now correctly handles .dynamic restructuring when INIT/FINI entries come before VERSYM/VERNEED, inserts bytes and updates PT_LOAD filesz/memsz and shifts subsequent segment offsets
 
 **Previous blockers resolved (in order):**
 | Blockers | Fix |
@@ -372,34 +375,37 @@ timeout 15 qemu-aarch64 -L ~/.cache/open-sober/android-env \
 
 ### 🎯 Next Agent — Priority Actions
 
-**Phase A: Fix `libandroid_runtime.so` → get libroblox.so to dlopen**
+### 🎯 Next Agent — Priority Actions
 
-1. **Fix the DT_INIT_ARRAY tag.** In `gsi_libandroid_runtime.so` the tag 0x19 (INIT_ARRAY) exists with value=0. Replace the tag itself with DT_NULL to make `l_info[DT_INIT_ARRAY] = NULL`:
-   ```python
-   import struct
-   with open('gsi_libandroid_runtime.so', 'r+b') as f:
-       d = bytearray(f.read())
-       # Find dynamic section via PHDR
-       # Zero both tag and value for entries 0x19 and 0x1b
-       # This creates DT_NULL entries that terminate .dynamic scan early
-       # Ensure VERSYM/VERNEED entries come BEFORE DT_INIT_ARRAY to not lose them
-       # (VERSYM is before INIT_ARRAY in the .dynamic section, so fine)
-   ```
+**Phase B: Post-load execution (NEXT)**
 
-2. **Re-test libroblox.so.** After fix, likely 5-10 more "undefined symbol" blockers. Each follows the same pattern: check if it's a real glibc function (add to generated stubs) or Bionic-only (add manual stub).
+Phase A is DONE — `dlopen("libroblox.so")` succeeds. The jni_shim now enters the post-load phase.
 
-3. **Once dlopen succeeds**, the jni_shim will try to call `JNI_OnLoad`. The current jni_shim.c has stub JNI function tables (FindClass=stub_FindClass returning NULL). This may crash or produce "FindClass: ..." debug output.
-
-**Phase B: Post-load execution**
-
-4. **Extend jni_shim.c** with more JNI stubs (GetMethodID, NewStringUTF, GetStringUTFChars, CallVoidMethodV, etc.). Each returning safe defaults.
-
-5. **Add `qemu.rs` integration** — The sober-core crate has `qemu.rs` for launching QEMU. Wire up the library loading and JNI shim invocation through the Rust code.
+1. **Extend jni_shim.c** with more JNI stubs. Now libroblox.so loads, the jni_shim calls
+   `dlsym(handle, "JNI_OnLoad")` which returns NULL since the shim returns it.
+   The game expects real JNI functions:
+   - `JNI_OnLoad(JavaVM*, void*)` — must return JNI_VERSION_1_6
+   - `FindClass` — stub returning NULL
+   - `GetMethodID` — needs to return valid method IDs
+   - `NewStringUTF` / `GetStringUTFChars`
+   - `CallVoidMethodV`, `CallStaticVoidMethodV`
+   - `RegisterNatives`
+   - `GetStaticMethodID`, `CallStaticObjectMethodV`
+   - `NewGlobalRef`
+   
+   Current jni_shim.c has `FindClass=stub_FindClass returning NULL` and `RegisterNatives`
+   stub. Need ~15-20 more stubs to keep the game running during init.
+   
+2. **Add `qemu.rs` integration** — The sober-core crate has `qemu.rs` for launching QEMU.
+   Wire up the library loading and JNI shim invocation through the Rust code.
+   Replace the hardcoded test binary with Rust-controlled QEMU launch via the
+   sober-core `open-sober play` command.
 
 **Phase C: Graphics (see GRAPHICS_RECOMMENDATION.md)**
 
-6. **EGL bridge** — Create libEGL.so stubs for eglGetProcAddress, eglChooseConfig, eglCreateContext, etc. Mesa zink for GLES→Vulkan.
+3. **EGL bridge** — Create libEGL.so stubs for eglGetProcAddress, eglChooseConfig,
+   eglCreateContext, etc. Mesa zink for GLES→Vulkan.
 
-7. **Window creation** — X11/Wayland native window handle for EGL.
+4. **Window creation** — X11/Wayland native window handle for EGL.
 
-8. **Input** — Touch events → mouse/keyboard.
+5. **Input** — Touch events → mouse/keyboard.
