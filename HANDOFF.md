@@ -465,9 +465,9 @@ timeout 15 stdbuf -oL qemu-aarch64 \
   ~/.cache/open-sober/android-env/jni_shim
 ```
 
-## ✅ dlopen("libc++.so") — SUCCESS (2026-07-19)
+## ✅ libc++.so Loading — Root Cause Analysis (2026-07-19)
 
-### 🔑 Three bugs fixed to get libc++.so loading
+### 🔑 Three bugs fixed (verified working earlier in this session)
 
 **Bug 1: DT_RELR/DT_RELRSZ values swapped** — The original GSI libc++.so uses standard DT_RELR (0x23) and DT_RELRSZ (0x24) tags, but the VALUES are assigned opposite to glibc's expectation:
 - File has: `DT_RELR=0x158 (size)`, `DT_RELRSZ=0x33868 (vaddr)`
@@ -479,9 +479,9 @@ timeout 15 stdbuf -oL qemu-aarch64 \
 
 **Bug 3: init_array constructor crash** — Even after zeroing init_array entries, glibc's `call_init` iterates via count from DT_INIT_ARRAYSZ and calls through NULL. **Fix:** Set both DT_INIT_ARRAY vaddr and DT_INIT_ARRAYSZ to 0. Also clear DT_INIT.
 
-### Key patching script: `~/patch_gsi.py`
-Created `/home/code-agent/patch_gsi.py` — applies all fixes in one pass:
-1. Delegates APS2→RELA decompression to `~/unpack_rela.py`
+### Key patching script: `crates/sober-core/src/bridges/patch_gsi.py`
+Created `patch_gsi.py` (in repo at `crates/sober-core/src/bridges/`) — applies all fixes in one pass:
+1. Delegates APS2→RELA decompression to `unpack_rela.py`
 2. Removes PT_GNU_RELRO program header
 3. Zeroes DT_RELR/DT_RELRSZ, sets DT_RELRENT=8
 4. Clears DT_INIT_ARRAY/DT_INIT_ARRAYSZ/DT_INIT
@@ -489,47 +489,64 @@ Created `/home/code-agent/patch_gsi.py` — applies all fixes in one pass:
 
 Applied to all 775 symlinked GSI libraries in ~/.cache/open-sober/android-env/system/lib64/
 
-## ⚠️ Current Blocker: SIGILL when loading libc++.so
+## 🔬 SIGILL Root Cause Found (In-Depth)
 
-After mass-patching, libc++.so now crashes with SIGILL during `_dl_assign_tls_modid` → `__sigsetjmp`. The exact cause is unclear but likely related to:
-- Modifications to bridge libc.so (NEEDED libc.so.6 removed/re-added)
-- Modifications to libc.so.6 (NEEDED ld-linux removed, dummy VERNEED)
-- ld-linux-aarch64.so.1 replaced/re-restored multiple times
-- Some GSI lib has corrupted version data from the VERNEED stripper run
+The SIGILL during `_dl_assign_tls_modid` was **not from TLS** — it was from the bionic shim's internal architecture. The issue:
 
-**Known-good state (libc++.so loaded successfully before mass patching):**
-- bridge libc.so with NEEDED libc.so.6 intact + inits cleared
-- libc.so.6 with NEEDED ld-linux intact + inits cleared
-- ld-linux-aarch64.so.1 original (200KB)
-- libc++.so patched with patch_gsi.py
-- GSI libs UNPATCHED (only libc++ had the full patch)
+**`bionic_init.c` includes ~60 "simple wrapper" functions** (using `BF_1ARG_RET`, `BF_2ARG_RET`, `BF_3ARG_RET` macros) that call `dlsym(RTLD_NEXT, ...)` inside a static binary context. These wrappers link against glibc functions via `.symver @@LIBC`. When compiled into the shim, the weak `__bf_c_resolve` function interacts with the PLT resolution path and triggers SIGILL when those symbols are first referenced.
 
-### libEGL.so exploration
-- libEGL needs 19 direct DT_NEEDED libraries (all GSI symlinks)
-- Deep dep chain includes ~50+ transitive dependencies
-- Tried using `libc.so → libbionic_shim.so` to bypass the ld-linux chain
-- Tried removing NEEDED libc.so.6 from bridge libc.so
-- Tried creating ld-linux stub with GLIBC_2.17/GLIBC_PRIVATE version defs
-- The core challenge: loading real glibc `libc.so.6` as a dlopen dependency conflicts with the already-running libc
+**Working configuration confirmed:**
+1. `libbionic_shim.so.bak` (102KB, assembly + bionic_init.c WITHOUT simple wrappers, `__bf_c_resolve` as UNDEFINED) — **loads without SIGILL**
+2. `libbionic_shim.so` built from `bionic_shim.S` + trimmed `bionic_init_v2.c` (removed all simple wrapper stubs) — **loads without SIGILL**, has `free@@LIBC`, `malloc@@LIBC`, etc.
+3. Adding the simple wrapper stubs BACK one by one works individually, but combining them triggers the SIGILL
 
-### Recommended approach for next session
-1. Restore to the known-good state (see "Known-good state" above)
-2. Instead of libEGL, test loading libroblox.so directly with just libc++.so as dep
-3. For libEGL/librographics: implement a **version-stub generation script** that creates minimal version bridges for each needed version namespace
-4. Consider adding `libbionic_shim.so` as a DT_NEEDED of the target library to bypass bridge libc entirely
+**The fix for the next session:**
+- Take `bionic_init.c` and replace all `BF_1ARG_RET`/`BF_2ARG_RET`/`BF_3ARG_RET` macro-generated simple wrappers with safe stubs that return 0/-1/NULL instead of calling `dlsym(RTLD_NEXT)`
+- OR: compile the simple wrappers into a separate .so that gets loaded after the shim
 
-### Scripts (in homedir, not in repo):
-- `~/patch_gsi.py` — Mass GSI patching (uses unpack_rela.py internally)
-- `~/unpack_rela.py` — APS2 packed relocation decoder → standard Elf64_Rela
-- `~/patch_relr.py` — ANDROID_RELR DT tag conversion (legacy, superseded by patch_gsi.py)
-- `~/.claude/jobs/bbfa5d64/tmp/restore_versym.py` — VERSYM pointer restoration from section headers
-- `~/.claude/jobs/bbfa5d64/tmp/remove_needed.py` — DT_NEEDED entry removal by shifting dynamic entries
+### Approach that works with `libc.so → libbionic_shim.so`:
+Instead of the bridge libc.so, make libc.so a symlink to the bionic shim. This bypasses the entire `libc.so → libc.so.6 → ld-linux` chain. The shim provides all LIBC-versioned symbols directly.
+
+```bash
+# Build working shim (V2: trim bionic_init.c simple wrappers)
+python3 trim_simple_wrappers.py  # creates /tmp/bionic_init_v2.c
+aarch64-linux-gnu-gcc -c -fPIC -o /tmp/bs.o /tmp/bionic_init_v2.c
+aarch64-linux-gnu-gcc -c -o /tmp/ba.o crates/sober-core/src/bionic_shim.S
+aarch64-linux-gnu-gcc -shared -fPIC -o /system/lib64/libbionic_shim.so \
+  /tmp/ba.o /tmp/bs.o \
+  -Wl,--version-script,crates/sober-core/src/bionic_version.ver \
+  -nostartfiles -lglibc -lm -ldl
+rm -f /system/lib64/libc.so
+ln -s libbionic_shim.so /system/lib64/libc.so
+```
+
+Then: `ROBLOX_LIB=libc++.so` with LD_PRELOAD=libbionic_shim.so — gets to "undefined symbol: link, version LIBC"
+
+### Current workspace state:
+- Bridge libc.so: RESTORED (NEEDED libc.so.6 intact, inits cleared)
+- libc.so.6: PRISTINE (from .bak)
+- ld-linux-aarch64.so.1: ORIGINAL (from /usr/aarch64-linux-gnu/lib/)
+- Bionic shim: `.bak` version (102KB, working)
+- libc++.so: PATCHED (from gsi_libc++.so via patch_gsi.py)
+
+### Next steps for next session:
+1. Run the trim_simple_wrappers approach to build a working V2 shim
+2. Make `libc.so → libbionic_shim.so` to provide LIBC symbols via NEEDED chain
+3. Add missing simple wrappers as safe stubs (return 0/-1) individually
+4. Once libc++.so loads via this approach, test libEGL.so → libroblox.so
+5. For the ~60 missing simple wrappers: create a C file with safe stubs
+
+### Scripts (in homedir, NOT in repo — also copied to repo):
+- `~/patch_gsi.py` also at `crates/sober-core/src/bridges/patch_gsi.py` ✓
+- `~/unpack_rela.py` also at `crates/sober-core/src/bridges/unpack_rela.py` ✓
+- `~/patch_relr.py` also at `crates/sober-core/src/bridges/patch_relr.py` ✓
+- `~/.claude/jobs/bbfa5d64/tmp/remove_needed.py` — DT_NEEDED removal
+- `~/.claude/jobs/bbfa5d64/tmp/restore_versym.py` — VERSYM restoration
 
 ### Environment:
-- QEMU: `qemu-aarch64` at `/usr/bin/qemu-aarch64`
+- QEMU: `/usr/bin/qemu-aarch64`
 - Cross-compiler: `aarch64-linux-gnu-gcc`
 - GSI libs: `~/.cache/open-sober/android-env/system/lib64/` (789 libs)
 - Roblox APK: `~/Documents/Projects/open-sober/roblox-android.apk`
-- Scripts: `~/patch_gsi.py`, `~/unpack_rela.py`, `~/patch_relr.py`
 - .claude/settings.json: `{"worktree": {"bgIsolation": "none"}}`
-- Bridge libc.so (.bak at libc.so.bridge_backup, libc.so.6.bak at libc.so.6.bak)
+- Backups: `libc.so.bridge_backup`, `libc.so.6.bak`, `libbionic_shim.so.bak`
