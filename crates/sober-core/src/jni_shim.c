@@ -559,6 +559,49 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Initialize bionic data objects directly from this binary.
+    // We do the dlsym calls HERE (not from the shim) because calling dlsym
+    // from inside the shim goes through its own trampolines, which can
+    // cause infinite recursion. From this binary, dlsym goes to glibc directly.
+    fprintf(stderr, "[jni_shim] Initializing bionic data objects...\n");
+    {
+        // Data symbols to initialize (name, address of data slot in shim)
+        struct { const char *name; const char *glibc_sym; } data_syms[] = {
+            {"__bf_data_stderr",     "stderr"},
+            {"__bf_data___sF",       "_IO_2_1_stderr_"},
+            {"__bf_data_optarg",     "optarg"},
+            {"__bf_data_optind",     "optind"},
+            {"__bf_data_tzname",     "tzname"},
+            {"__bf_data_daylight",   "daylight"},
+            {"__bf_data_timezone",   "timezone"},
+            {"__bf_data_environ",    "environ"},
+            {"__bf_data_in6addr_any","in6addr_any"},
+            {"__bf_data_stdin",      "stdin"},
+            {"__bf_data_stdout",     "stdout"},
+            {"__bf_data_in6addr_loopback", "in6addr_loopback"},
+        };
+        void *rtld_default_handle = dlopen(NULL, RTLD_LAZY | RTLD_NOLOAD);
+        for (size_t i = 0; i < sizeof(data_syms)/sizeof(data_syms[0]); i++) {
+            void **slot = dlsym(bionic_shim, data_syms[i].name);
+            if (slot && !*slot) {
+                *slot = dlsym(rtld_default_handle ? rtld_default_handle : RTLD_DEFAULT,
+                              data_syms[i].glibc_sym);
+            }
+        }
+        if (rtld_default_handle) dlclose(rtld_default_handle);
+
+        // Initialize __stack_chk_guard with a non-zero canary
+        void **canary_slot = dlsym(bionic_shim, "__bf_data___stack_chk_guard");
+        if (canary_slot && !*canary_slot) {
+            unsigned long long c = 0xdeadbeefcafebabeULL;
+            // Try to get a random canary from glibc
+            void *glibc_canary = dlsym(RTLD_DEFAULT, "__stack_chk_guard");
+            if (glibc_canary) c = *(unsigned long long*)glibc_canary;
+            if (!c) c = 0xdeadbeefcafebabeULL;
+            *canary_slot = (void*)c;
+        }
+    }
+
     fprintf(stderr, "[jni_shim] Loading %s...\n", lib_path);
 
     void* handle = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);

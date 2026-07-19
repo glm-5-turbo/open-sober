@@ -9,3 +9,9 @@ LIBC_N {
 LIBC_O {
     global: *;
 };
+
+LIBC_P {
+    global:
+        aligned_alloc;
+        *;
+};

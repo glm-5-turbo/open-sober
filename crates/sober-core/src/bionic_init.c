@@ -4,6 +4,10 @@
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <dlfcn.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <time.h>
+#include <stdint.h>
 
 /* Dispatch table and data — defined in bionic_shim.S */
 extern void *__bf_tramp_table[392];
@@ -74,6 +78,72 @@ char *__strncpy_chk2(char *d, const char *s, size_t n, size_t dl) {
     for (i = 0; i < n && *s; i++) *p++ = *s++;
     for (; i < n; i++) *p++ = '\0';
     return d;
+}
+
+/* ===== Common glibc re-exports under LIBC version =====
+ * These are basic C functions referenced from GSI libs with version LIBC
+ * that DON'T have assembly trampolines in bionic_shim.S.
+ * Each stub uses a hidden impl and .symver alias to produce only the
+ * versioned symbol. */
+
+/* free@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void _bf_free_impl(void *p);
+__asm__(".symver _bf_free_impl,free@@LIBC");
+void _bf_free_impl(void *p) {
+    static void (*_r)(void*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "free");
+    if (_r) _r(p);
+}
+
+/* malloc@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_malloc_impl(size_t s);
+__asm__(".symver _bf_malloc_impl,malloc@@LIBC");
+void *_bf_malloc_impl(size_t s) {
+    static void *(*_r)(size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "malloc");
+    return _r ? _r(s) : NULL;
+}
+
+/* calloc@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_calloc_impl(size_t n, size_t s);
+__asm__(".symver _bf_calloc_impl,calloc@@LIBC");
+void *_bf_calloc_impl(size_t n, size_t s) {
+    static void *(*_r)(size_t, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "calloc");
+    return _r ? _r(n, s) : NULL;
+}
+
+/* realloc@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_realloc_impl(void *p, size_t s);
+__asm__(".symver _bf_realloc_impl,realloc@@LIBC");
+void *_bf_realloc_impl(void *p, size_t s) {
+    static void *(*_r)(void*, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "realloc");
+    return _r ? _r(p, s) : NULL;
+}
+
+/* isatty@@LIBC */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_isatty_impl(int fd);
+__asm__(".symver _bf_isatty_impl,isatty@@LIBC");
+int _bf_isatty_impl(int fd) {
+    static int (*_r)(int) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "isatty");
+    return _r ? _r(fd) : 0;
+}
+
+/* aligned_alloc@@LIBC_P */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_aligned_alloc_impl(size_t a, size_t s);
+__asm__(".symver _bf_aligned_alloc_impl,aligned_alloc@@LIBC_P");
+void *_bf_aligned_alloc_impl(size_t a, size_t s) {
+    static void *(*_r)(size_t, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "aligned_alloc");
+    return _r ? _r(a, s) : NULL;
 }
 
 /* ===== Lazy dispatch-table resolver ===== */
@@ -1259,36 +1329,49 @@ void* __bf_c_resolve(int index) {
     return NULL;
 }
 
-/* ===== Init function (called from JNI shim) ===== */
+/* ===== Init function (called from JNI shim before dlopen) ===== */
+/* The data symbols (__bf_data_*) are 8-byte variables exported via symver
+ * as the real symbol names with @@LIBC. Writing to them directly stores
+ * the value at the correct memory location that libroblox will read via
+ * its GOT/relocation entries. */
 __attribute__((visibility("default")))
 void __bf_init_data(void) {
-    void *self = dlopen(NULL, RTLD_LAZY);
-    if (!self) return;
-    if (!__bf_data_stderr)
-        *(void **)(__bf_data_stderr) = dlsym(self, "stderr");
-    if (!__bf_data___sF)
-        *(void **)(__bf_data___sF) = dlsym(self, "_IO_2_1_stderr_");
-    if (!__bf_data_optarg)
-        *(void **)(__bf_data_optarg) = dlsym(self, "optarg");
-    if (!__bf_data_optind)
-        *(void **)(__bf_data_optind) = dlsym(self, "optind");
-    if (!__bf_data_tzname)
-        *(void **)(__bf_data_tzname) = dlsym(self, "tzname");
-    if (!__bf_data_daylight)
-        *(void **)(__bf_data_daylight) = dlsym(self, "daylight");
-    if (!__bf_data_timezone)
-        *(void **)(__bf_data_timezone) = dlsym(self, "timezone");
-    if (!__bf_data_environ)
-        *(void **)(__bf_data_environ) = dlsym(self, "environ");
+    // Pre-initialize __stack_chk_guard with a non-zero canary value.
+    // libroblox.so reads this during relocation and stores it on the stack
+    // for stack protector checks. A value of 0 would cause immediate crash
+    // on any function epilogue.
+    // We use a raw syscall here to avoid going through our own trampolines
+    // (which would cause circular resolution since we're LD_PRELOADED).
+    if (!__bf_data___stack_chk_guard) {
+        unsigned long long canary = 0;
+        // AArch64: __NR_clock_gettime = 113
+        register long x8 asm("x8") = 113;
+        register long x0 asm("x0") = 1;  // CLOCK_MONOTONIC
+        register long x1 asm("x1") = (long)&canary;
+        asm volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory");
+        // XOR with stack address for more entropy
+        canary ^= (unsigned long long)(uintptr_t)&canary;
+        // Ensure it's never zero
+        if (!canary || !(canary & 0xff)) canary |= 0x1;
+        __bf_data___stack_chk_guard = (void*)canary;
+    }
+
+    // Resolve other data symbols using dlsym with RTLD_DEFAULT.
+    // These search through all loaded libraries (including glibc).
+    // NOTE: dlsym itself goes through our trampoline, which works because
+    // the resolvers were pre-filled by the JNI shim before calling us.
+    if (!__bf_data_stderr)   __bf_data_stderr   = dlsym(RTLD_DEFAULT, "stderr");
+    if (!__bf_data___sF)     __bf_data___sF     = dlsym(RTLD_DEFAULT, "_IO_2_1_stderr_");
+    if (!__bf_data_optarg)   __bf_data_optarg   = dlsym(RTLD_DEFAULT, "optarg");
+    if (!__bf_data_optind)   __bf_data_optind   = dlsym(RTLD_DEFAULT, "optind");
+    if (!__bf_data_tzname)   __bf_data_tzname   = dlsym(RTLD_DEFAULT, "tzname");
+    if (!__bf_data_daylight) __bf_data_daylight = dlsym(RTLD_DEFAULT, "daylight");
+    if (!__bf_data_timezone) __bf_data_timezone = dlsym(RTLD_DEFAULT, "timezone");
+    if (!__bf_data_environ)  __bf_data_environ  = dlsym(RTLD_DEFAULT, "environ");
     if (!__bf_data_in6addr_any)
-        *(void **)(__bf_data_in6addr_any) = dlsym(self, "in6addr_any");
-    if (!__bf_data_stdin)
-        *(void **)(__bf_data_stdin) = dlsym(self, "stdin");
-    if (!__bf_data_stdout)
-        *(void **)(__bf_data_stdout) = dlsym(self, "stdout");
+        __bf_data_in6addr_any = dlsym(RTLD_DEFAULT, "in6addr_any");
+    if (!__bf_data_stdin)    __bf_data_stdin    = dlsym(RTLD_DEFAULT, "stdin");
+    if (!__bf_data_stdout)   __bf_data_stdout   = dlsym(RTLD_DEFAULT, "stdout");
     if (!__bf_data_in6addr_loopback)
-        *(void **)(__bf_data_in6addr_loopback) = dlsym(self, "in6addr_loopback");
-    if (!__bf_data___stack_chk_guard)
-        *(void **)(__bf_data___stack_chk_guard) = dlsym(self, "__stack_chk_guard");
-    dlclose(self);
+        __bf_data_in6addr_loopback = dlsym(RTLD_DEFAULT, "in6addr_loopback");
 }

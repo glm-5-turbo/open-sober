@@ -1,0 +1,30 @@
+/* Version bridge script — defines all LIBC_* version variants
+ * that GSI Android libraries expect from libc/libm/libdl.
+ *
+ * The LIBC version MUST be last so it becomes the default version
+ * for any symbol not explicitly assigned to another node. */
+LIBC_36          { global: *; };
+LIBC_37          { global: *; };
+LIBCAMERA2NDK    { global: *; };
+LIBCAMERA_METADATA { global: *; };
+LIBC_DEPRECATED  { global: *; };
+LIBCGROUPRC      { global: *; };
+LIBCGROUPRC_30   { global: *; };
+LIBC_N           { global: *; };
+LIBC_O           { global: *; };
+LIBC_OMR1        { global: *; };
+LIBCONNECTIVITY_NATIVE { global: *; };
+LIBC_P           { global: *; };
+LIBC_PLATFORM    { global: *; };
+LIBC_PRIVATE     { global: *; };
+LIBC_Q           { global: *; };
+LIBC_R           { global: *; };
+LIBC_S           { global: *; };
+LIBC_T           { global: *; };
+LIBC_U           {
+                   global:
+                     memset_explicit;
+                     *;
+                 };
+LIBC_V           { global: *; };
+LIBC             { global: *; };
