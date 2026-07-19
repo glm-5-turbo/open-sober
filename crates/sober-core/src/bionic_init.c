@@ -2514,9 +2514,39 @@ static int bf_pthread_mutex_timedlock_wrapper(pthread_mutex_t *mutex, const stru
     return real_pthread_mutex_timedlock(mutex, abstime);
 }
 
-/* ===== Init function (called from JNI shim) ===== */
+/* ===== Mutex wrapper install (safe to call under QEMU) =====
+ * Install sanitize_mutex wrappers for pthread_mutex_lock/trylock/timedlock.
+ * This is called from jni_shim after the SIGSEGV handler is installed.
+ * It only touches the trampoline table entries — no dlopen/dlsym needed.
+ *
+ * Index 38 = pthread_mutex_lock
+ * Index 124 = pthread_mutex_trylock
+ * Index 780 = pthread_mutex_timedlock */
+__attribute__((visibility("default")))
+void __bf_install_mutex_wrappers(void) {
+    // The __bf_c_resolve(38) calls dlsym(RTLD_NEXT) to find the real function
+    // and stores it in tramp_table[38]. Then we override with sanitize wrapper.
+    if (!real_pthread_mutex_lock) {
+        real_pthread_mutex_lock = (pthread_mutex_lock_fn_t)__bf_c_resolve(38);
+        if (real_pthread_mutex_lock)
+            __bf_tramp_table[38] = (void *)bf_pthread_mutex_lock_wrapper;
+    }
+    if (!real_pthread_mutex_trylock) {
+        real_pthread_mutex_trylock = (pthread_mutex_trylock_fn_t)__bf_c_resolve(124);
+        if (real_pthread_mutex_trylock)
+            __bf_tramp_table[124] = (void *)bf_pthread_mutex_trylock_wrapper;
+    }
+    if (!real_pthread_mutex_timedlock) {
+        real_pthread_mutex_timedlock = (pthread_mutex_timedlock_fn_t)__bf_c_resolve(780);
+        if (real_pthread_mutex_timedlock)
+            __bf_tramp_table[780] = (void *)bf_pthread_mutex_timedlock_wrapper;
+    }
+}
+
+/* ===== Legacy init function (may crash under QEMU due to dlopen+dlsym) ===== */
 __attribute__((visibility("default")))
 void __bf_init_data(void) {
+    // Try to set up data object pointers — may fail under QEMU, that's OK
     void *self = dlopen(NULL, RTLD_LAZY);
     if (!self) return;
     if (!__bf_data_stderr)
@@ -2549,28 +2579,6 @@ void __bf_init_data(void) {
         *(void **)(__bf_data_signgam) = dlsym(self, "signgam");
     dlclose(self);
 
-    /* Install mutex wrappers to fix ABI mismatches between Bionic and glibc.
-     *
-     * GSI libraries compiled for Bionic may have pthread_mutex_t __kind
-     * fields with type-flag bits (bits 2..6) set that glibc interprets as
-     * protocol flags (PTHREAD_PRIO_PROTECT, etc.). When glibc sees these
-     * bits, it takes the lock_full path which may call __pthread_tpp_change_priority()
-     * and assertion-fail on non-RT threads.
-     *
-     * Index 38 = pthread_mutex_lock
-     * Index 124 = pthread_mutex_trylock
-     * Index 780 = pthread_mutex_timedlock
-     */
-    if (!real_pthread_mutex_lock) {
-        real_pthread_mutex_lock = (pthread_mutex_lock_fn_t)__bf_c_resolve(38);
-        __bf_tramp_table[38] = (void *)bf_pthread_mutex_lock_wrapper;
-    }
-    if (!real_pthread_mutex_trylock) {
-        real_pthread_mutex_trylock = (pthread_mutex_trylock_fn_t)__bf_c_resolve(124);
-        __bf_tramp_table[124] = (void *)bf_pthread_mutex_trylock_wrapper;
-    }
-    if (!real_pthread_mutex_timedlock) {
-        real_pthread_mutex_timedlock = (pthread_mutex_timedlock_fn_t)__bf_c_resolve(780);
-        __bf_tramp_table[780] = (void *)bf_pthread_mutex_timedlock_wrapper;
-    }
+    // Also install mutex wrappers
+    __bf_install_mutex_wrappers();
 }

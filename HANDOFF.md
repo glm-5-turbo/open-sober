@@ -18,62 +18,41 @@
 
 Open Sober is an open-source reimplementation of VinegarHQ's Sober — a runtime that runs the Roblox Android APK on Linux natively.
 
-## What's Built
+## Current Status (July 19, session 3 - late)
 
-### Phase 1 - libbadcpu (`crates/libbadcpu/`)
-CPU feature emulator — SIGILL handler for missing x86-64 instructions (POPCNT, MOVBE, LZCNT, TZCNT, BMI1).
+### ✅ Done (this session)
 
-### Phase 2 - libloader (`crates/libloader/`)
-Process sandbox/spawner — chroot isolation, ELF loader, Android runtime env setup, Unix socket IPC.
+1. **Rewrote jni_shim.c** — Removed broken adrp-based JNI_OnLoad pre-copy (the copy+fix approach had incorrect address calculations). Replaced with a simple SIGSEGV handler that:
+   - Toggles page permissions (PROT_NONE → PROT_RWX) to force QEMU JIT cache invalidation
+   - Handles self-referencing writes (code writing to its own page) by flushing the cache
+   - Pre-mprotects all r--p RELRO pages to rw-p using /proc/self/maps
+   - Detects NULL/bad-address faults (returned MAP_FAILED errors)
+   - Has an infinite-loop limit of 500 faults
 
-### Phase 3 - sober-services (`crates/sober-services/`)
-Browser-based OAuth auth handler.
+2. **Fixed bionic_shim's __bf_init_data** — The function wasn't a constructor so the mutex wrapper trampolines were never installed. Added `__bf_install_mutex_wrappers()` which is called explicitly from jni_shim after the SIGSEGV handler is active. It installs `sanitize_mutex` wrappers at trampoline indices 38, 124, 780.
 
-### Phase 4 - sober-core (`crates/sober-core/`)
-Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command.
+3. **Fixed bulk mutex owner scan** — The previous session's dl_iterate_phdr scan was too aggressive and hit RELRO-protected pages. Removed the bulk scan entirely — per-mutex sanitization at lock time (via the bionic_shim trampolines) is the safe approach.
 
-**Key APK:** `~/Documents/Projects/open-sober/roblox-android.apk` (178MB, not in git)
-**APK structure:** `assets/app.zip` → `config.arm64_v8a.apk` → `lib/arm64-v8a/libroblox.so` (101MB, NDK r28c, Android 26)
+### 🔴 Current Blocker
 
-## Current Status (July 19, session 2 - late)
-
-### ✅ Done
-
-1. **Custom QEMU built** — Static 41MB binary at `/tmp/qemu-10.2.1/build/qemu-aarch64` (VDSO disabled). Source at `/tmp/qemu-10.2.1/`.
-
-2. **pthread_mutex_t ABI fix** (`bionic_init.c`) — intercepts `pthread_mutex_lock`/`trylock`/`timedlock` via trampoline table. Sanitizes `__kind` bits 2-6 (lock_full trigger) and clears stale `__owner` values.
-
-3. **Complete JNI function table** (`jni_shim.c`) — all 256 JNIEnv slots filled with safe stubs.
-
-4. **QEMU bridge wiring** (`qemu.rs`) — `setup_bridges()` builds version bridges (libc.so, libm.so, libdl.so with LIBC_* version tags) and copies glibc into sysroot.
-
-5. **Canary GOT patching** — `mprotect` + GOT write for `__stack_chk_guard` RELRO fix. Verified working.
-
-6. **SIGSEGV handler** for QEMU JIT bug — one-shot handler skips past faulting instruction on QEMU's bad code pages.
-
-7. **Mutex owner scan** — `dl_iterate_phdr` scan clears stale Bionic mutex owners across ALL loaded GSI libraries (~35K owners in libroblox.so alone).
-
-8. **Rebuilt jni_shim.c** — complete file with JNI table, canary fix, SIGSEGV handler, and mutex scan all integrated.
-
-### 🔴 Blockers
-
-**Primary: `_dl_fixup` assertion crash**
-The mutex owner scan's heuristic is too aggressive. It clears `__lock == 0 && __owner != 0 && __kind 0..3` patterns, but this matches PLT GOT entries too (especially unresolved lazy PLT entries). This corrupts the dynamic linker's relocation tables, causing:
+After fixing RELRO page faults and mutex assertions, JNI_OnLoad now crashes immediately with:
 ```
-Inconsistency detected by ld.so: dl-runtime.c: 63: _dl_fixup: Assertion `ELFW(R_TYPE)(reloc->r_info) == ELF_MACHINE_JMP_SLOT' failed!
+pc=0xffffffffffffffff fault=0xffffffffffffffff
 ```
-**Fix:** Tighten the heuristic (check `__count` field at offset 4, check alignment, check `__spins` field at offset 20).
+The program counter itself is at -1. This means a function call returned -1 (MAP_FAILED or similar error) and the code tried to call through it as a function pointer. This is likely one of:
 
-**Secondary: QEMU JIT code page bug**
-QEMU 10.2.1 crashes (host-level SIGSEGV) when JIT-compiling code from specific text pages of libroblox.so at offset ~0x1f64000. The SIGSEGV handler skip-workaround is working but the `_dl_fixup` crash from the mutex scan should be fixed first — it might reveal more QEMU-dependent crashes after.
+1. A `dlsym` or `mmap` call inside a GSI library that failed, and the error return is used as a callback pointer
+2. A JNI stub that returns a bad value used as a function pointer
+3. An ELF constructor in a GSI library that calls an unimplemented function returning -1
 
-### 🟢 Next Steps (Priority Order)
+The current jni_shim aborts on this with the bad-address check, but we need to understand why this call chain returns -1.
 
-1. **Tighten mutex owner scan heuristic** — Add `__count` field check (offset 4, should be 0 for unlocked mutex), `__kind` check stricter (only 0-3), and skip addresses that look like GOT/PLT entries.
-2. **Re-test full JNI shim** — Once the scan is fixed, run the integrated jni_shim with all fixes.
-3. **Debug remaining JNI_OnLoad crashes** — Likely more missing symbols, uninitialized globals, or JNI stub issues.
-4. **EGL/GLES graphics stubs** — Mesa+zink approach. Not yet started.
-5. **Window + input** — SDL2-based. Not yet started.
+### Next Steps
+
+1. **Trace the -1 PC crash** — Use QEMU's `-strace` or `-d cpu_reset` to find which function call leads to the `0xffffffffffffffff` PC. It's likely a GSI library init function crashing.
+2. **Identify missing stub** — Find which function is returning -1 and add a proper stub (likely one of the JNI function table entries).
+3. **EGL/GLES graphics stubs** — Mesa+zink approach. Not yet started.
+4. **Window + input** — SDL2-based. Not yet started.
 
 ### Environment
 
@@ -82,6 +61,5 @@ QEMU 10.2.1 crashes (host-level SIGSEGV) when JIT-compiling code from specific t
 - **QEMU:** Custom `/tmp/qemu-10.2.1/build/qemu-aarch64` (VDSO disabled) + system `/usr/bin/qemu-aarch64`
 - **Cross-compiler:** `aarch64-linux-gnu-gcc` (gcc-15)
 - **GSI ARM64 libs:** At `~/.cache/open-sober/android-env/system/lib64/` (788 libs, patched for ANDROID_RELR/RELA)
-- **Android NDK extracted:** `/tmp/ndk_extract/` and `/tmp/ndk.zip`
 - **Bionic shim:** Built at `~/.cache/open-sober/android-env/system/lib64/libbionic_shim.so`
 - **JNI shim:** Built at `~/.cache/open-sober/android-env/jni_shim`
