@@ -440,6 +440,26 @@ int main(int argc, char** argv) {
             }
             fprintf(stderr, "[jni_shim] pre-resolved %d/%d trampolines (%d failed)\n",
                     resolved, resolved+failed, failed);
+
+            // Override pthread_cond_wait (index 39) and pthread_cond_timedwait
+            // (index 96) with a raw ARM shim that returns 0 immediately.
+            // This prevents the one-time init deadlock where the init function
+            // does pthread_mutex_lock + pthread_cond_wait and no other thread
+            // ever signals the condvar. Using mmap'd raw ARM code instead of
+            // a C function wrapper avoids QEMU JIT goto_tb crashes.
+            // mov w0, #0 = 0x52800000, ret = 0xd65f03c0
+            void *cond_shim = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
+                                   MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+            if (cond_shim != MAP_FAILED) {
+                ((uint32_t*)cond_shim)[0] = 0x52800000;  // mov w0, #0
+                ((uint32_t*)cond_shim)[1] = 0xd65f03c0;  // ret
+                __builtin___clear_cache(cond_shim, (void*)((uintptr_t)cond_shim + 8));
+                tramp[39] = cond_shim;   // pthread_cond_wait
+                tramp[96] = cond_shim;   // pthread_cond_timedwait (same effect)
+                fprintf(stderr, "[jni_shim] condvar shim %p -> tramp[39,96]\n", cond_shim);
+            } else {
+                fprintf(stderr, "[jni_shim] WARNING: condvar shim mmap failed\n");
+            }
         }
     }
 
@@ -591,8 +611,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ALSO set the BSS guard flag directly so other code paths that check
-    // it (like function A at 0x5e17fb8) see it as init'd
+    // ALSO set the BSS guard flags directly so other code paths see init as done
     if (base) {
         // Guard at VA 0x6a26e40: byte[0]=1 means "initialization done"
         // This is checked by the init function at 0x1f65a60.
