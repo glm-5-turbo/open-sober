@@ -8,6 +8,9 @@
 #include <fcntl.h>
 #include <time.h>
 #include <stdint.h>
+#include <stdarg.h>
+#include <wchar.h>
+#include <sys/types.h>
 
 /* Dispatch table and data — defined in bionic_shim.S */
 extern void *__bf_tramp_table[392];
@@ -79,6 +82,181 @@ char *__strncpy_chk2(char *d, const char *s, size_t n, size_t dl) {
     for (; i < n; i++) *p++ = '\0';
     return d;
 }
+
+/* ===== _Unwind_* stubs under LIBC_R =====
+ * GSI libc++.so references DWARF unwind functions from libc.so under
+ * version LIBC_R. On glibc these live in libgcc_s.so.1 (GCC_3.0/3.3).
+ * Each stub forwards to libgcc_s via dlsym(RTLD_NEXT). */
+
+/* _Unwind stubs: forward to libgcc_s. These are resolved at dlopen time
+ * but typically not CALLED during initialization. If called before libgcc_s
+ * is loaded, we try RTLD_DEFAULT. The real functions have non-void return
+ * types and specific signatures, but these generic wrappers serve as
+ * link-time placeholders so the dynamic linker can resolve them.
+ * On first call, we resolve the real symbol and forward. */
+#define BF_UNWIND_STUB(sym, ret) \
+    __attribute__((used)) __attribute__((externally_visible)) \
+    ret _bf_unwind_##sym(void); \
+    __asm__(".symver _bf_unwind_" #sym "," #sym "@@LIBC_R"); \
+    __attribute__((externally_visible)) \
+    ret _bf_unwind_##sym(void) { \
+        static ret (*_r)(void) = NULL; \
+        if (!_r) { _r = dlsym(RTLD_NEXT, #sym); \
+                   if (!_r) _r = dlsym(RTLD_DEFAULT, #sym); } \
+        if (_r) return _r(); \
+        return (ret)0; \
+    }
+
+BF_UNWIND_STUB(_Unwind_RaiseException, int)
+BF_UNWIND_STUB(_Unwind_DeleteException, void)
+BF_UNWIND_STUB(_Unwind_SetGR, void)
+BF_UNWIND_STUB(_Unwind_SetIP, void)
+BF_UNWIND_STUB(_Unwind_GetLanguageSpecificData, void*)
+BF_UNWIND_STUB(_Unwind_GetIP, unsigned long)
+BF_UNWIND_STUB(_Unwind_GetRegionStart, unsigned long)
+BF_UNWIND_STUB(_Unwind_Resume, void)
+
+/* ===== String/number conversion functions not in trampoline table ===== */
+
+#define BF_FLOAT_STUB2(sym, ver, ret_type, a1_t, a2_t) \
+    __attribute__((used)) __attribute__((externally_visible)) \
+    ret_type _bf_##sym(a1_t a1, a2_t a2); \
+    __asm__(".symver _bf_" #sym "," #sym "@@" #ver); \
+    __attribute__((externally_visible)) \
+    ret_type _bf_##sym(a1_t a1, a2_t a2) { \
+        static ret_type (*_r)(a1_t, a2_t) = NULL; \
+        if (!_r) _r = dlsym(RTLD_NEXT, #sym); \
+        return _r ? _r(a1, a2) : (ret_type)0; \
+    }
+
+BF_FLOAT_STUB2(strtold, LIBC, long double, const char *, char **)
+BF_FLOAT_STUB2(strtod_l, LIBC_O, double, const char *, char **)
+BF_FLOAT_STUB2(strtof_l, LIBC_O, float, const char *, char **)
+BF_FLOAT_STUB2(wcstod, LIBC, double, const wchar_t *, wchar_t **)
+BF_FLOAT_STUB2(wcstof, LIBC, float, const wchar_t *, wchar_t **)
+BF_FLOAT_STUB2(wcstold, LIBC, long double, const wchar_t *, wchar_t **)
+
+/* wcstol/wcstoll/wcstoul/wcstoull — 3-arg */
+#define BF_3ARG(sym, ret, a1_t, a2_t, a3_t) \
+    __attribute__((used)) __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a1, a2_t a2, a3_t a3); \
+    __asm__(".symver _bf_" #sym "," #sym "@@LIBC"); \
+    __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a1, a2_t a2, a3_t a3) { \
+        static ret (*_r)(a1_t, a2_t, a3_t) = NULL; \
+        if (!_r) _r = dlsym(RTLD_NEXT, #sym); \
+        return _r ? _r(a1, a2, a3) : (ret)0; \
+    }
+
+BF_3ARG(wcstol, long, const wchar_t *, wchar_t **, int)
+BF_3ARG(wcstoll, long long, const wchar_t *, wchar_t **, int)
+BF_3ARG(wcstoul, unsigned long, const wchar_t *, wchar_t **, int)
+BF_3ARG(wcstoull, unsigned long long, const wchar_t *, wchar_t **, int)
+
+/* setlocale */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_setlocale(int cat, const char *loc);
+__asm__(".symver _bf_setlocale,setlocale@@LIBC");
+__attribute__((externally_visible))
+char *_bf_setlocale(int cat, const char *loc) {
+    static char *(*_r)(int, const char*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "setlocale");
+    return _r ? _r(cat, loc) : NULL;
+}
+
+/* sendfile */
+__attribute__((used)) __attribute__((externally_visible))
+ssize_t _bf_sendfile(int ofd, int ifd, off_t *off, size_t cnt);
+__asm__(".symver _bf_sendfile,sendfile@@LIBC");
+__attribute__((externally_visible))
+ssize_t _bf_sendfile(int ofd, int ifd, off_t *off, size_t cnt) {
+    static ssize_t (*_r)(int, int, off_t*, size_t) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "sendfile");
+    return _r ? _r(ofd, ifd, off, cnt) : -1;
+}
+
+/* setbuf */
+__attribute__((used)) __attribute__((externally_visible))
+void _bf_setbuf(void *stream, char *buf);
+__asm__(".symver _bf_setbuf,setbuf@@LIBC");
+__attribute__((externally_visible))
+void _bf_setbuf(void *stream, char *buf) {
+    static void (*_r)(void*, char*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "setbuf");
+    if (_r) _r(stream, buf);
+}
+
+/* swprintf */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_swprintf(wchar_t *ws, size_t n, const wchar_t *fmt, ...);
+__asm__(".symver _bf_swprintf,swprintf@@LIBC");
+__attribute__((externally_visible))
+int _bf_swprintf(wchar_t *ws, size_t n, const wchar_t *fmt, ...) {
+    static int (*_r)(wchar_t*, size_t, const wchar_t*, ...) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "swprintf");
+    va_list ap;
+    va_start(ap, fmt);
+    int ret = _r ? _r(ws, n, fmt, ap) : -1;
+    va_end(ap);
+    return ret;
+}
+
+/* Simple wrappers for filesystem/syscall functions not in trampoline table */
+
+#define BF_1ARG_RET(sym, ret, a1_t) \
+    __attribute__((used)) __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a); \
+    __asm__(".symver _bf_" #sym "," #sym "@@LIBC"); \
+    __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a) { \
+        static ret (*_r)(a1_t) = NULL; \
+        if (!_r) _r = dlsym(RTLD_NEXT, #sym); \
+        return _r ? _r(a) : (ret)-1; \
+    }
+
+#define BF_2ARG_RET(sym, ret, a1_t, a2_t) \
+    __attribute__((used)) __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a1, a2_t a2); \
+    __asm__(".symver _bf_" #sym "," #sym "@@LIBC"); \
+    __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a1, a2_t a2) { \
+        static ret (*_r)(a1_t, a2_t) = NULL; \
+        if (!_r) _r = dlsym(RTLD_NEXT, #sym); \
+        return _r ? _r(a1, a2) : (ret)-1; \
+    }
+
+#define BF_3ARG_RET(sym, ret, a1_t, a2_t, a3_t) \
+    __attribute__((used)) __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a1, a2_t a2, a3_t a3); \
+    __asm__(".symver _bf_" #sym "," #sym "@@LIBC"); \
+    __attribute__((externally_visible)) \
+    ret _bf_##sym(a1_t a1, a2_t a2, a3_t a3) { \
+        static ret (*_r)(a1_t, a2_t, a3_t) = NULL; \
+        if (!_r) _r = dlsym(RTLD_NEXT, #sym); \
+        return _r ? _r(a1, a2, a3) : (ret)-1; \
+    }
+
+BF_1ARG_RET(chdir, int, const char *)
+BF_1ARG_RET(pathconf, long, const char *)
+BF_1ARG_RET(truncate, int, const char *)
+BF_1ARG_RET(remove, int, const char *)
+BF_2ARG_RET(link, int, const char *, const char *)
+BF_2ARG_RET(symlink, int, const char *, const char *)
+BF_2ARG_RET(fchmodat, int, int, const char *)
+BF_2ARG_RET(openat, int, int, const char *)
+/* fdopendir — hand-written because void* trips up the macro */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_fdopendir(int fd);
+__asm__(".symver _bf_fdopendir,fdopendir@@LIBC");
+__attribute__((externally_visible))
+void *_bf_fdopendir(int fd) {
+    static void *(*_r)(int) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "fdopendir");
+    return _r ? _r(fd) : NULL;
+}
+
+BF_3ARG_RET(unlinkat, int, int, const char *, int)
+BF_3ARG_RET(utimensat, int, int, const char *, const void *)
 
 /* ===== Common glibc re-exports under LIBC version =====
  * These are basic C functions referenced from GSI libs with version LIBC

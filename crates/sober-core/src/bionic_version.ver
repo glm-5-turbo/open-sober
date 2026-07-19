@@ -15,3 +15,7 @@ LIBC_P {
         aligned_alloc;
         *;
 };
+
+LIBC_R {
+    global: *;
+};
