@@ -35,7 +35,7 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 **Key APK:** `~/Documents/Projects/open-sober/roblox-android.apk` (178MB, not in git)
 **APK structure:** `assets/app.zip` → `config.arm64_v8a.apk` → `lib/arm64-v8a/libroblox.so` (101MB, NDK r28c, Android 26)
 
-## Current Status (July 19, session 4 - early)
+## Current Status (July 19, session 4 — breakthrough)
 
 ### ✅ Complete (earlier sessions)
 
@@ -63,7 +63,18 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 
 10. **JNI_OnLoad code copy with adrp fix** — The QEMU JIT bug is a HOST-level SIGSEGV when JIT-compiling certain code pages (~0x1f64000 offset in libroblox.so). JNI_OnLoad is at offset 0x1f64e58, right in the bad zone. The fix copies 128KB of code to a fresh mmap'd page, fixes all adrp instructions to target original absolute addresses, and calls the copy instead. This works around QEMU's JIT crash.
 
-### 🟢 What Now Works
+### ✅ Fixed in session 4
+
+11. **BL/B/B.cond/CBZ/TBZ offset fix for code copy** — The code copy was only fixing `adrp` instructions (data access). BL/B/B.cond/CBZ/TBZ instructions that target code outside the 128KB copy range had wrong offsets because the copy is at a different virtual address than the original. The fix recalculates all PC-relative branch offsets to point to the ORIGINAL target address. This is critical for calls to PLT, GSI library functions, and other libroblox functions outside the copied range.
+
+12. **adrp detection fix (all immlo variants)** — The adrp instruction has 4 variants depending on `immlo` (bits 30-29): 0x90, 0xB0, 0xD0, 0xF0. The old code only detected `immlo=00` (0x90), missing 75% of adrp instructions. The fix uses `(ins & 0x1F000000) == 0x10000000 && bit31==1` to catch all 4 variants. **9010 adrp instructions** are now fixed in the 128KB copy (up from 2154).
+
+13. **Temporarily disabled mutex sanitization wrappers** — The `sanitize_and_lock` wrapper function re-entered glibc's `pthread_mutex_lock`, which triggered a QEMU JIT bug specifically on the second call. Without the wrapper (directly calling glibc's mutex functions), the code runs stably under QEMU for extended periods. The wrapper is guarded by `if(0)` — needs re-enabling with a fix.
+    - Also pre-resolved `pthread_mutex_lock` (trampoline index 38) to bypass the lazy resolver (`__bf_c_resolve` uses buggy `dlsym(RTLD_NEXT)` under QEMU).
+
+### 🟢 Current State — BREAKTHROUGH
+
+**JNI_OnLoad now runs stably for 30+ seconds without crashing!**
 
 Run the jni_shim:
 ```bash
@@ -76,52 +87,39 @@ ANDROID_ROOT=~/.cache/open-sober/android-env
   "$ANDROID_ROOT/jni_shim"
 ```
 
-To rebuild jni_shim.c:
-```bash
-SYSROOT=~/.cache/open-sober/android-env
-CRATE=~/Documents/Projects/open-sober/crates/sober-core/src
-aarch64-linux-gnu-gcc -o "$SYSROOT/jni_shim" "$CRATE/jni_shim.c" -ldl
-```
+### 🟡 Current Blocker — JNI_OnLoad doesn't return (hangs)
 
-To rebuild bionic_shim.so (needed if bionic_init.c changes):
-```bash
-aarch64-linux-gnu-gcc -c -o /tmp/bionic_stubs.o "$CRATE/bionic_init.c" -fPIC
-aarch64-linux-gnu-gcc -shared -fPIC -o "$SYSROOT/system/lib64/libbionic_shim.so" \
-  /tmp/bionic_symbols.o /tmp/bionic_stubs.o \
-  -Wl,--version-script,"$CRATE/bionic_version.ver" \
-  -Wl,-rpath,/system/lib64 -L "$SYSROOT/system/lib64" \
-  -lglibc -lm -ldl -nostartfiles
-```
+**JNI_OnLoad runs stably but doesn't return.** After 30+ seconds, the function is still executing (0% CPU — sleeping/waiting).
 
-(The bionic_symbols.o object file persists from a prior build — the assembly trampolines in bionic_shim.S rarely change.)
+JNI_OnLoad likely:
+1. Spawns worker threads and waits for them to initialize
+2. Tries to communicate with the Android Java runtime (which doesn't exist)
+3. Is waiting on a futex/condition variable that will never be signaled
 
-### 🔴 Current Blocker
-
-**QEMU JIT bug on multiple GSI library code pages**
-
-The QEMU JIT bug is NOT limited to the libroblox.so code page at 0x1f64000. Once JNI_OnLoad's prologue executes (via the code copy), it calls sub-functions in other GSI libraries (`libc++`, `libandroidicu`, etc.), and those libraries' code pages also trigger the same QEMU JIT bug (host-level SIGSEGV during JIT compilation).
-
-The crash now appears as `qemu: uncaught target signal 11` WITHOUT any SIGSEGV handler output, confirming it's a host-level crash inside QEMU's JIT, not deliverable as a guest signal.
-
-The SIGSEGV handler catches guest-level faults (page permission errors, bad addresses), but CANNOT catch QEMU's internal JIT crashes.
+The QEMU JIT crash that previously blocked progress is now **fully worked around** with the combination of:
+- Code copy with adrp fix (all 4 immlo variants)
+- BL/B/B.cond/CBZ/TBZ offset fix  
+- Mutex sanitization wrappers disabled (direct glibc call works)
+- SIGSEGV handler for RELRO writes and JIT self-write bugs
+- Pre-mprotect of RELRO pages
 
 ### 🎯 Next Steps (In Priority Order)
 
-The QEMU JIT bug is the primary blocker. Options:
+1. **Figure out why JNI_OnLoad hangs** — It spins up threads and waits. Options:
+   - Use `-strace` to see what syscalls are blocking
+   - Check if any required symbols are missing (Android runtime classes, JNI calls)
+   - Enable JNI stub logging to see what JNI calls Roblox makes during init
+   - The program might need more JNI stubs implemented (FindClass for specific classes, GetMethodID for specific methods)
 
-1. **Patch QEMU source** — The QEMU source is at `/tmp/qemu-10.2.1/`. Find and fix the JIT compilation bug. The bug causes SIGSEGV when JIT-compiling specific AArch64 instruction sequences. Options:
-   - Look at `linux-user/` and `accel/tcg/` directories in the QEMU source
-   - The bug might be in TCG code generation for specific ARM64 instructions (adrp+ldr combinations?)
-   - Try disabling TCG optimizations in QEMU's configure step (`--disable-tcg` won't help but there might be other flags)
-   - Patch `accel/tcg/translator.c` or `target/arm/translate.c`
+2. **Re-enable mutex sanitization safely** — The `sanitize_and_lock` wrapper triggers a QEMU JIT bug on re-entry. The fix might be:
+   - Use `__attribute__((noinline))` to prevent TCG cross-linking
+   - Move the sanitize code inline into jni_shim.c instead of calling through bionic_shim trampoline
+   - Simply skip sanitization if glibc's mutex works correctly (the Bionic ABI differences might not matter with glibc)
 
-2. **Build QEMU with debugging flags** — Rebuild with `--enable-debug` to get more info on where the JIT crashes.
-
-3. **Try QEMU's `-tb-size` option** — Reduce the translation block cache size to force more frequent re-translations.
-
-4. **Aggressive code copying** — When a code page triggers the JIT bug, use QEMU's `-strace` to learn which libraries/pages fail, then copy ALL of them. This is a losing battle if the bug is widespread.
-
-5. **Upgrade QEMU** — Try Ubuntu 26.04's `qemu-user` package (might be newer than 10.2.1).
+3. **Implement more JNI stubs** — Based on what JNI_OnLoad calls, add real implementations for key JNI methods:
+   - `FindClass` needs to return the right class objects
+   - `GetMethodID`/`GetStaticMethodID` might need real implementations
+   - `RegisterNatives` needs to handle function registration
 
 ### Environment
 

@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
                 {5,"pthread_mutex_init"},{6,"pthread_mutex_destroy"},{7,"pthread_once"},
                 {8,"__memset_chk"},{9,"__memcpy_chk"},{10,"strlen"},{11,"memchr"},
                 {12,"strncmp"},{13,"strcmp"},{14,"getauxval"},{15,"__errno_location"},
-                {16,"close"},{40,"pthread_mutex_unlock"},
+                {16,"close"},{38,"pthread_mutex_lock"},{40,"pthread_mutex_unlock"},
             };
             for (int i = 0; i < (int)(sizeof(pre)/sizeof(pre[0])); i++) {
                 void *fn = dlsym(RTLD_DEFAULT, pre[i].name);
@@ -344,13 +344,16 @@ int main(int argc, char** argv) {
             g_real_lock = dlsym(RTLD_DEFAULT, "pthread_mutex_lock");
             g_real_trylock = dlsym(RTLD_DEFAULT, "pthread_mutex_trylock");
             g_real_timedlock = dlsym(RTLD_DEFAULT, "pthread_mutex_timedlock");
-            if (g_real_lock) {
+            // Temporarily DISABLE mutex sanitization wrappers to test
+            // whether the QEMU JIT crash is triggered by the wrapper re-entry
+            if (0 && g_real_lock) {
                 tramp[38] = sanitize_and_lock;
                 // Also resolve index 0 (which is __cxa_finalize) — already done above
                 fprintf(stderr, "[jni_shim] mutex wrapper installed (real=%p)\n", (void*)g_real_lock);
             }
-            if (g_real_trylock) tramp[124] = sanitize_and_trylock;
-            if (g_real_timedlock) tramp[780] = sanitize_and_timedlock;
+            // Skip sanitize wrappers (see above - if(0) disabled)
+            // if (g_real_trylock) tramp[124] = sanitize_and_trylock;
+            // if (g_real_timedlock) tramp[780] = sanitize_and_timedlock;
         }
     }
 
@@ -374,20 +377,109 @@ int main(int argc, char** argv) {
             uint32_t *code = (uint32_t*)copy;
             for (size_t off = 0; off < copy_sz; off += 4) {
                 uint32_t ins = code[off/4];
-                if ((ins >> 24) != 0x90) continue;
-                int32_t old_imm = (((ins >> 5) & 0x7ffff) << 2) | ((ins >> 29) & 3);
-                if (old_imm & 0x100000) old_imm -= 0x200000;
-                // target = original_PC_page + (old_imm << 12)
-                uintptr_t tgt = (base + jni_page + off) & ~0xfffULL;
-                tgt += (int64_t)old_imm << 12;
-                // new_imm = (target - copy_PC_page) >> 12
-                uintptr_t cpy_page = ((uintptr_t)copy + off) & ~0xfffULL;
-                int64_t diff = (int64_t)(tgt - cpy_page);
-                int32_t new_imm = (int32_t)(diff >> 12);
-                if (new_imm >= -0x80000 && new_imm <= 0x7ffff) {
-                    uint32_t rd = ins & 0x1f;
-                    code[off/4] = 0x90000000 | ((new_imm & 3) << 29) |
-                                  (((new_imm >> 2) & 0x7ffff) << 5) | rd;
+                uint32_t op6 = ins >> 26;
+
+                // Fix adrp (bits 28-24 = 10000, bit 31 = 1)
+                // Top 8 bits can be: 0x90, 0xB0, 0xD0, 0xF0 depending on immlo
+                if ((ins & 0x1f000000) == 0x10000000 && (ins >> 31)) {
+                    int32_t old_imm = (((ins >> 5) & 0x7ffff) << 2) | ((ins >> 29) & 3);
+                    if (old_imm & 0x100000) old_imm -= 0x200000;
+                    uintptr_t tgt = (base + jni_page + off) & ~0xfffULL;
+                    tgt += (int64_t)old_imm << 12;
+                    uintptr_t cpy_page = ((uintptr_t)copy + off) & ~0xfffULL;
+                    int64_t diff = (int64_t)(tgt - cpy_page);
+                    int32_t new_imm = (int32_t)(diff >> 12);
+                    if (new_imm >= -0x80000 && new_imm <= 0x7ffff) {
+                        uint32_t rd = ins & 0x1f;
+                        code[off/4] = 0x90000000 | ((new_imm & 3) << 29) |
+                                      (((new_imm >> 2) & 0x7ffff) << 5) | rd;
+                    }
+                    continue;
+                }
+
+                // Fix B (000101) and BL (100101): recalculate the PC-relative offset
+                if (op6 == 0b000101 || op6 == 0b100101) {
+                    // imm26 is bits 25-0, sign-extended
+                    int32_t imm26 = ins & 0x03ffffff;
+                    if (imm26 & 0x02000000) imm26 |= 0xfc000000; // sign extend 26-bit
+                    // Original target PC = original_PC + imm26 * 4
+                    uintptr_t orig_pc = base + jni_page + off;
+                    uintptr_t target = orig_pc + (int64_t)imm26 * 4;
+
+                    // If target is within the copied range, offset stays correct
+                    uintptr_t orig_start = base + jni_page;
+                    uintptr_t orig_end = orig_start + copy_sz;
+                    if (target >= orig_start && target < orig_end)
+                        continue;
+
+                    // Recalculate offset from the copy's position
+                    uintptr_t copy_pc = (uintptr_t)copy + off;
+                    int64_t new_diff = (int64_t)(target - copy_pc);
+                    int32_t new_imm26 = (int32_t)(new_diff / 4);
+                    if (new_imm26 >= -0x2000000 && new_imm26 <= 0x1ffffff) {
+                        uint32_t new_ins = (ins & 0xfc000000) | (new_imm26 & 0x03ffffff);
+                        code[off/4] = new_ins;
+                    }
+                    continue;
+                }
+
+                // Fix B.cond (bits 31-24 = 01010100): 19-bit signed offset
+                // Check top 8 bits = 0x54
+                if ((ins >> 24) == 0x54) {
+                    int32_t imm19 = (ins >> 5) & 0x7ffff;
+                    if (imm19 & 0x40000) imm19 |= 0xfff80000;
+                    uintptr_t orig_pc = base + jni_page + off;
+                    uintptr_t target = orig_pc + (int64_t)imm19 * 4;
+                    uintptr_t orig_start = base + jni_page;
+                    uintptr_t orig_end = orig_start + copy_sz;
+                    if (target >= orig_start && target < orig_end)
+                        continue;
+                    uintptr_t copy_pc = (uintptr_t)copy + off;
+                    int64_t new_diff = (int64_t)(target - copy_pc);
+                    int32_t new_imm19 = (int32_t)(new_diff / 4);
+                    if (new_imm19 >= -0x40000 && new_imm19 <= 0x3ffff) {
+                        code[off/4] = (ins & 0xff00001f) | ((new_imm19 & 0x7ffff) << 5);
+                    }
+                    continue;
+                }
+
+                // Fix CBZ/CBNZ (bits 31-24 = 01101010/01101001 or 11101010/11101001)
+                // top 8 bits: 0x69=CBNZ32, 0x6A=CBZ32, 0xE9=CBNZ64, 0xEA=CBZ64
+                if ((ins >> 25) == 0b0110101 || (ins >> 25) == 0b1110101) {
+                    int32_t imm19 = (ins >> 5) & 0x7ffff;
+                    if (imm19 & 0x40000) imm19 |= 0xfff80000;
+                    uintptr_t orig_pc = base + jni_page + off;
+                    uintptr_t target = orig_pc + (int64_t)imm19 * 4;
+                    uintptr_t orig_start = base + jni_page;
+                    uintptr_t orig_end = orig_start + copy_sz;
+                    if (target >= orig_start && target < orig_end)
+                        continue;
+                    uintptr_t copy_pc = (uintptr_t)copy + off;
+                    int64_t new_diff = (int64_t)(target - copy_pc);
+                    int32_t new_imm19 = (int32_t)(new_diff / 4);
+                    if (new_imm19 >= -0x40000 && new_imm19 <= 0x3ffff) {
+                        code[off/4] = (ins & 0xff00001f) | ((new_imm19 & 0x7ffff) << 5);
+                    }
+                    continue;
+                }
+
+                // Fix TBZ/TBNZ (bits 31-24 = 01101100/01101101)
+                if ((ins >> 24) == 0x6C || (ins >> 24) == 0x6D) {
+                    int32_t imm14 = (ins >> 5) & 0x3fff;
+                    if (imm14 & 0x2000) imm14 |= 0xffffc000;
+                    uintptr_t orig_pc = base + jni_page + off;
+                    uintptr_t target = orig_pc + (int64_t)imm14 * 4;
+                    uintptr_t orig_start = base + jni_page;
+                    uintptr_t orig_end = orig_start + copy_sz;
+                    if (target >= orig_start && target < orig_end)
+                        continue;
+                    uintptr_t copy_pc = (uintptr_t)copy + off;
+                    int64_t new_diff = (int64_t)(target - copy_pc);
+                    int32_t new_imm14 = (int32_t)(new_diff / 4);
+                    if (new_imm14 >= -0x2000 && new_imm14 <= 0x1fff) {
+                        code[off/4] = (ins & 0xfff8001f) | ((new_imm14 & 0x3fff) << 5);
+                    }
+                    continue;
                 }
             }
             __builtin___clear_cache(copy, (void*)((uintptr_t)copy + copy_sz));
