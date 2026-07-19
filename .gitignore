@@ -8,3 +8,6 @@
 bot.sh
 mkstubs.sh
 stub_gen.sh
+
+# Claude Code worktrees
+.claude/worktrees/
