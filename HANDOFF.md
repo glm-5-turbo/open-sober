@@ -174,7 +174,17 @@ The underlying bit-packed RELR data format is identical between Android and glib
 
 **Usage:** `python3 ~/patch_relr.py gsi_libc++.so`
 
-**Current status:** After patching, `dlopen("libc++.so")` no longer segfaults. The library transitions past relocation into C++ static initialization (`.init_array` constructors run). However, it now **hangs** during one of the 3 constructors rather than crashing. The last syscall is `getrandom`, suggesting the issue is in C++ runtime init (possibly `std::ios_base::Init` or `__cxa_atexit` registering).
+**Current status:** After patching, `dlopen("libc++.so")` no longer segfaults. It transitions past relocation into C++ static initialization (`.init_array` constructors run). However, it now **hangs** in a pure CPU loop (no blocking syscalls after `getrandom`).
+
+**Isolated to function 1 (offset 0x7fbbc):** This function calls `getauxval(AT_HWCAP)` via PLT then checks bit 8. If clear, stores 0 to a `.bss` global and returns. This is a simple function that should take microseconds — but it hangs. Functions 2 and 3 crash (segfault) when run alone. Together with function 1 (which runs first in init_array order), the hang occurs before functions 2/3 get a chance to crash.
+
+The PLT dispatch for `getauxval` goes through the bionic shim's trampoline (pre-filled with real glibc address by the JNI shim), so `getauxval` should work. The hang might be in the trampoline resolution path itself, or in the `strb` to `.bss` at `0x122F80`.
+
+**Suspected cause:** The trampoline table entries are filled by the JNI shim via `dlsym(RTLD_DEFAULT, "getauxval")` from the JNI shim's host context. But these are addresses from the HOST process's glibc, not the GUEST's ARM64 glibc. Under QEMU user-mode, the ARM64 JNI shim binary runs with its own ARM64 glibc (linked statically into the JNI shim). The `dlsym(RTLD_DEFAULT, "getauxval")` returns the JNI shim's own `getauxval` (from its statically-linked glibc), not the ARM64 glibc's `getauxval`. These are different functions with different expectations about the auxiliary vector layout.
+
+**To fix:** Instead of pre-filling the trampoline table from the JNI shim's `dlsym`, the trampoline should lazily resolve using `dlsym(RTLD_DEFAULT, ...)` from WITHIN the bionic shim itself (which runs under QEMU and sees the guest dynamic linker's symbol tables). OR the trampoline should resolve via the PLT (using the dynamic linker's native symbol resolution), not via pre-filled host pointers.
+
+**Alternative approach:** Skip testing libc++.so entirely and test `libroblox.so` directly. Or create a minimal test that just checks symbol resolution without running C++ constructors.
 
 ### ❌ Current Blocker
 ```
@@ -184,16 +194,25 @@ dlopen("libc++.so")" — HANGS during C++ static initialization.
 After ANDROID_RELR→RELR patching and adding all ~40 LIBC-versioned stubs, `libc++.so` loads without crashing. It hangs during the 3rd phase of dlopen: running `.init_array` constructors. The three functions at offsets `0x7fbbc`, `0x7feb0`, `0xc87d4` in the patched binary are likely `std::ios_base::Init`, static locale init, or `__cxa_atexit` guard setup.
 
 **To debug:**
-1. Use GDB to catch dlopen completion and identify which constructor is hanging
-2. Set breakpoints at the init function addresses after RELR patch
-3. Check if the constructors are calling back into glibc functions that expect glibc-internal state that isn't set up properly (e.g., `__libc_single_threaded`, `__ctype_b_loc`, etc.)
-4. Try running with `GLIBC_TUNABLES=glibc.cpu.hwcaps=-XSAVEC` or similar to disable slow init paths
+1. The trampoline table pre-fill in the JNI shim (`jni_shim.c` lines 548-555) fills dispatch table entries with `dlsym(RTLD_DEFAULT, sym_name)`. These are HOST addresses that get written to the table. Under QEMU user-mode, the guest ARM64 process uses these as function pointers. If the host and guest glibc are different versions, calling a host glibc function from guest code WILL crash or hang.
+2. Fix: Either skip the pre-fill step and let the trampolines resolve lazily via `__bf_c_resolve` (which calls `dlsym(RTLD_DEFAULT, ...)` from inside the bionic shim under QEMU), OR verify that the JNI shim's `dlsym` returns addresses from the guest's ARM64 glibc, not the host's.
+3. Alternative: Try with the JNI shim's pre-fill disabled by commenting out the fill loop (lines 552-555 in jni_shim.c) and relying on lazy resolution.
+4. Alternative: Test `libroblox.so` directly instead; libc++.so might not actually be needed (Roblox may bundle its own C++ runtime).
 
 ### After init_array hang is resolved:
 - Test `dlopen("libroblox.so")` directly (the main Roblox game library)
 - Then JNI function table (~233 functions to stub)
 - EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
 - Window creation + input handling
+
+### ANDROID_RELR Patch Script
+Located at `~/patch_relr.py`. Converts Android RELR tags to standard RELR for glibc compatibility:
+
+```bash
+python3 ~/patch_relr.py gsi_libc++.so
+```
+
+The data format is identical — only DT tag values differ (0x6fffe000 → 0x24, 0x6fffe001 → 0x23, 0x6fffe003 → 0x25).
 
 ### Key Architecture Notes
 - `bionic_init.c` pattern for LIBC-versioned stubs:
