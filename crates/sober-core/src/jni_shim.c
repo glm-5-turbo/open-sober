@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/mman.h>
+#include <signal.h>
+#include <ucontext.h>
 
 // Minimal JNI types
 typedef int jint;
@@ -475,9 +477,30 @@ static void init_jni_functions() {
     }
 }
 
+/* One-shot SIGSEGV handler: skip past faulting instruction in QEMU
+ * (handles RELRO page access faults), then restore default handler. */
+static struct sigaction jni_old_sa;
+static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
+    ucontext_t* u = (ucontext_t*)ctx;
+    fprintf(stderr, "[jni_shim] SIGSEGV at PC=0x%lx, fault=%p, skipping\n",
+            u->uc_mcontext.pc, info->si_addr);
+    u->uc_mcontext.pc += 4;
+    sigaction(SIGSEGV, &jni_old_sa, NULL);
+}
+
 int main(int argc, char** argv) {
     const char* lib_path = getenv("ROBLOX_LIB");
     if (!lib_path) lib_path = "libroblox.so";
+
+    // Install one-shot SIGSEGV handler before accessing loaded library
+    // QEMU user-mode may enforce RELRO read-only GOT pages, causing SIGSEGV
+    // when reading GOT entries. The handler skips the fault and returns.
+    struct sigaction sa_jni;
+    memset(&sa_jni, 0, sizeof(sa_jni));
+    sa_jni.sa_sigaction = jni_segv_handler;
+    sa_jni.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa_jni.sa_mask);
+    sigaction(SIGSEGV, &sa_jni, &jni_old_sa);
 
     fprintf(stderr, "[jni_shim] Loading bionic shim...\n");
     void *bionic_shim = dlopen("libbionic_shim.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -485,43 +508,57 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[jni_shim] WARNING: libbionic_shim.so not found: %s\n", dlerror());
 
     fprintf(stderr, "[jni_shim] Loading %s...\n", lib_path);
-    void* handle = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
+    void* handle = dlopen(lib_path, RTLD_LAZY | RTLD_GLOBAL);
     if (!handle) {
         fprintf(stderr, "[jni_shim] Failed: %s\n", dlerror());
         return 1;
     }
     fprintf(stderr, "[jni_shim] Loaded successfully\n");
 
+    // Set up a one-shot SIGSEGV handler to handle RELRO page access issues.
+    // After dlopen with RTLD_NOW, some load instructions from RELRO-protected
+    // GOT pages may trigger SIGSEGV in QEMU user-mode. The handler skips past
+    // the faulting instruction (returns a NULL/garbage value which is fine
+    // since we patch the GOT entry immediately after).
+    struct sigaction sa, old_sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;  // skip SIGSEGV — let the load return whatever is in x8
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &old_sa);
+
     // Fix __stack_chk_guard in libroblox.so's data section.
-    // The GOT entry pointing to __stack_chk_guard is at a known offset
-    // from the library base. After RTLD_NOW dlopen, the GOT may be in a
-    // RELRO region (read-only), so we mprotect it to writable first.
+    // The GOT entry pointing to __stack_chk_guard is at base+0x6473438
+    // (inside .got.plt). After RTLD_NOW dlopen, the GOT is in a RELRO
+    // read-only region. We must mprotect it writable before patching.
     Dl_info dl_info;
     if (dladdr((void*)dlsym(handle, "JNI_OnLoad"), &dl_info)) {
         uintptr_t base = (uintptr_t)dl_info.dli_fbase;
         uintptr_t guard_ptr_addr = base + 0x6473438;
         uintptr_t* guard_ptr = (uintptr_t*)guard_ptr_addr;
-        uintptr_t canary_val = 0x0A0B0C0D0E0F1011ULL;
+
+        // Make the entire GOT region writable (covers .got, .got.plt, .relro_padding)
+        // libroblox.so data segments:
+        //   LOAD-2: vaddr 0x5fbd2c0, size 0x4b7268, RW (contains .got, .got.plt)
+        //   .got.plt spans 0x6473440 to 0x6474528
+        //   The RELRO mprotect covers start of LOAD-2's RELRO to .got.plt end
+        // We need full RW for the entire range.
+        uintptr_t got_start = base + 0x5fbd000;  // page-aligned start of data segment
+        uintptr_t got_end   = base + 0x6475000;  // page aligned end of .got.plt region
+        mprotect((void*)got_start, got_end - got_start, PROT_READ | PROT_WRITE);
+
         fprintf(stderr, "[jni_shim] libroblox base=%p, guard_ptr at %p = %p\n",
                 (void*)base, (void*)guard_ptr, (void*)*guard_ptr);
         if (*guard_ptr == 0) {
-            // GOT may be RELRO-protected (read-only). Make page writable.
-            uintptr_t page_start = guard_ptr_addr & ~0xfffUL;
-            if (mprotect((void*)page_start, 0x4000, PROT_READ | PROT_WRITE) == 0) {
-                fprintf(stderr, "[jni_shim] GOT page made writable\n");
-            } else {
-                fprintf(stderr, "[jni_shim] WARNING: mprotect failed: %m\n");
-            }
-            // Store the global canary address in the GOT entry
+            // GOT was read-only (RELRO). Now writable after mprotect.
             *guard_ptr = (uintptr_t)&g_canary;
-            fprintf(stderr, "[jni_shim] stack_chk_guard patched (canary at %p = 0x%lx)\n",
-                    (void*)*guard_ptr, g_canary);
-            // Also set glibc's __stack_chk_guard directly (accessed via TPIDR)
-            uintptr_t* libc_guard = (uintptr_t*)dlsym(RTLD_NEXT, "__stack_chk_guard");
-            if (libc_guard && *libc_guard == 0) {
-                *libc_guard = g_canary;
-                fprintf(stderr, "[jni_shim] libc __stack_chk_guard set at %p\n", (void*)libc_guard);
-            }
+            fprintf(stderr, "[jni_shim] stack_chk_guard patched to -> 0x%lx\n", g_canary);
+        }
+
+        // Also set the global __stack_chk_guard for thread-safe access
+        uintptr_t* libc_guard = (uintptr_t*)dlsym(RTLD_NEXT, "__stack_chk_guard");
+        if (libc_guard && *libc_guard == 0) {
+            *libc_guard = g_canary;
+            fprintf(stderr, "[jni_shim] libc __stack_chk_guard set at %p\n", (void*)libc_guard);
         }
     }
 

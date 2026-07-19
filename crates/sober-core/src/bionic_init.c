@@ -2481,13 +2481,21 @@ static pthread_mutex_lock_fn_t real_pthread_mutex_lock = NULL;
 static pthread_mutex_trylock_fn_t real_pthread_mutex_trylock = NULL;
 static pthread_mutex_timedlock_fn_t real_pthread_mutex_timedlock = NULL;
 
-/* Sanitize __kind field to clear bits 2..6 that would trigger lock_full */
+/* Sanitize __kind field to clear bits 2..6 that would trigger lock_full.
+ * Also clear __owner if it looks Bionic-stale (non-zero on a plain mutex
+ * that glibc expects to be unlocked). */
 static inline void sanitize_mutex(pthread_mutex_t *mutex) {
     int *kind_ptr = (int *)((char *)mutex + 16);
     int kind = *kind_ptr;
     if (kind & MUTEX_KIND_FLAG_MASK) {
         /* Zero only the type-flag bits, keep the mutex type (bits 0-1) */
         *kind_ptr = kind & ~MUTEX_KIND_FLAG_MASK;
+    }
+    /* Clear __owner if non-zero on a NORMAL mutex (Bionic often leaves stale
+     * __owner from its own locking, causing glibc's assert mutex->__owner == 0) */
+    int *owner_ptr = (int *)((char *)mutex + 8);
+    if (*owner_ptr != 0 && (*kind_ptr & 3) == 0) {
+        *owner_ptr = 0;
     }
 }
 
