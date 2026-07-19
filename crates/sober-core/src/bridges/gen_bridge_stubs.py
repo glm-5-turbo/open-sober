@@ -36,7 +36,7 @@ def get_undef_symbols(lib_path):
             name, version = raw_name.split('@', 1)
         if not version:
             continue
-        if not version.startswith('LIBC') and version != 'LIBDL_ANDROID':
+        if not version.startswith('LIBC'):
             continue
         sym_type = 'FUNC' if 'FUNC' in line else ('OBJECT' if 'OBJECT' in line else 'OTHER')
         symbols.append({'name': name, 'version': version, 'type': sym_type, 'lib': os.path.basename(lib_path)})
@@ -44,8 +44,7 @@ def get_undef_symbols(lib_path):
 
 
 SKIP = {
-    'dlopen', 'dlsym', 'dlclose', 'dladdr', 'dlerror',
-    '__cxa_atexit', '__register_atfork',
+    # dlopen/dlsym/dlclose/dladdr/dlerror — now generated as forwarding stubs
     '_Unwind_RaiseException', '_Unwind_DeleteException',
     '_Unwind_SetGR', '_Unwind_SetIP',
     '_Unwind_GetLanguageSpecificData', '_Unwind_GetIP',
@@ -61,7 +60,7 @@ SKIP = {
     'android_fdsan_close_with_tag', 'android_fdsan_create_owner_tag',
     'android_fdsan_exchange_owner_tag',
     'android_getaddrinfofornet',
-    'android_get_application_target_sdk_version',
+    'android_get_application_target_sdk_version',  # Bionic-specific, defined in bridge_libc.c
     'android_get_device_api_level',
     'android_dlopen_ext',
     'AConnectivityNative_getNetworkBlockedReason',
@@ -73,6 +72,15 @@ SKIP = {
     '__cfi_slowpath',   # Defined in bridge_libc.c (special @LIBC_OMR1)
     'getrandom', 'memfd_create', 'sem_clockwait', 'pthread_cond_clockwait',
     'eventfd_read', 'eventfd_write',
+    # Bionic-only system property functions (not in glibc, defined in bridge_libc.c)
+    '__system_property_get', '__system_property_find',
+    '__system_property_read', '__system_property_serial',
+    '__system_property_area_serial', '__system_property_set',
+    '__system_properties_init', '__system_properties_zygote_reload',
+    '__system_property_foreach',
+    # Bionic-only fdsan functions (file descriptor sanitizer)
+    'android_fdsan_close_with_tag', 'android_fdsan_create_owner_tag',
+    'android_fdsan_exchange_owner_tag', 'android_fdsan_get_owner_tag',
 }
 
 
