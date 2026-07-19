@@ -234,29 +234,79 @@ target SIGSEGV (not a QEMU crash!) — likely a NULL JNI table entry being calle
 
 `dlopen("libroblox.so")` succeeds, all 785 trampoline symbols resolve correctly.
 `JNI_OnLoad` is called, the stack canary check passes (patched correctly).
-Execution reaches `pthread_mutex_lock` but crashes with invalid mutex pointer.
+Execution reaches `pthread_mutex_lock` but crashes.
 
-```
-#0  stxr w17, w16, [x1]  in glibc's atomic store (bad x1)
-#1  glibc internal
-#2  pthread_mutex_lock () from libc.so.6
-#3  pthread_mutex_lock@@LIBC () from libbionic_shim.so
-```
+## 🔬 Debug Session: pthread_mutex_lock Crash (2026-07-19)
 
-The new crash is a **data initialization issue** — some GSI library is calling
-`pthread_mutex_lock` on an uninitialized/corrupted mutex. This is a legitimate
-runtime bug in the calling library, not a symbol resolution failure.
+### Approach
+Added a debug wrapper in `bionic_init.c` that intercepts `pthread_mutex_lock` (dispatch 
+table index 38). Uses raw ARM64 `svc #0` syscall to write mutex address + caller before
+calling glibc's real `pthread_mutex_lock`.
+
+### Findings
+
+1. **Mutex address is VALID**: `0x7d95569373ac` — inside `libbionic_shim.so`'s data
+   section at offset 0x173ac from base. This is NOT NULL and NOT an unmapped address.
+
+2. **Caller address from `__builtin_return_address(0)`**: inside the shim's trampoline
+   at offset 0x114e0. The trampoline uses `br x17` which does NOT modify `x30` (LR).
+   On the FIRST call, the resolver path is taken (`bl __bf_resolve_and_call`), which
+   clobbers x30. So `__builtin_return_address(0)` = trampoline address.
+
+3. **`__builtin_return_address(1)` returned 0**: frame chain is broken due to the
+   trampoline's non-standard frame setup.
+
+4. **After debug wrapper called `real_pthread_mutex_lock()`, crash CHANGED**:
+   From SIGSEGV to:
+   ```
+   Fatal glibc error: tpp.c:83 (__pthread_tpp_change_priority): 
+   assertion failed: new_prio == -1 || (new_prio >= fifo_min_prio && new_prio <= fifo_max_prio)
+   ```
+   This proves the mutex IS lockable by glibc — the TPP (Thread Priority Protection)
+   assertion fires AFTER the lock is acquired.
+
+### Root Cause: Bionic vs glibc pthread_mutex_t layout mismatch
+
+In Android/Bionic, `PTHREAD_MUTEX_INITIALIZER = {0}` is a valid initializer. When glibc
+sees a zero-initialized `pthread_mutex_t`, it interprets certain bits in the `__lock`
+field as protocol flags (`PTHREAD_PRIO_PROTECT`). This causes glibc to call
+`__pthread_tpp_change_priority()`, which asserts the thread has real-time scheduling.
+
+**The fix:** The bionic shim needs to initialize `pthread_mutex_t` structs to glibc's
+`PTHREAD_MUTEX_INITIALIZER` format. All-zero is NOT safe for glibc — need to ensure
+the protocol field = `PTHREAD_PRIO_NONE` (which happens to be 0 in glibc too, so the
+issue might be in a different field).
+
+Alternatively, intercept `pthread_mutex_init` to log which GSI library is initializing
+mutexes, and add a shim that ensures glibc-compatible initialization.
+
+### Dynamic Analysis Methods Tested
+
+| Method | Result |
+|--------|--------|
+| QEMU `-d exec,int,cpu` | 91M lines for startup — too verbose |
+| QEMU GDB stub (`-g 1234`) | Requires `gdb-multiarch`; timeout management tricky in automation. Use `-S` + separate timeout'd gdb |
+| Debug wrapper in `bionic_init.c` | **Most effective** — intercept via dispatch table, use `svc #0` syscall |
+| `dl_iterate_phdr` in `jni_shim.c` | Reliable for library map |
+| `__builtin_return_address(N)` | N=0→trampoline addr; N=1→0 (broken frame chain). Need assembly LR save |
 
 ### 🎯 Next Agent — Priority Actions
 
-1. **Debug pthread_mutex_lock crash** — investigate which GSI library passes a bad
-   mutex to pthread_mutex_lock. Likely a BSS/data initialization ordering issue.
-   Use GDB to inspect the mutex pointer (x1) and find the caller library.
+1. **Fix pthread_mutex_t initialization** — The zero-initialized mutex from GSI
+   libraries causes glibc's TPP assertion. Fix options:
+   a. Add a `pthread_mutex_init` interceptor that ensures glibc-compatible init
+   b. Add a constructor in `bionic_init.c` that initializes known static mutexes
+   c. Modify the shim to intercept `pthread_mutex_lock` and fix the protocol bits
+      before calling glibc's implementation
+   
+2. **Find the real caller** — Modify the trampoline in `bionic_shim.S` to save x30
+   before resolving, so `__builtin_return_address` gives the actual GSI library caller.
+   Add to the debug wrapper: save `x30` in the resolver and pass it to the wrapper.
 
-2. **Complete JNI stubs** — extend JNI function table with remaining missing slots.
+3. **Complete JNI stubs** — Extend JNI function table with remaining missing slots.
    JNI_OnLoad makes at least one JNI call (FindClass) before crashing; more stubs
    will be needed once the mutex crash is resolved.
 
-3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU launch.
+4. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU launch.
 
-4. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md.
+5. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md.
