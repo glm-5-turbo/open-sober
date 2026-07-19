@@ -219,22 +219,43 @@ target SIGSEGV (not a QEMU crash!) — likely a NULL JNI table entry being calle
 
 **4. Added strcasestr, ppoll, fallocate stubs to bionic_shim**
 
-### ⚠️ Current Blocker: GUEST SIGSEGV in JNI_OnLoad
+### ⚠️ MAJOR FIX: bionic shim infinite recursion resolved (2026-07-19)
 
-`dlopen("libroblox.so")` now succeeds. The previous QEMU VDSO crash is gone.
-When JNI_OnLoad is called, the guest process crashes with SIGSEGV (not a QEMU crash).
-Likely causes:
-- NULL JNI function table slot being called
-- `__stack_chk_guard` not properly accessible via thread pointer in libroblox
-- libroblox expecting real ART runtime data structures
-- Debug: run with `-d in_asm,cpu` to find the faulting instruction
+`dlopen("libroblox.so")` now **SUCCEEDS** after fixing the bionic shim's symbol resolution recursion.
+
+**Root cause:** `__bf_c_resolve()` called `dlsym(RTLD_DEFAULT, ...)` to resolve each trampoline symbol, but the shim was LD_PRELOAD'ed and exported those same symbols (including `dlsym@@LIBC`). This created infinite recursion: `dlsym(RTLD_DEFAULT, "strlen")` found the shim's own `strlen@@LIBC` trampoline → called the resolver again → stack overflow.
+
+**Fix (3 parts, committed 7f5ff9d):**
+1. **`RTLD_DEFAULT` → `RTLD_NEXT`** in gen_shim.py — skips the shim's own symbols during resolution, finds glibc's real implementations.
+2. **Moved dlopen/dlsym/dlclose/dlerror/dladdr** from bionic shim to bridge libc.so — these caused initial recursion since the resolver needs dlsym to work.
+3. **Comprehensive scan** — gen_shim.py now scans ALL GSI libs for LIBC-versioned UNDEF symbols (785 trampolines, up from 392).
+
+### ✅ Current Status: dlopen succeeds, JNI_OnLoad enters but crashes in glibc
+
+`dlopen("libroblox.so")` succeeds, all 785 trampoline symbols resolve correctly.
+`JNI_OnLoad` is called, the stack canary check passes (patched correctly).
+Execution reaches `pthread_mutex_lock` but crashes with invalid mutex pointer.
+
+```
+#0  stxr w17, w16, [x1]  in glibc's atomic store (bad x1)
+#1  glibc internal
+#2  pthread_mutex_lock () from libc.so.6
+#3  pthread_mutex_lock@@LIBC () from libbionic_shim.so
+```
+
+The new crash is a **data initialization issue** — some GSI library is calling
+`pthread_mutex_lock` on an uninitialized/corrupted mutex. This is a legitimate
+runtime bug in the calling library, not a symbol resolution failure.
 
 ### 🎯 Next Agent — Priority Actions
 
-1. **Debug JNI_OnLoad crash** — dlopen works under no-VDSO QEMU, JNI_OnLoad called but crashes.
-   Try running with QEMU's `-d in_asm,cpu` to find the faulting instruction.
+1. **Debug pthread_mutex_lock crash** — investigate which GSI library passes a bad
+   mutex to pthread_mutex_lock. Likely a BSS/data initialization ordering issue.
+   Use GDB to inspect the mutex pointer (x1) and find the caller library.
 
 2. **Complete JNI stubs** — extend JNI function table with remaining missing slots.
+   JNI_OnLoad makes at least one JNI call (FindClass) before crashing; more stubs
+   will be needed once the mutex crash is resolved.
 
 3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU launch.
 
