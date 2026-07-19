@@ -138,71 +138,98 @@ Remaining Phase B work:
 - **GitHub token:** Authenticated as `glm-5-turbo`, repo `open-sober`
 ## Latest Runtime Test Results (2026-07-19)
 
-### dlopen Progress After Fixes
-- ✅ **JNI shim starts, loads bionic shim, fills dispatch table** — all working
-- ✅ **libc.so bridge** rebuilt linking against real glibc+LIBC version definitions (22 LIBC variants defined)
-- ✅ **Bionic shim extended** with `free@@LIBC`, `malloc@@LIBC`, `calloc@@LIBC`, `realloc@@LIBC`, `isatty@@LIBC`, `aligned_alloc@@LIBC_P`
-- ✅ **libbinder_ndk.so** symlinked to real GSI lib (fixes LIBBINDER_NDK version gap)
-- ✅ **ld-linux-aarch64.so.1, libc.so.6, libm.so.6** replaced with real cross-glibc ARM64 libs
-- ✅ **auto_stub.py** fixed to skip glibc base libs
-- ✅ **memset_explicit@@LIBC_U** added to bridge
+### ✅ All Symbol Resolution Blockers Fixed
+
+The following new stubs were added to `bionic_init.c` + `bionic_version.ver`:
+
+**`@@LIBC_R` (NEW version block):**
+- `_Unwind_RaiseException`, `_Unwind_DeleteException`, `_Unwind_SetGR`, `_Unwind_SetIP`
+- `_Unwind_GetLanguageSpecificData`, `_Unwind_GetIP`, `_Unwind_GetRegionStart`, `_Unwind_Resume`
+
+**`@@LIBC` string/number conversion:**
+- `strtold`, `wcstod`, `wcstof`, `wcstold`
+- `wcstol`, `wcstoll`, `wcstoul`, `wcstoull`
+- `setlocale`, `sendfile`, `setbuf`, `swprintf`
+
+**`@@LIBC_O`:**
+- `strtof_l`, `strtod_l`
+
+**`@@LIBC` filesystem/syscall:**
+- `chdir`, `pathconf`, `truncate`, `remove`, `link`, `symlink`
+- `fchmodat`, `openat`, `fdopendir`, `unlinkat`, `utimensat`
 
 ### ❌ Current Blocker
-`/system/lib64/libc++.so: undefined symbol: _Unwind_RaiseException, version LIBC_R`
+`dlopen("libc++.so")` segfaults in `.init_array` (C++ static constructor) at address 0x7fbbc.
 
-This is a long-tail issue: libc++.so (a real GSI library) references many LIBC-versioned C library symbols that aren't in the bionic shim's trampoline table. Each one needs a `.symver` + C stub in `bionic_init.c` and the corresponding version block in `bionic_version.ver`.
+All symbols now resolve cleanly (RTLD_NOW succeeds for the symbol phase). The segfault happens during libc++.so's 3 static constructors (`.init_array` has 3 entries). The crash address 0x7fbbc matches the first init_array entry.
 
-### What's Needed to Finish
+**Hypothesis:** libc++.so's C++ static initializers manage global C++ objects (ios_base::Init, locale, etc.) that need working `new`/`delete` or `__cxa_*` runtime support. The bionic shim provides `__cxa_finalize@@LIBC` and `__cxa_atexit@@LIBC` but these may not be sufficient for full C++ runtime init under GSI libc++.
 
-**Automated missing-symbol patcher**: instead of iterating one-by-one, write a script that:
-1. Runs `dlopen` under QEMU via the JNI shim
-2. Parses the "undefined symbol: X, version Y" error
-3. Auto-generates the stub entry in `bionic_init.c` (hidden impl + .symver pattern)
-4. Adds the version block to `bionic_version.ver` if needed
-5. Rebuilds and re-runs
-6. Loops until dlopen succeeds
-
-Estimated ~10-30 more iterations.
+**To debug:**
+1. Install `gdb-multiarch` and use QEMU's `-g` flag for GDB server:
+   ```
+   qemu-aarch64 -g 1234 -L ... ./jni_shim
+   gdb-multiarch -ex "target remote :1234" ./jni_shim
+   ```
+2. Or try with `LD_BIND_NOW=1` and `LD_DEBUG=all` or `GLIBC_TUNABLES=glibc.rtld.dynamic_sort=1`
+3. The three init array entries are at offsets 0x7fbbc, 0x7feb0, 0xc87d4 in libc++.so
 
 ### Key Architecture Notes
-- `bionic_init.c` now has a proven pattern for adding LIBC-versioned stubs:
+- `bionic_init.c` pattern for LIBC-versioned stubs:
   - `__attribute__((used)) __attribute__((externally_visible))` on the impl
   - `.symver(name_impl, symbol@@VERSION)` 
   - dlsym(RTLD_NEXT, ...) to call the real glibc version
-- `bionic_version.ver` must define each version block used (LIBC, LIBC_N, LIBC_O, LIBC_P added so far)
-- `build_bridges.sh` now links against `libc_glibc.so` using `-Wl,--version-script` (no whole-archive needed)
-- The bridge `libc.so` provides the VERDEF table (LIBC et al) while glibc symbols keep their original GLIBC_2.17 versions
+- `bionic_version.ver` defines version blocks: LIBC_R, LIBC, LIBC_N, LIBC_O, LIBC_P
+- The bridge `libc.so` provides the VERDEF table (22 LIBC variants) while glibc symbols keep their original GLIBC_2.17 versions
 - The bionic shim (LD_PRELOAD'd) provides the @@LIBC-versioned aliases
+- Each stub has a `return (ret)0` fallback if dlsym returns NULL (safe when function is resolved but not called)
+- `_Unwind_*` stubs try `RTLD_DEFAULT` fallback if `RTLD_NEXT` returns NULL (libgcc_s not yet loaded)
 
 ## 🎯 Next Agent — Your Priority Task
 
-### Finish the Bionic→glibc symbol bridge
+### Debug libc++.so .init_array crash
 
-The current blocker is: **`libc++.so: undefined symbol: _Unwind_RaiseException, version LIBC_R`**
+All 8 `_Unwind_*` (`@@LIBC_R`) and ~30 other LIBC-versioned symbols are now stubbed. The symbol resolution phase of `dlopen("libc++.so")` completes — no more "undefined symbol" errors.
 
-There are ~10-30 more missing LIBC-versioned symbols in the GSI libraries. Do this:
+**New blocker:** `libc++.so` crashes during its 3 static C++ constructors (`.init_array` entries at offsets 0x7fbbc, 0x7feb0, 0xc87d4). The segfault is at address 0x7fbbc (the first init function address itself), suggesting an unrelocated pointer or missing C++ runtime symbol.
 
-1. **Build an auto-patcher script** (or extend the pattern manually):
-   - Run `dlopen("libc++.so")` under QEMU via the JNI shim
-   - Catch "undefined symbol: X, version Y" errors
-   - Auto-generate the stub in `bionic_init.c` using the established pattern:
-     ```c
-     __attribute__((used)) __attribute__((externally_visible)) void X_impl() {
-         // dlsym(RTLD_NEXT, "X") for real glibc version, or empty stub
-     }
-     __asm__(".symver X_impl, X@@LIBC_R");
-     ```
-   - Add version block to `bionic_version.ver` (LIBC_R, LIBC_Q, etc.)
-   - Rebuild and loop
+**To investigate:**
 
-2. **Fix all iteration blockers** until `dlopen("libc++.so")` succeeds
+1. **Install gdb-multiarch** for QEMU GDB debugging:
+   ```
+   sudo apt install gdb-multiarch
+   qemu-aarch64 -g 1234 -L ~/.cache/open-sober/android-env \
+     -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+     -E LD_PRELOAD="libbionic_shim.so" \
+     -E ROBLOX_LIB="libc++.so" \
+     ~/.cache/open-sober/android-env/jni_shim &
+   gdb-multiarch -ex "target remote :1234" ~/.cache/open-sober/android-env/jni_shim
+   ```
 
-3. **Then progress to loading `libroblox.so` itself**
+2. **Check if `__cxa_*` functions need more complete stubs.** libc++.so's constructors may need working `__cxa_atexit`, `__cxa_finalize`, or `__cxa_guard_*` that go beyond simple dlsym forwarding. The trampoline table entries for these may be incomplete or wrong.
 
-4. **Do NOT create worktrees or feature branches. Work on `dev` directly.**
+3. **Check if the `--whole-archive` bridge libc.so is causing symbol conflicts** with the real glibc `libc.so.6`. Consider rebuilding the bridge without `--whole-archive`:
+   ```
+   aarch64-linux-gnu-gcc -shared -fPIC -o libc.so bridge_libc.c \
+     -Wl,--version-script,bridge_version.ver \
+     -Wl,-soname,libc.so \
+     -L. -lc_glibc -lm -ldl
+   ```
 
-### After bionic shim is done:
-- JNI function table (~233 functions)
+4. **Check if `libgcc_s.so.1` needs to be in the sysroot** for the `_Unwind_*` stubs' `dlsym(RTLD_NEXT)` to resolve:
+   ```
+   cp /usr/aarch64-linux-gnu/lib/libgcc_s.so.1 ~/.cache/open-sober/android-env/system/lib64/
+   ```
+
+5. **Try simpler _Unwind stubs** that are true no-ops (no dlsym call at all) to isolate whether the crash is from the _Unwind stubs or from other init code.
+
+### If init_array crash is resolved:
+- Test `dlopen("libroblox.so")` directly (the main Roblox game library)
+- Then JNI function table (~233 functions to stub)
+- EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
+- Window creation + input handling
+
+### Do NOT create worktrees or feature branches. Work on `dev` directly.
 - EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
 - Window creation + input handling
 
