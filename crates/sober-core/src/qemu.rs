@@ -2,7 +2,7 @@
 //
 // QEMU user-mode launcher for running ARM64 Android binaries on x86-64.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -35,8 +35,9 @@ pub fn launch_roblox(
     let main_binary = find_main_binary(&libs)?;
     info!("Main Roblox binary: {}", main_binary.display());
 
-    // Build and install the JNI shim + bionic shim
+    // Build and install the JNI shim + version bridges + bionic shim
     setup_jni_shim(env)?;
+    setup_bridges(env)?;
     setup_bionic_shim(env)?;
 
     // Build the QEMU command using the shim as entry point
@@ -135,6 +136,94 @@ fn setup_jni_shim(env: &AndroidEnv) -> Result<()> {
     }
 
     info!("JNI shim ready at: {}", shim_out.display());
+    Ok(())
+}
+
+/// Build the version bridge libraries (libc.so, libm.so, libdl.so).
+///
+/// These bridges define LIBC_*, LIBM_*, LIBDL_ANDROID version tags that
+/// GSI libraries check when they're loaded. Without version definitions,
+/// glibc's dynamic linker rejects the GSI libraries.
+///
+/// The bridge libraries are built by cross-compiling C stubs with a version
+/// script that assigns every symbol to Android-compatible version variants.
+fn setup_bridges(env: &AndroidEnv) -> Result<()> {
+    let syslib64 = env.root.join("system").join("lib64");
+    let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let bridges_dir = crate_dir.join("bridges");
+    let build_script = bridges_dir.join("build_bridges.sh");
+
+    // Check if already built
+    let libc_out = syslib64.join("libc.so");
+    let libm_out = syslib64.join("libm.so");
+    let libdl_out = syslib64.join("libdl.so");
+    let host_arm64_libs = PathBuf::from("/usr/aarch64-linux-gnu/lib");
+
+    if libc_out.exists() && libm_out.exists() && libdl_out.exists() {
+        info!("Bridge libraries already built and installed");
+    } else {
+        if !build_script.exists() {
+            warn!("Bridge build script not found at {}", build_script.display());
+            return Ok(());
+        }
+
+        info!("Building version bridge libraries (libc.so, libm.so, libdl.so)...");
+        std::fs::create_dir_all(&syslib64)?;
+
+        // Copy ARM64 glibc libraries into sysroot for the bridge build to link against
+        let glibc_src = host_arm64_libs.join("libc.so.6");
+        let glibc_dst = syslib64.join("libc_glibc.so");
+        if glibc_src.exists() && !glibc_dst.exists() {
+            std::fs::copy(&glibc_src, &glibc_dst)?;
+        }
+        let libm_src = host_arm64_libs.join("libm.so.6");
+        let libm_dst = syslib64.join("libm_glibc.so");
+        if libm_src.exists() && !libm_dst.exists() {
+            std::fs::copy(&libm_src, &libm_dst)?;
+        }
+
+        let status = std::process::Command::new("bash")
+            .arg(&build_script)
+            .arg(&syslib64)
+            .status()
+            .context("Failed to run bridge build script")?;
+
+        if !status.success() {
+            anyhow::bail!("Bridge libraries build failed");
+        }
+
+        if libc_out.exists() {
+            info!("libc.so bridge built: {} bytes",
+                libc_out.metadata().map(|m| m.len()).unwrap_or(0));
+        }
+        if libm_out.exists() {
+            info!("libm.so bridge built: {} bytes",
+                libm_out.metadata().map(|m| m.len()).unwrap_or(0));
+        }
+        if libdl_out.exists() {
+            info!("libdl.so bridge built: {} bytes",
+                libdl_out.metadata().map(|m| m.len()).unwrap_or(0));
+        }
+    }
+
+    // Also symlink glibc base libraries into the sysroot for use at runtime.
+    // libroblox.so and GSI libraries may reference ld-linux-aarch64.so.1
+    // through NEEDED entries. QEMU's -L flag searches the sysroot for these.
+    let libs_to_symlink = [
+        "libc.so.6",
+        "libm.so.6",
+        "libdl.so.2",
+        "ld-linux-aarch64.so.1",
+    ];
+    for lib_name in &libs_to_symlink {
+        let src = host_arm64_libs.join(lib_name);
+        let dst = syslib64.join(lib_name);
+        if src.exists() && !dst.exists() {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("Failed to copy {} to sysroot", lib_name))?;
+        }
+    }
+
     Ok(())
 }
 
