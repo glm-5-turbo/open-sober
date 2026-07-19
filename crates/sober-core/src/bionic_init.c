@@ -2491,10 +2491,10 @@ static inline void sanitize_mutex(pthread_mutex_t *mutex) {
         /* Zero only the type-flag bits, keep the mutex type (bits 0-1) */
         *kind_ptr = kind & ~MUTEX_KIND_FLAG_MASK;
     }
-    /* Clear __owner if non-zero on a NORMAL mutex (Bionic often leaves stale
+    /* Clear __owner unconditionally (Bionic leaves stale
      * __owner from its own locking, causing glibc's assert mutex->__owner == 0) */
     int *owner_ptr = (int *)((char *)mutex + 8);
-    if (*owner_ptr != 0 && (*kind_ptr & 3) == 0) {
+    if (*owner_ptr != 0) {
         *owner_ptr = 0;
     }
 }
