@@ -265,3 +265,24 @@ ssize_t _bf_sendto_chk_libc_o_alias(int sockfd, const void *buf, size_t len,
     return sendto(sockfd, buf, len, flags, dest_addr, addrlen);
 }
 __asm__(".symver _bf_sendto_chk_libc_o_alias, __sendto_chk@@LIBC_O");
+
+/* eventfd_write — needed by libgui.so under LIBC version. */
+int _bf_eventfd_write_impl(int fd, unsigned long long value) {
+    extern int eventfd_write(int, unsigned long long);
+    return eventfd_write(fd, value);
+}
+__asm__(".symver _bf_eventfd_write_impl, eventfd_write@@LIBC");
+
+/* eventfd_read — needed by libgui.so under LIBC version. */
+int _bf_eventfd_read_impl(int fd, unsigned long long *value) {
+    extern int eventfd_read(int, unsigned long long *);
+    return eventfd_read(fd, value);
+}
+__asm__(".symver _bf_eventfd_read_impl, eventfd_read@@LIBC");
+
+/* sem_clockwait — needed by libgui.so under LIBC_R version. */
+int _bf_sem_clockwait_impl(int *sem, int clockid, const struct timespec *abstime) {
+    extern int sem_clockwait(int *, int, const struct timespec *);
+    return sem_clockwait(sem, clockid, abstime);
+}
+__asm__(".symver _bf_sem_clockwait_impl, sem_clockwait@@LIBC_R");
