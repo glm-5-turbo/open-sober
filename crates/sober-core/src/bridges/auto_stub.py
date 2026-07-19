@@ -13,6 +13,9 @@ import subprocess, sys, os, tempfile, re
 
 CROSS_CC = "aarch64-linux-gnu-gcc"
 
+# glibc base libraries that will be served via the bionic shim at runtime
+GLIBC_BASE_LIBS = {"ld-linux-aarch64.so.1", "libc.so.6", "libm.so.6", "ld-linux.so.2"}
+
 def get_needed_libs(lib_path):
     """Return set of library sonames needed by a shared library."""
     needed = set()
@@ -75,6 +78,10 @@ def find_missing_libs(sysroot):
         needed |= get_needed_libs(roblox)
 
     missing = needed - present
+
+    # Filter out glibc base libs — they're served via the bionic shim at runtime
+    missing -= GLIBC_BASE_LIBS
+
     return sorted(missing)
 
 def create_stub(lib_name, output_dir):

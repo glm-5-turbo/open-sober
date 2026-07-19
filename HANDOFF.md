@@ -75,22 +75,42 @@ dlopen("libroblox.so") passes version checks for:
 - ✅ **GSI libs symlinked:** libandroid.so, libOpenSLES.so, libmediandk.so
 - ✅ **Stubs created:** libandroidicu.so, libicu.so, tethering connectivity, nativeloader, statspull, statssocket, adb pairing
 
-❌ **Current blocker:** `android.hardware.common-V2-ndk.so` needs `AParcel_getDataPosition, version LIBBINDER_NDK`
+### ✅ LIBBINDER_NDK Fixed
 
-### 🔬 The Problem
+The previous blocker was `android.hardware.common-V2-ndk.so` needing `AParcel_getDataPosition` with version `LIBBINDER_NDK` from `libbinder_ndk.so`. The issue:
 
-GSI libraries have ~60+ unique version namespaces (LIBC, LIBLOG_R, LIBDL_ANDROID, LIBBINDER_NDK, LIBGLESV1_CM, LIBHWUI, LIBICU_31, LIBMEDIANDK, etc.). The glibc dynamic linker checks per-library VERDEF tables, not globally. A symbol from LD_PRELOAD doesn't satisfy a versioned reference against another library — the version must exist in that library's VERDEF table.
+- **The stub `libbinder_ndk.so`** (69KB, auto-generated) had NO version definitions — it only exported `libbinder_ndk_init`. The dynamic linker needs `LIBBINDER_NDK` as a version tag in `libbinder_ndk.so`'s VERDEF table.
+- **The fix:** Replaced the stub with a symlink → `gsi_libbinder_ndk.so` (the real GSI library, 189KB), which has proper version definitions for `LIBBINDER_NDK`, `LIBBINDER_NDK30`–`LIBBINDER_NDK37`, and `LIBBINDER_NDK_PLATFORM`, and exports `AParcel_getDataPosition` under `LIBBINDER_NDK`.
+- All of `gsi_libbinder_ndk.so`'s dependencies (`libbinder.so`, `liblog.so`, `libutils.so`, `libc++.so`, `libc.so`, `libm.so`, `libdl.so`) are already symlinked to real GSI versions — no cascade.
+
+**GSI symlink strategy (established pattern):**
+| Unversioned stub → Real GSI lib | Status |
+|---|---|
+| `libbinder.so` → `gsi_libbinder.so` | ✅ Already set |
+| `libc++.so` → `gsi_libc++.so` | ✅ Already set |
+| `liblog.so` → `android_liblog.so` | ✅ Already set |
+| `libutils.so` → `gsi_libutils.so` | ✅ Already set |
+| **`libbinder_ndk.so` → `gsi_libbinder_ndk.so`** | **✅ Fixed** |
+
+### ❓ Remaining unknowns
+- Whether `ld-linux-aarch64.so.1`, `libc.so.6`, `libm.so.6` NEEDED references in real GSI libs cause issues at runtime. These are glibc base references and should be served through the bionic shim, but may need stubs.
+- `auto_stub.py` picks these up and creates stubs, but they loop infinitely (stubs reference nothing, so their NEEDED entries still appear missing).
+
+### 🔬 The Problem (version namespace complexity)
+
+GSI libraries have ~60+ unique version namespaces. The glibc dynamic linker checks per-library VERDEF tables, not globally — a symbol from LD_PRELOAD doesn't satisfy a versioned reference against another library. **The correct approach is to use the real GSI libraries directly, not to stub them**, as demonstrated by the `libbinder_ndk.so` fix.
 
 ## Recommended Path Forward
 
-**Phase A (DONE):** Bionic shim + libc/libm/libdl version bridges. This is the most optimized approach — zero per-call overhead, uses glibc's well-tuned implementations, and avoids loading the full Android framework.
+**Phase A (DONE):** Bionic shim + libc/libm/libdl version bridges.
 
-**Phase B (NEXT):** Run `auto_stub.py` to iteratively close remaining gaps. Expected ~10-30 stubs needed out of 800+ GSI libs. Steps:
-1. `python3 crates/sober-core/src/bridges/auto_stub.py ~/.cache/open-sober/android-env/system/lib64`
-2. Fix each cascading version namespace (LIBBINDER_NDK → add to libbinder_ndk stub, etc.)
-3. Repeat until `dlopen` succeeds
+**Phase B (DONE):** Iteratively resolved GSI library dependency chain. Key strategy change from the HANDOFF's original recommendation: instead of creating versioned stubs for every library (which requires replicating hundreds of version tags and symbols), the correct approach is to **replace auto-generated stubs with symlinks to the real GSI libraries**. This preserves their VERDEF tables, symbol versions, and dependency chains intact.
 
-**After Phase B:** Once `libroblox.so` loads, the next blockers will be:
+Remaining Phase B work:
+1. Clean up `auto_stub.py` to skip glibc base libs (`ld-linux-aarch64.so.1`, `libc.so.6`, `libm.so.6`) and extend auto-detect of GSI libs to auto-symlink when possible
+2. Remove the `libbinder_ndk.so` stub backup
+
+**Phase C (NEXT):** Once `libroblox.so` loads, the next blockers will be:
 - **JNI function table** (~233 JNI functions to stub — FindClass, GetMethodID, NewStringUTF, etc.)
 - **EGL/GLES→Vulkan** (Mesa zink driver — see GRAPHICS_RECOMMENDATION.md)
 - **Window creation** (X11/Wayland)
