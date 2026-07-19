@@ -112,7 +112,10 @@ def main():
         p_type = struct.unpack('<I', elf_data[off:off+4])[0]
         if p_type == 0x6474e552:
             has_relro = True
-    if 25 in tags and tags[25][1] != 0:
+    # DETECT: DT_INIT_ARRAY/DT_FINI_ARRAY tag presence alone causes glibc call_init
+    # to crash (it checks l_info presence, not value). Even with value=0 and
+    # DT_INIT_ARRAYSZ=0, the tag existing makes it jump to base+0 = SIGILL.
+    if 25 in tags or 26 in tags or 27 in tags or 28 in tags:  # INIT/FINI ARRAY/ARRAYSZ
         has_init = True
     if 0x1e in tags:
         val = tags[0x1e][1]
@@ -188,20 +191,26 @@ def main():
                 print("  ✓ DT_RELRENT set to 8")
 
     # Step 4: Clear init
-    if has_init:
-        print("\n[Step 4] Clearing init entries...")
-        for off in range(dyn_fo, dyn_fo + dyn_sz, 16):
-            tag = struct.unpack('<Q', elf_data[off:off+8])[0]
-            if tag == 0: break
-            if tag == 12:   # DT_INIT
-                struct.pack_into('<Q', elf_data, off+8, 0)
-                print("  ✓ DT_INIT cleared")
-            elif tag == 25:  # DT_INIT_ARRAY
-                struct.pack_into('<Q', elf_data, off+8, 0)
-                print("  ✓ DT_INIT_ARRAY vaddr cleared")
-            elif tag == 27:  # DT_INIT_ARRAYSZ
-                struct.pack_into('<Q', elf_data, off+8, 0)
-                print("  ✓ DT_INIT_ARRAYSZ cleared")
+    # CRITICAL: Glibc's call_init checks l_info[DT_INIT_ARRAY] presence (not value),
+    # so zeroing the value is NOT enough — it still sees the tag and jumps to base+0.
+    # We must replace the ENTIRE dynamic entry (tag + value) with DT_NULL (0, 0).
+    # However, replacing entries with DT_NULL can terminate the .dynamic scan early,
+    # so we MUST scan the full dynamic section and do replacements AFTER reading all tags.
+    # Also handle DT_FINI_ARRAY (same caller, same crash pattern).
+    init_entries = []  # (offset, name) for entries to null out
+    for off in range(dyn_fo, dyn_fo + dyn_sz, 16):
+        tag = struct.unpack('<Q', elf_data[off:off+8])[0]
+        if tag == 0: break
+        if tag == 12:   # DT_INIT — set value to 0 (safe, presence doesn't crash)
+            struct.pack_into('<Q', elf_data, off+8, 0)
+            print("  ✓ DT_INIT cleared")
+        elif tag in (25, 26, 27, 28):  # DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ
+            init_entries.append((off, {25: "DT_INIT_ARRAY", 26: "DT_FINI_ARRAY", 27: "DT_INIT_ARRAYSZ", 28: "DT_FINI_ARRAYSZ"}.get(tag, hex(tag))))
+
+    # Replace with DT_NULL to prevent glibc call_init from seeing the tag
+    for off, name in init_entries:
+        struct.pack_into('<QQ', elf_data, off, 0, 0)
+        print(f"  ✓ {name} tag replaced with DT_NULL")
 
     # Step 5: Remove BIND_NOW / SYMBOLIC
     if has_bind_now:

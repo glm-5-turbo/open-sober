@@ -252,9 +252,21 @@ All of the following libraries load via `dlopen()` under QEMU-aarch64:
 
 ### 📈 dlopen("libroblox.so") Progress
 
-**Current blocker:** `libandroid_runtime.so` crashes with SIGILL at base+0.
+**Current blocker:** `libandroid_runtime.so` crashes in `do_lookup_x` during symbol resolution.
 
-`gsi_libandroid_runtime.so` was patched with `patch_gsi.py` (APS2→RELA, GNU_RELRO removed, BIND_NOW removed). DT_INIT_ARRAY tag still exists with value=0 and DT_INIT_ARRAYSZ=0. Glibc's `call_init` sees `l_info[DT_INIT_ARRAY] != NULL` and computes `base + 0 = base = ELF header = SIGILL`. See instructions below for the fix.
+The crash is at PC=0x44b000 (`ubfiz x0, x0, #3, #26` then `ldr x2, [x2, x0]` in `do_lookup_x`) — glibc's dynamic linker crashing on a hash chain lookup. This occurs because:
+
+1. **DT_INIT_ARRAY/DT_FINI_ARRAY → DT_NULL fixed** in `patch_gsi.py`: Previously only zeroed values (not tags), so glibc's `call_init` jumped to base+0. Now replaces tags with DT_NULL. CRITICAL: must move DT_NULL entries to AFTER VERSYM/VERNEED or the scan terminates early.
+2. **VERSYM/VERNEED nulled by batch process**: The earlier batch-patching of GSI libs nulled VERSYM/VERNEED dynamic entries (tags at 0x2e8338+) but the data still exists on disk at vaddr 0x1cf78. Need to restore VERSYM dynamic tag.
+3. **`libdl_android.so` chain setup**: Now correctly symlinked: `ld-android.so → gsi_ld-android.so`, `libdl_android.so` restored from `android_libdl_android.so` with RELRO/BIND_NOW removal applied.
+
+**GSI lib symlinks expanded:**
+| Stub → GSI | Status |
+|---|---|
+| `libandroidfw.so → gsi_libandroidfw.so` | ✅ |
+| `libGLESv1_CM.so → gsi_libGLESv1_CM.so` | ✅ |
+| `libGLESv3.so → gsi_libGLESv3.so` | ✅ |
+| `libvulkan.so → gsi_libvulkan.so` | ✅ |
 
 **Previous blockers resolved (in order):**
 | Blockers | Fix |
@@ -330,14 +342,15 @@ timeout 15 qemu-aarch64 -L ~/.cache/open-sober/android-env \
 1. **DT_INIT_ARRAY tag with value 0** — Many GSI libraries have cleared INIT_ARRAY entries
    (value=0) but the DT tag still EXISTS. Glibc's `call_init` checks `l_info[DT_INIT_ARRAY]`
    presence, not value. With DT_INIT_ARRAYSZ=0 the loop should not execute, but some
-   libraries SIGILL anyway — possibly from a different constructor path.
-   **Fix:** Replace the DT_INIT_ARRAY tag itself with DT_NULL (0):
-   ```python
-   for each dynamic entry:
-       if tag in (0x19, 0x1b):  # DT_INIT_ARRAY, DT_INIT_ARRAYSZ
-           set tag=0, value=0  # DT_NULL — terminates .dynamic scan
-   ```
-2. **VERSYM removal** — 149 GSI files lost VERSYM. Libraries needing versioned lookups fail.
+   libraries SIGILL anyway.
+   **Fix:** Replace the DT_INIT_ARRAY/FINI_ARRAY tags with DT_NULL — but **must move them
+   AFTER VERSYM/VERNEED tags** or the scan terminates early. Also handle FINI_ARRAY
+   (same crash pattern). `patch_gsi.py` now does this correctly.
+2. **VERSYM removal** — ~149 GSI files lost VERSYM when the batch patcher zeroed
+   dynamic entries 122-129 (INIT_ARRAY, FINI_ARRAY, VERSYM, VERNEED, VERNEEDNUM).
+   The VERSYM DATA still exists on disk but the dynamic tag is gone.
+   **Fix:** Restore the VERSYM (0x6ffffff0) and VERNEED (0x6ffffffe) dynamic entries
+   with their original vaddrs. The android_lib*.so variants still have them intact.
 3. **Multiple libc.so in load chain** — Bridge `libc.so` and glibc `libc.so.6` coexist.
 4. **TLS overflow** — `GLIBC_TUNABLES` env var workaround needed for large dlopen'd libs.
 
