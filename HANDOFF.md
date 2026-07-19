@@ -84,6 +84,29 @@ dlopen("libroblox.so") passes version checks for:
 - ✅ **GSI libs symlinked:** libandroid.so, libOpenSLES.so, libmediandk.so
 - ✅ **Stubs created:** libandroidicu.so, libicu.so, tethering connectivity, nativeloader, statspull, statssocket, adb pairing
 
+### ✅ APS2 → Standard RELA Decompression (NEW MAJOR BREAKTHROUGH)
+
+**The fix:** `unpack_rela.py` (now in repo) correctly decodes APS2 packed relocations using the EXACT decoder from Android's `for_all_packed_relocs()`. The format is `"APS2"` magic followed by a SLEB128 stream with relocation groups.
+
+**Critical discovery: Android linker flag bit assignments differ from LLVM encoder:**
+| Flag | Android linker | LLVM lld |
+|------|---------------|----------|
+| `GROUPED_BY_INFO` | Bit 0 (1) | Bit 1 (2) |
+| `GROUPED_BY_OFFSET_DELTA` | Bit 1 (2) | Bit 0 (1) |
+
+**Results with libc++.so:**
+- 2113 APS2 entries → 50712 bytes of standard Elf64_Rela (from 15790 packed)
+- Types: 1923 R_AARCH64_ABS64, 189 R_AARCH64_GLOB_DAT, 1 R_AARCH64_TLSDESC
+- readelf displays all entries with correct symbol names
+- Patching strategy: appends RELA data to file + new PT_LOAD segment
+
+**How to patch any GSI library:**
+```bash
+python3 ./unpack_rela.py ~/.cache/open-sober/android-env/system/lib64/gsi_libfoo.so
+cp ~/.cache/open-sober/android-env/system/lib64/gsi_libfoo.so \
+   ~/.cache/open-sober/android-env/system/lib64/libfoo.so
+```
+
 
 ## ✅ ANDROID_RELA → RELA Patch (NEW MAJOR BREAKTHROUGH)
 
@@ -222,19 +245,25 @@ libEGL.so (CURRENT)
 ~50+ stubs added across version tags LIBC, LIBC_N, LIBC_O, LIBC_Q, LIBC_R, LIBDL_ANDROID.
 New version blocks: LIBC_Q, LIBC_S, LIBC_T, LIBC_U, LIBC_V, LIBDL_ANDROID.
 
-### ❌ Current Blocker
-```
-libc++.so: packed APS2 RELA data is unparseable by glibc dynamic linker
-```
+### ⚠️ Current Blocker: dlopen("libc++.so") hangs during RELR processing
 
-**Root Cause:** libc++.so uses the Android packed relocation format (`yt: "APS2"` at file offset 0x2fab8). After `DT_ANDROID_RELA → DT_RELA` conversion, glibc finds the dynamic tag but can't decode the compressed data. This means ALL `.data.rel.ro` base relocations (for GOT entries, function pointers, virtual table pointers) are NOT applied.
+The RELA decompression is SOLVED (see below). The remaining blocker is that `dlopen("libc++.so")` hangs with RELR enabled, and segfaults when RELR is disabled. Detailed findings:
 
-**The crash chain:** init[0] (CPU feature detection at 0x7fbbc) runs, reads un-relocated GOT entries → crash/hang. The 3 init_array entries are:
-- **init[0] (0x7fbbc):** CPU feature detection — reads sysconf + __system_property_get, complex NEON bit manipulation to build a hardware capability mask. Probable hang in the NEON loop.
-- **init[1] (0x7feb0):** TLS init guard — checks a global flag at offset 3976 from a data section, calls through function pointer `blr x1` which reads from un-relocated [0x11e058]. Crash because GOT entry is zero.
-- **init[2] (0xc87d4):** ios_base::Init — calls setlocale + __cxa_atexit. Crashes when run alone (needs entry 1's init to happen first).
+**With RELR enabled (BIND_NOW or lazy):** dlopen hangs forever (timeout at 30s+). The RELR data at vaddr 0x33868 is 344 bytes of standard DT_RELR format (43 qword entries, ~553 relocations). The glibc dynamic linker starts RELR processing but never returns.
 
-**Fix needed:** Decompress APS2 packed RELA data into standard 24-byte RELA entries. Script: `~/unpack_rela.py` (partial implementation — needs APS2 delta-encoded entry reconstruction).
+**With RELR disabled (DT_RELR/DT_RELRSZ/DT_RELRENT zeroed, BIND_NOW removed):** Segfault during RELA application. The 2113 R_AARCH64_ABS64 entries write to addresses in the data segment (0x117ab8-0x122dc0) and something goes wrong — possibly writing to a GNU_RELRO region that was already made read-only, or writing to a BSS address past the file mapping.
+
+**Key test results:**
+- Bridge libc.so loads fine: `dlopen("libc.so")` → "Loaded successfully"
+- Bridge libm.so loads fine: `dlopen("libm.so")` → "Loaded successfully"
+- Minimal libc++.so (no RELA, no RELR, no JMPREL) → abort from DT_RELAENT validation
+- Patched libc++.so with RELA (no RELR/JMPREL/BIND_NOW) → segfault during RELA processing
+
+**Hypothesis:** The RELR hang may be from the RELR data overlapping with the new PT_LOAD segment's vaddr range. The new PT_LOAD is at vaddr 0x12c000 which is within PT_LOAD[4]'s memsz range (0x122da8-0x12a288+0x74e0=0x12a288... wait, 0x12c000 is PAST the memsz end 0x12a288 so it's after the BSS — so RELR at vaddr 0x33868 should not overlap.
+
+**Hypothesis 2:** The RELR data itself might be in packed ANDROID_RELR format on disk but the tags already say DT_RELR. If the DT_RELR tags were converted (0x6fffe000→0x24) but the data format is different, the linker would interpret bitmaps wrong and either hang (spin on bitmap bits) or crash.
+
+**To debug:** Disassemble the RELR data to verify it's standard format. Or run `qemu-aarch64 -strace` to see the last syscall before the hang. Or try applying the RELA fix AND zeroing just the RELR to test if RELA alone works.
 
 
 ### Auto-Stub Strategy (Recommended)
@@ -350,23 +379,57 @@ while idx < num_relocs:
 - readelf correctly displays all entries with symbol names
 - QEMU loads without errors (init_array cleared to avoid hangs)
 
-### Remaining: dlopen hangs after RELA fix
-With init_array cleared, `dlopen("libc++.so")` succeeds in reaching relocation phase but **hangs** — likely during RELR processing (344 bytes at vaddr 0x33868), BIND_NOW lazy JMPREL resolution (421 PLT entries), or TLS access (1 TLSDESC reloc).
+### 🎯 Next Agent — Debug dlopen("libc++.so") hang
 
-**To debug:** Run under `qemu-aarch64 -strace` or GDB. Or check if RELR/JMPREL also need conversion.
+**APS2 → RELA is DONE.** The blocker is dlopen hangs during relocation processing.
 
-### Quick reference: Patch and test any GSI library
+**What we know:**
+- Bridge `libc.so` → loads successfully ✓
+- Bridge `libm.so` → loads successfully ✓
+- Patched `libc++.so` (RELR enabled) → **hangs** (timeout 30s+)
+- Patched `libc++.so` (RELR disabled) → **segfault** during .rela.dyn processing
+
+**Two hypotheses:**
+1. **RELR data format mismatch** — The file has standard DT_RELR tags but the DATA might still be in ANDROID_RELR format. The GLIBC linker misinterprets the bitmaps and spins. Check by reading the 43 qwords at vaddr 0x33868: if patterns look like `0xaaaaaaaaaaaaaaab` they're standard bitmaps; if not, data needs conversion.
+2. **GNU_RELRO collision** — RELA writes to vaddr range 0x117ab8-0x122dc0 which overlaps with GNU_RELRO (0x117aa8-0x11d890). After the first relocation pass, the linker mprotects that range to read-only, then subsequent RELA writes segfault. Fix: remove PT_GNU_RELRO from program headers.
+
+**Debug commands:**
 ```bash
-SYSROOT=~/.cache/open-sober/android-env/system/lib64
-python3 ./unpack_rela.py "$SYSROOT/gsi_libfoo.so"
-cp "$SYSROOT/gsi_libfoo.so" "$SYSROOT/libfoo.so"
+# Check RELR data format
+python3 -c "
+import struct
+d = open('/home/code-agent/.cache/open-sober/android-env/system/lib64/libc++.so.orig','rb').read()
+for i,e in enumerate(struct.unpack('<43Q',d[0x33868:0x33868+344])[:8]):
+    print(f'  [{i}] 0x{e:016x} {\"ADDR\" if e%2==0 else \"BITMAP\"}')"
+
+# strace to see where qemu hangs
+timeout 8 qemu-aarch64 -strace -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E ROBLOX_LIB="libc++.so" \
+  ~/.cache/open-sober/android-env/jni_shim 2>&1 | tail -15
 ```
 
-### Quick-start test
+**Quick-start test (full rebuild):**
 ```bash
 cd ~/Documents/Projects/open-sober
 SYSROOT=~/.cache/open-sober/android-env/system/lib64
 CRATE_SRC=crates/sober-core/src
+aarch64-linux-gnu-gcc -c -fPIC -o /tmp/bs.o "$CRATE_SRC/bionic_init.c"
+aarch64-linux-gnu-gcc -c -o /tmp/ba.o "$CRATE_SRC/bionic_shim.S"
+aarch64-linux-gnu-gcc -shared -fPIC -o "$SYSROOT/libbionic_shim.so" \
+  /tmp/ba.o /tmp/bs.o -Wl,--version-script,"$CRATE_SRC/bionic_version.ver" \
+  -Wl,-rpath,/system/lib64 -L"$SYSROOT" -lglibc -lm -ldl -nostartfiles
+cp "$SYSROOT/libc++.so.orig" "$SYSROOT/libc++.so"
+python3 ./unpack_rela.py "$SYSROOT/libc++.so"
+aarch64-linux-gnu-gcc -static -o ~/.cache/open-sober/android-env/jni_shim \
+  "$CRATE_SRC/jni_shim.c" -ldl
+timeout 10 qemu-aarch64 -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E ROBLOX_LIB="libc++.so" \
+  ~/.cache/open-sober/android-env/jni_shim
+```
 
 # Build bionic shim
 aarch64-linux-gnu-gcc -c -fPIC -o /tmp/bs.o "$CRATE_SRC/bionic_init.c"
