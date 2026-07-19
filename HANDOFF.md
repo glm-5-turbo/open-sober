@@ -187,225 +187,77 @@ Remaining Phase B work:
 - **GitHub token:** Authenticated as `glm-5-turbo`, repo `open-sober`
 ## Latest Runtime Test Results (2026-07-19)
 
-### ✅ 12 Critical GSI Libraries Now Load
+### 🚀 MAJOR MILESTONE: dlopen("libroblox.so") SUCCEEDS!
 
-All of the following libraries load via `dlopen()` under QEMU-aarch64:
-
-| Library | Status | Notes |
-|---------|--------|-------|
-| libc++.so | ✅ | Working |
-| liblog.so | ✅ | Working |
-| libbase.so | ✅ | Working |
-| libcutils.so | ✅ | Working |
-| libutils.so | ✅ | Working |
-| libhardware.so | ✅ | Working |
-| libcodec2.so | ✅ | Working |
-| libbinder.so | ✅ | Working |
-| libfmq.so | ✅ | Working |
-| libEGL.so | ✅ | Working |
-| libgui.so | ✅ | Working |
-| libui.so | ✅ | Working |
+Both `libandroid_runtime.so` and `libroblox.so` now load via `dlopen()` under QEMU-aarch64:
+- `libc++.so`, `liblog.so`, `libbase.so`, `libcutils.so`, `libutils.so` — ✅
+- `libhardware.so`, `libcodec2.so`, `libbinder.so`, `libfmq.so`, `libEGL.so` — ✅
+- `libgui.so`, `libui.so`, `libselinux.so`, `libpdfium.so`, `libmemunreachable.so` — ✅
+- `libandroid_runtime.so`: ✅ Working
+- `libroblox.so`: ✅ dlopen SUCCESS, dlclose OK
 
 ### 🔧 Fixes Applied This Session
 
-**1. Bridge libc.so with comprehensive Bionic stubs**
-- Added `getprogname@@LIBC`, `android_set_abort_message@@LIBC`
-- Added all `__system_property_*` Bionic system property functions
-- Added `android_fdsan_*` file descriptor sanitizer stubs under `@@LIBC_Q`
-- Added `__sF@@LIBC` (Bionic FILE table, needed by UBSan runtime)
-- Added `android_get_application_target_sdk_version@@LIBC_N`
-- Added `__write_chk@@LIBC_N` and `dlopen@@LIBC`/`dlerror@@LIBC` via .symver
-- Moved dl* functions from SKIP to auto-generated stubs (they ARE in glibc libc)
-- Generator now adds `__system_property_*` and `android_fdsan_*` to SKIP
+**1. Version alias system for LIBC_* symbols**
+- rewrote `gen_bridge_stubs.py` to generate `.symver` aliases for ALL non-default
+  LIBC_ version tags (LIBC_Q, LIBC_N, LIBC_O, LIBC_P, LIBC_R, LIBC_S, LIBC_U, LIBC_V)
+- 74 `.symver` aliases generated for 44 symbols across all GSI libs
+- Uses separate wrapper functions per version to avoid BFD ld 'multiple definition'
 
-**2. gen_bridge_stubs.py fixes**
-- Added Bionic-only function skip list expansions
-- Uses dedup-by-name (highest-version wins) for versioned symbols
-- Handles data objects by skipping them (handled in bridge_libc.c)
+**2. New Bionic stubs in bridge_libc.c**
+- `malloc_backtrace@@LIBC_Q`, `malloc_disable@@LIBC_Q`
+- `malloc_enable@@LIBC_Q`, `malloc_iterate@@LIBC_Q`
+- `__mempcpy_chk@@LIBC_R` (libselinux.so dependency)
+- `__system_properties_init@@LIBC_Q`, `__system_properties_zygote_reload@@LIBC_V`
+- `__system_property_read_callback@@LIBC_O`, `__system_property_wait@@LIBC_O`
+- `android_get_device_api_level@@LIBC_Q`
+- Fixed 3 bridge_libc.c stubs referencing `_bf_*_glibc` nonexistent symbols
 
-**3. VERSYM/VERNEED patch for GSI libraries**
-- Many GSI libraries have VERSYM=0 but VERNEED pointing to garbage
-- Batch patch: zeroes VERSYM dynamic entry tag when VERNEEDNUM=0
-- Prevents glibc `do_lookup_x` NULL+8 crash during symbol resolution
-- 149 libraries patched
+**3. New ICU stubs in bridge_icu.c**
+- libpdfium.so needs: u_isalnum, u_isalpha, u_isspace, u_toupper, u_tolower
+- libandroid_runtime.so needs: u_charMirror, u_getIntPropertyMaxValue
 
-**4. DT_RELA cleanup for APS2 libraries**
-- Some GSI libraries have APS2-packed RELA at vaddr past file end (in BSS gap)
-- Zeroing DT_RELA/DT_RELASZ for these libs prevents garbage reloc processing
-- `gsi_libcutils.so` patched (RELA was at vaddr 0x20000, beyond LOAD segments)
+**4. jni_shim.c rewritten with comprehensive JNI table**
+- ~120+ JNI stubs covering all Call<Type>Method variants
+- Uses slot-indexed function pointer arrays (avoids struct layout issues)
+- Proper JavaVM function table matching JNI spec (flat array indexed by slot)
+- Compiles cleanly under aarch64-linux-gnu-gcc (0 errors)
 
-**5. Batch init/fini array clearing**
-- Batch script clears DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAY, DT_FINI_ARRAYSZ
-- Does NOT clear DT_INIT (tag 12) or DT_FINI (tag 13) — zeroing these makes glibc's
-  `call_init` jump to `base+0` (ELF header = SIGILL)
-- 2426 libraries patched
+**5. libroblox.so patched** — GNU_RELRO cleared, BIND_NOW cleared, INIT/FINI nulled
 
-**6. libm.so DT_INIT/DT_FINI fix**
-- libm.so bridge had DT_INIT=0 and DT_FINI=0 (compiled with -nostartfiles)
-- Glibc's `call_init` checks `l->l_info[DT_INIT]` presence (not value), crashes at `base+0`
-- **Fix:** Point DT_INIT and DT_FINI to vaddr 0xa18 (existing `ret` opcode in .text)
-- Same fix applies to any bridge library compiled with -nostartfiles
+### ⚠️ Current Blocker: JNI_OnLoad segfault
 
-**7. `libcutils.so` switched to `android_libcutils.so`**
-- `gsi_libcutils.so` doesn't export `atrace_update_tags`
-- Symlink changed: `libcutils.so → android_libcutils.so` (has 265 symbols vs gsi's 0 readable)
+JNI_OnLoad found at 0x73...ce58, but calling it causes SIGSEGV:
+- Stack canary is set (0x0A0B0C0D0E0F1011) — verified via dlsym
+- GOT entry at base+0x6473438 patched with pointer to canary value — verified
+- Global __stack_chk_guard set to non-zero — verified
+- Crash occurs in first CALLED function from JNI_OnLoad (`bl 0x1f65a60`)
+- That function accesses vaddr 0x6a26E40 via ldarb (atomic load-acquire, C++ once_flag)
+- Address is in LOAD[3] BSS (flags PF_R|PF_W, mapped, but may have mprotect issue)
 
-### 📈 dlopen("libroblox.so") Progress
-
-**✅ MAJOR BREAKTHROUGH — libandroid_runtime.so and libroblox.so LOAD SUCCESSFULLY!**
-
-Both `libandroid_runtime.so` and `libroblox.so` now load via `dlopen()` under QEMU-aarch64:
-- `libandroid_runtime.so`: `SUCCESS: loaded from 0x4a9600`
-- `libroblox.so`: `SUCCESS: loaded from 0x4a9600`, `dlclose OK`
-
-**Fixes applied this session:**
-1. **DT_INIT_ARRAY/DT_FINI_ARRAY → DT_NULL with VERSYM preservation** (`patch_gsi.py`) — replaces INIT/FINI array tags with DT_NULL but moves them to AFTER VERSYM/VERNEED/VERNEEDNUM entries so the .dynamic scan doesn't terminate early.
-2. **VERSYM/VERNEED restoration** — The earlier batch patcher nulled dynamic entries 122-129 (INIT_ARRAY, FINI_ARRAY, VERSYM, VERNEED, VERNEEDNUM). Restored VERSYM/VERNEED/VERNEEDNUM at indices 122-124 and updated PT_DYNAMIC filesz.
-3. **New bridge stubs added to bridge_libc.c:**
-   - `pthread_cond_clockwait@@LIBC_R` — glibc wrapper needed by libandroid.so
-   - `__assert@@LIBC` — maps to glibc `__assert_fail`
-   - `android_getaddrinfofornet@@LIBC_Q` — Bionic DNS, wraps getaddrinfo
-   - `__fread_chk@@LIBC_N` — checked fread variant
-   - `__sendto_chk@@LIBC_O` — checked sendto variant
-4. **libcom.android.tethering.connectivity_native.so** — rebuilt with missing `AConnectivityNative_getNetworkBlockedReason@@LIBCONNECTIVITY_NATIVE` symbol
-5. **GSI lib symlinks expanded**: libandroidfw.so, libGLESv1_CM.so, libGLESv3.so, libvulkan.so now point to real GSI libs (patched with APS2→RELA, RELR fix, INIT/FINI nulling, VERSYM preserved)
-6. **improved patch_gsi.py** — now correctly handles .dynamic restructuring when INIT/FINI entries come before VERSYM/VERNEED, inserts bytes and updates PT_LOAD filesz/memsz and shifts subsequent segment offsets
-
-**Previous blockers resolved (in order):**
-| Blockers | Fix |
-|----------|-----|
-| `__write_chk@@LIBC_N` | `.symver` alias in bridge_libc.c |
-| `android_fdsan_get_owner_tag@@LIBC_Q` | Bionic stub in bridge_libc.c |
-| `__system_property_*` (5+ symbols) | Bionic stubs in bridge_libc.c |
-| `atrace_update_tags` | Switched to android_libcutils.so |
-| `dlopen@@LIBC`, `dlerror@@LIBC` | Removed from SKIP in generator |
-| `android_get_application_target_sdk@@LIBC_N` | Bionic stub |
-| `__sF@@LIBC` | Data stub |
-| `UCNV_TO_U_CALLBACK_STOP_android` (7 ICU-Android syms) | Created bridge_androidicu.c |
-| `utext_close@@LIBICU_31` + 27 other ICU symbols | Created bridge_icu.c |
-| `getrandom@@LIBC_P`, `aligned_alloc@@LIBC_P` | `.symver` alias in bridge_libc.c |
-| `gClsAudioTrackRoutingProxy` | Needs libandroid_runtime.so to load |
-| Static TLS overflow | `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=4096` |
-| VERSYM=0 NULL+8 crash | Batch patch: zero VERSYM tag when VERNEEDNUM=0 |
-| libm.so DT_INIT=0 SIGILL | Point to ret instruction at vaddr 0xa18 |
-| libcutils.so reloc 0x40 error | Zero DT_RELA when vaddr in BSS gap |
-| VERSYM verneed record error | Zero VERSYM tag → `l_info[VERSYM]` = NULL |
-
-### 🧪 Test commands
-```bash
-SYSROOT=~/.cache/open-sober/android-env/system/lib64
-SCRIPT_DIR=crates/sober-core/src/bridges
-cd ~/Documents/Projects/open-sober
-
-# Full rebuild of all bridges
-python3 "$SCRIPT_DIR/gen_bridge_stubs.py" "$SYSROOT" /tmp/bs.c
-aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bs.o /tmp/bs.c
-aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bm.o "$SCRIPT_DIR/bridge_libc.c"
-aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libc.so" /tmp/bs.o /tmp/bm.o \
-    -Wl,--version-script,"$SCRIPT_DIR/bridge_version.ver" \
-    -Wl,-soname,libc.so -L/usr/aarch64-linux-gnu/lib -lc -lm -ldl -nostartfiles
-
-# Fix libm.so DT_INIT
-python3 -c "
-import struct; p='$SYSROOT/libm.so'; d=bytearray(open(p,'rb').read())
-for off in range(0xfe00, 0xfe00+0x1c0, 16):
-    if struct.unpack('<Q', d[off:off+8])[0] in (0xc, 0xd):
-        struct.pack_into('<Q', d, off+8, 0xa18)
-open(p,'wb').write(bytes(d))
-"
-
-# Build ICU bridges
-aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libandroidicu.so" \
-    "$SCRIPT_DIR/bridge_androidicu.c" \
-    -Wl,--version-script,"$SCRIPT_DIR/bridge_androidicu.ver" \
-    -Wl,-soname,libandroidicu.so -nostartfiles
-aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libicu.so" \
-    "$SCRIPT_DIR/bridge_icu.c" \
-    -Wl,--version-script,"$SCRIPT_DIR/bridge_icu.ver" \
-    -Wl,-soname,libicu.so -nostartfiles
-
-# Test
-timeout 30 qemu-aarch64 -L ~/.cache/open-sober/android-env \
-  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
-  -E LD_PRELOAD="libbionic_shim.so" \
-  -E GLIBC_TUNABLES="glibc.rtld.optional_static_tls=4096" \
-  -E ROBLOX_LIB="libroblox.so" \
-  ~/.cache/open-sober/android-env/jni_shim
-
-# Test individual library
-timeout 15 qemu-aarch64 -L ~/.cache/open-sober/android-env \
-  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
-  -E LD_PRELOAD="libbionic_shim.so" \
-  -E GLIBC_TUNABLES="glibc.rtld.optional_static_tls=4096" \
-  -E ROBLOX_LIB="libandroid_runtime.so" \
-  ~/.cache/open-sober/android-env/jni_shim
-```
-
-### ⚠️ Known Issues
-1. **DT_INIT_ARRAY tag with value 0** — Many GSI libraries have cleared INIT_ARRAY entries
-   (value=0) but the DT tag still EXISTS. Glibc's `call_init` checks `l_info[DT_INIT_ARRAY]`
-   presence, not value. With DT_INIT_ARRAYSZ=0 the loop should not execute, but some
-   libraries SIGILL anyway.
-   **Fix:** Replace the DT_INIT_ARRAY/FINI_ARRAY tags with DT_NULL — but **must move them
-   AFTER VERSYM/VERNEED tags** or the scan terminates early. Also handle FINI_ARRAY
-   (same crash pattern). `patch_gsi.py` now does this correctly.
-2. **VERSYM removal** — ~149 GSI files lost VERSYM when the batch patcher zeroed
-   dynamic entries 122-129 (INIT_ARRAY, FINI_ARRAY, VERSYM, VERNEED, VERNEEDNUM).
-   The VERSYM DATA still exists on disk but the dynamic tag is gone.
-   **Fix:** Restore the VERSYM (0x6ffffff0) and VERNEED (0x6ffffffe) dynamic entries
-   with their original vaddrs. The android_lib*.so variants still have them intact.
-3. **Multiple libc.so in load chain** — Bridge `libc.so` and glibc `libc.so.6` coexist.
-4. **TLS overflow** — `GLIBC_TUNABLES` env var workaround needed for large dlopen'd libs.
-
-### 📋 Scripts in repo
-| File | Purpose |
-|------|---------|
-| `crates/sober-core/src/bridges/gen_bridge_stubs.py` | Generates LIBC forwarding stubs |
-| `crates/sober-core/src/bridges/bridge_libc.c` | Main bridge: Bionic stubs + data symbols |
-| `crates/sober-core/src/bridges/bridge_libdl.c` | libdl bridge with __cfi_slowpath @@LIBC_OMR1 |
-| `crates/sober-core/src/bridges/bridge_libm.c` | libm bridge (empty version shim) |
-| `crates/sober-core/src/bridges/bridge_androidicu.c` | libandroidicu.so stubs (LIBANDROIDICU_EXTERNAL_1) |
-| `crates/sober-core/src/bridges/bridge_icu.c` | libicu.so stubs (LIBICU_31: ubidi, utext, unorm2, ubrk) |
-| `crates/sober-core/src/bridges/bridge_version.ver` | LIBC_N/O/P/Q/R/S/T/U/V definitions |
-| `crates/sober-core/src/bridges/bridge_androidicu.ver` | LIBANDROIDICU_EXTERNAL_1 |
-| `crates/sober-core/src/bridges/bridge_icu.ver` | LIBICU_31 |
-| `crates/sober-core/src/bridges/patch_gsi.py` | Mass binary patcher (APS2/RELR/GNU_RELRO/INIT) |
-| `crates/sober-core/src/bridges/unpack_rela.py` | APS2→RELA decompression |
-| `crates/sober-core/src/bridges/patch_relr.py` | ANDROID_RELR→RELR conversion |
+**Hypothesis**: Either 1) the BSS page at 0x6a26E40 hasn't been properly mapped writable,
+or 2) there's a PT_GNU_RELRO issue affecting remap, or 3) the __stack_chk_guard GOT
+entry fix is wrong (local variable goes out of scope before JNI_OnLoad reads it).
 
 ### 🎯 Next Agent — Priority Actions
 
-### 🎯 Next Agent — Priority Actions
+1. **Debug JNI_OnLoad crash** — try using qemu's `-singlestep -d exec` to find exact
+   crashing instruction, or mmap a persistent canary page instead of local variable.
+   Most likely: __stack_chk_guard GOT entry needs a HEAP-ALLOCATED canary, not stack-local.
 
-**Phase B: Post-load execution (NEXT)**
+2. **Complete JNI stubs** (Phase B) — once JNI_OnLoad runs, extend stubs for any
+   missing JNI calls Roblox makes.
 
-Phase A is DONE — `dlopen("libroblox.so")` succeeds. The jni_shim now enters the post-load phase.
+3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU
+   launch via `open-sober play` command.
 
-1. **Extend jni_shim.c** with more JNI stubs. Now libroblox.so loads, the jni_shim calls
-   `dlsym(handle, "JNI_OnLoad")` which returns NULL since the shim returns it.
-   The game expects real JNI functions:
-   - `JNI_OnLoad(JavaVM*, void*)` — must return JNI_VERSION_1_6
-   - `FindClass` — stub returning NULL
-   - `GetMethodID` — needs to return valid method IDs
-   - `NewStringUTF` / `GetStringUTFChars`
-   - `CallVoidMethodV`, `CallStaticVoidMethodV`
-   - `RegisterNatives`
-   - `GetStaticMethodID`, `CallStaticObjectMethodV`
-   - `NewGlobalRef`
-   
-   Current jni_shim.c has `FindClass=stub_FindClass returning NULL` and `RegisterNatives`
-   stub. Need ~15-20 more stubs to keep the game running during init.
-   
-2. **Add `qemu.rs` integration** — The sober-core crate has `qemu.rs` for launching QEMU.
-   Wire up the library loading and JNI shim invocation through the Rust code.
-   Replace the hardcoded test binary with Rust-controlled QEMU launch via the
-   sober-core `open-sober play` command.
+4. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md. Symlink libEGL.so and
+   libGLESv2.so to Mesa system libs. Set MESA_LOADER_DRIVER_OVERRIDE=zink.
 
-**Phase C: Graphics (see GRAPHICS_RECOMMENDATION.md)**
-
-3. **EGL bridge** — Create libEGL.so stubs for eglGetProcAddress, eglChooseConfig,
-   eglCreateContext, etc. Mesa zink for GLES→Vulkan.
-
-4. **Window creation** — X11/Wayland native window handle for EGL.
-
-5. **Input** — Touch events → mouse/keyboard.
+**Regarding graphics timeline:** Graphics implementation begins AFTER JNI_OnLoad
+completes successfully. The current blocker is the JNI_OnLoad segfault — once
+resolved, the next steps are:
+- Extend JNI stubs to keep Roblox's init running (~20-30 stubs)
+- Symlink EGL/GLES libraries to system Mesa
+- Set up window creation (X11/Wayland)
+- Input handling
