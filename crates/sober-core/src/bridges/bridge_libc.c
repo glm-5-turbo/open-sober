@@ -55,6 +55,15 @@ __attribute__((used)) __attribute__((externally_visible))
 void *bf_stdout = NULL;
 __asm__(".symver bf_stdout,stdout@@LIBC");
 
+/* ===== CFI slowpath stub (Bionic-only, CFI not needed on glibc) =====
+ * __cfi_slowpath is referenced by libraries compiled with Control Flow
+ * Integrity. On non-CFI builds it should be a no-op. The version tag
+ * matters: libcodec2_hidl_client needs __cfi_slowpath@LIBC_OMR1. */
+
+__attribute__((used)) __attribute__((externally_visible))
+void __cfi_slowpath(void) { }
+__asm__(".symver __cfi_slowpath, __cfi_slowpath@@LIBC_OMR1");
+
 /* ===== Re-exported glibc symbols under LIBC version =====
  * These are standard C functions that GSI libraries reference
  * from libc.so with version LIBC. We use thin wrappers that

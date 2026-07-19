@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Generate LIBC-versioned C forwarding stubs for bridge libc.so.
-
-Each stub declares the glibc function as extern (unversioned reference),
-defines a tail-call wrapper, and relies on the version script
-(bridge_version.ver LIBC { global: *; }) to tag it with @@LIBC.
+"""Generate LIBC-versioned C stubs from multiple GSI libraries.
 
 Usage:
-    python3 gen_bridge_stubs.py <lib_to_analyze> <output.c>
+    python3 gen_bridge_stubs.py <library_or_directory> <output.c>
+
+If a directory is given, all .so files are scanned and the union
+of all LIBC-versioned UNDEF symbols is generated.
 """
 
 import subprocess
 import sys
+import os
 
 
 def get_undef_symbols(lib_path):
@@ -39,33 +39,71 @@ def get_undef_symbols(lib_path):
         if not version.startswith('LIBC') and version != 'LIBDL_ANDROID':
             continue
         sym_type = 'FUNC' if 'FUNC' in line else ('OBJECT' if 'OBJECT' in line else 'OTHER')
-        symbols.append({'name': name, 'version': version, 'type': sym_type})
+        symbols.append({'name': name, 'version': version, 'type': sym_type, 'lib': os.path.basename(lib_path)})
     return symbols
 
 
 SKIP = {
     'dlopen', 'dlsym', 'dlclose', 'dladdr', 'dlerror',
-    '__cxa_finalize', '__cxa_atexit', '__register_atfork',
+    '__cxa_atexit', '__register_atfork',
     '_Unwind_RaiseException', '_Unwind_DeleteException',
     '_Unwind_SetGR', '_Unwind_SetIP',
     '_Unwind_GetLanguageSpecificData', '_Unwind_GetIP',
     '_Unwind_GetRegionStart', '_Unwind_Resume',
+    '_Unwind_GetDataRelBase', '_Unwind_GetTextRelBase',
+    '_Unwind_GetIPInfo',
     '__cxa_thread_atexit_impl',
     'android_set_abort_message', '__system_property_get',
-    '__assert2', '__strncpy_chk2',
+    '__system_property_find', '__system_property_read',
+    '__system_property_serial', '__system_property_set',
+    '__system_property_area_serial',
+    '__system_property_read_callback', '__system_property_wait',
+    'android_fdsan_close_with_tag', 'android_fdsan_create_owner_tag',
+    'android_fdsan_exchange_owner_tag',
+    'android_getaddrinfofornet',
+    'android_get_application_target_sdk_version',
+    'android_get_device_api_level',
+    'android_dlopen_ext',
+    'AConnectivityNative_getNetworkBlockedReason',
+    'getprogname',
+    'nrand48', 'futimens',
+    '__assert2', '__strncpy_chk2', '__assert',
+    'memset_explicit',  # Defined in bridge_libc.c
+    'getentropy',       # Defined in bridge_libc.c
+    '__cfi_slowpath',   # Defined in bridge_libc.c (special @LIBC_OMR1)
+    'getrandom', 'memfd_create', 'sem_clockwait', 'pthread_cond_clockwait',
+    'eventfd_read', 'eventfd_write',
 }
 
 
 def main():
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <lib_to_analyze> <output.c>")
+        print(f"Usage: {sys.argv[0]} <library_or_directory> <output.c>")
         sys.exit(1)
 
-    lib_path = sys.argv[1]
+    path = sys.argv[1]
     output_path = sys.argv[2]
 
-    symbols = get_undef_symbols(lib_path)
-    print(f"Found {len(symbols)} LIBC-versioned UNDEF symbols")
+    # Collect all .so files (single file or directory)
+    if os.path.isdir(path):
+        files = [os.path.join(path, f) for f in os.listdir(path)
+                 if f.endswith('.so') and os.path.isfile(os.path.join(path, f))]
+    else:
+        files = [path]
+
+    print(f"Scanning {len(files)} libraries...")
+
+    # Merge all UNDEF symbols by name+version
+    merged = {}
+    for lib_path in files:
+        syms = get_undef_symbols(lib_path)
+        for s in syms:
+            key = f"{s['name']}@@{s['version']}"
+            if key not in merged:
+                merged[key] = s
+
+    symbols = list(merged.values())
+    print(f"Found {len(symbols)} unique LIBC-versioned UNDEF symbols")
 
     to_gen = [s for s in symbols if s['name'] not in SKIP and s['type'] == 'FUNC']
     objs = [s for s in symbols if s['name'] not in SKIP and s['type'] == 'OBJECT']
@@ -77,19 +115,18 @@ def main():
 
     lines = [
         '/* AUTO-GENERATED LIBC forwarding stubs */',
-        f'/* {len(to_gen)} functions from {lib_path} */',
+        f'/* {len(to_gen)} functions from {len(files)} libraries */',
         '/* Each: extern decl → tail-call wrapper → version script tags @@LIBC */',
-        '',
-        '/* WARNING: All wrapper functions use void(void) signature.',
-        ' * On ARM64, all args pass in registers x0-x7, and tail-calls',
-        ' * via b instruction preserve them. The version script assigns',
-        ' * these to the LIBC version tag automatically.',
-        ' */',
         '',
     ]
 
-    for sym in to_gen:
+    # Deduplicate by name (if multiple have different versions, use the default LIBC)
+    seen = set()
+    for sym in sorted(to_gen, key=lambda s: (s['name'], s['version'])):
         name = sym['name']
+        if name in seen:
+            continue
+        seen.add(name)
         version = sym['version']
         lines += [
             f'extern void _bf_{name}_glibc(void);',
@@ -101,11 +138,26 @@ def main():
             '',
         ]
 
+    # Add data objects — NOTE: these use __asm__(".symver") which can cause
+    # linker conflicts. Data objects are already handled in bridge_libc.c
+    # with the bf_ prefix pattern.
+    seen_data = set()
+    for sym in objs:
+        name = sym['name']
+        if name in seen_data:
+            continue
+        seen_data.add(name)
+        version = sym['version']
+        lines += [
+            f'/* DATA {name}@@{version} — handled in bridge_libc.c */',
+            '',
+        ]
+
     output = '\n'.join(lines)
     with open(output_path, 'w') as f:
         f.write(output)
 
-    print(f"Wrote {output_path}")
+    print(f"Wrote {len(seen)} function stubs + {len(seen_data)} data -> {output_path}")
 
 
 if __name__ == '__main__':

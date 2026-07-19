@@ -11,3 +11,10 @@
  */
 
 /* Empty — dlfcn symbols are resolved at runtime by the linker/loader */
+
+/* __cfi_slowpath — CFI slowpath stub, needed by some GSI libs
+ * under LIBC_OMR1 version, looked up from libdl.so.
+ * On non-CFI builds this is a no-op. */
+__attribute__((used)) __attribute__((externally_visible))
+void __cfi_slowpath(void) { }
+__asm__(".symver __cfi_slowpath, __cfi_slowpath@@LIBC_OMR1");
