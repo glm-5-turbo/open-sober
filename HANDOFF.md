@@ -428,7 +428,86 @@ while idx < num_relocs:
 - readelf correctly displays all entries with symbol names
 - QEMU loads without errors (init_array cleared to avoid hangs)
 
-### 🎯 Next Agent — Debug dlopen("libc++.so") hang
+### 🎯 Next Agent — Debug dlopen("libc++.so") hang — RESOLVED (2026-07-19)
+
+**APS2 → RELA is DONE and dlopen("libc++.so") now WORKS.**
+
+The bridge libc.so was rebuilt with **795 LIBC-versioned symbols** (779 function stubs + 18 data).
+`dlopen("libc++.so")` returns success — library loads, relocates, and unloads cleanly.
+
+### ✅ dlopen("libroblox.so") status
+
+Roblox load progresses deep into the GSI dependency chain (~50+ libraries) but crashes at
+`libcodec2_hidl_client@1.0.so` with `SIGSEGV si_addr=0x8` (NULL+8) during versioned symbol
+resolution. This is in the Android media/codec subsystem.
+
+**Remaining blocker:** The crash occurs immediately after `close(3)` for
+`libcodec2_hidl_client@1.0.so`. Suspect causes:
+1. **Per-library version lookup** — This GSI library's Verneed says `LIBC_OMR1` comes from
+   `libdl.so`. Our bridge libdl.so now has `__cfi_slowpath@@LIBC_OMR1` but the version lookup
+   may still fail in glibc's do_lookup_x.
+2. **ld-android.so** — Some libraries in the chain NEED the Android linker (`ld-android.so`)
+   which exists as a symlink to `gsi_ld-android.so`. This library may call Android-specific
+   linker symbols our bridge can't provide.
+3. **Massive dep chain** — The media/codec chain pulls in ~50+ GSI libraries with deep
+   inter-dependencies (libcodec2, libstagefright, libmedia, libgui, libui, etc.)
+
+### 🛠 Build commands
+
+**Bridge libc.so (795 symbols):**
+```bash
+SYSROOT=~/.cache/open-sober/android-env/system/lib64
+SCRIPT_DIR=crates/sober-core/src/bridges
+
+python3 "$SCRIPT_DIR/gen_bridge_stubs.py" "$SYSROOT" /tmp/bridge_stubs_full.c
+aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bridge_stubs_full.o /tmp/bridge_stubs_full.c
+aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libc.so" \
+    "$SCRIPT_DIR/bridge_libc.c" /tmp/bridge_stubs_full.o \
+    -Wl,--version-script,"$SCRIPT_DIR/bridge_version.ver" \
+    -Wl,-soname,libc.so -L/usr/aarch64-linux-gnu/lib -lc -lm -ldl -nostartfiles
+
+# Fix libm.so (set DT_INIT and DT_FINI to harmless 'ret' instead of 0)
+python3 -c "
+import struct
+p='$SYSROOT/libm.so'; d=bytearray(open(p,'rb').read()); eh=d[:64]
+po=struct.unpack('<Q',eh,32)[0]; ps=struct.unpack('<H',eh,54)[0]; pn=struct.unpack('<H',eh,56)[0]
+do=ds=None
+for i in range(pn):
+    ph=d[po+i*ps:po+(i+1)*ps]
+    if struct.unpack('<I',ph,0)[0]==2: do=struct.unpack('<Q',ph,8)[0]; ds=struct.unpack('<Q',ph,32)[0]; break
+for off in range(do,do+ds,16):
+    t=struct.unpack('<Q',d[off:off+8])[0]
+    if t in(0xc,0xd): struct.pack_into('<Q',d,off+8,0xa18)  # point to ret
+open(p,'wb').write(bytes(d))
+"
+```
+
+### 🧪 Test commands
+```bash
+# libc++.so (works)
+qemu-aarch64 -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E ROBLOX_LIB="libc++.so" \
+  ~/.cache/open-sober/android-env/jni_shim
+
+# libroblox.so (still crashes)
+qemu-aarch64 -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH="/system/lib64:/lib" \
+  -E LD_PRELOAD="libbionic_shim.so" \
+  -E ROBLOX_LIB="libroblox.so" \
+  ~/.cache/open-sober/android-env/jni_shim
+```
+
+### 📁 Scripts in repo
+- `crates/sober-core/src/bridges/gen_bridge_stubs.py` — generates forwarding stubs
+- `crates/sober-core/src/bridges/bridge_libc.c` — bridge C stubs + __cfi_slowpath
+- `crates/sober-core/src/bridges/bridge_libdl.c` — bridge libdl with __cfi_slowpath
+- `crates/sober-core/src/bridges/bridge_libm.c` — bridge libm
+- `crates/sober-core/src/bridges/bridge_version.ver` — version definitions (LIBC through LIBC_V, LIBC_OMR1, etc.)
+- `crates/sober-core/src/bridges/patch_gsi.py` — mass binary patcher
+- `crates/sober-core/src/bridges/unpack_rela.py` — APS2→RELA decompression
+- `crates/sober-core/src/bridges/patch_relr.py` — ANDROID_RELR→RELR conversion
 
 **APS2 → RELA is DONE.** The blocker is dlopen hangs during relocation processing.
 
