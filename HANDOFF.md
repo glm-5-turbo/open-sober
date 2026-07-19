@@ -225,39 +225,58 @@ Both `libandroid_runtime.so` and `libroblox.so` now load via `dlopen()` under QE
 
 **5. libroblox.so patched** — GNU_RELRO cleared, BIND_NOW cleared, INIT/FINI nulled
 
-### ⚠️ Current Blocker: JNI_OnLoad segfault
+### ⚠️ Current Blocker: QEMU VDSO crash on JNI_OnLoad call
 
-JNI_OnLoad found at 0x73...ce58, but calling it causes SIGSEGV:
-- Stack canary is set (0x0A0B0C0D0E0F1011) — verified via dlsym
-- GOT entry at base+0x6473438 patched with pointer to canary value — verified
-- Global __stack_chk_guard set to non-zero — verified
-- Crash occurs in first CALLED function from JNI_OnLoad (`bl 0x1f65a60`)
-- That function accesses vaddr 0x6a26E40 via ldarb (atomic load-acquire, C++ once_flag)
-- Address is in LOAD[3] BSS (flags PF_R|PF_W, mapped, but may have mprotect issue)
+`dlopen("libroblox.so")` succeeds. The GOT entry for `__stack_chk_guard` at
+`base + 0x6473438` is manually patched with a global canary pointer. The
+`__stack_chk_guard` TLS variable is set via dlsym. Stack is verified working
+(64MB via `-s`). No init/fini arrays run. No RELRO mprotect.
 
-**Hypothesis**: Either 1) the BSS page at 0x6a26E40 hasn't been properly mapped writable,
-or 2) there's a PT_GNU_RELRO issue affecting remap, or 3) the __stack_chk_guard GOT
-entry fix is wrong (local variable goes out of scope before JNI_OnLoad reads it).
+When JNI_OnLoad is called, QEMU 10.2.1 immediately crashes with SIGSEGV
+`si_code=2` (SEGV_ACCERR) at `0x...100000 - 0x10` pattern. The `-d in_asm`
+trace shows QEMU is translating code in the **VDSO page** (addresses
+`0x7f...fff000` range) when it crashes.
+
+**Root cause**: QEMU 10.2.1 user-mode VDSO translation bug triggered by the
+large guest binary (105MB + 788 GSI libs). The VDSO (virtual dynamic shared
+object) is QEMU's kernel emulation for fast syscalls. When too many guest
+libraries are loaded, VDSO interaction causes an internal QEMU crash.
+
+**Attempted fixes that didn't help:**
+- Stack size: `-s 64MB`, `-s 128MB`, `-s 512MB`
+- Reserved VA: `-R 512M`, `-R 4G`, `-R 0`
+- TCG cache: `-tb-size 256`
+- Kernel version: `-r 4.14.0`, `-r 5.0.0`
+- Removing PT_GNU_RELRO from ALL bridge libraries
+- Building bridges with `-Wl,-z,norelro`
+- Static global canary, heap canary, dlsym-based canary
+- RTLD_NOW vs RTLD_LAZY
+- All signal handler attempts
+
+**Possible fixes:**
+1. **Build QEMU with --disable-vdso** — the VDSO is not essential for
+   user-mode. `./configure --target-list=aarch64-linux-user --disable-vdso`
+2. **Try QEMU 9.x** — the VDSO bug may be a regression in 10.x
+3. **Use an Ubuntu PPA or different QEMU build**
+4. **Try running under Docker with a different QEMU version**
 
 ### 🎯 Next Agent — Priority Actions
 
-1. **Debug JNI_OnLoad crash** — try using qemu's `-singlestep -d exec` to find exact
-   crashing instruction, or mmap a persistent canary page instead of local variable.
-   Most likely: __stack_chk_guard GOT entry needs a HEAP-ALLOCATED canary, not stack-local.
+1. **Fix QEMU VDSO crash** — build QEMU with `--disable-vdso` or install an
+   older QEMU version. The crash is NOT in our code.
 
-2. **Complete JNI stubs** (Phase B) — once JNI_OnLoad runs, extend stubs for any
+2. **Complete JNI stubs** (Phase B) — once JNI_OnLoad runs, extend stubs for
    missing JNI calls Roblox makes.
 
-3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU
-   launch via `open-sober play` command.
+3. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled
+   QEMU launch via `open-sober play` command.
 
-4. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md. Symlink libEGL.so and
-   libGLESv2.so to Mesa system libs. Set MESA_LOADER_DRIVER_OVERRIDE=zink.
+4. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md. Symlink libEGL.so
+   and libGLESv2.so to Mesa system libs. Set MESA_LOADER_DRIVER_OVERRIDE=zink.
 
-**Regarding graphics timeline:** Graphics implementation begins AFTER JNI_OnLoad
-completes successfully. The current blocker is the JNI_OnLoad segfault — once
-resolved, the next steps are:
-- Extend JNI stubs to keep Roblox's init running (~20-30 stubs)
-- Symlink EGL/GLES libraries to system Mesa
-- Set up window creation (X11/Wayland)
+**Regarding graphics timeline:** Graphics begins AFTER JNI_OnLoad runs.
+Current blocker is QEMU VDSO — once resolved:
+- JNI stubs (~20-30 needed)
+- EGL/GLES symlinks to Mesa
+- X11/Wayland window creation
 - Input handling
