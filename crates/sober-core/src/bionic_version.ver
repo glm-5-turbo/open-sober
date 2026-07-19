@@ -19,3 +19,31 @@ LIBC_P {
 LIBC_R {
     global: *;
 };
+
+LIBC_Q {
+    global: *;
+};
+
+LIBC_S {
+    global: *;
+};
+
+LIBC_T {
+    global: *;
+};
+
+LIBC_U {
+    global:
+        memset_explicit;
+        *;
+};
+
+LIBC_V {
+    global: *;
+};
+
+
+LIBDL_ANDROID {
+    global: *;
+};
+

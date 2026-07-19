@@ -114,6 +114,18 @@ BF_UNWIND_STUB(_Unwind_SetIP, void)
 BF_UNWIND_STUB(_Unwind_GetLanguageSpecificData, void*)
 BF_UNWIND_STUB(_Unwind_GetIP, unsigned long)
 BF_UNWIND_STUB(_Unwind_GetRegionStart, unsigned long)
+BF_UNWIND_STUB(_Unwind_GetTextRelBase, unsigned long)
+BF_UNWIND_STUB(_Unwind_Backtrace, int)
+BF_UNWIND_STUB(_Unwind_FindEnclosingFunction, void*)
+BF_UNWIND_STUB(_Unwind_Find_FDE, void*)
+
+BF_UNWIND_STUB(_Unwind_GetCFA, unsigned long)
+
+BF_UNWIND_STUB(_Unwind_GetIPInfo, unsigned long)
+
+BF_UNWIND_STUB(_Unwind_GetDataRelBase, unsigned long)
+
+
 BF_UNWIND_STUB(_Unwind_Resume, void)
 
 /* ===== String/number conversion functions not in trampoline table ===== */
@@ -257,6 +269,573 @@ void *_bf_fdopendir(int fd) {
 
 BF_3ARG_RET(unlinkat, int, int, const char *, int)
 BF_3ARG_RET(utimensat, int, int, const char *, const void *)
+
+/* getprogname — used by liblog.so */
+__attribute__((used)) __attribute__((externally_visible))
+const char *_bf_getprogname(void);
+__asm__(".symver _bf_getprogname,getprogname@@LIBC");
+__attribute__((externally_visible))
+const char *_bf_getprogname(void) {
+    static const char *(*_r)(void) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "getprogname");
+    return _r ? _r() : "open-sober";
+}
+
+/* getgroups — used by liblog.so */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_getgroups(int size, void *list);
+__asm__(".symver _bf_getgroups,getgroups@@LIBC");
+__attribute__((externally_visible))
+int _bf_getgroups(int size, void *list) {
+    static int (*_r)(int, void*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "getgroups");
+    return _r ? _r(size, list) : 0;
+}
+
+/* getlogin — used by various */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_getlogin(void);
+__asm__(".symver _bf_getlogin,getlogin@@LIBC");
+__attribute__((externally_visible))
+char *_bf_getlogin(void) {
+    static char *(*_r)(void) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "getlogin");
+    return _r ? _r() : NULL;
+}
+
+/* getpwnam — used by various */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_getpwnam(const char *name);
+__asm__(".symver _bf_getpwnam,getpwnam@@LIBC");
+__attribute__((externally_visible))
+void *_bf_getpwnam(const char *name) {
+    static void *(*_r)(const char*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "getpwnam");
+    return _r ? _r(name) : NULL;
+}
+
+/* getpwuid — used by various */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_getpwuid(int uid);
+__asm__(".symver _bf_getpwuid,getpwuid@@LIBC");
+__attribute__((externally_visible))
+void *_bf_getpwuid(int uid) {
+    static void *(*_r)(int) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "getpwuid");
+    return _r ? _r(uid) : NULL;
+}
+
+/* strdup — used by liblog.so */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_strdup(const char *s);
+__asm__(".symver _bf_strdup,strdup@@LIBC");
+__attribute__((externally_visible))
+char *_bf_strdup(const char *s) {
+    static char *(*_r)(const char*) = NULL;
+    if (!_r) _r = dlsym(RTLD_NEXT, "strdup");
+    return _r ? _r(s) : NULL;
+}
+
+/* __system_property_area_serial — Android Bionic property system */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned _bf_sys_prop_area_serial(void);
+__asm__(".symver _bf_sys_prop_area_serial,__system_property_area_serial@@LIBC");
+__attribute__((externally_visible))
+unsigned _bf_sys_prop_area_serial(void) { return 0; }
+
+/* __system_property_serial — Android Bionic property system */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned _bf_sys_prop_serial(void);
+__asm__(".symver _bf_sys_prop_serial,__system_property_serial@@LIBC");
+__attribute__((externally_visible))
+unsigned _bf_sys_prop_serial(void) { return 0; }
+
+/* __system_property_find — find Android system property */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_sys_prop_find(const char *name);
+__asm__(".symver _bf_sys_prop_find,__system_property_find@@LIBC");
+__attribute__((externally_visible))
+void *_bf_sys_prop_find(const char *name) { (void)name; return NULL; }
+
+/* __system_property_read — read Android system property */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_sys_prop_read(void *pi, char *value, const char *name);
+__asm__(".symver _bf_sys_prop_read,__system_property_read@@LIBC");
+__attribute__((externally_visible))
+int _bf_sys_prop_read(void *pi, char *value, const char *name) {
+    (void)pi; (void)name; if (value) if (value) value[0] = 0; return 0; }
+
+/* __strlcpy_chk — Android Bionic strlcpy with buffer check */
+__attribute__((used)) __attribute__((externally_visible))
+size_t _bf_strlcpy_chk(char *dst, const char *src, size_t n, size_t dn);
+__asm__(".symver _bf_strlcpy_chk,__strlcpy_chk@@LIBC");
+__attribute__((externally_visible))
+size_t _bf_strlcpy_chk(char *dst, const char *src, size_t n, size_t dn) {
+    (void)dn; size_t i; for (i = 0; i < n-1 && src[i]; i++) dst[i] = src[i];
+    if (n > 0) dst[i] = 0; return i; }
+
+/* mkstemp */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_mkstemp(char *t);
+__asm__(".symver _bf_mkstemp,mkstemp@@LIBC");
+__attribute__((externally_visible))
+int _bf_mkstemp(char *t) { static int (*_r)(char*)=NULL; if(!_r)_r=dlsym(RTLD_NEXT,"mkstemp"); return _r?_r(t):-1; }
+
+/* mkdtemp */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_mkdtemp(char *t);
+__asm__(".symver _bf_mkdtemp,mkdtemp@@LIBC");
+__attribute__((externally_visible))
+char *_bf_mkdtemp(char *t) { static char*(*_r)(char*)=NULL; if(!_r)_r=dlsym(RTLD_NEXT,"mkdtemp"); return _r?_r(t):NULL; }
+
+/* dup */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_dup(int fd);
+__asm__(".symver _bf_dup,dup@@LIBC");
+__attribute__((externally_visible))
+int _bf_dup(int fd) { static int (*_r)(int)=NULL; if(!_r)_r=dlsym(RTLD_NEXT,"dup"); return _r?_r(fd):-1; }
+
+/* dup2 */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_dup2(int o, int n);
+__asm__(".symver _bf_dup2,dup2@@LIBC");
+__attribute__((externally_visible))
+int _bf_dup2(int o, int n) { static int(*_r)(int,int)=NULL; if(!_r)_r=dlsym(RTLD_NEXT,"dup2"); return _r?_r(o,n):-1; }
+
+/* basename */
+__attribute__((used)) __attribute__((externally_visible))
+const char *_bf_basename(const char *p);
+__asm__(".symver _bf_basename,basename@@LIBC");
+__attribute__((externally_visible))
+const char *_bf_basename(const char *p) { static const char*(*_r)(const char*)=NULL; if(!_r)_r=dlsym(RTLD_NEXT,"basename"); return _r?_r(p):NULL; }
+
+/* __pread_chk */
+__attribute__((used)) __attribute__((externally_visible))
+ssize_t _bf_pread_chk(int fd, void *b, size_t n, off_t o, size_t bn);
+__asm__(".symver _bf_pread_chk,__pread_chk@@LIBC");
+__attribute__((externally_visible))
+ssize_t _bf_pread_chk(int fd, void *b, size_t n, off_t o, size_t bn) {
+    static ssize_t(*_r)(int,void*,size_t,off_t,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"__pread_chk"); return _r?_r(fd,b,n,o,bn):-1; }
+
+/* nftw */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_nftw(const char *d, void *fn, int n, int f);
+__asm__(".symver _bf_nftw,nftw@@LIBC");
+__attribute__((externally_visible))
+int _bf_nftw(const char *d, void *fn, int n, int f) {
+    static int(*_r)(const char*,void*,int,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"nftw"); return _r?_r(d,fn,n,f):-1; }
+
+/* __system_property_set */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_sys_prop_set(const char *k, const char *v);
+__asm__(".symver _bf_sys_prop_set,__system_property_set@@LIBC");
+__attribute__((externally_visible))
+int _bf_sys_prop_set(const char *k, const char *v) { (void)k;(void)v; return 0; }
+
+/* __pwrite_chk — LIBC_N version */
+__attribute__((used)) __attribute__((externally_visible))
+ssize_t _bf_pwrite_chk(int fd, const void *b, size_t n, off_t o, size_t bn);
+__asm__(".symver _bf_pwrite_chk,__pwrite_chk@@LIBC_N");
+__attribute__((externally_visible))
+ssize_t _bf_pwrite_chk(int fd, const void *b, size_t n, off_t o, size_t bn) {
+    static ssize_t(*_r)(int,const void*,size_t,off_t,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"__pwrite_chk"); return _r?_r(fd,b,n,o,bn):-1; }
+
+
+/* __system_property_read_callback — LIBC_O version */
+__attribute__((used)) __attribute__((externally_visible))
+void _bf_sys_prop_read_cb_o(const void *pi, void *cb, void *data);
+__asm__(".symver _bf_sys_prop_read_cb_o,__system_property_read_callback@@LIBC_O");
+__attribute__((externally_visible))
+void _bf_sys_prop_read_cb_o(const void *pi, void *cb, void *data) { (void)pi;(void)cb;(void)data; }
+
+/* __system_property_wait — LIBC_O version */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_sys_prop_wait_o(void *unused);
+__asm__(".symver _bf_sys_prop_wait_o,__system_property_wait@@LIBC_O");
+__attribute__((externally_visible))
+int _bf_sys_prop_wait_o(void *unused) { (void)unused; return 0; }
+
+/* android_fdsan_get_owner_tag — LIBC_Q */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned long _bf_fdsan_get_owner_tag(int fd);
+__asm__(".symver _bf_fdsan_get_owner_tag,android_fdsan_get_owner_tag@@LIBC_Q");
+__attribute__((externally_visible))
+unsigned long _bf_fdsan_get_owner_tag(int fd) { (void)fd; return 0; }
+
+/* android_fdsan_close_with_tag — LIBC_Q */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_fdsan_close_with_tag(int fd, unsigned long tag);
+__asm__(".symver _bf_fdsan_close_with_tag,android_fdsan_close_with_tag@@LIBC_Q");
+__attribute__((externally_visible))
+int _bf_fdsan_close_with_tag(int fd, unsigned long tag) {
+    static int(*_r)(int,unsigned long)=NULL; if(!_r)_r=dlsym(RTLD_NEXT,"close"); return _r?_r(fd, tag):-1; }
+
+/* android_fdsan_create_owner_tag — LIBC_Q */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned long _bf_fdsan_create_owner_tag(unsigned int type, const char *n);
+__asm__(".symver _bf_fdsan_create_owner_tag,android_fdsan_create_owner_tag@@LIBC_Q");
+__attribute__((externally_visible))
+unsigned long _bf_fdsan_create_owner_tag(unsigned int type, const char *n) { (void)type;(void)n; return 0xCAFE; }
+
+/* android_fdsan_exchange_owner_tag — LIBC_Q */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned long _bf_fdsan_exchange_owner_tag(int fd, unsigned long o, unsigned long n);
+__asm__(".symver _bf_fdsan_exchange_owner_tag,android_fdsan_exchange_owner_tag@@LIBC_Q");
+__attribute__((externally_visible))
+unsigned long _bf_fdsan_exchange_owner_tag(int fd, unsigned long o, unsigned long n) { (void)fd;(void)o;(void)n; return 0; }
+
+/* android_get_application_target_sdk_version — LIBC_N */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_get_app_target_sdk(void);
+__asm__(".symver _bf_get_app_target_sdk,android_get_application_target_sdk_version@@LIBC_N");
+__attribute__((externally_visible))
+int _bf_get_app_target_sdk(void) { return 26; }
+
+/* __system_property_foreach */
+__attribute__((used)) __attribute__((externally_visible))
+void _bf_sys_prop_foreach(void *cb, void *data);
+__asm__(".symver _bf_sys_prop_foreach,__system_property_foreach@@LIBC");
+__attribute__((externally_visible))
+void _bf_sys_prop_foreach(void *cb, void *data) { (void)cb;(void)data; }
+
+/* strtoimax */
+__attribute__((used)) __attribute__((externally_visible))
+long long _bf_strtoimax(const char *n, char **e, int b);
+__asm__(".symver _bf_strtoimax,strtoimax@@LIBC");
+__attribute__((externally_visible))
+long long _bf_strtoimax(const char *n, char **e, int b) {
+    static long long(*_r)(const char*,char**,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"strtoimax"); return _r?_r(n,e,b):0; }
+
+/* strtoumax */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned long long _bf_strtoumax(const char *n, char **e, int b);
+__asm__(".symver _bf_strtoumax,strtoumax@@LIBC");
+__attribute__((externally_visible))
+unsigned long long _bf_strtoumax(const char *n, char **e, int b) {
+    static unsigned long long(*_r)(const char*,char**,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"strtoumax"); return _r?_r(n,e,b):0; }
+
+/* fnmatch */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_fnmatch(const char *p, const char *s, int f);
+__asm__(".symver _bf_fnmatch,fnmatch@@LIBC");
+__attribute__((externally_visible))
+int _bf_fnmatch(const char *p, const char *s, int f) {
+    static int(*_r)(const char*,const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"fnmatch"); return _r?_r(p,s,f):0; }
+
+/* asprintf */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_asprintf(char **s, const char *f, ...);
+__asm__(".symver _bf_asprintf,asprintf@@LIBC");
+__attribute__((externally_visible))
+int _bf_asprintf(char **s, const char *f, ...) {
+    static int(*_r)(char**,const char*,...)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"asprintf");
+    va_list ap; va_start(ap,f); int ret=_r?_r(s,f,ap):-1; va_end(ap); return ret; }
+
+/* fstatat */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_fstatat(int d, const char *p, void *s, int f);
+__asm__(".symver _bf_fstatat,fstatat@@LIBC");
+__attribute__((externally_visible))
+int _bf_fstatat(int d, const char *p, void *s, int f) {
+    static int(*_r)(int,const char*,void*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"fstatat"); return _r?_r(d,p,s,f):-1; }
+
+/* mkdirat */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_mkdirat(int d, const char *p, int m);
+__asm__(".symver _bf_mkdirat,mkdirat@@LIBC");
+__attribute__((externally_visible))
+int _bf_mkdirat(int d, const char *p, int m) {
+    static int(*_r)(int,const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"mkdirat"); return _r?_r(d,p,m):-1; }
+
+/* scandirat */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_scandirat(int d, const char *p, void *nl, void *sel, void *cmp);
+__asm__(".symver _bf_scandirat,scandirat@@LIBC");
+__attribute__((externally_visible))
+int _bf_scandirat(int d, const char *p, void *nl, void *sel, void *cmp) {
+    static int(*_r)(int,const char*,void*,void*,void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"scandirat"); return _r?_r(d,p,nl,sel,cmp):-1; }
+
+/* dirname */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_dirname(char *p);
+__asm__(".symver _bf_dirname,dirname@@LIBC");
+__attribute__((externally_visible))
+char *_bf_dirname(char *p) {
+    static char*(*_r)(char*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"dirname"); return _r?_r(p):(char*)"."; }
+
+/* chmod */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_chmod(const char *p, int m);
+__asm__(".symver _bf_chmod,chmod@@LIBC");
+__attribute__((externally_visible))
+int _bf_chmod(const char *p, int m) {
+    static int(*_r)(const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"chmod"); return _r?_r(p,m):-1; }
+
+/* chown */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_chown(const char *p, int o, int g);
+__asm__(".symver _bf_chown,chown@@LIBC");
+__attribute__((externally_visible))
+int _bf_chown(const char *p, int o, int g) {
+    static int(*_r)(const char*,int,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"chown"); return _r?_r(p,o,g):-1; }
+
+/* __openat_2 */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_openat_2(int d, const char *p, int f);
+__asm__(".symver _bf_openat_2,__openat_2@@LIBC");
+__attribute__((externally_visible))
+int _bf_openat_2(int d, const char *p, int f) {
+    static int(*_r)(int,const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"openat"); return _r?_r(d,p,f):-1; }
+
+/* strtok_r */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_strtok_r(char *s, const char *d, char **p);
+__asm__(".symver _bf_strtok_r,strtok_r@@LIBC");
+__attribute__((externally_visible))
+char *_bf_strtok_r(char *s, const char *d, char **p) {
+    static char*(*_r)(char*,const char*,char**)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"strtok_r"); return _r?_r(s,d,p):NULL; }
+
+/* strndup */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_strndup(const char *s, size_t n);
+__asm__(".symver _bf_strndup,strndup@@LIBC");
+__attribute__((externally_visible))
+char *_bf_strndup(const char *s, size_t n) {
+    static char*(*_r)(const char*,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"strndup"); return _r?_r(s,n):NULL; }
+
+/* strlcpy */
+__attribute__((used)) __attribute__((externally_visible))
+size_t _bf_strlcpy(char *d, const char *s, size_t n);
+__asm__(".symver _bf_strlcpy,strlcpy@@LIBC");
+__attribute__((externally_visible))
+size_t _bf_strlcpy(char *d, const char *s, size_t n) {
+    static size_t(*_r)(char*,const char*,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"strlcpy"); return _r?_r(d,s,n):0; }
+
+/* strlcat */
+__attribute__((used)) __attribute__((externally_visible))
+size_t _bf_strlcat(char *d, const char *s, size_t n);
+__asm__(".symver _bf_strlcat,strlcat@@LIBC");
+__attribute__((externally_visible))
+size_t _bf_strlcat(char *d, const char *s, size_t n) {
+    static size_t(*_r)(char*,const char*,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"strlcat"); return _r?_r(d,s,n):0; }
+
+/* android_get_exported_namespace — LIBDL_ANDROID version */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_get_exported_ns(const char *name);
+__asm__(".symver _bf_get_exported_ns,android_get_exported_namespace@@LIBDL_ANDROID");
+__attribute__((externally_visible))
+void *_bf_get_exported_ns(const char *name) { (void)name; return NULL; }
+
+/* mmap64 */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_mmap64(void *a, size_t l, int p, int f, int d, off_t o);
+__asm__(".symver _bf_mmap64,mmap64@@LIBC");
+__attribute__((externally_visible))
+void *_bf_mmap64(void *a, size_t l, int p, int f, int d, off_t o) {
+    static void*(*_r)(void*,size_t,int,int,int,off_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"mmap"); return _r?_r(a,l,p,f,d,o):((void*)-1); }
+
+/* dprintf */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_dprintf(int fd, const char *f, ...);
+__asm__(".symver _bf_dprintf,dprintf@@LIBC");
+__attribute__((externally_visible))
+int _bf_dprintf(int fd, const char *f, ...) {
+    static int(*_r)(int,const char*,...)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"dprintf");
+    va_list ap; va_start(ap,f); int ret=_r?_r(fd,f,ap):-1; va_end(ap); return ret; }
+
+/* pthread_gettid_np */
+__attribute__((used)) __attribute__((externally_visible))
+long _bf_pthread_gettid_np(void *t);
+__asm__(".symver _bf_pthread_gettid_np,pthread_gettid_np@@LIBC");
+__attribute__((externally_visible))
+long _bf_pthread_gettid_np(void *t) {
+    static long(*_r)(void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"pthread_gettid_np"); return _r?_r(t):0; }
+
+/* android_get_device_api_level */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_get_device_api_level(void);
+__asm__(".symver _bf_get_device_api_level,android_get_device_api_level@@LIBC_Q");
+__attribute__((externally_visible))
+int _bf_get_device_api_level(void) { return 30; }
+
+/* sleep */
+__attribute__((used)) __attribute__((externally_visible))
+unsigned _bf_sleep(unsigned s);
+__asm__(".symver _bf_sleep,sleep@@LIBC");
+__attribute__((externally_visible))
+unsigned _bf_sleep(unsigned s) {
+    static unsigned(*_r)(unsigned)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"sleep"); return _r?_r(s):0; }
+
+/* getrlimit */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_getrlimit(int r, void *l);
+__asm__(".symver _bf_getrlimit,getrlimit@@LIBC");
+__attribute__((externally_visible))
+int _bf_getrlimit(int r, void *l) {
+    static int(*_r)(int,void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"getrlimit"); return _r?_r(r,l):-1; }
+
+/* posix_memalign */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_posix_memalign(void **p, size_t a, size_t s);
+__asm__(".symver _bf_posix_memalign,posix_memalign@@LIBC");
+__attribute__((externally_visible))
+int _bf_posix_memalign(void **p, size_t a, size_t s) {
+    static int(*_r)(void**,size_t,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"posix_memalign"); return _r?_r(p,a,s):-1; }
+
+/* lseek64 */
+__attribute__((used)) __attribute__((externally_visible))
+long long _bf_lseek64(int f, long long o, int w);
+__asm__(".symver _bf_lseek64,lseek64@@LIBC");
+__attribute__((externally_visible))
+long long _bf_lseek64(int f, long long o, int w) {
+    static long long(*_r)(int,long long,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"lseek64"); return _r?_r(f,o,w):-1; }
+
+/* readv */
+__attribute__((used)) __attribute__((externally_visible))
+long long _bf_readv(int f, const void *i, int n);
+__asm__(".symver _bf_readv,readv@@LIBC");
+__attribute__((externally_visible))
+long long _bf_readv(int f, const void *i, int n) {
+    static long long(*_r)(int,const void*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"readv"); return _r?_r(f,i,n):-1; }
+
+/* inet_ntoa */
+__attribute__((used)) __attribute__((externally_visible))
+char *_bf_inet_ntoa(void *i);
+__asm__(".symver _bf_inet_ntoa,inet_ntoa@@LIBC");
+__attribute__((externally_visible))
+char *_bf_inet_ntoa(void *i) {
+    static char*(*_r)(void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"inet_ntoa"); return _r?_r(i):NULL; }
+
+/* pthread_cond_clockwait — LIBC_R version (glibc 2.35+) */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_pthread_cond_clockwait(void *c, void *m, void *t, const void *a);
+__asm__(".symver _bf_pthread_cond_clockwait,pthread_cond_clockwait@@LIBC_R");
+__attribute__((externally_visible))
+int _bf_pthread_cond_clockwait(void *c, void *m, void *t, const void *a) {
+    static int(*_r)(void*,void*,void*,const void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"pthread_cond_clockwait"); return _r?_r(c,m,t,a):-1; }
+
+/* pipe2 */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_pipe2(int f[2], int fl);
+__asm__(".symver _bf_pipe2,pipe2@@LIBC");
+__attribute__((externally_visible))
+int _bf_pipe2(int f[2], int fl) {
+    static int(*_r)(int[2],int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"pipe2"); return _r?_r(f,fl):-1; }
+
+/* pthread_getname_np — LIBC_O version */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_pthread_getname_np(void *t, char *b, size_t l);
+__asm__(".symver _bf_pthread_getname_np,pthread_getname_np@@LIBC_O");
+__attribute__((externally_visible))
+int _bf_pthread_getname_np(void *t, char *b, size_t l) {
+    static int(*_r)(void*,char*,size_t)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"pthread_getname_np"); return _r?_r(t,b,l):-1; }
+
+/* memfd_create — LIBC_R */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_memfd_create(const char *n, unsigned f);
+__asm__(".symver _bf_memfd_create,memfd_create@@LIBC_R");
+__attribute__((externally_visible))
+int _bf_memfd_create(const char *n, unsigned f) {
+    static int(*_r)(const char*,unsigned)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"memfd_create"); return _r?_r(n,f):-1; }
+
+/* creat */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_creat(const char *p, int m);
+__asm__(".symver _bf_creat,creat@@LIBC");
+__attribute__((externally_visible))
+int _bf_creat(const char *p, int m) {
+    static int(*_r)(const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"creat"); return _r?_r(p,m):-1; }
+
+/* inflateInit_ — zlib */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_inflateInit_(void *s, const char *v, int w);
+__asm__(".symver _bf_inflateInit_,inflateInit_@@LIBC");
+__attribute__((externally_visible))
+int _bf_inflateInit_(void *s, const char *v, int w) {
+    static int(*_r)(void*,const char*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"inflateInit_"); return _r?_r(s,v,w):-1; }
+
+/* inflate — zlib */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_inflate(void *s, int f);
+__asm__(".symver _bf_inflate,inflate@@LIBC");
+__attribute__((externally_visible))
+int _bf_inflate(void *s, int f) {
+    static int(*_r)(void*,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"inflate"); return _r?_r(s,f):-1; }
+
+/* inflateEnd — zlib */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_inflateEnd(void *s);
+__asm__(".symver _bf_inflateEnd,inflateEnd@@LIBC");
+__attribute__((externally_visible))
+int _bf_inflateEnd(void *s) {
+    static int(*_r)(void*)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"inflateEnd"); return _r?_r(s):-1; }
+
+/* process_vm_readv */
+__attribute__((used)) __attribute__((externally_visible))
+long long _bf_process_vm_readv(int p, const void *l, unsigned long n, const void *r, unsigned long m, unsigned f);
+__asm__(".symver _bf_process_vm_readv,process_vm_readv@@LIBC");
+__attribute__((externally_visible))
+long long _bf_process_vm_readv(int p, const void *l, unsigned long n, const void *r, unsigned long m, unsigned f) {
+    static long long(*_r)(int,const void*,unsigned long,const void*,unsigned long,unsigned)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"process_vm_readv"); return _r?_r(p,l,n,r,m,f):-1; }
+
+/* tgkill */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_tgkill(int t, int u, int s);
+__asm__(".symver _bf_tgkill,tgkill@@LIBC");
+__attribute__((externally_visible))
+int _bf_tgkill(int t, int u, int s) {
+    static int(*_r)(int,int,int)=NULL;
+    if(!_r)_r=dlsym(RTLD_NEXT,"tgkill"); return _r?_r(t,u,s):-1; }
+
+/* android_link_namespaces — LIBDL_ANDROID */
+__attribute__((used)) __attribute__((externally_visible))
+int _bf_android_link_ns(void *ns);
+__asm__(".symver _bf_android_link_ns,android_link_namespaces@@LIBDL_ANDROID");
+__attribute__((externally_visible))
+int _bf_android_link_ns(void *ns) { (void)ns; return 0; }
+
+/* android_create_namespace — LIBDL_ANDROID */
+__attribute__((used)) __attribute__((externally_visible))
+void *_bf_android_create_ns(const char *n, const char *p, const char *l, unsigned t, const char *x, void *a);
+__asm__(".symver _bf_android_create_ns,android_create_namespace@@LIBDL_ANDROID");
+__attribute__((externally_visible))
+void *_bf_android_create_ns(const char *n, const char *p, const char *l, unsigned t, const char *x, void *a) { (void)n;(void)p;(void)l;(void)t;(void)x;(void)a; return NULL; }
 
 /* ===== Common glibc re-exports under LIBC version =====
  * These are basic C functions referenced from GSI libs with version LIBC

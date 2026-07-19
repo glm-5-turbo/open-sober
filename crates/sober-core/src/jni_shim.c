@@ -544,16 +544,27 @@ int main(int argc, char** argv) {
     if (!bionic_shim) {
         fprintf(stderr, "[jni_shim] WARNING: libbionic_shim.so not found: %s\n", dlerror());
     } else {
-        // Get the dispatch table address and fill it from here
+        // Get the dispatch table address and fill the CRITICAL entries
+        // (dl* functions: dlopen, dlsym, dlclose, dladdr, dlerror) that
+        // are needed during __bf_c_resolve to avoid circular resolution.
+        // The rest are resolved lazily on first call via __bf_c_resolve.
+        // PREVIOUSLY we pre-filled ALL 392 entries here, but that caused
+        // issues because dlsym(RTLD_DEFAULT) in a static binary returns
+        // addresses from this binary's libc rather than the ARM64 glibc's.
         void **table = dlsym(bionic_shim, "__bf_tramp_table");
         if (table) {
-            fprintf(stderr, "[jni_shim] Filling bionic dispatch table (%zu entries)...\n",
-                    sizeof(bf_table_syms)/sizeof(bf_table_syms[0]));
-            for (size_t i = 0; i < sizeof(bf_table_syms)/sizeof(bf_table_syms[0]); i++) {
-                if (!table[i]) {
-                    table[i] = dlsym(RTLD_DEFAULT, bf_table_syms[i]);
+            // Only pre-fill entries 12-15 (dladdr, dlerror, dlopen, dlsym)
+            // plus dlclose (index 76) and __cxa_finalize (index 0)
+            // and __cxa_atexit (index 1) — these are needed for resolution
+            const int critical_indices[] = {0, 1, 2, 12, 13, 14, 15, 76};
+            for (size_t ci = 0; ci < sizeof(critical_indices)/sizeof(critical_indices[0]); ci++) {
+                int idx = critical_indices[ci];
+                if (!table[idx]) {
+                    table[idx] = dlsym(RTLD_DEFAULT, bf_table_syms[idx]);
                 }
             }
+            fprintf(stderr, "[jni_shim] Pre-filled %zu critical dispatch table entries (lazy for rest)\n",
+                    sizeof(critical_indices)/sizeof(critical_indices[0]));
         } else {
             fprintf(stderr, "[jni_shim] WARNING: __bf_tramp_table not found in bionic shim\n");
         }
