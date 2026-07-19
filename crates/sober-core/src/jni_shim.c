@@ -279,14 +279,9 @@ static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
 
     // If mprotect fails, try advancing PC by 4 without mprotect
     // (transient QEMU TLB issue — retry might work after the fault handler returns)
-    static uintptr_t last_skip_page = 0;
-    if (last_skip_page != fault_page) {
-        last_skip_page = fault_page;
-        u->uc_mcontext.pc = pc + 4;
-        if (jni_segv_count <= 5)
-            fprintf(stderr, "[jni_segv] #%d: skip-retry 0x%lx\n", jni_segv_count, fault_page);
-        return;
-    }
+    // Only do this once to avoid infinite loops
+    // Skip-retry was removed because it can skip store instructions
+    // and cause stack smashing. Just chain to the old handler.
 
     // Can't handle — chain
     fprintf(stderr, "[jni_segv] #%d: unhandled pc=0x%lx fault=0x%lx\n", jni_segv_count, pc, fault_addr);
