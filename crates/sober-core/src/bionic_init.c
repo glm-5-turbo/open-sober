@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <dlfcn.h>
+#include <pthread.h>
 
 /* Dispatch table and data — defined in bionic_shim.S */
 extern void *__bf_tramp_table[785];
@@ -2441,6 +2442,70 @@ void* __bf_c_resolve(int index) {
 }
 
 
+/* ===== pthread_mutex_t ABI compatibility fix =====
+ *
+ * GSI libraries compiled for Bionic may have pthread_mutex_t structs
+ * with different field layouts or initialization than glibc expects.
+ *
+ * glibc 2.43 ARM64 __pthread_mutex_lock disassembly shows the fast path
+ * check: tst w1, #0x7c (test __kind bits 2..6). If ANY of these bits are
+ * set, glibc branches to __pthread_mutex_lock_full which may trigger
+ * __pthread_tpp_change_priority().
+ *
+ * glibc ARM64 struct __pthread_mutex_s layout:
+ *   offset 0:  int __lock        (4 bytes)  — low bits = futex state
+ *   offset 4:  unsigned int __count    (4 bytes)  — recursion count
+ *   offset 8:  int __owner       (4 bytes)  — owning thread ID
+ *   offset 12: unsigned int __nusers  (4 bytes)  — waiters count
+ *   offset 16: int __kind        (4 bytes)  — mutex type in bits 0-1
+ *   offset 20: int __spins       (4 bytes)
+ *   offset 24: __pthread_list_t __list    (16 bytes, two pointers)
+ *
+ * glibc checks __kind bits 2..6 (mask 0x7c) to decide fast vs full path.
+ * Glibc's PTHREAD_MUTEX_NORMAL (type=0) with no flags set passes this check.
+ * Any non-zero in bits 2..6 means the mutex has protocol flags or extended
+ * type bits set, triggering lock_full which may call TPP.
+ *
+ * The wrapper intercepts all mutex lock functions to sanitize __kind
+ * before forwarding to the real glibc implementation.
+ */
+#define MUTEX_KIND_FLAG_MASK 0x7c  /* The bits that trigger lock_full */
+
+/* Forward declarations */
+typedef int (*pthread_mutex_lock_fn_t)(pthread_mutex_t *mutex);
+typedef int (*pthread_mutex_trylock_fn_t)(pthread_mutex_t *mutex);
+typedef int (*pthread_mutex_timedlock_fn_t)(pthread_mutex_t *mutex, const struct timespec *abstime);
+typedef int (*pthread_mutex_init_fn_t)(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
+
+static pthread_mutex_lock_fn_t real_pthread_mutex_lock = NULL;
+static pthread_mutex_trylock_fn_t real_pthread_mutex_trylock = NULL;
+static pthread_mutex_timedlock_fn_t real_pthread_mutex_timedlock = NULL;
+
+/* Sanitize __kind field to clear bits 2..6 that would trigger lock_full */
+static inline void sanitize_mutex(pthread_mutex_t *mutex) {
+    int *kind_ptr = (int *)((char *)mutex + 16);
+    int kind = *kind_ptr;
+    if (kind & MUTEX_KIND_FLAG_MASK) {
+        /* Zero only the type-flag bits, keep the mutex type (bits 0-1) */
+        *kind_ptr = kind & ~MUTEX_KIND_FLAG_MASK;
+    }
+}
+
+static int bf_pthread_mutex_lock_wrapper(pthread_mutex_t *mutex) {
+    if (mutex) sanitize_mutex(mutex);
+    return real_pthread_mutex_lock(mutex);
+}
+
+static int bf_pthread_mutex_trylock_wrapper(pthread_mutex_t *mutex) {
+    if (mutex) sanitize_mutex(mutex);
+    return real_pthread_mutex_trylock(mutex);
+}
+
+static int bf_pthread_mutex_timedlock_wrapper(pthread_mutex_t *mutex, const struct timespec *abstime) {
+    if (mutex) sanitize_mutex(mutex);
+    return real_pthread_mutex_timedlock(mutex, abstime);
+}
+
 /* ===== Init function (called from JNI shim) ===== */
 __attribute__((visibility("default")))
 void __bf_init_data(void) {
@@ -2475,4 +2540,29 @@ void __bf_init_data(void) {
     if (!__bf_data_signgam)
         *(void **)(__bf_data_signgam) = dlsym(self, "signgam");
     dlclose(self);
+
+    /* Install mutex wrappers to fix ABI mismatches between Bionic and glibc.
+     *
+     * GSI libraries compiled for Bionic may have pthread_mutex_t __kind
+     * fields with type-flag bits (bits 2..6) set that glibc interprets as
+     * protocol flags (PTHREAD_PRIO_PROTECT, etc.). When glibc sees these
+     * bits, it takes the lock_full path which may call __pthread_tpp_change_priority()
+     * and assertion-fail on non-RT threads.
+     *
+     * Index 38 = pthread_mutex_lock
+     * Index 124 = pthread_mutex_trylock
+     * Index 780 = pthread_mutex_timedlock
+     */
+    if (!real_pthread_mutex_lock) {
+        real_pthread_mutex_lock = (pthread_mutex_lock_fn_t)__bf_c_resolve(38);
+        __bf_tramp_table[38] = (void *)bf_pthread_mutex_lock_wrapper;
+    }
+    if (!real_pthread_mutex_trylock) {
+        real_pthread_mutex_trylock = (pthread_mutex_trylock_fn_t)__bf_c_resolve(124);
+        __bf_tramp_table[124] = (void *)bf_pthread_mutex_trylock_wrapper;
+    }
+    if (!real_pthread_mutex_timedlock) {
+        real_pthread_mutex_timedlock = (pthread_mutex_timedlock_fn_t)__bf_c_resolve(780);
+        __bf_tramp_table[780] = (void *)bf_pthread_mutex_timedlock_wrapper;
+    }
 }
