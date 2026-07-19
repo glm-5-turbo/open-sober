@@ -286,3 +286,22 @@ int _bf_sem_clockwait_impl(int *sem, int clockid, const struct timespec *abstime
     return sem_clockwait(sem, clockid, abstime);
 }
 __asm__(".symver _bf_sem_clockwait_impl, sem_clockwait@@LIBC_R");
+
+/* strchrnul — needed by libstagefright_xmlparser under LIBC_N. */
+char *_bf_strchrnul_impl(const char *s, int c) {
+    extern char *strchrnul(const char *, int);
+    return strchrnul(s, c);
+}
+__asm__(".symver _bf_strchrnul_impl, strchrnul@@LIBC_N");
+
+/* pthread_setschedprio — needed by libmediautils.so under LIBC_P. */
+int _bf_pthread_setschedprio_impl(int tid, int prio) {
+    extern int pthread_setschedprio(int, int);
+    return pthread_setschedprio(tid, prio);
+}
+__asm__(".symver _bf_pthread_setschedprio_impl, pthread_setschedprio@@LIBC_P");
+
+/* android_mallopt — Bionic-only. libmediautils.so needs android_mallopt@@LIBC_Q.
+ * The gen script exports it as @@LIBC which doesn't match. */
+void _bf_android_mallopt_libc_q(void) {}
+__asm__(".symver _bf_android_mallopt_libc_q, android_mallopt@@LIBC_Q");
