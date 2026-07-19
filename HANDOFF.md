@@ -1,10 +1,19 @@
 # Open Sober - Agent Handoff
 
+## ⚠️ CRITICAL RULES — READ FIRST
+
+1. **NO WORKTREES.** Do NOT create git worktrees. Ever. The last agent created 8 worktrees and they all conflicted with each other.
+2. **NO BRANCHES.** Work directly on `dev` branch. No feature branches, no topic branches.
+3. **CLAUDE.md** at repo root has these rules — read it.
+4. **Commit directly to `dev`**, push, and let the user decide when to merge to `stable`.
+5. If you need to research something, do it inline or in a temp dir outside the repo.
+6. **`cargo check --workspace`** before committing. **`cargo test --workspace`** before pushing.
+
 ## Project Overview
 
 **Repo:** https://github.com/glm-5-turbo/open-sober
-**Branches:** `stable` (release), `dev` (active development)
-**Build:** `cargo build --release` — produces `./target/release/open-sober`
+**Branches:** `stable` (release), `dev` (active development — work here)
+**Build:** `cargo build --release`
 **Tests:** `cargo test --workspace` — 33 tests passing, zero warnings
 
 Open Sober is an open-source reimplementation of VinegarHQ's Sober — a runtime that runs the Roblox Android APK on Linux natively.
@@ -164,3 +173,43 @@ Estimated ~10-30 more iterations.
 - `build_bridges.sh` now links against `libc_glibc.so` using `-Wl,--version-script` (no whole-archive needed)
 - The bridge `libc.so` provides the VERDEF table (LIBC et al) while glibc symbols keep their original GLIBC_2.17 versions
 - The bionic shim (LD_PRELOAD'd) provides the @@LIBC-versioned aliases
+
+## 🎯 Next Agent — Your Priority Task
+
+### Finish the Bionic→glibc symbol bridge
+
+The current blocker is: **`libc++.so: undefined symbol: _Unwind_RaiseException, version LIBC_R`**
+
+There are ~10-30 more missing LIBC-versioned symbols in the GSI libraries. Do this:
+
+1. **Build an auto-patcher script** (or extend the pattern manually):
+   - Run `dlopen("libc++.so")` under QEMU via the JNI shim
+   - Catch "undefined symbol: X, version Y" errors
+   - Auto-generate the stub in `bionic_init.c` using the established pattern:
+     ```c
+     __attribute__((used)) __attribute__((externally_visible)) void X_impl() {
+         // dlsym(RTLD_NEXT, "X") for real glibc version, or empty stub
+     }
+     __asm__(".symver X_impl, X@@LIBC_R");
+     ```
+   - Add version block to `bionic_version.ver` (LIBC_R, LIBC_Q, etc.)
+   - Rebuild and loop
+
+2. **Fix all iteration blockers** until `dlopen("libc++.so")` succeeds
+
+3. **Then progress to loading `libroblox.so` itself**
+
+4. **Do NOT create worktrees or feature branches. Work on `dev` directly.**
+
+### After bionic shim is done:
+- JNI function table (~233 functions)
+- EGL/GLES→Vulkan translation (see GRAPHICS_RECOMMENDATION.md)
+- Window creation + input handling
+
+### Environment:
+- QEMU: `qemu-aarch64` at `/usr/bin/qemu-aarch64`
+- Cross-compiler: `aarch64-linux-gnu-gcc`
+- GSI libs: `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
+- Roblox APK: `~/Documents/Projects/open-sober/roblox-android.apk`
+- Android NDK: `/tmp/ndk_extract/`
+- GSI image mount: `/tmp/gsi_mount/`
