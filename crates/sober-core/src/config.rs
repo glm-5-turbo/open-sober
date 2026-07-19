@@ -87,8 +87,9 @@ impl Default for SoConfig {
 }
 
 fn which_qemu() -> PathBuf {
-    // Check common locations
+    // Check common locations — prefer custom VDSO-free build
     for path in &[
+        "/tmp/qemu-10.2.1/build/qemu-aarch64",
         "/usr/bin/qemu-aarch64",
         "/usr/local/bin/qemu-aarch64",
         "/run/current-system/sw/bin/qemu-aarch64",

@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <sys/mman.h>
 
 // Minimal JNI types
 typedef int jint;
@@ -39,6 +40,9 @@ typedef struct JavaVM_ JavaVM;
 typedef struct { const char* name; const char* signature; void* fnPtr; } JNINativeMethod;
 
 #define STUB_LOG(fmt, ...) fprintf(stderr, "[jni] " fmt "\n", ##__VA_ARGS__)
+
+/* Global canary value — persists in BSS, libroblox.so reads this via GOT */
+static uintptr_t g_canary = 0x0A0B0C0D0E0F1011ULL;
 
 // ============== All stub functions ==============
 
@@ -488,26 +492,36 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "[jni_shim] Loaded successfully\n");
 
-    // Fix __stack_chk_guard in libroblox.so's data section
-    // The code at JNI_OnLoad does: adrp x24, imm; ldr x24, [x24, #1080]; ldr x8, [x24]
-    // This loads a pointer from offset 1080 within a page, then dereferences it.
-    // The pointer is in the library's data/BSS and should point to a non-zero value.
-    // Find the base address of the loaded library
+    // Fix __stack_chk_guard in libroblox.so's data section.
+    // The GOT entry pointing to __stack_chk_guard is at a known offset
+    // from the library base. After RTLD_NOW dlopen, the GOT may be in a
+    // RELRO region (read-only), so we mprotect it to writable first.
     Dl_info dl_info;
     if (dladdr((void*)dlsym(handle, "JNI_OnLoad"), &dl_info)) {
         uintptr_t base = (uintptr_t)dl_info.dli_fbase;
-        // The GOT pointer is at offset 0x6473438 from the base (file vaddr)
-        // This is in the writable data segment
         uintptr_t guard_ptr_addr = base + 0x6473438;
         uintptr_t* guard_ptr = (uintptr_t*)guard_ptr_addr;
-        uintptr_t canary = 0x0A0B0C0D0E0F1011ULL;
+        uintptr_t canary_val = 0x0A0B0C0D0E0F1011ULL;
         fprintf(stderr, "[jni_shim] libroblox base=%p, guard_ptr at %p = %p\n",
                 (void*)base, (void*)guard_ptr, (void*)*guard_ptr);
         if (*guard_ptr == 0) {
-            // Create a canary value in a known location
-            *guard_ptr = (uintptr_t)&canary;
-            canary = 0x0A0B0C0D0E0F1011ULL;
-            fprintf(stderr, "[jni_shim] stack_chk_guard patched\n");
+            // GOT may be RELRO-protected (read-only). Make page writable.
+            uintptr_t page_start = guard_ptr_addr & ~0xfffUL;
+            if (mprotect((void*)page_start, 0x4000, PROT_READ | PROT_WRITE) == 0) {
+                fprintf(stderr, "[jni_shim] GOT page made writable\n");
+            } else {
+                fprintf(stderr, "[jni_shim] WARNING: mprotect failed: %m\n");
+            }
+            // Store the global canary address in the GOT entry
+            *guard_ptr = (uintptr_t)&g_canary;
+            fprintf(stderr, "[jni_shim] stack_chk_guard patched (canary at %p = 0x%lx)\n",
+                    (void*)*guard_ptr, g_canary);
+            // Also set glibc's __stack_chk_guard directly (accessed via TPIDR)
+            uintptr_t* libc_guard = (uintptr_t*)dlsym(RTLD_NEXT, "__stack_chk_guard");
+            if (libc_guard && *libc_guard == 0) {
+                *libc_guard = g_canary;
+                fprintf(stderr, "[jni_shim] libc __stack_chk_guard set at %p\n", (void*)libc_guard);
+            }
         }
     }
 
