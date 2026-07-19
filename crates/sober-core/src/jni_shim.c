@@ -47,19 +47,46 @@ typedef struct { const char* name; const char* signature; void* fnPtr; } JNINati
 /* Global canary value */
 static uintptr_t g_canary = 0x0A0B0C0D0E0F1011ULL;
 
+// ============== Tracking stub helpers ==============
+
+// Track classes, methods, and fields to return unique pointers per name
+// so that Roblox can distinguish between different classes/methods
+#define MAX_TRACKED 512
+static char *tracked_names[MAX_TRACKED];
+static void *tracked_ptrs[MAX_TRACKED];
+static int tracked_count = 0;
+
+static void *track_ptr(const char *name) {
+    if (!name) name = "";
+    for (int i = 0; i < tracked_count; i++)
+        if (strcmp(tracked_names[i], name) == 0)
+            return tracked_ptrs[i];
+    if (tracked_count >= MAX_TRACKED) return (void*)(uintptr_t)(0x1000 + tracked_count);
+    char *copy = strdup(name);
+    // Use the string address itself as the unique pointer
+    if (copy) { tracked_names[tracked_count] = copy; tracked_ptrs[tracked_count] = copy; }
+    else { tracked_names[tracked_count] = (char*)name; tracked_ptrs[tracked_count] = (void*)(uintptr_t)(0x2000 + tracked_count); }
+    return tracked_ptrs[tracked_count++];
+}
+
 // ============== Stub functions ==============
 
 static void* stub_voidp(void) { static char buf[64]; return buf; }
 static jint   stub_GetVersion(JNIEnv* e) { STUB_LOG("GetVersion"); return JNI_VERSION_1_6; }
-static jclass stub_FindClass(JNIEnv* e, const char* n) { STUB_LOG("FindClass: %s", n?n:"NULL"); return (jclass)stub_voidp(); }
-static jmethodID stub_GetMethodID(JNIEnv* e, jclass c, const char* n, const char* s) { STUB_LOG("GetMethodID: %s %s", n?n:"NULL", s?s:"NULL"); return (jmethodID)(uintptr_t)0x1001; }
-static jmethodID stub_GetStaticMethodID(JNIEnv* e, jclass c, const char* n, const char* s) { STUB_LOG("GetStaticMethodID: %s %s", n?n:"NULL", s?s:"NULL"); return (jmethodID)(uintptr_t)0x2001; }
-static jfieldID stub_GetFieldID(JNIEnv* e, jclass c, const char* n, const char* s) { return (jfieldID)(uintptr_t)0x3001; }
+static jclass stub_FindClass(JNIEnv* e, const char* n) { STUB_LOG("FindClass: %s", n?n:"NULL"); return (jclass)track_ptr(n); }
+static jmethodID stub_GetMethodID(JNIEnv* e, jclass c, const char* n, const char* s) { STUB_LOG("GetMethodID: %s %s", n?n:"NULL", s?s:"NULL"); return (jmethodID)track_ptr(n); }
+static jmethodID stub_GetStaticMethodID(JNIEnv* e, jclass c, const char* n, const char* s) { STUB_LOG("GetStaticMethodID: %s %s", n?n:"NULL", s?s:"NULL"); return (jmethodID)track_ptr(n); }
+static jfieldID stub_GetFieldID(JNIEnv* e, jclass c, const char* n, const char* s) { return (jfieldID)track_ptr(n); }
 static jfieldID stub_GetStaticFieldID(JNIEnv* e, jclass c, const char* n, const char* s) { return (jfieldID)(uintptr_t)0x4001; }
-static jstring stub_NewStringUTF(JNIEnv* e, const char* u) { return (jstring)stub_voidp(); }
-static const char* stub_GetStringUTFChars(JNIEnv* e, jstring s, jboolean* c) { if(c)*c=1; return ""; }
+static jstring stub_NewStringUTF(JNIEnv* e, const char* u) { return (jstring)track_ptr(u); }
+static const char* stub_GetStringUTFChars(JNIEnv* e, jstring s, jboolean* c) { if(c)*c=0; return s ? (const char*)s : ""; }
 static void stub_ReleaseStringUTFChars(JNIEnv* e, jstring s, const char* u) {}
-static jint stub_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) { STUB_LOG("RegisterNatives: %d methods", n); return JNI_OK; }
+static jint stub_RegisterNatives(JNIEnv* e, jclass c, const JNINativeMethod* m, jint n) {
+    STUB_LOG("RegisterNatives: %d methods", n);
+    for (jint i = 0; i < n && i < 5; i++)
+        STUB_LOG("  native[%d]: name=%s sig=%s fn=%p", i, m[i].name?:"?", m[i].signature?:"?", m[i].fnPtr);
+    return JNI_OK;
+}
 static jobject stub_NewGlobalRef(JNIEnv* e, jobject o) { return o; }
 static void stub_DeleteGlobalRef(JNIEnv* e, jobject o) {}
 static void stub_DeleteLocalRef(JNIEnv* e, jobject o) {}
