@@ -290,23 +290,39 @@ mutexes, and add a shim that ensures glibc-compatible initialization.
 | `dl_iterate_phdr` in `jni_shim.c` | Reliable for library map |
 | `__builtin_return_address(N)` | N=0→trampoline addr; N=1→0 (broken frame chain). Need assembly LR save |
 
+## 🚧 Fixes Applied This Session (2026-07-19, session 2)
+
+### ✅ DONE: pthread_mutex_t ABI compatibility fix (`bionic_init.c`)
+**Commit:** `eb4dca9` — intercept `pthread_mutex_lock` (index 38), `pthread_mutex_trylock` (index 124), and `pthread_mutex_timedlock` (index 780) in the bionic trampoline table. The wrappers sanitize the `__kind` field (bits 2..6, mask `0x7c`) that glibc checks to decide between fast-path and `lock_full` path. GSI libraries compiled for Bionic may have these bits set, causing glibc's TPP protection assertion on non-RT threads.
+
+**Key finding from glibc 2.43 ARM64 `pthread_mutex_lock` disassembly:**
+- `tst w1, #0x7c` where `w1 = mutex->__kind` (offset 0x10)
+- If ANY of bits 2..6 set → branch to `__pthread_mutex_lock_full` → possible TPP crash
+- Wrapper clears these bits before calling real glibc implementation
+
+### ✅ DONE: Complete JNI function table (`jni_shim.c`)
+**Commit:** `2755262` — fill all 256 JNIEnv function table slots with safe stubs instead of NULL. Previously many slots were left NULL (GetSuperclass, IsAssignableFrom, PushLocalFrame, PushLocalFrame, EnsureLocalCapacity, etc.). Now every slot returns a safe default to prevent SIGSEGV on any JNI call from `JNI_OnLoad`.
+
+### ✅ DONE: Wire QEMU bridge + sysroot setup (`qemu.rs`)
+**Commit:** `c69b432` — add `setup_bridges()` function that:
+1. Runs `build_bridges.sh` to compile version-tagged libc.so, libm.so, libdl.so bridges
+2. Copies ARM64 glibc libraries (libc.so.6, libm.so.6, libdl.so.2, ld-linux-aarch64.so.1) into the Android env sysroot for QEMU `-L`
+3. Copies libglibc.so for the bionic shim link step
+Calls `setup_bridges()` in `launch_roblox()` before `setup_bionic_shim()`.
+
+### 📈 Remaining Blockers
+
+1. **Actually run QEMU and test** — All the wiring is done, but QEMU launch hasn't been executed with the new changes. The custom QEMU with VDSO disabled is missing (`/tmp/qemu-build/qemu-10.2.1/build/qemu-aarch64`). The user needs to rebuild it or use the system QEMU-10.2.1.
+
+2. **Find the real caller** — The trampoline in `bionic_shim.S` still clobbers x30. For debugging, save x30 before resolve and pass it to the wrapper so `__builtin_return_address` gives the actual GSI library caller. (Medium priority — the mutex sanitization already prevents the crash.)
+
+3. **EGL/GLES graphics stubs** — See GRAPHICS_RECOMMENDATION.md. Mesa+zink approach with libEGL.so/libGLESv2.so dlopen-forwarding stubs. Not yet started — blocked behind runtime verification.
+
+4. **Window/input handling** — SDL2-based window creation and mouse→touch input mapping. Not yet started.
+
 ### 🎯 Next Agent — Priority Actions
 
-1. **Fix pthread_mutex_t initialization** — The zero-initialized mutex from GSI
-   libraries causes glibc's TPP assertion. Fix options:
-   a. Add a `pthread_mutex_init` interceptor that ensures glibc-compatible init
-   b. Add a constructor in `bionic_init.c` that initializes known static mutexes
-   c. Modify the shim to intercept `pthread_mutex_lock` and fix the protocol bits
-      before calling glibc's implementation
-   
-2. **Find the real caller** — Modify the trampoline in `bionic_shim.S` to save x30
-   before resolving, so `__builtin_return_address` gives the actual GSI library caller.
-   Add to the debug wrapper: save `x30` in the resolver and pass it to the wrapper.
-
-3. **Complete JNI stubs** — Extend JNI function table with remaining missing slots.
-   JNI_OnLoad makes at least one JNI call (FindClass) before crashing; more stubs
-   will be needed once the mutex crash is resolved.
-
-4. **Wire qemu.rs integration** — Replace standalone test with Rust-controlled QEMU launch.
-
-5. **Graphics (Phase C)** — See GRAPHICS_RECOMMENDATION.md.
+1. **Rebuild custom QEMU** with VDSO disabled (from source at `/tmp/qemu-build/qemu-10.2.1/`) or verify system QEMU works
+2. **Run the full pipeline** — `open-sober play --apk roblox-android.apk` to test the integrated QEMU + JNI shim + bionic shim + bridges
+3. **Debug remaining crashes** once the runtime reaches JNI_OnLoad successfully
+4. **EGL/GLES stubs** (Phase C graphics) — Blocked until step 2-3 complete
