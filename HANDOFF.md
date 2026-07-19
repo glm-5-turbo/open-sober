@@ -245,7 +245,56 @@ libEGL.so (CURRENT)
 ~50+ stubs added across version tags LIBC, LIBC_N, LIBC_O, LIBC_Q, LIBC_R, LIBDL_ANDROID.
 New version blocks: LIBC_Q, LIBC_S, LIBC_T, LIBC_U, LIBC_V, LIBDL_ANDROID.
 
-### ⚠️ Current Blocker: dlopen("libc++.so") hangs during RELR processing
+### ✅ MAJOR BREAKTHROUGH: dlopen("libc++.so") SUCCEEDS! (2026-07-19)
+
+The bridge libc.so now provides 169 LIBC-versioned symbols via auto-generated forwarding stubs.
+`dlopen("libc++.so")` returns success — the library loads and fully relocates!
+
+**How it works:** `gen_bridge_stubs.py` (in repo at `crates/sober-core/src/bridges/`) extracts all
+UNDEF LIBC-versioned symbols from the target library and generates C wrapper functions that:
+1. Declare the glibc function as `extern` (creating an unversioned reference)
+2. Define a tail-call wrapper that branches to the glibc function
+3. The version script `bridge_version.ver LIBC { global: *; }` tags them with `@@LIBC`
+
+**153 function stubs + 3 data objects (stderr/stdin/stdout from bridge_libc.c) = 169 LIBC symbols**
+
+**Key fix for libm.so DT_INIT crash:** The bridge libm.so had `DT_INIT=0x0`, which caused
+glibc's `call_init` to jump to `base+0=base` = ELF header = SIGILL. Fix: set DT_INIT to point
+to a harmless ARM64 `ret` instruction (opcode 0xd65f03c0) at vaddr 0xa18 within libm.so.
+
+**Build commands:**
+```bash
+SYSROOT=~/.cache/open-sober/android-env/system/lib64
+SCRIPT_DIR=crates/sober-core/src/bridges
+
+# Generate and compile stubs
+python3 "$SCRIPT_DIR/gen_bridge_stubs.py" "$SYSROOT/gsi_libc++.so" /tmp/bridge_stubs.c
+aarch64-linux-gnu-gcc -c -fPIC -O2 -o /tmp/bridge_stubs.o /tmp/bridge_stubs.c
+
+# Build bridge libc.so
+aarch64-linux-gnu-gcc -shared -fPIC -O2 -o "$SYSROOT/libc.so" \
+    "$SCRIPT_DIR/bridge_libc.c" /tmp/bridge_stubs.o \
+    -Wl,--version-script,"$SCRIPT_DIR/bridge_version.ver" \
+    -Wl,-soname,libc.so -L/usr/aarch64-linux-gnu/lib -lc -lm -ldl -nostartfiles
+
+# Fix libm.so DT_INIT (set to a 'ret' instruction)
+python3 -c "
+import struct
+p='$SYSROOT/libm.so'; d=bytearray(open(p,'rb').read()); dyn_off=0xfe00
+for off in range(dyn_off, dyn_off+0x1c0, 16):
+    if struct.unpack('<Q', d[off:off+8])[0]==0xc:
+        # Point DT_INIT to a ret instruction at vaddr 0xa18
+        struct.pack_into('<Q', d, off+8, 0xa18); break
+open(p,'wb').write(bytes(d))
+"
+```
+
+**Remaining issue:** After dlopen succeeds, a SIGILL occurs during post-load init of
+a dependency library. Likely the same `call_init` base-address issue in another
+library (libdl.so or libc++.so's own dependency chain). Debug with strace:
+- `qemu-aarch64 -strace -L ... -E LD_PRELOAD=libbionic_shim.so -E ROBLOX_LIB=libc++.so jni_shim`
+
+### ⚠️ Old Blocker (RESOLVED): dlopen("libc++.so") hangs during RELR processing
 
 The RELA decompression is SOLVED (see below). The remaining blocker is that `dlopen("libc++.so")` hangs with RELR enabled, and segfaults when RELR is disabled. Detailed findings:
 
