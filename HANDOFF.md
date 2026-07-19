@@ -35,79 +35,59 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 **Key APK:** `~/Documents/Projects/open-sober/roblox-android.apk` (178MB, not in git)
 **APK structure:** `assets/app.zip` → `config.arm64_v8a.apk` → `lib/arm64-v8a/libroblox.so` (101MB, NDK r28c, Android 26)
 
-## Current Status (July 19, session 5 — One-time init deadlock FIXED, QEMU JIT crash intermittent)
+## Current Status (July 19, after sessions 5+5b)
 
 ### ✅ Complete (all sessions)
 
-1. **Custom QEMU built + PATCHED** — Static 41MB binary from `/tmp/qemu-10.2.1/`. **Patched copy** at `~/.cache/open-sober/qemu-patched` with `CF_NO_GOTO_TB` fix + `tb_set_jmp_target` no-op.
+1. **Custom QEMU** built from `/tmp/qemu-10.2.1/` — patched copy at `~/.cache/open-sober/qemu-patched`.
 2. **pthread_mutex_t ABI fix** (`bionic_init.c`) — trampoline-based mutex interceptors.
-3. **Complete JNI function table** (`jni_shim.c`) — all 256 JNIEnv slots filled. Name-tracked pointers for FindClass/GetMethodID uniqueness.
+3. **Complete JNI function table** (`jni_shim.c`) — all 256 JNIEnv slots filled.
 4. **QEMU bridge wiring** (`qemu.rs`) — version bridges for libc/libm/libdl.
 5. **Canary GOT patching** — stack_chk_guard write via mprotect.
-6. **SIGSEGV handler** — RELRO faults, self-write JIT bugs, NULL deref returns valid JNIEnv*.
+6. **SIGSEGV handler** — RELRO faults, self-write JIT bugs, NULL deref handling.
 7. **Pre-mprotect RELRO** — ~464 pages made RW before JNI_OnLoad.
-8. **Pre-resolved trampoline table** — 358 functions resolved via RTLD_DEFAULT (up from 20).
+8. **Pre-resolved trampoline table** — 358 functions via RTLD_DEFAULT.
 9. **Canary check patched out** in code copy.
-10. **JNI_OnLoad code copy** — 128KB copy with adrp fix (all 4 immlo variants, 9010 instructions).
-11. **BL/B/B.cond/CBZ/TBZ offset fix** — recalculation for calls outside copy range.
-12. **GOT + init_array pre-mprotect** — explicit ranges for libroblox.so.
-13. **PROT_NONE→PROT_RW double-mprotect** — forces QEMU TLB flush.
-14. **Name-tracked JNI stubs** — unique pointers per class/method name.
-15. **Init guard deadlock FIXED** — code copy patch replaces `bl 26c0c7c` (mutex+condvar) with `mov w0,#1; nop`, bypassing the futex deadlock.
-16. **NULL deref safety** — SIGSEGV handler returns valid JNIEnv* pointer when code dereferences NULL.
+10. **JNI_OnLoad code copy** — 128KB copy with adrp fix + BL/B.cond/CBZ/TBZ offset fix.
+11. **Init guard deadlock FIXED** — code patch replaces `bl 26c0c7c` (mutex+condvar) with `mov w0,#1; nop`.
+12. **Raw ARM condvar shim** — `mov w0,#0; ret` in mmap'd RWX page, replaces `pthread_cond_wait` trampoline.
 
-### ✅ QEMU JIT BUG — Root cause patched but intermittent crashes remain
+### 🟡 Current Blocker — QEMU JIT page-boundary SMC crash on x86-64 host
 
-**Root cause:** QEMU's TCG `goto_tb` mechanism writes to the JIT code buffer. When the write address is at the end of a host page (`...fffb8`), x86_64 SMC detection triggers a host SIGSEGV, corrupting the JIT cache and causing guest SIGILL.
+**QEMU 10.2.1 TCG JIT** writes to its code buffer during translation (before jump patching). When the write lands at the end of a host page (`0x...ffb8` or `0x...fff8`), x86-64 Self-Modifying Code detection triggers a host SIGSEGV that QEMU cannot recover from. This corrupts the JIT cache and causes guest SIGILL.
 
-**Patches:**
-- `CF_NO_GOTO_TB` (`cpu-exec-common.c`): prevents goto_tb chaining
-- `tb_set_jmp_target` no-op (`cpu-exec.c`): prevents indirect jump patching writes to JIT buffer
+**Patches applied but insufficient:**
+- `CF_NO_GOTO_TB` — prevents goto_tb chaining writes
+- `tb_set_jmp_target` no-op — prevents indirect jump patching writes
+- The write comes from TCG code **generation** (literal pool fixup, relocations), not from jump patching
 
-**Intermittent:** Even with both patches, TCG code generation itself (literal pool fixup, etc.) writes to the JIT buffer during translation. These writes can also trigger SMC at page boundaries (~30% of runs).
+**Findings:**
+- `-one-insn-per-tb`, `-d nochain`, `-tb-size`, `-cpu max` all still crash
+- split-wx IS configured (`tcg_splitwx_diff` is set) but the RX view still gets corrupted
+- The crash is in QEMU itself (also affects Debian's system `qemu-aarch64`)
+- 100% failure rate in last session's runs (6/6), earlier it was ~30%
+- The memory layout changes from the expanded trampoline table (bigger BSS) likely made it deterministic
 
-### 🟡 Session 5 + 5b Progress — JNI_OnLoad init deadlock bypassed; QEMU JIT crash blocks further progress
+**The user says:** They will handle the QEMU JIT bug themselves. Don't try to patch QEMU further.
 
-**What was discovered:**
-- The `0% CPU` hang from session 4 was NOT a thread spawn — it was a one-time init guard using `pthread_mutex_lock` + `pthread_cond_wait` at function `26c0c7c`. The main thread calls into this init, which waits on a condvar that no other thread ever signals.
-- Function at `5e17fb8` checks BSS[0x6a26e48] for a JavaVM* pointer. When set, it treats the pointer as an object with a vtable and calls `vtable[6]` (which happens to be GetEnv from our JavaVM stub).
-- Multiple guard bytes at VA 0x6a26e30-0x6a26e48 control different initialization paths.
-- NULL dereference in JNI_OnLoad (`ldr x0, [sp, #16]` returns NULL, then `ldr x8, [x0]` faults).
+### What session 5 discovered about JNI_OnLoad
 
-**What was fixed:**
-1. Code copy patch: `bl 26c0c7c` → `mov w0, #1` at copy offset +0x1a98
-2. BSS pre-init: set guard bytes to 1 at 0x6a26e30-0x6a26e48  
-3. SIGSEGV handler: NULL deref returns valid JNIEnv* (`&g_env`) in x0 + jni_table in x8
-4. Expanded trampoline pre-resolution: 358 entries (all GSI lib symbols)
+- The "0% CPU hang" was a **one-time init guard** using `pthread_mutex_lock` + `pthread_cond_wait` at function `0x26c0c7c`. The main thread waits on a condvar that no other thread ever signals (no Java runtime).
+- Function at `0x5e17fb8` checks BSS at `0x6a26e48` for an object pointer. When set, it calls through what it expects is a vtable (but is actually vm_table from our JavaVM stub).
+- Multiple guard bytes at VA `0x6a26e30-0x6a26e48` control different initialization paths.
 
-**Results:** Intermittent — when QEMU doesn't crash on JIT page writes, JNI_OnLoad runs without crashing but still hasn't returned (timeout at 10s). When QEMU hits the page-boundary SMC issue, SIGILL kills the process.
+### What was fixed (software side)
 
-### 🎯 Next Steps (Priority Order)
+1. **Code copy patch** in `jni_shim.c`: `bl 26c0c7c` → `mov w0, #1` at copy offset +0x1a98
+2. **BSS pre-init**: guard bytes set to 1 at `0x6a26e30-0x6a26e48`
+3. **Condvar shim**: raw ARM `mov w0,#0; ret` replaces trampoline entries 39 (pthread_cond_wait) and 96 (pthread_cond_timedwait), preventing all condvar deadlocks
+4. **Null-deref safety** in SIGSEGV handler (partial — under QEMU user-mode `uc_mcontext` maps to host x86-64 registers, not guest ARM)
 
-1. **Fix QEMU JIT page-boundary crash for good** — Option: build QEMU with `--disable-tcg` and use a different JIT backend, or increase JIT page alignment, or use `mmap(MAP_NORESERVE)` to avoid SMC detection. The crash at `0x...ffb8` is from TCG code generation writing to the JIT buffer, not just from tb_set_jmp_target.
-2. **Let JNI_OnLoad run to completion** — with the init deadlock bypassed, JNI_OnLoad makes real progress. 30+ second runs may be needed due to QEMU JIT slowdown.
-3. **Implement RegisterNatives properly** — log and implement key native methods
-4. **Once JNI_OnLoad returns** — Roblox main loop (render, network, scripts)
+### 🎯 Next Steps (after QEMU JIT is fixed)
 
-### QEMU Patch Details
-
-Current patches in `/tmp/qemu-10.2.1/accel/tcg/`:
-
-**`cpu-exec-common.c` (line 53):**
-```c
-cflags |= CF_NO_GOTO_TB;
-```
-
-**`cpu-exec.c` (line 600):**
-```c
-void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr) {
-    /* no-op */
-    (void)tb; (void)n; (void)addr;
-    tb->jmp_target_addr[n] = addr;
-}
-```
-
-Build: `cd /tmp/qemu-10.2.1/build && make -j$(nproc) qemu-aarch64 && cp qemu-aarch64 ~/.cache/open-sober/qemu-patched`
+1. **Let JNI_OnLoad run to completion** — with init deadlock bypassed, JNI_OnLoad makes real progress. 30+ second runs expected under QEMU JIT slowdown.
+2. **Implement RegisterNatives properly** — log registered methods and implement key ones.
+3. **Once JNI_OnLoad returns** — Roblox main loop (render, network, scripts), then optimize the 10-15% emulation slowdown.
 
 ### Running
 
@@ -122,43 +102,20 @@ ANDROID_ROOT=~/.cache/open-sober/android-env
 ```
 
 Rebuild jni_shim: `aarch64-linux-gnu-gcc -o "$SYSROOT/jni_shim" "$CRATE/jni_shim.c" -ldl`
-- BL/B/B.cond/CBZ/TBZ offset fix  
-- Mutex sanitization wrappers disabled (direct glibc call works)
-- SIGSEGV handler for RELRO writes and JIT self-write bugs
-- Pre-mprotect of RELRO pages
 
-### 🎯 Next Steps (In Priority Order)
+### Key Source Files
 
-1. **Figure out why JNI_OnLoad hangs** — It spins up threads and waits. Options:
-   - Use `-strace` to see what syscalls are blocking
-   - Check if any required symbols are missing (Android runtime classes, JNI calls)
-   - Enable JNI stub logging to see what JNI calls Roblox makes during init
-   - The program might need more JNI stubs implemented (FindClass for specific classes, GetMethodID for specific methods)
-
-2. **Re-enable mutex sanitization safely** — The `sanitize_and_lock` wrapper triggers a QEMU JIT bug on re-entry. The fix might be:
-   - Use `__attribute__((noinline))` to prevent TCG cross-linking
-   - Move the sanitize code inline into jni_shim.c instead of calling through bionic_shim trampoline
-   - Simply skip sanitization if glibc's mutex works correctly (the Bionic ABI differences might not matter with glibc)
-
-3. **Implement more JNI stubs** — Based on what JNI_OnLoad calls, add real implementations for key JNI methods:
-   - `FindClass` needs to return the right class objects
-   - `GetMethodID`/`GetStaticMethodID` might need real implementations
-   - `RegisterNatives` needs to handle function registration
+- `crates/sober-core/src/jni_shim.c` — Main JNI shim: loads libroblox.so, code copy with adrp/branch fix, SIGSEGV handler, trampoline pre-resolve, condvar shim
+- `crates/sober-core/src/bionic_init.c` — Bionic shim C code: trampoline resolver (`__bf_c_resolve`)
+- `crates/sober-core/src/bionic_shim.S` — Auto-generated assembly trampolines (785 entries)
+- `crates/sober-core/src/qemu.rs` — QEMU launcher: builds bridges, sets up environment, spawns QEMU
 
 ### Environment
 
 - **GPU:** NVIDIA RTX 3060 Mobile + Intel Iris Xe (Mesa drivers active)
 - **OS:** Ubuntu 26.04 LTS
-- **QEMU:** Custom `/tmp/qemu-10.2.1/build/qemu-aarch64` (VDSO disabled, build from source at `/tmp/qemu-10.2.1/`) + system `/usr/bin/qemu-aarch64`
+- **QEMU:** Custom from `/tmp/qemu-10.2.1/` source; also system `/usr/bin/qemu-aarch64` (both crash with same SMC bug)
 - **Cross-compiler:** `aarch64-linux-gnu-gcc` (gcc-15)
-- **GSI ARM64 libs:** At `~/.cache/open-sober/android-env/system/lib64/` (788 libs, patched for ANDROID_RELR/RELA)
-- **Bionic shim:** Built at `~/.cache/open-sober/android-env/system/lib64/libbionic_shim.so`
-- **JNI shim:** Built at `~/.cache/open-sober/android-env/jni_shim`
-- **Android NDK extracted:** `/tmp/ndk_extract/` and `/tmp/ndk.zip`
-
-### Key Source Files
-
-- `crates/sober-core/src/jni_shim.c` — Main JNI shim: loads libroblox.so, copies JNI_OnLoad to bypass QEMU bug, installs mutex sanitization wrappers, has RELRO page SIGSEGV handler
-- `crates/sober-core/src/bionic_init.c` — Bionic shim C code: trampoline resolver (`__bf_c_resolve`), mutex sanitization, data object resolution
-- `crates/sober-core/src/bionic_shim.S` — Auto-generated assembly trampolines (785 entries)
-- `crates/sober-core/src/qemu.rs` — QEMU launcher: builds bridges, sets up environment, spawns QEMU process
+- **GSI ARM64 libs:** At `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
+- **Bionic shim:** `~/.cache/open-sober/android-env/system/lib64/libbionic_shim.so`
+- **JNI shim:** `~/.cache/open-sober/android-env/jni_shim`
