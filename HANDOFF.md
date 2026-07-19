@@ -465,17 +465,71 @@ timeout 15 stdbuf -oL qemu-aarch64 \
   ~/.cache/open-sober/android-env/jni_shim
 ```
 
-### After libc++.so loads:
-- Test `dlopen("libEGL.so")` (was blocked on libc++.so init)
-- Test `dlopen("libroblox.so")` directly
-- JNI function table (~233 stubs)
-- EGL/GLES→Vulkan (see GRAPHICS_RECOMMENDATION.md)
-- Window creation + input handling
+## ✅ dlopen("libc++.so") — SUCCESS (2026-07-19)
+
+### 🔑 Three bugs fixed to get libc++.so loading
+
+**Bug 1: DT_RELR/DT_RELRSZ values swapped** — The original GSI libc++.so uses standard DT_RELR (0x23) and DT_RELRSZ (0x24) tags, but the VALUES are assigned opposite to glibc's expectation:
+- File has: `DT_RELR=0x158 (size)`, `DT_RELRSZ=0x33868 (vaddr)`
+- glibc expects: `DT_RELR=vaddr`, `DT_RELRSZ=size`
+- The data at vaddr 0x33868 is Android ANDROID_RELR format, not standard glibc RELR.
+- **Fix:** Zero DT_RELR/DT_RELRSZ values, set DT_RELRENT=8 to pass glibc assertion.
+
+**Bug 2: PT_GNU_RELRO overlapping with RELA write range** — GNU_RELRO (0x117aa8–0x120000) overlapped with decompressed RELA data range (0x117ab8–0x122dc0). **Fix:** Remove PT_GNU_RELRO.
+
+**Bug 3: init_array constructor crash** — Even after zeroing init_array entries, glibc's `call_init` iterates via count from DT_INIT_ARRAYSZ and calls through NULL. **Fix:** Set both DT_INIT_ARRAY vaddr and DT_INIT_ARRAYSZ to 0. Also clear DT_INIT.
+
+### Key patching script: `~/patch_gsi.py`
+Created `/home/code-agent/patch_gsi.py` — applies all fixes in one pass:
+1. Delegates APS2→RELA decompression to `~/unpack_rela.py`
+2. Removes PT_GNU_RELRO program header
+3. Zeroes DT_RELR/DT_RELRSZ, sets DT_RELRENT=8
+4. Clears DT_INIT_ARRAY/DT_INIT_ARRAYSZ/DT_INIT
+5. Removes BIND_NOW/SYMBOLIC flags
+
+Applied to all 775 symlinked GSI libraries in ~/.cache/open-sober/android-env/system/lib64/
+
+## ⚠️ Current Blocker: SIGILL when loading libc++.so
+
+After mass-patching, libc++.so now crashes with SIGILL during `_dl_assign_tls_modid` → `__sigsetjmp`. The exact cause is unclear but likely related to:
+- Modifications to bridge libc.so (NEEDED libc.so.6 removed/re-added)
+- Modifications to libc.so.6 (NEEDED ld-linux removed, dummy VERNEED)
+- ld-linux-aarch64.so.1 replaced/re-restored multiple times
+- Some GSI lib has corrupted version data from the VERNEED stripper run
+
+**Known-good state (libc++.so loaded successfully before mass patching):**
+- bridge libc.so with NEEDED libc.so.6 intact + inits cleared
+- libc.so.6 with NEEDED ld-linux intact + inits cleared
+- ld-linux-aarch64.so.1 original (200KB)
+- libc++.so patched with patch_gsi.py
+- GSI libs UNPATCHED (only libc++ had the full patch)
+
+### libEGL.so exploration
+- libEGL needs 19 direct DT_NEEDED libraries (all GSI symlinks)
+- Deep dep chain includes ~50+ transitive dependencies
+- Tried using `libc.so → libbionic_shim.so` to bypass the ld-linux chain
+- Tried removing NEEDED libc.so.6 from bridge libc.so
+- Tried creating ld-linux stub with GLIBC_2.17/GLIBC_PRIVATE version defs
+- The core challenge: loading real glibc `libc.so.6` as a dlopen dependency conflicts with the already-running libc
+
+### Recommended approach for next session
+1. Restore to the known-good state (see "Known-good state" above)
+2. Instead of libEGL, test loading libroblox.so directly with just libc++.so as dep
+3. For libEGL/librographics: implement a **version-stub generation script** that creates minimal version bridges for each needed version namespace
+4. Consider adding `libbionic_shim.so` as a DT_NEEDED of the target library to bypass bridge libc entirely
+
+### Scripts (in homedir, not in repo):
+- `~/patch_gsi.py` — Mass GSI patching (uses unpack_rela.py internally)
+- `~/unpack_rela.py` — APS2 packed relocation decoder → standard Elf64_Rela
+- `~/patch_relr.py` — ANDROID_RELR DT tag conversion (legacy, superseded by patch_gsi.py)
+- `~/.claude/jobs/bbfa5d64/tmp/restore_versym.py` — VERSYM pointer restoration from section headers
+- `~/.claude/jobs/bbfa5d64/tmp/remove_needed.py` — DT_NEEDED entry removal by shifting dynamic entries
 
 ### Environment:
 - QEMU: `qemu-aarch64` at `/usr/bin/qemu-aarch64`
 - Cross-compiler: `aarch64-linux-gnu-gcc`
-- GSI libs: `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
+- GSI libs: `~/.cache/open-sober/android-env/system/lib64/` (789 libs)
 - Roblox APK: `~/Documents/Projects/open-sober/roblox-android.apk`
-- Scripts: `~/patch_relr.py` (DT tag conversion), `~/unpack_rela.py` (APS2 decompressor, WIP)
-- .claude/settings.json: `{"worktree": {"bgIsolation": "none"}}` (allows direct editing without worktree in bg)
+- Scripts: `~/patch_gsi.py`, `~/unpack_rela.py`, `~/patch_relr.py`
+- .claude/settings.json: `{"worktree": {"bgIsolation": "none"}}`
+- Bridge libc.so (.bak at libc.so.bridge_backup, libc.so.6.bak at libc.so.6.bak)
