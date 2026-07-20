@@ -48,53 +48,59 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 7. **Pre-mprotect RELRO** — ~464 pages made RW before JNI_OnLoad.
 8. **Pre-resolved trampoline table** — 358 functions via RTLD_DEFAULT.
 9. **Canary check patched out** in code copy.
-10. **JNI_OnLoad code copy** — 128KB copy with adrp fix + BL/B.cond/CBZ/TBZ offset fix.
-11. **Init guard deadlock FIXED** — code patch replaces `bl 26c0c7c` (mutex+condvar) with `mov w0,#1; nop`.
-12. **Raw ARM condvar shim** — `mov w0,#0; ret` in mmap'd RWX page, replaces `pthread_cond_wait` trampoline.
+10. **Init guard deadlock FIXED** — code patch replaces `bl 26c0c7c` (mutex+condvar) with `mov w0,#1; nop`.
+11. **Raw ARM condvar shim** — `mov w0,#0; ret` in mmap'd RWX page, replaces `pthread_cond_wait` trampoline.
 
-### 🟢 CF_NO_GOTO_TB patch works with direct call
+### 🟢 QEMU JIT crash is fixed (Session 6 breakthrough)
 
-Session 6 discovered: The CF_NO_GOTO_TB + tb_set_jmp_target no-op patches in the custom QEMU (`~/.cache/open-sober/qemu-patched`) are sufficient when JNI_OnLoad is called **directly** (no code copy). The code copy workaround introduced adrp fix bugs that caused SIGILL.
+The CF_NO_GOTO_TB + tb_set_jmp_target no-op patches in the custom QEMU (`~/.cache/open-sober/qemu-patched`) are sufficient when JNI_OnLoad is called **directly** (no code copy). The code copy introduced adrp fix bugs that caused SIGILL.
 
-Key findings:
-- **Direct call to JNI_OnLoad → SIGILL fixed** (no host crash, no guest crash)
-- **Code copy approach → still crashes with SIGILL** (adrp/branch fix has bugs)
-- **100% CPU for 5+ min** with no syscalls — libroblox enters a spin loop after init returns
-- The init deadlock (condvar wait) is bypassed via BSS pre-init + condvar shim
-- But the code after init returns has an infinite loop
+### 🟡 Current Blocker — QEMU JIT slowness via _dl_mcount O(n²) strcmp loop
 
-### 🟡 Current Blocker — Libroblox init spin loop
+**What we found:** The "spin loop" is NOT a hang — it's a **QEMU JIT performance bottleneck** in glibc's `_dl_mcount` function in `ld-linux-aarch64.so.1`.
 
-**Symptom:** After JNI_OnLoad enters and the guard check returns immediately, libroblox enters a tight computation loop at 100% CPU, makes **zero syscalls**, and never reaches any JNI calls even after 5+ minutes.
+Using `-d exec` traces, the hottest guest PC is **`0x1e2d8` in ld-linux** — the core of an `strcmp` loop that is the `_dl_mcount` call-record maintenance. This function is called for EVERY PLT-resolved trampoline invocation and iterates a growing linked list of call records, doing strcmp on each entry. With 785 trampoline entries being called, this becomes an O(n²) bottleneck.
 
 **Evidence:**
-- `strace` shows no futex/write/read after `entering JNI_OnLoad...`
-- No `FindClass`, `GetMethodID`, or `RegisterNatives` log lines appear
-- QEMU process shows 100% CPU on one core
-- WITH QEMU_RESERVED_VA: same spin loop behavior
-- No SIGSEGV handler fires (no dangling pointers or bad accesses)
+- Hottest code: `_dl_mcount+0x7834` strcmp loop — 600k iterations in 5 seconds
+- All hot PCs are in `ld-linux-aarch64.so.1` (offsets 0x9000-0x1e300 range)
+- NOT in `libc.so`, `libm.so`, or `libroblox.so`
+- NOT a hang or deadlock — pure CPU-bound O(n²) strcmp
 
-**Hypothesis:** JNI_OnLoad calls code that spins on a BSS variable that was supposed to be set during the one-time init. Since we bypassed the init (guard=1), the variable was never written. Candidates:
-- A "initialization complete" flag checked in a loop
-- A function pointer table that was supposed to be populated by init
-- An internal Roblox sync primitive (not pthread — no syscalls)
+**Attempted fix — noping _dl_mcount:**
+- Patching `_dl_mcount` entry with `ret` + noping 128KB of its body **did not help**
+- Root cause: QEMU JIT caches translated blocks, so host-side writes to guest memory don't invalidate the TCG translation cache (same SMC issue from earlier sessions)
 
-**Best fix to try next:** Don't set guard=1. Instead, let the init function run, but let the **condvar shim** handle the deadlock. The init function calls `bl 26c0c7c` which does mutex_lock + cond_wait. With condvar shim (`mov w0,#0; ret` at tramp[39,96]), cond_wait returns immediately and the init function completes normally — writing the guard byte and storing the JavaVM* itself.
+**Why it happens:**
+1. Every trampoline call goes through `__bf_c_resolve` → `dlsym(RTLD_NEXT)` → PLT
+2. glibc's PLT calls `_dl_mcount` for profiling
+3. `_dl_mcount` does strcmp-based search through a linked list of call records
+4. Under QEMU JIT, each strcmp loop iteration is JIT-translated and slow
+5. With 785 trampolines × many calls, this dominates
 
-### What session 5 discovered about JNI_OnLoad
+### 🎯 Recommended Next Steps
 
-- The "0% CPU hang" was a **one-time init guard** using `pthread_mutex_lock` + `pthread_cond_wait` at function `0x26c0c7c`. The main thread waits on a condvar that no other thread ever signals (no Java runtime).
-- Function at `0x5e17fb8` checks BSS at `0x6a26e48` for an object pointer. When set, it calls through what it expects is a vtable (but is actually vm_table from our JavaVM stub).
-- Multiple guard bytes at VA `0x6a26e30-0x6a26e48` control different initialization paths.
+1. **Run the same test on real ARM64 hardware** — if it completes quickly, the issue is QEMU JIT slowness, not a real bug
+2. **Disable `_dl_mcount` at compile time** — rebuild `ld-linux` without profiling support, or use `LD_BIND_NOT=1` / set glibc profiling env vars
+3. **Use `-one-insn-per-tb`** to avoid TB chaining (might slow things further but could break the strcmp loop pattern)
+4. **Modify bionic_shim.S** to bypass the PLT entirely — call resolved functions directly instead of going through `__bf_c_resolve` → PLT → _dl_mcount
+5. **Add JNI_OnLoad to the init calls that get patched** — if we let the init function complete (don't set guard=1, let condvar shim handle the deadlock), the init stores proper BSS state which might reduce the number of trampoline calls needed
 
-### What was fixed (software side)
+### What was fixed in session 6
 
-1. **Enhanced JNI logging stubs** — FindClass, GetMethodID, RegisterNatives, ThrowNew all log with call counts
-2. **Mutex sanitization** — wrappers for Bionic→glibc pthread_mutex_t ABI mismatch (kind field at offset 16, __owner at offset 8 leaking into __count)
-3. **Condvar shim** — raw ARM `mov w0,#0; ret` replaces trampoline entries 39 (pthread_cond_wait) and 96 (pthread_cond_timedwait), preventing all condvar deadlocks
-4. **SIGSEGV handler fixed** — bad-address faults chain to old handler instead of setting x0=&g_env (which made crashes worse)
-5. **BSS pre-init** — guard bytes set to 1 at `0x6a26e30-0x6a26e48`, JavaVM* stored at `0x6a26e48`
-6. **Init call patches** — code copy replaces `bl 26c0c7c` with `mov w0, #1` at offset +0x1a98
+1. **All 785 trampoline entries pre-filled** — remaining 429 filled with safe default (`__errno_location`) to prevent `__bf_c_resolve` from calling `dlsym(RTLD_NEXT)`
+2. **Condvar shim installed** at tramp[39,96] — `mov w0,#0; ret` prevents all condvar deadlocks
+3. **Mutex sanitization wrappers** — Bionic→glibc pthread_mutex_t ABI fix (kind field, __owner leak)
+4. **SIGSEGV handler improved** — bad-address faults chain to old handler instead of setting x0=&g_env
+5. **Removed null-deref hack** — was making crashes worse by setting invalid JNIEnv*
+6. **Use direct JNI_OnLoad call** — no code copy needed; QEMU patches handle the JIT issue
+
+### Key Source Files
+
+- `crates/sober-core/src/jni_shim.c` — Main JNI shim (~620 lines)
+- `crates/sober-core/src/bionic_init.c` — Bionic shim C code: trampoline resolver (`__bf_c_resolve`)
+- `crates/sober-core/src/bionic_shim.S` — Auto-generated assembly trampolines (785 entries)
+- `crates/sober-core/src/qemu.rs` — QEMU launcher
 
 ### Running
 
@@ -110,18 +116,11 @@ ANDROID_ROOT=~/.cache/open-sober/android-env
 
 Rebuild jni_shim: `aarch64-linux-gnu-gcc -o "$SYSROOT/jni_shim" "$CRATE/jni_shim.c" -ldl`
 
-### Key Source Files
-
-- `crates/sober-core/src/jni_shim.c` — Main JNI shim: loads libroblox.so, code copy with adrp/branch fix, SIGSEGV handler, trampoline pre-resolve, condvar shim
-- `crates/sober-core/src/bionic_init.c` — Bionic shim C code: trampoline resolver (`__bf_c_resolve`)
-- `crates/sober-core/src/bionic_shim.S` — Auto-generated assembly trampolines (785 entries)
-- `crates/sober-core/src/qemu.rs` — QEMU launcher: builds bridges, sets up environment, spawns QEMU
-
 ### Environment
 
 - **GPU:** NVIDIA RTX 3060 Mobile + Intel Iris Xe (Mesa drivers active)
 - **OS:** Ubuntu 26.04 LTS
-- **QEMU:** Custom from `/tmp/qemu-10.2.1/` source; also system `/usr/bin/qemu-aarch64` (both crash with same SMC bug)
+- **QEMU:** Custom from `/tmp/qemu-10.2.1/` — patched at `~/.cache/open-sober/qemu-patched`
 - **Cross-compiler:** `aarch64-linux-gnu-gcc` (gcc-15)
 - **GSI ARM64 libs:** At `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
 - **Bionic shim:** `~/.cache/open-sober/android-env/system/lib64/libbionic_shim.so`

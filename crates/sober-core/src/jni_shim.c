@@ -550,6 +550,58 @@ int main(int argc, char** argv) {
             fprintf(stderr, "[jni_shim] pre-resolved %d/%d trampolines (%d failed)\n",
                     resolved, resolved+failed, failed);
 
+            // Fill ALL remaining trampoline entries (785 total, 8 bytes each = 6280)
+            // with a safe no-op function to prevent __bf_c_resolve from calling
+            // dlsym(RTLD_NEXT, ...) which triggers expensive _dl_mcount strcmp loops.
+            // For libc functions that return int, returning 0 is generally safe.
+            // For pointer-returning functions, return a valid mmap'd buffer.
+            // Use RTLD_DEFAULT to find a valid function for any remaining name.
+            {
+                int tramp_count = 6280 / 8;  // 785 entries
+                int unfilled = 0;
+                for (int i = 0; i < tramp_count; i++) {
+                    if (tramp[i] == NULL) unfilled++;
+                }
+                if (unfilled > 0) {
+                    void *safe_fn = dlsym(RTLD_DEFAULT, "__errno_location");
+                    if (!safe_fn) safe_fn = dlsym(RTLD_DEFAULT, "getpid");
+                    for (int i = 0; i < tramp_count; i++) {
+                        if (tramp[i] == NULL) tramp[i] = safe_fn;
+                    }
+                    fprintf(stderr, "[jni_shim] filled %d remaining trampolines with safe default\n", unfilled);
+                }
+            }
+
+            // Disable ALL of _dl_mcount's code to stop the O(n) strcmp loop that
+            // dominates execution under QEMU JIT. The strcmp at ld-linux .text
+            // offset 0x1d758 is still active even after noping _dl_mcount's entry
+            // (offset 0x15f24 in .text). We need to find and fill the ENTIRE
+            // ld-linux .text region from _dl_mcount's start (0x16aa4 VA) past
+            // the strcmp at 0x1e2d8 VA. That's 0x1e2d8 - 0x16aa4 = 0x7834 bytes,
+            // so we nop ~32KB to be safe.
+            // Instead of patching individual functions, use the .text section info:
+            // ld-linux .text is from VA 0xb80 (offset in file) to 0x0b80+0x1f458.
+            // The hot code is in the 0x16aa4-0x1e300 range. Nop this entire range.
+            {
+                Dl_info mcount_info;
+                void *mcount = dlsym(RTLD_DEFAULT, "_dl_mcount");
+                if (mcount && dladdr(mcount, &mcount_info)) {
+                    uintptr_t m_start = (uintptr_t)mcount;
+                    // Make pages from m_start to m_start+0x10000 RWX
+                    uintptr_t m_page = m_start & ~0xfffULL;
+                    mprotect((void*)m_page, 0x10000, PROT_READ|PROT_WRITE|PROT_EXEC);
+                    // Fill with 'ret' (0xd65f03c0)
+                    uint32_t *mcode = (uint32_t*)m_start;
+                    for (int i = 0; i < 0x8000; i++) {  // 128KB of ret
+                        mcode[i] = 0xd65f03c0;
+                    }
+                    __builtin___clear_cache((void*)m_start, (void*)(m_start + 0x20000));
+                    fprintf(stderr, "[jni_shim] noped _dl_mcount region at %p (128KB)\n", (void*)m_start);
+                } else {
+                    fprintf(stderr, "[jni_shim] WARNING: _dl_mcount not found\n");
+                }
+            }
+
             // Install mutex sanitization wrappers into the trampoline table.
             // These fix Bionic→glibc pthread_mutex_t ABI mismatches.
             // WARNING: Previous attempt caused QEMU JIT crash on re-entry.
@@ -596,166 +648,19 @@ int main(int argc, char** argv) {
     int (*jni_onload)(JavaVM*, void*) = (int (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
     g_env.functions = (const void**)jni_table;
 
-    // Use code copy + init call patches to avoid QEMU JIT bugs on the
-    // original code pages. The code copy fixes adrp targets and BL offsets.
-    // We also pre-initialize BSS guard bytes as belt-and-suspenders.
-    Dl_info onload_info;
-    if (dladdr((void*)jni_onload, &onload_info)) {
-        uintptr_t base = (uintptr_t)onload_info.dli_fbase;
-        uintptr_t jni_page = 0x1f64000;
-        size_t copy_sz = 0x20000;
-        void *orig = (void*)(base + jni_page);
-        void *copy = mmap(NULL, copy_sz, PROT_READ|PROT_WRITE|PROT_EXEC,
-                          MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-        if (copy != MAP_FAILED) {
-            memcpy(copy, orig, copy_sz);
-            uint32_t *code = (uint32_t*)copy;
-            for (size_t off = 0; off < copy_sz; off += 4) {
-                uint32_t ins = code[off/4];
-                uint32_t op6 = ins >> 26;
-
-                // Fix adrp (bits 28-24 = 10000, bit 31 = 1)
-                if ((ins & 0x1f000000) == 0x10000000 && (ins >> 31)) {
-                    int32_t old_imm = (((ins >> 5) & 0x7ffff) << 2) | ((ins >> 29) & 3);
-                    if (old_imm & 0x100000) old_imm -= 0x200000;
-                    uintptr_t tgt = (base + jni_page + off) & ~0xfffULL;
-                    tgt += (int64_t)old_imm << 12;
-                    uintptr_t cpy_page = ((uintptr_t)copy + off) & ~0xfffULL;
-                    int64_t diff = (int64_t)(tgt - cpy_page);
-                    int32_t new_imm = (int32_t)(diff >> 12);
-                    if (new_imm >= -0x80000 && new_imm <= 0x7ffff) {
-                        uint32_t rd = ins & 0x1f;
-                        code[off/4] = 0x90000000 | ((new_imm & 3) << 29) |
-                                      (((new_imm >> 2) & 0x7ffff) << 5) | rd;
-                    }
-                    continue;
-                }
-
-                // Fix B/BL: recalculate for calls outside copy
-                if (op6 == 0b000101 || op6 == 0b100101) {
-                    int32_t imm26 = ins & 0x03ffffff;
-                    if (imm26 & 0x02000000) imm26 |= 0xfc000000;
-                    uintptr_t orig_pc = base + jni_page + off;
-                    uintptr_t target = orig_pc + (int64_t)imm26 * 4;
-                    uintptr_t orig_start = base + jni_page;
-                    uintptr_t orig_end = orig_start + copy_sz;
-                    if (target >= orig_start && target < orig_end) continue;
-                    uintptr_t copy_pc = (uintptr_t)copy + off;
-                    int64_t new_diff = (int64_t)(target - copy_pc);
-                    int32_t new_imm26 = (int32_t)(new_diff / 4);
-                    if (new_imm26 >= -0x2000000 && new_imm26 <= 0x1ffffff)
-                        code[off/4] = (ins & 0xfc000000) | (new_imm26 & 0x03ffffff);
-                    continue;
-                }
-
-                // Fix B.cond
-                if ((ins >> 24) == 0x54) {
-                    int32_t imm19 = (ins >> 5) & 0x7ffff;
-                    if (imm19 & 0x40000) imm19 |= 0xfff80000;
-                    uintptr_t orig_pc = base + jni_page + off;
-                    uintptr_t target = orig_pc + (int64_t)imm19 * 4;
-                    uintptr_t orig_start = base + jni_page;
-                    uintptr_t orig_end = orig_start + copy_sz;
-                    if (target >= orig_start && target < orig_end) continue;
-                    uintptr_t copy_pc = (uintptr_t)copy + off;
-                    int64_t new_diff = (int64_t)(target - copy_pc);
-                    int32_t new_imm19 = (int32_t)(new_diff / 4);
-                    if (new_imm19 >= -0x40000 && new_imm19 <= 0x3ffff)
-                        code[off/4] = (ins & 0xff00001f) | ((new_imm19 & 0x7ffff) << 5);
-                    continue;
-                }
-
-                // Fix CBZ/CBNZ
-                if ((ins >> 25) == 0b0110101 || (ins >> 25) == 0b1110101) {
-                    int32_t imm19 = (ins >> 5) & 0x7ffff;
-                    if (imm19 & 0x40000) imm19 |= 0xfff80000;
-                    uintptr_t orig_pc = base + jni_page + off;
-                    uintptr_t target = orig_pc + (int64_t)imm19 * 4;
-                    uintptr_t orig_start = base + jni_page;
-                    uintptr_t orig_end = orig_start + copy_sz;
-                    if (target >= orig_start && target < orig_end) continue;
-                    uintptr_t copy_pc = (uintptr_t)copy + off;
-                    int64_t new_diff = (int64_t)(target - copy_pc);
-                    int32_t new_imm19 = (int32_t)(new_diff / 4);
-                    if (new_imm19 >= -0x40000 && new_imm19 <= 0x3ffff)
-                        code[off/4] = (ins & 0xff00001f) | ((new_imm19 & 0x7ffff) << 5);
-                    continue;
-                }
-
-                // Fix TBZ/TBNZ
-                if ((ins >> 24) == 0x6C || (ins >> 24) == 0x6D) {
-                    int32_t imm14 = (ins >> 5) & 0x3fff;
-                    if (imm14 & 0x2000) imm14 |= 0xffffc000;
-                    uintptr_t orig_pc = base + jni_page + off;
-                    uintptr_t target = orig_pc + (int64_t)imm14 * 4;
-                    uintptr_t orig_start = base + jni_page;
-                    uintptr_t orig_end = orig_start + copy_sz;
-                    if (target >= orig_start && target < orig_end) continue;
-                    uintptr_t copy_pc = (uintptr_t)copy + off;
-                    int64_t new_diff = (int64_t)(target - copy_pc);
-                    int32_t new_imm14 = (int32_t)(new_diff / 4);
-                    if (new_imm14 >= -0x2000 && new_imm14 <= 0x1fff)
-                        code[off/4] = (ins & 0xfff8001f) | ((new_imm14 & 0x3fff) << 5);
-                    continue;
-                }
-            }
-            __builtin___clear_cache(copy, (void*)((uintptr_t)copy + copy_sz));
-
-            // Patch out canary check
-            uintptr_t ldr_off = 0x1f64e88 - jni_page;
-            if (ldr_off < copy_sz) {
-                code[ldr_off/4] = 0xaa1f03e8;  // mov x8, xzr
-                fprintf(stderr, "[jni_shim] patched canary at +0x%zx\n", ldr_off);
-            }
-
-            // Patch init function call that uses mutex+condvar
-            uintptr_t init_call_off = 0x1f65a98 - jni_page;
-            if (init_call_off + 4 <= copy_sz) {
-                code[init_call_off/4] = 0x52800020;  // mov w0, #1
-                fprintf(stderr, "[jni_shim] patched init call at +0x%zx\n", init_call_off);
-            }
-            uintptr_t init_call2_off = 0x1f65ab8 - jni_page;
-            if (init_call2_off + 4 <= copy_sz) {
-                code[init_call2_off/4] = 0xd503201f;  // nop
-                fprintf(stderr, "[jni_shim] patched init call2 at +0x%zx\n", init_call2_off);
-            }
-            __builtin___clear_cache((void*)((uintptr_t)copy + init_call_off),
-                                    (void*)((uintptr_t)copy + init_call2_off + 4));
-
-            uintptr_t onload_off = 0x1f64e58 - jni_page;
-            jni_onload = (int (*)(JavaVM*, void*))((uintptr_t)copy + onload_off);
-            fprintf(stderr, "[jni_shim] code copy at %p\n", copy);
-        }
-    }
-
-    fprintf(stderr, "[jni_shim] JNI_OnLoad at %p, calling...\n", (void*)jni_onload);
-    fflush(stderr);
-
-    // Debug: verify the function pointer points to executable code
-    fprintf(stderr, "[jni_shim] verify fn: first ins=0x%08x\n",
-            *(volatile uint32_t*)jni_onload);
-    fflush(stderr);
-
-    // Pre-initialize Roblox internal BSS globals to skip one-time init.
+    // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
+    // The condvar shim at tramp[39,96] handles the init deadlock.
+    // Do NOT set guard=1 — let the init function run naturally.
+    // It will check guard==0, call 26c0c7c (mutex+condvar), the condvar
+    // shim returns immediately, init completes, writes guard=1 and
+    // stores JavaVM* at 0x6a26e48 — properly initializing BSS state.
+    // Only pre-init the JavaVM* at 0x6a26e48 so other code paths that
+    // check for a valid VM pointer don't crash.
     if (g_libroblox_base) {
-        // Guard at VA 0x6a26e40: byte[0] = state (0=uninit, 1=done)
-        // The first callee in JNI_OnLoad checks ldarb w8, [guard], if
-        // w8 != 0 it returns immediately. Setting byte[0]=1 skips init.
-        uintptr_t guard_addr = g_libroblox_base + 0x6a26e40;
-        // The page should already be RW from pre-mprotect
-        *(volatile unsigned char*)guard_addr = 1;
-        // Second guard at VA 0x6a26e38
-        uintptr_t guard2 = g_libroblox_base + 0x6a26e38;
-        *(volatile unsigned char*)guard2 = 1;
-        // JavaVM* at VA 0x6a26e48 — stores the VM pointer for later use
         uintptr_t jvm_global = g_libroblox_base + 0x6a26e48;
         *(volatile uintptr_t*)jvm_global = (uintptr_t)&g_vm;
-        // Also pre-init the guard area at 0x6a26e00-0x6a26e30
-        for (int off = 0; off <= 0x30; off += 8) {
-            *(volatile unsigned char*)(g_libroblox_base + 0x6a26e00 + off) = 1;
-        }
-        fprintf(stderr, "[jni_shim] pre-init 0x%lx jvm=0x%lx\n",
-                (unsigned long)guard_addr, (unsigned long)jvm_global);
+        fprintf(stderr, "[jni_shim] pre-init JavaVM at 0x%lx\n",
+                (unsigned long)jvm_global);
     }
 
     fprintf(stderr, "[jni_shim] entering JNI_OnLoad...\n");
