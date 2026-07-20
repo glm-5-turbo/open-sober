@@ -572,33 +572,16 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "[jni_shim] direct glibc mutex (lock=%p init=%p)\n",
                         (void*)g_real_lock, (void*)g_real_mutex_init);
             }
-
-            // Override pthread_cond_wait (index 39) and pthread_cond_timedwait
-            // (index 96) with a raw ARM shim that returns 0 immediately.
-            // This prevents all condvar deadlocks (init guards, etc.) under QEMU
-            // where no other thread exists to signal the condvar.
-            // mov w0, #0 = 0x52800000, ret = 0xd65f03c0
-            void *cond_shim = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
-                                   MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-            if (cond_shim != MAP_FAILED) {
-                ((uint32_t*)cond_shim)[0] = 0x52800000;  // mov w0, #0
-                ((uint32_t*)cond_shim)[1] = 0xd65f03c0;  // ret
-                __builtin___clear_cache(cond_shim, (void*)((uintptr_t)cond_shim + 8));
-                tramp[39] = cond_shim;   // pthread_cond_wait
-                tramp[96] = cond_shim;   // pthread_cond_timedwait (same effect)
-                fprintf(stderr, "[jni_shim] condvar shim %p -> tramp[39,96]\n", cond_shim);
-            } else {
-                fprintf(stderr, "[jni_shim] WARNING: condvar shim mmap failed\n");
-            }
         }
     }
 
     int (*jni_onload)(JavaVM*, void*) = (int (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
     g_env.functions = (const void**)jni_table;
 
-    // Use code copy + init call patches to avoid QEMU JIT bugs on the
-    // original code pages. The code copy fixes adrp targets and BL offsets.
-    // We also pre-initialize BSS guard bytes as belt-and-suspenders.
+    // Copy JNI_OnLoad + 128KB to a fresh page to bypass QEMU JIT bug
+    // (QEMU host-crashes when JIT-compiling pages near offset 0x1f64000)
+    // The goto_tb patch (CF_NO_GOTO_TB) in the QEMU binary should
+    // prevent the crash, but we keep the code copy as belt-and-suspenders.
     Dl_info onload_info;
     if (dladdr((void*)jni_onload, &onload_info)) {
         uintptr_t base = (uintptr_t)onload_info.dli_fbase;
@@ -609,6 +592,7 @@ int main(int argc, char** argv) {
                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if (copy != MAP_FAILED) {
             memcpy(copy, orig, copy_sz);
+            // Fix adrp: recalculate for the new code location
             uint32_t *code = (uint32_t*)copy;
             for (size_t off = 0; off < copy_sz; off += 4) {
                 uint32_t ins = code[off/4];
@@ -631,7 +615,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
 
-                // Fix B/BL: recalculate for calls outside copy
+                // Fix B/BL: recalculate PC-relative offset for calls outside copy
                 if (op6 == 0b000101 || op6 == 0b100101) {
                     int32_t imm26 = ins & 0x03ffffff;
                     if (imm26 & 0x02000000) imm26 |= 0xfc000000;
@@ -639,12 +623,14 @@ int main(int argc, char** argv) {
                     uintptr_t target = orig_pc + (int64_t)imm26 * 4;
                     uintptr_t orig_start = base + jni_page;
                     uintptr_t orig_end = orig_start + copy_sz;
-                    if (target >= orig_start && target < orig_end) continue;
+                    if (target >= orig_start && target < orig_end)
+                        continue;
                     uintptr_t copy_pc = (uintptr_t)copy + off;
                     int64_t new_diff = (int64_t)(target - copy_pc);
                     int32_t new_imm26 = (int32_t)(new_diff / 4);
-                    if (new_imm26 >= -0x2000000 && new_imm26 <= 0x1ffffff)
+                    if (new_imm26 >= -0x2000000 && new_imm26 <= 0x1ffffff) {
                         code[off/4] = (ins & 0xfc000000) | (new_imm26 & 0x03ffffff);
+                    }
                     continue;
                 }
 
@@ -708,20 +694,6 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "[jni_shim] patched canary at +0x%zx\n", ldr_off);
             }
 
-            // Patch init function call that uses mutex+condvar
-            uintptr_t init_call_off = 0x1f65a98 - jni_page;
-            if (init_call_off + 4 <= copy_sz) {
-                code[init_call_off/4] = 0x52800020;  // mov w0, #1
-                fprintf(stderr, "[jni_shim] patched init call at +0x%zx\n", init_call_off);
-            }
-            uintptr_t init_call2_off = 0x1f65ab8 - jni_page;
-            if (init_call2_off + 4 <= copy_sz) {
-                code[init_call2_off/4] = 0xd503201f;  // nop
-                fprintf(stderr, "[jni_shim] patched init call2 at +0x%zx\n", init_call2_off);
-            }
-            __builtin___clear_cache((void*)((uintptr_t)copy + init_call_off),
-                                    (void*)((uintptr_t)copy + init_call2_off + 4));
-
             uintptr_t onload_off = 0x1f64e58 - jni_page;
             jni_onload = (int (*)(JavaVM*, void*))((uintptr_t)copy + onload_off);
             fprintf(stderr, "[jni_shim] code copy at %p\n", copy);
@@ -744,16 +716,9 @@ int main(int argc, char** argv) {
         uintptr_t guard_addr = g_libroblox_base + 0x6a26e40;
         // The page should already be RW from pre-mprotect
         *(volatile unsigned char*)guard_addr = 1;
-        // Second guard at VA 0x6a26e38
-        uintptr_t guard2 = g_libroblox_base + 0x6a26e38;
-        *(volatile unsigned char*)guard2 = 1;
         // JavaVM* at VA 0x6a26e48 — stores the VM pointer for later use
         uintptr_t jvm_global = g_libroblox_base + 0x6a26e48;
         *(volatile uintptr_t*)jvm_global = (uintptr_t)&g_vm;
-        // Also pre-init the guard area at 0x6a26e00-0x6a26e30
-        for (int off = 0; off <= 0x30; off += 8) {
-            *(volatile unsigned char*)(g_libroblox_base + 0x6a26e00 + off) = 1;
-        }
         fprintf(stderr, "[jni_shim] pre-init 0x%lx jvm=0x%lx\n",
                 (unsigned long)guard_addr, (unsigned long)jvm_global);
     }
