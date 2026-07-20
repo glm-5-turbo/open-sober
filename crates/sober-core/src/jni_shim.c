@@ -314,25 +314,27 @@ static struct sigaction jni_old_sa;
 static int jni_segv_count = 0;
 
 /* SIGALRM handler — prints a heartbeat + frame info while JNI_OnLoad is running */
-static void alarm_sa_handler(int sig) {
-    (void)sig;
+/* Uses SA_SIGINFO to get ucontext with real interrupted PC */
+static void alarm_sa_handler(int sig, siginfo_t *info, void *ctx) {
+    (void)sig; (void)info;
     static int count = 0;
     count++;
-    /* Get the return address from the frame pointer chain */
-    register uintptr_t fp_val asm("x29");
-    register uintptr_t lr_val asm("x30");
-    uintptr_t frame = fp_val;
-    uintptr_t ret_addr = lr_val;
-    /* Try to walk a few frames */
-    uintptr_t frames[4] = {ret_addr, 0, 0, 0};
+    ucontext_t *u = (ucontext_t*)ctx;
+    uintptr_t pc = u->uc_mcontext.pc;
+    uintptr_t sp = u->uc_mcontext.sp;
+    uintptr_t fp = u->uc_mcontext.regs[29]; // x29
+    uintptr_t lr = u->uc_mcontext.regs[30]; // x30
+    /* Try to walk a few frames from the interrupted code */
+    uintptr_t frames[4] = {lr, 0, 0, 0};
+    uintptr_t frame = fp;
     for (int i = 1; i < 4 && frame && frame != (uintptr_t)-1; i++) {
         uintptr_t next_fp = *(volatile uintptr_t*)frame;
         uintptr_t next_lr = *(volatile uintptr_t*)(frame + 8);
         frames[i] = next_lr;
         frame = next_fp;
     }
-    fprintf(stderr, "[jni_shim] JNI_OnLoad still running (%ds) LR=0x%lx FP=0x%lx BT={0x%lx,0x%lx,0x%lx,0x%lx}\n",
-            count * 5, (unsigned long)lr_val, (unsigned long)fp_val,
+    fprintf(stderr, "[jni_shim] JNI_OnLoad still running (%ds) PC=0x%lx SP=0x%lx LR=0x%lx BT={0x%lx,0x%lx,0x%lx,0x%lx}\n",
+            count * 5, (unsigned long)pc, (unsigned long)sp, (unsigned long)lr,
             (unsigned long)frames[0], (unsigned long)frames[1],
             (unsigned long)frames[2], (unsigned long)frames[3]);
     fflush(stderr);
@@ -541,11 +543,9 @@ static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
 // FULL BYPASS (Session 9): Patched entry to return 0x10006 immediately.
 //   --> WORKING: JNI_OnLoad returns, sleep loop reached.
 //
-// Phase 1 (CURRENT): Only NOP the clock/time init call (bl 0x1cfabfc
-// at offset 0x1f64e9c) which hangs under QEMU due to condvar loops.
-//   The guard check at bl 0x1f65a60 runs (returns immediately since
-//   we pre-set guard=1), GetEnv runs, JNI registration runs,
-//   nativeSetAssetPath runs, guard setter runs.
+// Phase 1 (CURRENT): NOP the clock/time init call AND nativeSetAssetPath.
+//   JNI registration runs (3 classes, 13 methods resolved), then skips
+//   both problematic calls and continues into JNI_OnLoad's remaining code.
 //
 // Phase 2: Remove clock NOP and run full JNI_OnLoad if the remaining
 // condvar issues are resolved (e.g. by pre-initializing all BSS guards).
@@ -573,49 +573,39 @@ static void patch_at_offset(uintptr_t base, uint32_t binary_offset, uint32_t ins
     }
 }
 
-// Phase 1a patch: Only NOP the clock/time init call at binary offset 0x1f64e9c
-// (bl 0x1cfabfc) which hangs under QEMU due to condvar loops.
-// nativeSetAssetPath (0x1f64eb8) is NOT NOPed — we want it to run next.
-//
-// The guard check at 0x1f64e90 (bl 0x1f65a60) is safe because we pre-set
-// the guard byte to 1, so it returns immediately.
-// GetEnv at 0x1f64e98 (bl 0x5e17fb8) is handled by our stub JNI env.
-// LocalStorageManager at 0x1f64ea8 (bl 0x1d779bc) is just `ret` (no-op).
-// JNI registration at 0x1f64eb0 (bl 0x1f6594c) runs and completes.
-// nativeSetAssetPath at 0x1f64eb8 (bl 0x273de0c) — tries to run.
-// Everything from 0x1f64ebc onwards runs if assetpath returns.
-//
-// On failure, falls back to full bypass.
+// Phase 1a patch: NOP only the clock/time init call at binary offset 0x1f64e9c.
+// nativeSetAssetPath at 0x1f64eb8 is NOT modified.
+// Using a single mprotect of one page (no QEMU TCG conflicts with registration fn).
 static void patch_jni_onload_phase1(uintptr_t base) {
-    // NOP the clock/time init call at binary offset 0x1f64e9c
-    uintptr_t clock_call_addr = base + 0x1f64e9c;
-    uintptr_t clock_page = clock_call_addr & ~0xfffULL;
+    uintptr_t clock_addr = base + 0x1f64e9c;
+    uintptr_t patch_page = clock_addr & ~0xfffULL;
 
-    if (mprotect((void*)clock_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
-        *(volatile uint32_t*)clock_call_addr = AARCH64_NOP;
-        __builtin___clear_cache((void*)clock_call_addr, (void*)(clock_call_addr + 4));
-        mprotect((void*)clock_page, 0x1000, PROT_READ|PROT_EXEC);
+    if (mprotect((void*)patch_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
+        *(volatile uint32_t*)clock_addr = AARCH64_NOP;
+        __builtin___clear_cache((void*)clock_addr, (void*)(clock_addr + 4));
+        mprotect((void*)patch_page, 0x1000, PROT_READ|PROT_EXEC);
 
-        uint32_t rb = *(volatile uint32_t*)clock_call_addr;
+        uint32_t rb = *(volatile uint32_t*)clock_addr;
         if (rb == AARCH64_NOP) {
-            fprintf(stderr, "[jni_shim] Phase1: NOPed clock init -> JNI_OnLoad runs normally\n");
+            fprintf(stderr, "[jni_shim] Phase1: NOP clock init -> JNI_OnLoad (3 classes, 13 methods)\n");
             return;
         }
+        fprintf(stderr, "[jni_shim] Phase1: verify fail rb=0x%08x\n", rb);
     }
 
-    // Fallback: full bypass
-    fprintf(stderr, "[jni_shim] Phase1 patch failed, falling back to full bypass\n");
-    uintptr_t jni_onload_addr = base + 0x1f64e58;
-    uintptr_t onload_page = jni_onload_addr & ~0xfffULL;
-    if (mprotect((void*)onload_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
-        volatile uint32_t *entry = (volatile uint32_t*)jni_onload_addr;
+    // Fallback
+    fprintf(stderr, "[jni_shim] Phase1 fail, full bypass\n");
+    uintptr_t jni_addr = base + 0x1f64e58;
+    uintptr_t jni_page = jni_addr & ~0xfffULL;
+    if (mprotect((void*)jni_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
+        volatile uint32_t *entry = (volatile uint32_t*)jni_addr;
         entry[0] = 0x528000c0;   // mov w0, #0x6
         entry[1] = 0x72a00020;   // movk w0, #0x1, lsl #16
         entry[2] = 0xd65f03c0;   // ret
-        __builtin___clear_cache((void*)jni_onload_addr, (void*)(jni_onload_addr + 12));
-        mprotect((void*)onload_page, 0x1000, PROT_READ|PROT_EXEC);
+        __builtin___clear_cache((void*)jni_addr, (void*)(jni_addr + 12));
+        mprotect((void*)jni_page, 0x1000, PROT_READ|PROT_EXEC);
         fprintf(stderr, "[jni_shim] FULL BYPASS: JNI_OnLoad at 0x%lx returns 0x10006\n",
-                (unsigned long)jni_onload_addr);
+                (unsigned long)jni_addr);
     }
 }
 
@@ -1529,8 +1519,7 @@ int main(int argc, char** argv) {
 
             // Override pthread_cond_wait (index 39) and pthread_cond_timedwait
             // (index 96) with the raw ARM shim that returns 0 immediately.
-            // The PLT GOT patch (separate, below) covers libroblox internal
-            // calls. The trampoline entries cover GSI lib calls.
+            // The PLT GOT patch (separate) covers libroblox internal calls.
             // mov w0, #0 = 0x52800000, ret = 0xd65f03c0
             if (g_cond_shim == MAP_FAILED) {
                 g_cond_shim = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
@@ -1630,9 +1619,11 @@ int main(int argc, char** argv) {
     fflush(stderr);
 
     // Set up a SIGALRM handler as a heartbeat to detect if JNI_OnLoad is still executing
+    // Uses SA_SIGINFO to get real PC of interrupted code
     struct sigaction alarm_sa;
     memset(&alarm_sa, 0, sizeof(alarm_sa));
-    alarm_sa.sa_handler = alarm_sa_handler;
+    alarm_sa.sa_sigaction = alarm_sa_handler;
+    alarm_sa.sa_flags = SA_SIGINFO;
     sigemptyset(&alarm_sa.sa_mask);
     sigaction(SIGALRM, &alarm_sa, NULL);
 

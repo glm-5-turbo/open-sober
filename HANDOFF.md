@@ -35,7 +35,7 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 **Key APK:** `~/Documents/Projects/open-sober/roblox-android.apk` (178MB, not in git)
 **APK structure:** `assets/app.zip` → `config.arm64_v8a.apk` → `lib/arm64-v8a/libroblox.so` (101MB, NDK r28c, Android 26)
 
-## Current Status (July 20, after session 8)
+## Current Status (July 20, after session 11b)
 
 ### ✅ Complete (all sessions)
 
@@ -138,6 +138,38 @@ This bypasses ALL internal initialization functions that were hanging:
    Then the process hangs in `nativeSetAssetPath` (`0x273de0c`).
 
 4. **Confirmed PLT GOT condvar patching works.** Heartbeat backtrace shows LR at the condvar shim page, proving that the raw ARM shim IS reached from libroblox's internal code. The issue is that after the shim returns 0 (spurious wakeup), the calling code re-checks the condition and re-enters `pthread_cond_wait` in an infinite loop (single-threaded, no other thread to signal).
+
+
+
+### Session 11b summary (July 20, 2026)
+
+**Goal:** Debug the `nativeSetAssetPath` hang with improved instrumentation.
+
+**What was discovered:**
+
+1. **Improved SIGALRM heartbeat.** Changed from `sa_handler` (signal handler's own x29/x30) to `sa_sigaction` with `SA_SIGINFO` and ucontext. Heartbeat now shows the **real PC** of interrupted code:
+   ```
+   [jni_shim] JNI_OnLoad still running (5s) PC=0x...1074 LR=0x...cb04 BT={0x...cb04,0x...a0c0,0x...f90,0x...6038}
+   ```
+   PC alternates between `0x...1074` and `0x...1084` on the bionic shim trampoline page. Frame 2 at `base + 0x1f64f90` = JNI_OnLoad error path.
+
+2. **`-d exec` trace** shows a repeating 9-address cycle on the bionic shim trampoline page:
+   ```
+   0xbc0 → 0xdc0 → 0xf00 → 0x1080 → 0x1200 → 0x1380 → 0x1580 → 0x1740 → 0x1940 → 0xbc0 → ...
+   ```
+   Each 0x200 bytes apart. This is a GSI library init function calling a sequence of bionic trampolines in a tight loop that never terminates.
+
+3. **QEMU TCG cache conflict confirmed.** NOPing `bl 0x273de0c` at offset `0x1f64eb8` requires `mprotect` on page `0x1f64000`, which ALSO contains the JNI registration function at `0x1f6594c`. Three approaches all failed:
+   - Single mprotect writing both NOPs → only 2 classes
+   - Two separate mprotect calls → only 2 classes  
+   - `b #4` skip instead of NOP → only 2 classes
+   - Phase 1a (clock-only NOP) → STABLE 3 classes
+
+   **Root cause:** Making page `0x1f64000` RW → write → RX causes QEMU to invalidate TCG cache for the registration function. Re-translation produces incorrect code that skips the `NativeUserJavaInterface` class.
+
+4. **gdbstub tested but impractical.** QEMU's `-g 1234` starts in the dynamic linker phase. Connecting gdb before the hang requires multi-step breakpoint setup. `gdb-multiarch` can connect and examine state but reaching the hang point with a useful backtrace is complex.
+
+**Recommended fix:** Patch `libroblox.so` on disk BEFORE `dlopen` (pre-load patching) to avoid QEMU TCG cache invalidation entirely. The target bytes at file offsets `0x1f64e9c` and `0x1f64eb8` can be replaced with `0xd503201f` (NOP) using `open(O_RDWR)` + `pwrite` before loading the library.
 
 5. **Attempted fixes that didn't work:**
    - Using real glibc `pthread_cond_wait` directly in PLT GOT (via `g_real_cond_wait`) — no futex syscall appeared in `-strace`, suggesting the condvar calls go through a different code path than expected, OR the process hangs before reaching a condvar call.
@@ -245,8 +277,11 @@ Rebuild jni_shim: `aarch64-linux-gnu-gcc -o "$SYSROOT/jni_shim" "$CRATE/jni_shim
 
 ### 🎯 Recommended Next Steps
 
-The Phase 1a progressive patch (`patch_jni_onload_phase1`) only NOPs the clock/time
-init, so JNI_OnLoad runs partial native init. The next agent should:
+The Phase 1a progressive patch (`patch_jni_onload_phase1`) NOPs the clock/time
+init only, producing stable 3-class JNI registration output. The next agent
+should skip trying to NOP `nativeSetAssetPath` via runtime mprotect (it shares
+a page with the JNI registration function and corrupts QEMU's TCG cache),
+and instead:
 
 **Phase A — Port the patched QEMU into the repo (critical long-term fix)**
 
@@ -260,61 +295,61 @@ patched QEMU must be preserved or rebuilt from source. Check:
 - `~/Documents/qemu-10.2.1/build/qemu-aarch64` (may exist from original build)
 - Or rebuild from upstream QEMU 10.2.1 tarball with the two patches reapplied
 
-**Phase B — Fix nativeSetAssetPath hang (Session 11 blocker)**
+**Phase B — Fix nativeSetAssetPath hang (Session 11b blocker)**
 
-The hang is inside `nativeSetAssetPath` (binary offset `0x273de0c`) which is
-called from JNI_OnLoad at `0x1f64eb8`. The function calls a helper at `0x273dd4c`
-which calls `FindClass(env, x1)` where `x1` is uninitialized. The caller should:
+The hang is inside `nativeSetAssetPath` (offset `0x273de0c`). The SIGALRM
+heartbeat (now with ucontext-based real PC) shows the PC alternating between
+two addresses on the bionic shim trampoline page, with frame 2 at
+`JNI_OnLoad + 0x1f64f90` (error handling path after JNI calls).
 
-1. **Confirm the hang point** — Replace the raw ARM condvar shim with a C-based
-   one that writes to stderr each time it's called, then sleeps 100ms and returns 0.
-   Key: the shim must be a proper ARM C function (not a host pointer) to work
-   with the bionic trampoline table and PLT GOT patching.
+**Key constraint:** NOPing `bl 0x273de0c` at JNI_OnLoad offset `0x1f64eb8`
+requires mprotect on page `0x1f64000`, which ALSO contains the JNI registration
+function at `0x1f6594c`. Making this page RW → NOP → RX causes QEMU TCG cache
+to re-translate the registration function, which then only discovers 2 classes
+instead of 3 (unstable behavior). This was confirmed with both NOP and `b #4`
+replacements, with single and separate mprotect calls.
 
-2. **Use QEMU's gdbstub** (`-g 1234`) to attach `aarch64-linux-gnu-gdb` and get
-   a proper backtrace when the process hangs. The SIGALRM handler's `x29`/`x30`
-   register reads are unreliable under QEMU — gdbstub provides accurate frame
-   unwinding.
+**Recommended approach for Session 12:**
 
-3. **Strace the syscalls at hang time.** At the hang point, no futex call
-   appears in `-strace` output, suggesting either:
-   a) The condvar is being shimmed by the raw ARM shim (returns immediately, so
-      no syscall is made)
-   b) The process is in a tight loop that doesn't involve any syscalls
+1. **Pre-load code patch (on-disk patching).** Instead of runtime mprotect,
+   patch `libroblox.so` on disk BEFORE `dlopen`. The `bl 0x273de0c` at file
+   offset `0x1f64eb8` (and `bl 0x1cfabfc` at `0x1f64e9c`) can be replaced with
+   NOP bytes directly in the .so file using a C function that reads/writes the
+   file, then calls `dlopen`. This avoids QEMU TCG cache invalidation entirely
+   because the code bytes are different before QEMU first translates them.
 
-4. **If the hang is in nativeSetAssetPath's helper** (function at `0x273dd4c`):
-   The helper calls `FindClass` via JNI with uninitialized `x1`. Our
-   `stub_FindClass` handles any pointer but `strdup(garbage)` might fault.
-   Fix: Set up `x1` to point to a valid class name string before the call,
-   or NOP the helper call (`bl 0x273dd4c` at offset `0x273de2c`).
+2. **Patch the on-disk .so at load time.** Write a small function that:
+   - Opens `libroblox.so` with `open(O_RDWR)`
+   - Seeks to the two offsets
+   - Writes `0xd503201f` (NOP) at each
+   - Closes the file
+   - Then calls `dlopen("libroblox.so", ...)`
+   - QEMU will translate the already-patched code from the start.
 
-5. **Alternative: Full nativeSetAssetPath bypass.**
-   NOPing `bl 0x273de0c` at JNI_OnLoad offset `0x1f64eb8` in addition to the
-   clock init NOP. Note: this requires a SINGLE mprotect covering both NOP
-   targets (they're on the same or adjacent pages), and each page restore
-   must use the proper permissions.
+3. **If pre-load patching isn't possible** (file permissions, read-only fs),
+   use `mmap` to map the file with MAP_SHARED, patch in-memory, then close.
+   This also avoids mprotect on the executed pages.
 
-6. **Build proper JNI stubs** for the 3 discovered classes and 13 methods.
-   The next step after fixing the hang is to handle RegisterNatives properly
-   (the registration function at `0x1f6594c` stores method IDs in BSS at
-   `base + 0x64d9000` region, but our stubs return `track_ptr` values which
-   the calling code stores as valid pointers).
+4. **After NOPing both calls**, JNI_OnLoad should run fully:
+   - Guard check → GetEnv → (clock NOPed) → LocalStorageManager → JNI reg →
+     (assetpath NOPed) → guard setter → remaining JNI calls → return 0x10006
+   - If remaining JNI calls (FindClass for more classes after guard setter)
+     hang due to NULL returns or condvars, add JNI stubs for those classes.
+
+5. **Build proper JNI stubs** for the 3 discovered classes and 13 methods:
+   - `NativeLocaleJavaInterface`: getLocale, getRobloxLocale, getGameLocale
+   - `NativeUserJavaInterface`: getUserId, getIsUnder13, getUsername,
+     getDisplayName, getAlternateName, getPlatformName, getMembershipType,
+     getHasRobloxSubscription, getTheme
+   - `LoggingProtocol`: getProcessTimestamp
 
 **Phase C — Full JNI_OnLoad enablement**
 
 Once the basic JNI stubs and condvar shim are working:
 
-1. **Remove the Phase 1a NOP** (stop NOPing the clock init call).
+1. **Remove the Phase 1a NOP** (stop patching the clock init call).
 2. **Fix the remaining crash** — when all NOPs are removed, the binary may
    hit a SIGSEGV from a different code path.
-3. **Expand JNI stubs** to handle all classes/methods that JNI_OnLoad needs.
-4. **Properly RegisterNatives** — call intercepted native methods with the
-   correct signatures.
-
-**Phase D — Integrate with the Rust orchestrator**
-
-Once the C-based JNI shim works stably, update `qemu.rs` to use it as the
-main entry point for `open-sober play --apk roblox.apk`.
 3. **Expand JNI stubs** to handle all classes/methods that JNI_OnLoad needs.
 4. **Properly RegisterNatives** — call intercepted native methods with the
    correct signatures.
