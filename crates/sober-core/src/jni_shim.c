@@ -14,6 +14,7 @@
 #include <ucontext.h>
 #include <errno.h>
 #include <link.h>
+#include <time.h>
 
 // Minimal JNI types
 typedef int jint;
@@ -47,6 +48,9 @@ typedef struct { const char* name; const char* signature; void* fnPtr; } JNINati
 /* Global canary value */
 static uintptr_t g_canary = 0x0A0B0C0D0E0F1011ULL;
 static uintptr_t g_libroblox_base = 0;
+
+/* Condvar shim — allocated once, used to patch both bionic tramp table and PLT GOT */
+static void *g_cond_shim = MAP_FAILED;
 
 // ============== Tracking stub helpers ==============
 
@@ -303,6 +307,15 @@ static int wrap_cond_timedwait(void *cond, void *mutex, const void *abstime) {
 static struct sigaction jni_old_sa;
 static int jni_segv_count = 0;
 
+/* SIGALRM handler — prints a heartbeat while JNI_OnLoad is running */
+static void alarm_sa_handler(int sig) {
+    (void)sig;
+    static int count = 0;
+    count++;
+    fprintf(stderr, "[jni_shim] JNI_OnLoad still running (%ds)...\n", count * 5);
+    fflush(stderr);
+}
+
 static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
     ucontext_t *u = (ucontext_t*)ctx;
     uintptr_t fault_addr = (uintptr_t)info->si_addr;
@@ -380,11 +393,130 @@ static void pre_mprotect_relro(void) {
     if (count) fprintf(stderr, "[mprotect] %d RELRO pages -> RW (with TLB flush)\n", count);
 }
 
-// ============== Main ==============
+// ============== Disable _dl_mcount profiling ==============
+// QEMU's internal ld-linux has profiling enabled by default (rtld_global.dl_profile = 0x40),
+// causing an O(n²) strcmp loop on EVERY PLT resolution. This function patches _dl_mcount
+// by writing `ret` at its entry point AND zeroing dl_profile in the data section.
+//
+// MUST be called BEFORE loading libroblox.so or any GSI libraries, because those
+// libraries trigger _dl_mcount during their PLT resolution.
+//
+// The large mprotect (64KB) on ld-linux's text section is REQUIRED to force QEMU's
+// TCG JIT cache to invalidate its cached translation of _dl_mcount. A single-page
+// mprotect is insufficient — QEMU user-mode's TCG doesn't always re-translate on
+// a page-granularity mprotect of code.
+static void disable_mcount_profiling(void) {
+    Dl_info mcount_info;
+    void *mcount = dlsym(RTLD_DEFAULT, "_dl_mcount");
+    if (!mcount || !dladdr(mcount, &mcount_info)) {
+        fprintf(stderr, "[jni_shim] WARNING: _dl_mcount not found\n");
+        return;
+    }
+
+    uintptr_t m_start = (uintptr_t)mcount;
+    uintptr_t m_page = m_start & ~0xfffULL;
+
+    // Step 1: Write `ret` at _dl_mcount's entry point.
+    // Use 64KB mprotect to force QEMU TCG JIT cache invalidation across
+    // ld-linux's entire text section. The 64KB range covers the text pages
+    // that contain _dl_mcount. This is the ONLY reliable way to force QEMU
+    // user-mode to re-translate this function.
+    if (mprotect((void*)m_page, 0x10000, PROT_READ|PROT_WRITE) == 0) {
+        volatile uint32_t *entry = (volatile uint32_t*)m_start;
+        *entry = 0xd65f03c0;  // AArch64 `ret` instruction
+        __builtin___clear_cache((void*)m_start, (void*)(m_start + 4));
+        mprotect((void*)m_page, 0x10000, PROT_READ|PROT_EXEC);
+        fprintf(stderr, "[jni_shim] noped _dl_mcount at 0x%lx (64KB TCG flush)\n",
+                (unsigned long)m_start);
+    } else {
+        fprintf(stderr, "[jni_shim] WARNING: mprotect _dl_mcount page failed\n");
+    }
+
+    // Step 2: Zero rtld_global.dl_profile in the data section.
+    // This is a belt-and-suspenders approach — if TCG re-translates but somehow
+    // still executes the old adrp+ldr pattern, the zeroed dl_profile causes an
+    // early return from _dl_mcount anyway.
+    uint32_t *code = (uint32_t*)m_start;
+    if ((code[0] & 0x9f00001f) == 0x90000000) {
+        uint64_t adrp_hi = (code[0] >> 5) & 0x7ffff;
+        uint64_t adrp_lo = (code[0] >> 29) & 0x3;
+        int64_t page_off = (adrp_hi << 14) | (adrp_lo << 12);
+        uint64_t pc_page = m_start & ~0xfffULL;
+        uint64_t rtld_global_addr = pc_page + page_off;
+        uint32_t ldr_val = code[1];
+        if ((ldr_val & 0xffc00000) == 0xb9400000) {
+            uint32_t ldr_off = (ldr_val >> 5) & 0xfff;
+            uintptr_t profile_field = rtld_global_addr + (ldr_off * 4);
+            uintptr_t pf_page = profile_field & ~0xfffULL;
+            if (mprotect((void*)pf_page, 0x10000, PROT_READ|PROT_WRITE) == 0) {
+                *(volatile uint32_t*)profile_field = 0;
+                mprotect((void*)pf_page, 0x10000, PROT_READ);
+                fprintf(stderr, "[jni_shim] zeroed dl_profile at 0x%lx\n",
+                        (unsigned long)profile_field);
+            }
+        }
+    }
+
+    // Sanity check: verify _dl_mcount now reads as `ret`
+    {
+        uint32_t val = *(volatile uint32_t*)m_start;
+        fprintf(stderr, "[jni_shim] _dl_mcount entry now: 0x%08x (expect 0xd65f03c0)\n", val);
+    }
+}
+
+// ============== Direct PLT GOT patching ==============
+// The one-time init function in libroblox calls pthread_cond_wait through its
+// PLT (offset 0x5fb74a0), NOT through the bionic shim trampolines. Our condvar
+// shim in the bionic trampoline table doesn't intercept these PLT calls.
+// We need to directly patch the GOT entry that the PLT resolves to.
+//
+// pthread_cond_wait GOT: base + 0x6473628 (adrp 0x6473000 + ldr offset 0x628)
+// pthread_cond_timedwait GOT: base + 0x6473630 (adrp 0x6473000 + ldr offset 0x630)
+// pthread_mutex_lock GOT: base + 0x6473620 (adrp 0x6473000 + ldr offset 0x620)
+//
+// These offsets are determined from the disassembly:
+//   pthread_cond_wait@plt:   ldr x17, [x16, #1576]  -> 1576=0x628
+//   pthread_cond_timedwait@plt: ldr x17, [x16, #1584] -> 1584=0x630
+//   pthread_mutex_lock@plt:  ldr x17, [x16, #1568]  -> 1568=0x620
+//
+// We need to find the GOT at run time based on where libroblox is loaded
+// and write our shim addresses there.
+#define PLT_GOT_ADRP_PAGE  0x6473000
+
+// Patching condvar PLT GOT entries to our shim
+// Must happen AFTER cond_shim is allocated
+static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
+    uintptr_t got_page = base + PLT_GOT_ADRP_PAGE;
+    // pthread_cond_wait GOT entry: got_page + 0x628
+    // pthread_cond_timedwait GOT entry: got_page + 0x630
+    uintptr_t cond_wait_got = got_page + 0x628;
+    uintptr_t cond_timedwait_got = got_page + 0x630;
+
+    // Make the page writable
+    uintptr_t got_base = cond_wait_got & ~0xfffULL;
+    mprotect((void*)got_base, 0x2000, PROT_READ|PROT_WRITE);
+
+    // Write our condvar shim into the GOT entries
+    *(volatile uintptr_t*)cond_wait_got = (uintptr_t)cond_shim;
+    *(volatile uintptr_t*)cond_timedwait_got = (uintptr_t)cond_shim;
+
+    fprintf(stderr, "[jni_shim] patched PLT GOT condvar at 0x%lx, 0x%lx -> shim=%p\n",
+            (unsigned long)cond_wait_got, (unsigned long)cond_timedwait_got, cond_shim);
+
+    // Verify the patch
+    {
+        uintptr_t readback = *(volatile uintptr_t*)cond_wait_got;
+        fprintf(stderr, "[jni_shim] cond_wait GOT verify: %p (expect %p)\n",
+                (void*)readback, cond_shim);
+    }
+}
 
 int main(int argc, char** argv) {
     const char* lib_path = getenv("ROBLOX_LIB");
     if (!lib_path) lib_path = "libroblox.so";
+
+    fprintf(stderr, "[jni_shim] Disabling _dl_mcount profiling...\n");
+    disable_mcount_profiling();
 
     fprintf(stderr, "[jni_shim] Loading bionic shim...\n");
     void *bionic_shim = dlopen("libbionic_shim.so", RTLD_LAZY | RTLD_GLOBAL);
@@ -1264,46 +1396,6 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Disable _dl_mcount profiling by zeroing rtld_global's dl_profile field.
-            // QEMU user-mode loads the guest ld-linux, which has profiling enabled
-            // by default (field at rtld_global+0xCA0 = 0x40). Setting it to 0
-            // makes _dl_mcount return early without the expensive strcmp loop.
-            // Use mprotect to force QEMU JIT cache invalidation on the data page.
-            {
-                Dl_info mcount_info;
-                void *mcount = dlsym(RTLD_DEFAULT, "_dl_mcount");
-                if (mcount && dladdr(mcount, &mcount_info)) {
-                    uintptr_t m_start = (uintptr_t)mcount;
-                    // Get the adrp target: _dl_mcount code:
-                    //   d000015a  adrp x26, 40000   (x26 = _rtld_global)
-                    //   b94ca343  ldr  w3, [x26, #3232]  (w3 = dl_profile)
-                    // rtld_global + 0xCA0 is the dl_profile field
-                    uint32_t *code = (uint32_t*)m_start;
-                    if ((code[0] & 0x9f00001f) == 0x90000000) {
-                        // Decode adrp: immhi = bits 23:5 of instruction, immlo = bits 30:29
-                        uint64_t adrp_hi = (code[0] >> 5) & 0x7ffff;
-                        uint64_t adrp_lo = (code[0] >> 29) & 0x3;
-                        int64_t page_off = (adrp_hi << 14) | (adrp_lo << 12);
-                        uint64_t pc_page = m_start & ~0xfffULL;
-                        uint64_t rtld_global_addr = pc_page + page_off;
-                        // ldr w3, [x26, #3232] at code[1]
-                        uint32_t ldr_val = code[1];
-                        uint32_t ldr_off = (ldr_val >> 5) & 0xfff;  // scaled by 4
-                        if ((ldr_val & 0xffc00000) == 0xb9400000 && ldr_off == 0xCA0/4) {
-                            uintptr_t profile_field = rtld_global_addr + 0xCA0;
-                            uintptr_t pf_page = profile_field & ~0xfffULL;
-                            mprotect((void*)pf_page, 0x10000, PROT_READ|PROT_WRITE);
-                            *(volatile uint32_t*)profile_field = 0;
-                            mprotect((void*)pf_page, 0x10000, PROT_READ);
-                            fprintf(stderr, "[jni_shim] zeroed dl_profile at 0x%lx\n",
-                                    (unsigned long)profile_field);
-                        }
-                    }
-                } else {
-                    fprintf(stderr, "[jni_shim] WARNING: _dl_mcount not found\n");
-                }
-            }
-
             // Install mutex sanitization wrappers into the trampoline table.
             // These fix Bionic→glibc pthread_mutex_t ABI mismatches.
             // WARNING: Previous attempt caused QEMU JIT crash on re-entry.
@@ -1332,15 +1424,17 @@ int main(int argc, char** argv) {
             // This prevents all condvar deadlocks (init guards, etc.) under QEMU
             // where no other thread exists to signal the condvar.
             // mov w0, #0 = 0x52800000, ret = 0xd65f03c0
-            void *cond_shim = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
+            if (g_cond_shim == MAP_FAILED) {
+                g_cond_shim = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
                                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-            if (cond_shim != MAP_FAILED) {
-                ((uint32_t*)cond_shim)[0] = 0x52800000;  // mov w0, #0
-                ((uint32_t*)cond_shim)[1] = 0xd65f03c0;  // ret
-                __builtin___clear_cache(cond_shim, (void*)((uintptr_t)cond_shim + 8));
-                tramp[39] = cond_shim;   // pthread_cond_wait
-                tramp[96] = cond_shim;   // pthread_cond_timedwait (same effect)
-                fprintf(stderr, "[jni_shim] condvar shim %p -> tramp[39,96]\n", cond_shim);
+            }
+            if (g_cond_shim != MAP_FAILED) {
+                ((uint32_t*)g_cond_shim)[0] = 0x52800000;  // mov w0, #0
+                ((uint32_t*)g_cond_shim)[1] = 0xd65f03c0;  // ret
+                __builtin___clear_cache(g_cond_shim, (void*)((uintptr_t)g_cond_shim + 8));
+                tramp[39] = g_cond_shim;   // pthread_cond_wait
+                tramp[96] = g_cond_shim;   // pthread_cond_timedwait (same effect)
+                fprintf(stderr, "[jni_shim] condvar shim %p -> tramp[39,96]\n", g_cond_shim);
             } else {
                 fprintf(stderr, "[jni_shim] WARNING: condvar shim mmap failed\n");
             }
@@ -1350,23 +1444,70 @@ int main(int argc, char** argv) {
     int (*jni_onload)(JavaVM*, void*) = (int (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
     g_env.functions = (const void**)jni_table;
 
-    // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
-    // The condvar shim at tramp[39,96] handles the init deadlock.
-    // Do NOT set guard=1 — let the init function run naturally.
-    // It will check guard==0, call 26c0c7c (mutex+condvar), the condvar
-    // shim returns immediately, init completes, writes guard=1 and
-    // stores JavaVM* at 0x6a26e48 — properly initializing BSS state.
-    // Only pre-init the JavaVM* at 0x6a26e48 so other code paths that
-    // check for a valid VM pointer don't crash.
-    if (g_libroblox_base) {
-        uintptr_t jvm_global = g_libroblox_base + 0x6a26e48;
-        *(volatile uintptr_t*)jvm_global = (uintptr_t)&g_vm;
-        fprintf(stderr, "[jni_shim] pre-init JavaVM at 0x%lx\n",
-                (unsigned long)jvm_global);
+    // Patch the PLT GOT entries for pthread_cond_wait and pthread_cond_timedwait
+    // to point to our condvar shim. This intercepts calls through libroblox's PLT,
+    // which the bionic shim trampoline table does not cover.
+    // The init function at 0x26c0c7c calls pthread_cond_wait via PLT, and without
+    // this patch, it waits forever on a condition variable that no one signals.
+    if (g_libroblox_base && g_cond_shim != MAP_FAILED) {
+        patch_condvar_plt_got(g_libroblox_base, g_cond_shim);
     }
 
+    // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
+    // The one-time init function (at 0x1f65a60) checks guard at base+0x6a26e40
+    // and if zero, calls 26c0c7c which does mutex+condvar in a loop that waits
+    // until another thread sets a flag. Under QEMU user-mode with no other thread,
+    // this loop spins forever (our condvar shim returns 0, which is a spurious
+    // wakeup that re-checks and re-waits, ad infinitum).
+    //
+    // Fix: pre-set the guard byte to 1 (already initialized) so the init function
+    // returns immediately. Also pre-init the JavaVM* at guard+8 (0x6a26e48).
+    if (g_libroblox_base) {
+        uintptr_t guard_addr = g_libroblox_base + 0x6a26e40;
+        uintptr_t jvm_global = g_libroblox_base + 0x6a26e48;
+
+        // Make the page writable
+        uintptr_t guard_page = guard_addr & ~0xfffULL;
+        mprotect((void*)guard_page, 0x1000, PROT_READ|PROT_WRITE);
+
+        // Set guard byte to 1 (tells init "already done, skip")
+        *(volatile uint8_t*)guard_addr = 1;
+
+        // Set JavaVM* slot (guard+8) — needed by other code paths
+        *(volatile uintptr_t*)jvm_global = (uintptr_t)&g_vm;
+
+        fprintf(stderr, "[jni_shim] pre-init guard=1 at 0x%lx, JVM at 0x%lx\n",
+                (unsigned long)guard_addr, (unsigned long)jvm_global);
+
+	}
+    // Set an alarm to catch JNI_OnLoad hang — if it runs >10s, print debug info
+    signal(SIGALRM, SIG_IGN);  // Don't kill process, just print from alarm handler
+
+    // Write a marker to stderr just before the call to confirm flush
     fprintf(stderr, "[jni_shim] entering JNI_OnLoad...\n");
     fflush(stderr);
+
+    // Use a timer to print stack depth every 5 seconds while in JNI_OnLoad
+    // Since we can't get a proper backtrace under QEMU, we use a simple approach:
+    // fork a child that sleeps and kills parent if JNI_OnLoad doesn't return
+    fprintf(stderr, "[jni_shim] JNI_OnLoad call at %p, vm=%p, env=%p\n",
+            (void*)jni_onload, (void*)&g_vm, (void*)&g_env);
+    fflush(stderr);
+
+    // Set up a SIGALRM handler as a heartbeat to detect if JNI_OnLoad is still executing
+    struct sigaction alarm_sa;
+    memset(&alarm_sa, 0, sizeof(alarm_sa));
+    alarm_sa.sa_handler = alarm_sa_handler;
+    sigemptyset(&alarm_sa.sa_mask);
+    sigaction(SIGALRM, &alarm_sa, NULL);
+
+    struct itimerval timer;
+    timer.it_value.tv_sec = 3;
+    timer.it_value.tv_usec = 0;
+    timer.it_interval.tv_sec = 5;
+    timer.it_interval.tv_usec = 0;
+    setitimer(ITIMER_REAL, &timer, NULL);
+
     jint ver = jni_onload(&g_vm, NULL);
     fprintf(stderr, "[jni_shim] JNI_OnLoad -> 0x%x\n", ver);
     fflush(stderr);
