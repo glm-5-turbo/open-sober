@@ -1542,11 +1542,13 @@ int main(int argc, char** argv) {
         // flag2 = base + 0x6ae6000 + 0x690 = 0x6ae6690
         uintptr_t ts_flag1 = g_libroblox_base + 0x6a325e4;
         uintptr_t ts_flag2 = g_libroblox_base + 0x6ae6690;
-        // Check bounds: BSS is 0x64c4f00 to 0x6ae6cec
-        // flag1=0x6a325e4 and flag2=0x6ae6690 are both within BSS
+        // Also pre-init the frequency double checked at base+0x6ae66e8
+        // If this double is 0.0, the fast path falls through to another init
+        // function that also uses condvars. Set to 1.0e9 (1 GHz default).
+        uintptr_t freq_dbl = g_libroblox_base + 0x6ae66e8;
         __atomic_store_n((volatile uint8_t*)ts_flag1, 1, __ATOMIC_RELEASE);
         __atomic_store_n((volatile uint8_t*)ts_flag2, 1, __ATOMIC_RELEASE);
-        // Also init any double/float constants that the fast path reads
+        *(volatile double*)freq_dbl = 1.0e9; // 1 GHz cntvct frequency
         // cntvct_freq = base + 0x6ae6000 + 0xda8 = 0x6ae6da8
         // This is a double: set to 1.0e9 (1 GHz default cntvct freq)
 
