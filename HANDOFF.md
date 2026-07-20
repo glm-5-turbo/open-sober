@@ -35,7 +35,7 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 **Key APK:** `~/Documents/Projects/open-sober/roblox-android.apk` (178MB, not in git)
 **APK structure:** `assets/app.zip` → `config.arm64_v8a.apk` → `lib/arm64-v8a/libroblox.so` (101MB, NDK r28c, Android 26)
 
-## Current Status (July 19, after sessions 5+5b)
+## Current Status (July 19, after session 6)
 
 ### ✅ Complete (all sessions)
 
@@ -52,23 +52,34 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 11. **Init guard deadlock FIXED** — code patch replaces `bl 26c0c7c` (mutex+condvar) with `mov w0,#1; nop`.
 12. **Raw ARM condvar shim** — `mov w0,#0; ret` in mmap'd RWX page, replaces `pthread_cond_wait` trampoline.
 
-### 🟡 Current Blocker — QEMU JIT page-boundary SMC crash on x86-64 host
+### 🟢 CF_NO_GOTO_TB patch works with direct call
 
-**QEMU 10.2.1 TCG JIT** writes to its code buffer during translation (before jump patching). When the write lands at the end of a host page (`0x...ffb8` or `0x...fff8`), x86-64 Self-Modifying Code detection triggers a host SIGSEGV that QEMU cannot recover from. This corrupts the JIT cache and causes guest SIGILL.
+Session 6 discovered: The CF_NO_GOTO_TB + tb_set_jmp_target no-op patches in the custom QEMU (`~/.cache/open-sober/qemu-patched`) are sufficient when JNI_OnLoad is called **directly** (no code copy). The code copy workaround introduced adrp fix bugs that caused SIGILL.
 
-**Patches applied but insufficient:**
-- `CF_NO_GOTO_TB` — prevents goto_tb chaining writes
-- `tb_set_jmp_target` no-op — prevents indirect jump patching writes
-- The write comes from TCG code **generation** (literal pool fixup, relocations), not from jump patching
+Key findings:
+- **Direct call to JNI_OnLoad → SIGILL fixed** (no host crash, no guest crash)
+- **Code copy approach → still crashes with SIGILL** (adrp/branch fix has bugs)
+- **100% CPU for 5+ min** with no syscalls — libroblox enters a spin loop after init returns
+- The init deadlock (condvar wait) is bypassed via BSS pre-init + condvar shim
+- But the code after init returns has an infinite loop
 
-**Findings:**
-- `-one-insn-per-tb`, `-d nochain`, `-tb-size`, `-cpu max` all still crash
-- split-wx IS configured (`tcg_splitwx_diff` is set) but the RX view still gets corrupted
-- The crash is in QEMU itself (also affects Debian's system `qemu-aarch64`)
-- 100% failure rate in last session's runs (6/6), earlier it was ~30%
-- The memory layout changes from the expanded trampoline table (bigger BSS) likely made it deterministic
+### 🟡 Current Blocker — Libroblox init spin loop
 
-**The user says:** They will handle the QEMU JIT bug themselves. Don't try to patch QEMU further.
+**Symptom:** After JNI_OnLoad enters and the guard check returns immediately, libroblox enters a tight computation loop at 100% CPU, makes **zero syscalls**, and never reaches any JNI calls even after 5+ minutes.
+
+**Evidence:**
+- `strace` shows no futex/write/read after `entering JNI_OnLoad...`
+- No `FindClass`, `GetMethodID`, or `RegisterNatives` log lines appear
+- QEMU process shows 100% CPU on one core
+- WITH QEMU_RESERVED_VA: same spin loop behavior
+- No SIGSEGV handler fires (no dangling pointers or bad accesses)
+
+**Hypothesis:** JNI_OnLoad calls code that spins on a BSS variable that was supposed to be set during the one-time init. Since we bypassed the init (guard=1), the variable was never written. Candidates:
+- A "initialization complete" flag checked in a loop
+- A function pointer table that was supposed to be populated by init
+- An internal Roblox sync primitive (not pthread — no syscalls)
+
+**Best fix to try next:** Don't set guard=1. Instead, let the init function run, but let the **condvar shim** handle the deadlock. The init function calls `bl 26c0c7c` which does mutex_lock + cond_wait. With condvar shim (`mov w0,#0; ret` at tramp[39,96]), cond_wait returns immediately and the init function completes normally — writing the guard byte and storing the JavaVM* itself.
 
 ### What session 5 discovered about JNI_OnLoad
 
@@ -78,16 +89,12 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 
 ### What was fixed (software side)
 
-1. **Code copy patch** in `jni_shim.c`: `bl 26c0c7c` → `mov w0, #1` at copy offset +0x1a98
-2. **BSS pre-init**: guard bytes set to 1 at `0x6a26e30-0x6a26e48`
-3. **Condvar shim**: raw ARM `mov w0,#0; ret` replaces trampoline entries 39 (pthread_cond_wait) and 96 (pthread_cond_timedwait), preventing all condvar deadlocks
-4. **Null-deref safety** in SIGSEGV handler (partial — under QEMU user-mode `uc_mcontext` maps to host x86-64 registers, not guest ARM)
-
-### 🎯 Next Steps (after QEMU JIT is fixed)
-
-1. **Let JNI_OnLoad run to completion** — with init deadlock bypassed, JNI_OnLoad makes real progress. 30+ second runs expected under QEMU JIT slowdown.
-2. **Implement RegisterNatives properly** — log registered methods and implement key ones.
-3. **Once JNI_OnLoad returns** — Roblox main loop (render, network, scripts), then optimize the 10-15% emulation slowdown.
+1. **Enhanced JNI logging stubs** — FindClass, GetMethodID, RegisterNatives, ThrowNew all log with call counts
+2. **Mutex sanitization** — wrappers for Bionic→glibc pthread_mutex_t ABI mismatch (kind field at offset 16, __owner at offset 8 leaking into __count)
+3. **Condvar shim** — raw ARM `mov w0,#0; ret` replaces trampoline entries 39 (pthread_cond_wait) and 96 (pthread_cond_timedwait), preventing all condvar deadlocks
+4. **SIGSEGV handler fixed** — bad-address faults chain to old handler instead of setting x0=&g_env (which made crashes worse)
+5. **BSS pre-init** — guard bytes set to 1 at `0x6a26e30-0x6a26e48`, JavaVM* stored at `0x6a26e48`
+6. **Init call patches** — code copy replaces `bl 26c0c7c` with `mov w0, #1` at offset +0x1a98
 
 ### Running
 
