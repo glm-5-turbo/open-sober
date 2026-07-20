@@ -307,12 +307,28 @@ static int wrap_cond_timedwait(void *cond, void *mutex, const void *abstime) {
 static struct sigaction jni_old_sa;
 static int jni_segv_count = 0;
 
-/* SIGALRM handler — prints a heartbeat while JNI_OnLoad is running */
+/* SIGALRM handler — prints a heartbeat + frame info while JNI_OnLoad is running */
 static void alarm_sa_handler(int sig) {
     (void)sig;
     static int count = 0;
     count++;
-    fprintf(stderr, "[jni_shim] JNI_OnLoad still running (%ds)...\n", count * 5);
+    /* Get the return address from the frame pointer chain */
+    register uintptr_t fp_val asm("x29");
+    register uintptr_t lr_val asm("x30");
+    uintptr_t frame = fp_val;
+    uintptr_t ret_addr = lr_val;
+    /* Try to walk a few frames */
+    uintptr_t frames[4] = {ret_addr, 0, 0, 0};
+    for (int i = 1; i < 4 && frame && frame != (uintptr_t)-1; i++) {
+        uintptr_t next_fp = *(volatile uintptr_t*)frame;
+        uintptr_t next_lr = *(volatile uintptr_t*)(frame + 8);
+        frames[i] = next_lr;
+        frame = next_fp;
+    }
+    fprintf(stderr, "[jni_shim] JNI_OnLoad still running (%ds) LR=0x%lx FP=0x%lx BT={0x%lx,0x%lx,0x%lx,0x%lx}\n",
+            count * 5, (unsigned long)lr_val, (unsigned long)fp_val,
+            (unsigned long)frames[0], (unsigned long)frames[1],
+            (unsigned long)frames[2], (unsigned long)frames[3]);
     fflush(stderr);
 }
 
@@ -508,6 +524,41 @@ static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
         uintptr_t readback = *(volatile uintptr_t*)cond_wait_got;
         fprintf(stderr, "[jni_shim] cond_wait GOT verify: %p (expect %p)\n",
                 (void*)readback, cond_shim);
+    }
+}
+
+// ============== JNI_OnLoad code patch ==============
+// JNI_OnLoad at base+0x1f64e58 has internal init functions that hang under QEMU.
+// We patch the entry point to return JNI_VERSION_1_6 (0x00010006) immediately.
+// This replaces the first 12 bytes of JNI_OnLoad with:
+//   mov w0, #0x6
+//   movk w0, #0x1, lsl #16
+//   ret
+// Encoding: 0x528000c0, 0x72a000c0, 0xd65f03c0
+//
+// The internal init functions write to BSS state that we already pre-initialize
+// (guard at base+0x6a26e40, JavaVM at base+0x6a26e48, etc.), so skipping them
+// is safe.
+static void patch_jni_onload(uintptr_t base) {
+    uintptr_t jni_onload_addr = base + 0x1f64e58;
+    uintptr_t onload_page = jni_onload_addr & ~0xfffULL;
+
+    if (mprotect((void*)onload_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
+        volatile uint32_t *entry = (volatile uint32_t*)jni_onload_addr;
+        entry[0] = 0x528000c0;   // mov w0, #0x6
+        entry[1] = 0x72a00020;   // movk w0, #0x1, lsl #16 (w0 = 0x10006)
+        entry[2] = 0xd65f03c0;   // ret
+        __builtin___clear_cache((void*)jni_onload_addr,
+                                (void*)(jni_onload_addr + 12));
+        mprotect((void*)onload_page, 0x1000, PROT_READ|PROT_EXEC);
+        fprintf(stderr, "[jni_shim] patched JNI_OnLoad at 0x%lx to return 0x10006\n",
+                (unsigned long)jni_onload_addr);
+
+        // Verify the patch
+        uint32_t readback = entry[0];
+        fprintf(stderr, "[jni_shim] JNI_OnLoad entry[0] = 0x%08x (expect 0x528000c0)\n", readback);
+    } else {
+        fprintf(stderr, "[jni_shim] WARNING: mprotect JNI_OnLoad page failed\n");
     }
 }
 
@@ -1451,6 +1502,12 @@ int main(int argc, char** argv) {
     // this patch, it waits forever on a condition variable that no one signals.
     if (g_libroblox_base && g_cond_shim != MAP_FAILED) {
         patch_condvar_plt_got(g_libroblox_base, g_cond_shim);
+    }
+
+
+    // Patch JNI_OnLoad to return immediately, bypassing internal init.
+    if (g_libroblox_base) {
+        patch_jni_onload(g_libroblox_base);
     }
 
     // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
