@@ -108,6 +108,8 @@ This bypasses ALL internal initialization functions that were hanging:
 12. **JNI_OnLoad patch** — returns JNI_VERSION_1_6 immediately, bypassing internal init.
 13. **End-to-end success** — binary loads, JNI_OnLoad returns, sleep loop reached.
 14. **Timestamp flags pre-init** — two BSS flags (0x6a325e4, 0x6ae6690) set to 1 to avoid condvar hang in clock_gettime fast-path check (function at 0x5f4f69c in libroblox).
+15. **Frequency double pre-init** — `base+0x6ae66e8` set to 1.0e9 to skip another condvar-based init fallthrough in the same clock function.
+16. **Clean sweep** — removed 17GB of core dumps and 1.1GB of build artifacts. Project from 18GB → 720MB. Disk from 98% → 63%.
 
 ### Session 10 summary
 
@@ -116,29 +118,40 @@ This bypasses ALL internal initialization functions that were hanging:
 **What was discovered:**
 
 1. **JNI_OnLoad's internal structure mapped** via disassembly:
-   - Guard check at `0x1f65a60` returns immediately when guard=1 (our pre-init works)
-   - GetEnv at `0x5e17fb8` → returns our stub env pointer
-   - Clock/time function at `0x1cfabfc` → `b 0x5f4f69c` → has its own two-flag check
-   - `LocalStorageManager_initStorageManagerNative` → JUST `ret` (no-op!)
-   - JNI registration block at `0x1f6594c` → FindClass/RegisterNatives for locale classes
-   - `nativeSetAssetPath` at `0x273de0c` → JNI calls
-   - Guard setter at `0x1f65a54` → writes to BSS
+   - Guard check at `0x1f65a60` — returns immediately when guard=1 (our pre-init works)
+   - GetEnv at `0x5e17fb8` — returns our stub env pointer
+   - Clock/time function at `0x1cfabfc` → `b 0x5f4f69c` — three-tier guard check
+   - `LocalStorageManager_initStorageManagerNative` — JUST `ret` (no-op!)
+   - JNI registration block at `0x1f6594c` — FindClass/RegisterNatives for locale classes
+   - `nativeSetAssetPath` at `0x273de0c` — JNI calls
+   - Guard setter at `0x1f65a54` — writes to BSS
 
-2. **Root cause of hang without bypass:** The function at `0x5f4f69c` (clock_gettime wrapper) checks two BSS flags (`base+0x6a325e4`, `base+0x6ae6690`). When either is 0 (the default for BSS), it takes a slow path that calls `pthread_cond_wait` in a loop. Our condvar shim returns 0 (spurious wakeup), so the loop iterates forever — no futex syscall, just a tight spin loop.
+2. **Root cause of hang without bypass:** The function at `0x5f4f69c` (clock_gettime wrapper) has a three-tier guard check:
+   - **Level 1:** Two BSS flags (`base+0x6a325e4`, `base+0x6ae6690`) — if either is 0, takes slow path with condvar loop
+   - **Level 2:** Double at `base+0x6ae66e8` — if 0.0 (BSS default), falls through to another init function with condvars
+   - **Level 3:** Atomic ldaxr/stlxr timestamp update loop — works under QEMU
+   
+   Our condvar shim returns 0 (spurious wakeup), so any condvar-based path spins forever without any futex syscall.
 
-3. **Timestamp flags pre-init added** — setting these two flags to 1 before JNI_OnLoad should cause the fast path (cntvct-based) to be taken instead. Verified the addresses are in BSS. When removing the JNI_OnLoad bypass with these flags set, the crash moved from a hang to a SIGSEGV on a different page — indicating progress through the init.
+3. **BSS pre-inits added:** `__atomic_store_n` with release semantics for the two ts_flags, and a `*(volatile double*) = 1.0e9` for the cntvct frequency. All verified to be within BSS range: `0x64c4f00` to `0x6ae6cec`.
 
 4. **Key addresses identified:**
    - Init guard: `base + 0x6a26e40` (already pre-set)
    - Timestamp flag 1: `base + 0x6a325e4` (ldrb at #1508)
    - Timestamp flag 2: `base + 0x6ae6690` (ldrb at #1680)
+   - Cntvct frequency double: `base + 0x6ae66e8` (freq == 0.0 check)
    - JNI_OnLoad entry: `base + 0x1f64e58`
    - JNI registration: `base + 0x1f6594c`
    - Init guard check: `base + 0x1f65a60`
    - condvar-heavy init: `base + 0x26c0c7c` (mutex+condvar loop)
 
+5. **Attempted fixes that didn't work:**
+   - **futex-based condvar wrapper:** The `wrap_cond_wait` C function with `syscall(SYS_futex, FUTEX_WAIT_BITSET)` didn't appear in `-strace` output, suggesting the guest code path goes through the PLT (which we patched) or the bionic trampoline (which we also patched), but potentially the futex syscall is intercepted by QEMU user-mode and doesn't reach the host. Using `nanosleep` instead of futex also didn't help — the calls just accumulate delay without making progress since there's no other thread to satisfy the condition.
+   - **Pre-setting more BSS state:** Even with all three levels of the clock function guarded, there are more condvar waits deeper in the init chain that we haven't mapped.
+
 **Added in jni_shim.c:**
 - `__atomic_store_n` for pre-setting timestamp flags with release semantics
+- `*(volatile double*)freq_dbl = 1.0e9` for cntvct frequency
 - Verify guards and logging for all pre-init values
 
 ### Key Source Files
@@ -194,42 +207,51 @@ patched QEMU must be preserved or rebuilt from source. Check:
 
 Session 10 identified that the hang when running without the JNI_OnLoad bypass
 is in the clock_gettime wrapper at binary offset `0x5f4f69c`. This function
-checks two flags (`base+0x6a325e4`, `base+0x6ae6690`) — if either is 0,
-it calls a slow path containing a `pthread_cond_wait` loop. With the condvar
-shim returning 0 (spurious wakeup), this becomes an infinite tight spin loop
-(no futex syscall, just user-space spin).
+has a three-tier guard check:
 
-Pre-setting these flags should take the fast path (cntvct-based). The next agent
-should:
+1. Two BSS flags (`base+0x6a325e4`, `base+0x6ae6690`) — if either is 0,
+   calls slow path with `pthread_cond_wait` loop
+2. Double frequency at `base+0x6ae66e8` — if 0.0 (BSS default), falls through
+   to another init function with condvars
+3. Atomic ldaxr/stlxr timestamp update loop
 
-1. **Remove the JNI_OnLoad patch** (comment out the `patch_jni_onload()` call)
-   now that ts_flags are pre-set. If it doesn't hang, catalog the JNI calls.
-   If it does crash, fix the next blocker.
+All three are now pre-initialized. With the condvar shim returning 0 (spurious
+wakeup), any condvar-based path spins forever — no futex syscall, just a tight
+user-space spin loop.
 
-2. **Build JNI stubs that work** — The JNI registration block at `0x1f6594c`
+**Attempted:** futex-based condvar C wrappers (`wrap_cond_wait` with
+`syscall(SYS_futex, FUTEX_WAIT_BITSET, ...)`) — didn't appear in `-strace`,
+suggesting QEMU user-mode intercepts the futex before it reaches the host.
+`nanosleep` also didn't help — delays just accumulate without progress since
+no other thread exists to satisfy the condition.
+
+The next agent should:
+
+1. **Try the clock_gettime-based condvar approach** — Instead of futex or
+   nanosleep, have the condvar shim call `clock_nanosleep(CLOCK_MONOTONIC,
+   TIMER_ABSTIME, ...)` with a 100ms timeout. This makes a real blocking
+   syscall that QEMU user-mode can process (unlike futex which QEMU may
+   short-circuit). If the calling code checks a condition after the wait
+   returns, the nanosleep wakeup lets it retry without burning CPU.
+
+2. **Map more BSS guards** — Use `-d exec` with a subset of addresses to
+   find additional guards that control condvar-based init paths. Search for
+   `ldarb` + `tbz` patterns (guard check idiom) in the init chain to identify
+   flags that can be pre-set.
+
+3. **Build JNI stubs that work** — The JNI registration block at `0x1f6594c`
    calls FindClass, GetMethodID, RegisterNatives for locale classes:
    - `com/roblox/engine/jni/locale/NativeLocaleJavaInterface`
    - Methods: `getLocale()Ljava/lang/String;`, `getRobloxLocale`,
      `getGameLocale`, `getAlternateName`
    
    The stubs need to return unique pointers per class/method name so that
-   JNI_OnLoad can proceed. `RegisterNatives` function pointers from the binary
-   need to actually be callable.
+   JNI_OnLoad can proceed.
 
-3. **Implement a real condvar shim** — Instead of `mov w0,#0; ret`, use a
-   futex-based blocking wait (`futex(FUTEX_WAIT)`) so that `pthread_cond_wait`
-   actually blocks instead of spinning. This is needed because libc functions
-   called by JNI_OnLoad may use condvars legitimately for one-time init.
-
-   Alternative: use `syscall(SYS_futex, uaddr, FUTEX_WAIT, val, timeout)` in
-   a loop with a 100ms timeout, and return 0 (ETIMEDOUT) on each timeout.
-   The caller will retry and eventually the condition will be met (if it ever
-   would be in a real Android environment).
-
-4. **Shrink the patch progressively** — once the JNI stubs work:
-   - First: keep the patch but let more functions run (jump to offset 0x1f64e94
-     instead of returning immediately)
-   - Then: jump to 0x1f64ea8 (skip clock_gettime but run JNI registration)
+4. **Shrink the patch progressively:**
+   - First: patch to jump to offset 0x1f64eb0 (skip problematic init calls
+     but run JNI registration + nativeSetAssetPath)
+   - Then: jump to 0x1f64e9c (skip only the first init)
    - Finally: remove the patch entirely
 
 **Phase C — Full JNI_OnLoad enablement**
@@ -251,13 +273,14 @@ main entry point for `open-sober play --apk roblox.apk`.
 
 ### Known issues / gotchas
 
-- `unused function` warnings from `wrap_mutex_lock`, `wrap_mutex_init`,
-  `wrap_cond_wait`, `wrap_cond_timedwait` — these are defined but not called
-  (the direct glibc approach is used instead). Can be deleted.
 - QEMU `-strace` output + `-d exec` output interleave on stderr. For clean
   analysis, redirect to separate files.
-- The `alarm_sa_handler` backtrace via `x29`/`x30` doesn't work in signal
-  context under QEMU (the registers are the handler's, not the interrupted
-  code). To get real backtraces, use QEMU's gdbstub (`-g 1234`).
+- The `alarm_sa_handler` backtrace via `x29`/`x30` doesn't work reliably in
+  signal context under QEMU (the registers are the handler's, not the
+  interrupted code). To get real backtraces, use QEMU's gdbstub (`-g 1234`).
+- `futex` syscalls from guest ARM code may be intercepted by QEMU user-mode
+  and not reach the host kernel. `nanosleep` and `clock_nanosleep` DO reach
+  the host and appear in `-strace`. If a blocking condvar is needed, prefer
+  `clock_nanosleep` over `futex`.
 - Tilde expansion (`~`) in paths breaks with QEMU in some shell contexts.
   Always use `$(realpath ...)` or full `/home/code-agent/...` paths.
