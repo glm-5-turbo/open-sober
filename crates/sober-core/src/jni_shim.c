@@ -80,8 +80,7 @@ static void* stub_voidp(void) { static char buf[64]; return buf; }
 static jint stub_GetVersion(JNIEnv* e) { STUB_LOG("GetVersion"); return JNI_VERSION_1_6; }
 static jclass stub_FindClass(JNIEnv* e, const char* n) {
     static int count = 0; count++;
-    if (count <= 20 || (count % 100) == 0)
-        STUB_LOG("FindClass[%d]: %s", count, n?n:"NULL");
+    STUB_LOG("FindClass[%d]: %s", count, n?n:"NULL");
     return (jclass)track_ptr(n);
 }
 static jmethodID stub_GetMethodID(JNIEnv* e, jclass c, const char* n, const char* s) {
@@ -192,7 +191,7 @@ __attribute__((constructor))
 static void init_jni_functions() {
     memset(jni_table, 0, sizeof(jni_table));
     jni_table[4] = stub_GetVersion;
-    for (int i = 5; i <= 40; i++) jni_table[i] = stub_GetVersion;
+    for (int i = 5; i <= 40; i++) jni_table[i] = stub_voidp;  // default = return NULL/0
     jni_table[5] = stub_FindClass; jni_table[6] = stub_FindClass;
     jni_table[7] = stub_GetMethodID; jni_table[8] = stub_GetFieldID;
     jni_table[9] = stub_voidp; jni_table[10] = stub_FindClass;
@@ -208,13 +207,20 @@ static void init_jni_functions() {
     for (int i = 41; i <= 100; i++) jni_table[i] = (void*)stub_CallIntMethod;
     jni_table[101] = stub_GetFieldID;
     jni_table[102] = stub_GetObjectField; jni_table[103] = stub_SetObjectField;
+    // Slot 113 (offset 904) — called during JNI_OnLoad native method registration.
+    // Takes (env, class, name, sig) — this is GetStaticMethodID or similar.
+    // Patterns observed: (FindClass → GetStaticMethodID → ? → GetStringUTFChars)
+    jni_table[113] = stub_GetStaticMethodID;
     jni_table[193] = stub_RegisterNatives; jni_table[197] = stub_GetJavaVM;
-    for (int i = 200; i < JNI_SLOTS; i++) jni_table[i] = (void *)stub_GetVersion;
+    // Fill remaining slots with stub_voidp (returns NULL/0) instead of stub_GetVersion
+    // Returning 0x10006 from random slots causes crashes when interpreted as pointers
+    for (int i = 200; i < JNI_SLOTS; i++) jni_table[i] = (void *)stub_voidp;
     vm_table[3] = stub_DestroyJavaVM; vm_table[4] = stub_GetEnv_Attach;
     vm_table[5] = stub_DetachCurrentThread; vm_table[6] = stub_GetEnv_jint;
     vm_table[7] = stub_GetEnv_Attach;
     g_vm.functions = (const void**)vm_table;
-    for (int i = 0; i < JNI_SLOTS; i++) if (jni_table[i] == NULL) jni_table[i] = (void *)stub_GetVersion;
+    // Fill any remaining NULL slots with stub_voidp (safe NULL/0 return)
+    for (int i = 0; i < JNI_SLOTS; i++) if (jni_table[i] == NULL) jni_table[i] = (void *)stub_voidp;
 }
 
 // ============== Mutex sanitization wrappers ==============
@@ -527,38 +533,89 @@ static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
     }
 }
 
-// ============== JNI_OnLoad code patch ==============
-// JNI_OnLoad at base+0x1f64e58 has internal init functions that hang under QEMU.
-// We patch the entry point to return JNI_VERSION_1_6 (0x00010006) immediately.
-// This replaces the first 12 bytes of JNI_OnLoad with:
-//   mov w0, #0x6
-//   movk w0, #0x1, lsl #16
-//   ret
-// Encoding: 0x528000c0, 0x72a000c0, 0xd65f03c0
+// ============== JNI_OnLoad progressive patches ==============
 //
-// The internal init functions write to BSS state that we already pre-initialize
-// (guard at base+0x6a26e40, JavaVM at base+0x6a26e48, etc.), so skipping them
-// is safe.
-static void patch_jni_onload(uintptr_t base) {
+// JNI_OnLoad at base+0x1f64e58 can be progressively un-patched to run
+// more real init code. Current status:
+//
+// FULL BYPASS (Session 9): Patched entry to return 0x10006 immediately.
+//   --> WORKING: JNI_OnLoad returns, sleep loop reached.
+//
+// Phase 1 (CURRENT): Only NOP the clock/time init call (bl 0x1cfabfc
+// at offset 0x1f64e9c) which hangs under QEMU due to condvar loops.
+//   The guard check at bl 0x1f65a60 runs (returns immediately since
+//   we pre-set guard=1), GetEnv runs, JNI registration runs,
+//   nativeSetAssetPath runs, guard setter runs.
+//
+// Phase 2: Remove clock NOP and run full JNI_OnLoad if the remaining
+// condvar issues are resolved (e.g. by pre-initializing all BSS guards).
+//
+// Phase 3: No patches — full native init.
+
+// Encoding: NOP = 0xd503201f
+#define AARCH64_NOP 0xd503201fUL
+
+// Patch a single instruction at a given binary offset within libroblox
+static void patch_at_offset(uintptr_t base, uint32_t binary_offset, uint32_t insn) {
+    uintptr_t addr = base + binary_offset;
+    uintptr_t page = addr & ~0xfffULL;
+    if (mprotect((void*)page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
+        *(volatile uint32_t*)addr = insn;
+        __builtin___clear_cache((void*)addr, (void*)(addr + 4));
+        mprotect((void*)page, 0x1000, PROT_READ|PROT_EXEC);
+        // Verify
+        uint32_t readback = *(volatile uint32_t*)addr;
+        if (readback != insn)
+            fprintf(stderr, "[jni_shim] patch verify FAIL at 0x%lx: wrote 0x%08x read 0x%08x\n",
+                    (unsigned long)addr, insn, readback);
+    } else {
+        fprintf(stderr, "[jni_shim] WARNING: mprotect failed at 0x%lx\n", (unsigned long)addr);
+    }
+}
+
+// Phase 1a patch: Only NOP the clock/time init call at binary offset 0x1f64e9c
+// (bl 0x1cfabfc) which hangs under QEMU due to condvar loops.
+// nativeSetAssetPath (0x1f64eb8) is NOT NOPed — we want it to run next.
+//
+// The guard check at 0x1f64e90 (bl 0x1f65a60) is safe because we pre-set
+// the guard byte to 1, so it returns immediately.
+// GetEnv at 0x1f64e98 (bl 0x5e17fb8) is handled by our stub JNI env.
+// LocalStorageManager at 0x1f64ea8 (bl 0x1d779bc) is just `ret` (no-op).
+// JNI registration at 0x1f64eb0 (bl 0x1f6594c) runs and completes.
+// nativeSetAssetPath at 0x1f64eb8 (bl 0x273de0c) — tries to run.
+// Everything from 0x1f64ebc onwards runs if assetpath returns.
+//
+// On failure, falls back to full bypass.
+static void patch_jni_onload_phase1(uintptr_t base) {
+    // NOP the clock/time init call at binary offset 0x1f64e9c
+    uintptr_t clock_call_addr = base + 0x1f64e9c;
+    uintptr_t clock_page = clock_call_addr & ~0xfffULL;
+
+    if (mprotect((void*)clock_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
+        *(volatile uint32_t*)clock_call_addr = AARCH64_NOP;
+        __builtin___clear_cache((void*)clock_call_addr, (void*)(clock_call_addr + 4));
+        mprotect((void*)clock_page, 0x1000, PROT_READ|PROT_EXEC);
+
+        uint32_t rb = *(volatile uint32_t*)clock_call_addr;
+        if (rb == AARCH64_NOP) {
+            fprintf(stderr, "[jni_shim] Phase1: NOPed clock init -> JNI_OnLoad runs normally\n");
+            return;
+        }
+    }
+
+    // Fallback: full bypass
+    fprintf(stderr, "[jni_shim] Phase1 patch failed, falling back to full bypass\n");
     uintptr_t jni_onload_addr = base + 0x1f64e58;
     uintptr_t onload_page = jni_onload_addr & ~0xfffULL;
-
     if (mprotect((void*)onload_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
         volatile uint32_t *entry = (volatile uint32_t*)jni_onload_addr;
         entry[0] = 0x528000c0;   // mov w0, #0x6
-        entry[1] = 0x72a00020;   // movk w0, #0x1, lsl #16 (w0 = 0x10006)
+        entry[1] = 0x72a00020;   // movk w0, #0x1, lsl #16
         entry[2] = 0xd65f03c0;   // ret
-        __builtin___clear_cache((void*)jni_onload_addr,
-                                (void*)(jni_onload_addr + 12));
+        __builtin___clear_cache((void*)jni_onload_addr, (void*)(jni_onload_addr + 12));
         mprotect((void*)onload_page, 0x1000, PROT_READ|PROT_EXEC);
-        fprintf(stderr, "[jni_shim] patched JNI_OnLoad at 0x%lx to return 0x10006\n",
+        fprintf(stderr, "[jni_shim] FULL BYPASS: JNI_OnLoad at 0x%lx returns 0x10006\n",
                 (unsigned long)jni_onload_addr);
-
-        // Verify the patch
-        uint32_t readback = entry[0];
-        fprintf(stderr, "[jni_shim] JNI_OnLoad entry[0] = 0x%08x (expect 0x528000c0)\n", readback);
-    } else {
-        fprintf(stderr, "[jni_shim] WARNING: mprotect JNI_OnLoad page failed\n");
     }
 }
 
@@ -1471,9 +1528,9 @@ int main(int argc, char** argv) {
             }
 
             // Override pthread_cond_wait (index 39) and pthread_cond_timedwait
-            // (index 96) with a raw ARM shim that returns 0 immediately.
-            // This prevents all condvar deadlocks (init guards, etc.) under QEMU
-            // where no other thread exists to signal the condvar.
+            // (index 96) with the raw ARM shim that returns 0 immediately.
+            // The PLT GOT patch (separate, below) covers libroblox internal
+            // calls. The trampoline entries cover GSI lib calls.
             // mov w0, #0 = 0x52800000, ret = 0xd65f03c0
             if (g_cond_shim == MAP_FAILED) {
                 g_cond_shim = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
@@ -1483,8 +1540,8 @@ int main(int argc, char** argv) {
                 ((uint32_t*)g_cond_shim)[0] = 0x52800000;  // mov w0, #0
                 ((uint32_t*)g_cond_shim)[1] = 0xd65f03c0;  // ret
                 __builtin___clear_cache(g_cond_shim, (void*)((uintptr_t)g_cond_shim + 8));
-                tramp[39] = g_cond_shim;   // pthread_cond_wait
-                tramp[96] = g_cond_shim;   // pthread_cond_timedwait (same effect)
+                tramp[39] = g_cond_shim;
+                tramp[96] = g_cond_shim;
                 fprintf(stderr, "[jni_shim] condvar shim %p -> tramp[39,96]\n", g_cond_shim);
             } else {
                 fprintf(stderr, "[jni_shim] WARNING: condvar shim mmap failed\n");
@@ -1505,9 +1562,11 @@ int main(int argc, char** argv) {
     }
 
 
-    // Patch JNI_OnLoad to return immediately, bypassing internal init.
+    // Phase 1a progressive patch: NOP clock init + nativeSetAssetPath.
+    // Only the guard check, GetEnv, LocalStorageManager, and JNI registration
+    // function run. The guard setter and remaining JNI calls also run.
     if (g_libroblox_base) {
-        patch_jni_onload(g_libroblox_base);
+        patch_jni_onload_phase1(g_libroblox_base);
     }
 
     // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
