@@ -128,6 +128,7 @@ ANDROID_ROOT=~/.cache/open-sober/android-env
 ```
 
 Rebuild jni_shim: `aarch64-linux-gnu-gcc -o "$SYSROOT/jni_shim" "$CRATE/jni_shim.c" -ldl`
+(NOTE: use `realpath` for paths — tilde expansion fails under some shells with QEMU.)
 
 ### Environment
 
@@ -138,3 +139,67 @@ Rebuild jni_shim: `aarch64-linux-gnu-gcc -o "$SYSROOT/jni_shim" "$CRATE/jni_shim
 - **GSI ARM64 libs:** At `~/.cache/open-sober/android-env/system/lib64/` (788 libs)
 - **Bionic shim:** `~/.cache/open-sober/android-env/system/lib64/libbionic_shim.so`
 - **JNI shim:** `~/.cache/open-sober/android-env/jni_shim`
+
+### 🎯 Recommended Next Steps
+
+The JNI_OnLoad code patch (`patch_jni_onload` in `jni_shim.c`) returns 0x10006
+immediately, bypassing all internal initialization. The next agent should:
+
+**Phase A — Port the patched QEMU into the repo (critical long-term fix)**
+
+The custom QEMU at `/home/code-agent/.cache/open-sober/qemu-patched` was built
+from /tmp/qemu-10.2.1/ (now deleted). The patches applied were:
+1. CF_NO_GOTO_TB — prevents chained TB linking in TCG, fixing SMC crashes
+2. tb_set_jmp_target no-op — related to goto_tb patching
+
+Without the QEMU patches, the SMC (self-modifying code) crashes return. The
+patched QEMU must be preserved or rebuilt from source. Check:
+- `~/Documents/qemu-10.2.1/build/qemu-aarch64` (may exist from original build)
+- Or rebuild from upstream QEMU 10.2.1 tarball with the two patches reapplied
+
+**Phase B — Progressive native method resumption**
+
+Instead of bypassing ALL of JNI_OnLoad, build up the working set incrementally:
+
+1. **Analyze what native methods JNI_OnLoad registers** — run with `-d exec` to
+   see what JNI_OnLoad does, or incrementally remove bytes from the patch.
+
+2. **Start with a smaller patch** — instead of patching everything at offset 0,
+   patch just the problematic functions. Known hangs:
+   - `1f64e98: bl 5e17fb8` — calls GetEnv with 0x10006 version; works but leads to other code
+   - `1f64e9c: bl 1cfabfc` (→ `b 5f4f69c`) — ldxr/stxr atomic loop if flags are set
+   - `1f64eb0: bl 1f6594c` — calls FindClass/RegisterNatives (needs working JNI)
+
+3. **Make the internal JNI calls actually work** — the JNI stub table at
+   `jni_shim.c:188` needs to return valid class/method pointers. Currently
+   `stub_FindClass` returns `track_ptr(name)` which is a stable pointer but not
+   a real jclass. If FindClass is called for class lookup failure, the code
+   may branch to an error path that loops.
+
+**Phase C — Enable JNI calls through the real JNI_OnLoad**
+
+1. **Remove the JNI_OnLoad code patch** and re-enable the real entry point.
+2. **Fix the specific hang** — based on exec trace analysis, the loop addresses
+   were in the `0x...088xxx` range. These are likely in a GSI library. Use
+   `-d exec` with `-strace` simultaneously to correlate guest PCs with libraries.
+3. **Add proper backing to JNI stubs** — `FindClass` needs to return valid
+   classes. `RegisterNatives` already logs but doesn't register anything.
+   If a native method is called, it will crash (NULL function pointer).
+
+**Phase D — Integrate with the Rust orchestrator**
+
+Once the C-based JNI shim works stably, update `qemu.rs` to use it as the
+main entry point for `open-sober play --apk roblox.apk`.
+
+### Known issues / gotchas
+
+- `unused function` warnings from `wrap_mutex_lock`, `wrap_mutex_init`,
+  `wrap_cond_wait`, `wrap_cond_timedwait` — these are defined but not called
+  (the direct glibc approach is used instead). Can be deleted.
+- QEMU `-strace` output + `-d exec` output interleave on stderr. For clean
+  analysis, redirect to separate files.
+- The `alarm_sa_handler` backtrace via `x29`/`x30` doesn't work in signal
+  context under QEMU (the registers are the handler's, not the interrupted
+  code). To get real backtraces, use QEMU's gdbstub (`-g 1234`).
+- Tilde expansion (`~`) in paths breaks with QEMU in some shell contexts.
+  Always use `$(realpath ...)` or full `/home/code-agent/...` paths.
