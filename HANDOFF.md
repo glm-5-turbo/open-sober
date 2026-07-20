@@ -35,7 +35,7 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 **Key APK:** `~/Documents/Projects/open-sober/roblox-android.apk` (178MB, not in git)
 **APK structure:** `assets/app.zip` → `config.arm64_v8a.apk` → `lib/arm64-v8a/libroblox.so` (101MB, NDK r28c, Android 26)
 
-## Current Status (July 19, after session 6)
+## Current Status (July 20, after session 7)
 
 ### ✅ Complete (all sessions)
 
@@ -46,7 +46,7 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 5. **Canary GOT patching** — stack_chk_guard write via mprotect.
 6. **SIGSEGV handler** — RELRO faults, self-write JIT bugs, NULL deref handling.
 7. **Pre-mprotect RELRO** — ~464 pages made RW before JNI_OnLoad.
-8. **Pre-resolved trampoline table** — 358 functions via RTLD_DEFAULT.
+8. **Pre-resolved trampoline table** — all **785 entries** via data-driven dlsym loop (782/785 resolved, 3 Bionic-only fallbacks filled with `__errno_location`).
 9. **Canary check patched out** in code copy.
 10. **Init guard deadlock FIXED** — code patch replaces `bl 26c0c7c` (mutex+condvar) with `mov w0,#1; nop`.
 11. **Raw ARM condvar shim** — `mov w0,#0; ret` in mmap'd RWX page, replaces `pthread_cond_wait` trampoline.
@@ -55,45 +55,40 @@ Main binary orchestrator. `open-sober play --apk roblox.apk` is the main command
 
 The CF_NO_GOTO_TB + tb_set_jmp_target no-op patches in the custom QEMU (`~/.cache/open-sober/qemu-patched`) are sufficient when JNI_OnLoad is called **directly** (no code copy). The code copy introduced adrp fix bugs that caused SIGILL.
 
-### 🟡 Current Blocker — QEMU JIT slowness via _dl_mcount O(n²) strcmp loop
+### 🟡 QEMU JIT _dl_mcount profiling bottleneck
 
-**What we found:** The "spin loop" is NOT a hang — it's a **QEMU JIT performance bottleneck** in glibc's `_dl_mcount` function in `ld-linux-aarch64.so.1`.
+The "spin loop" is NOT a hang — it's a **QEMU JIT performance bottleneck** in glibc's `_dl_mcount` function in QEMU's internal ld-linux-aarch64 dynamic linker.
 
 Using `-d exec` traces, the hottest guest PC is **`0x1e2d8` in ld-linux** — the core of an `strcmp` loop that is the `_dl_mcount` call-record maintenance. This function is called for EVERY PLT-resolved trampoline invocation and iterates a growing linked list of call records, doing strcmp on each entry. With 785 trampoline entries being called, this becomes an O(n²) bottleneck.
 
-**Evidence:**
-- Hottest code: `_dl_mcount+0x7834` strcmp loop — 600k iterations in 5 seconds
-- All hot PCs are in `ld-linux-aarch64.so.1` (offsets 0x9000-0x1e300 range)
-- NOT in `libc.so`, `libm.so`, or `libroblox.so`
-- NOT a hang or deadlock — pure CPU-bound O(n²) strcmp
+**Root cause:** glibc's `_rtld_global.dl_profile` field (offset 0xCA0 from `_rtld_global`) has the value **0x40** — profiling is ENABLED by default. Every PLT resolution enters the strcmp loop.
 
-**Attempted fix — noping _dl_mcount:**
-- Patching `_dl_mcount` entry with `ret` + noping 128KB of its body **did not help**
-- Root cause: QEMU JIT caches translated blocks, so host-side writes to guest memory don't invalidate the TCG translation cache (same SMC issue from earlier sessions)
+**Fix applied:** Runtime noping of `_dl_mcount` with mprotect + write 0xd65f03c0 (ret) at the entry point. The mprotect forces QEMU's TCG JIT cache to invalidate the page, making the patch take effect at runtime. Note that disk-patching ld-linux doesn't work because QEMU user-mode loads the guest binary through its own internal loader, not the guest's ld-linux.
 
-**Why it happens:**
-1. Every trampoline call goes through `__bf_c_resolve` → `dlsym(RTLD_NEXT)` → PLT
-2. glibc's PLT calls `_dl_mcount` for profiling
-3. `_dl_mcount` does strcmp-based search through a linked list of call records
-4. Under QEMU JIT, each strcmp loop iteration is JIT-translated and slow
-5. With 785 trampolines × many calls, this dominates
+### 🟡 Current Blocker — JNI_OnLoad crashes with pc=0x0
+
+After fixing the _dl_mcount bottleneck and pre-resolving all 785 trampoline entries, we reach JNI_OnLoad but crash with `pc=0x0` (jump to NULL). This happens during the first few function calls inside JNI_OnLoad.
+
+**Root cause:** The 128KB runtime noping of `_dl_mcount` corrupts the PLT fixup code following `_dl_mcount` in ld-linux. When a GSI library calls through lazy PLT resolution during JNI_OnLoad, the fixup returns 0. With `RTLD_NOW` on libroblox, its PLT is resolved at load time, but GSI libraries (transitive depdendencies) may use lazy binding.
+
+**Attempts that didn't work:**
+- Disk-patching ld-linux: QEMU user-mode uses its own internal loader, not the guest's ld-linux
+- Zeroing dl_profile at runtime: QEMU's TCG cache has already translated the check with the cached 0x40 value
+- 4-byte only noping + 1-page mprotect: not enough TCG cache flush; process too slow to produce output
+
+**What does work:** 128KB noping `mprotect(0x10000) + write ret` — aggressively flushes QEMU's JIT cache. The corrupted PLT fixup returns 0 for any lazy PLT resolution.
 
 ### 🎯 Recommended Next Steps
 
-1. **Run the same test on real ARM64 hardware** — if it completes quickly, the issue is QEMU JIT slowness, not a real bug
-2. **Disable `_dl_mcount` at compile time** — rebuild `ld-linux` without profiling support, or use `LD_BIND_NOT=1` / set glibc profiling env vars
-3. **Use `-one-insn-per-tb`** to avoid TB chaining (might slow things further but could break the strcmp loop pattern)
-4. **Modify bionic_shim.S** to bypass the PLT entirely — call resolved functions directly instead of going through `__bf_c_resolve` → PLT → _dl_mcount
-5. **Add JNI_OnLoad to the init calls that get patched** — if we let the init function complete (don't set guard=1, let condvar shim handle the deadlock), the init stores proper BSS state which might reduce the number of trampoline calls needed
+1. **Fix the pc=0x0 crash** — either prevent GSI libraries from needing lazy PLT resolution (use RTLD_NOW for all of them) OR handle the lazy PLT resolution differently
+2. **Alternative: use QEMU's `-one-insn-per-tb`** — avoids TB chaining entirely, which eliminates goto_tb SMC issues but may be slower
+3. **Alternative: rebuild patched QEMU** — add a proper SMC invalidation handler that catches host-side writes to guest code pages
 
-### What was fixed in session 6
+### What was fixed in session 7
 
-1. **All 785 trampoline entries pre-filled** — remaining 429 filled with safe default (`__errno_location`) to prevent `__bf_c_resolve` from calling `dlsym(RTLD_NEXT)`
-2. **Condvar shim installed** at tramp[39,96] — `mov w0,#0; ret` prevents all condvar deadlocks
-3. **Mutex sanitization wrappers** — Bionic→glibc pthread_mutex_t ABI fix (kind field, __owner leak)
-4. **SIGSEGV handler improved** — bad-address faults chain to old handler instead of setting x0=&g_env
-5. **Removed null-deref hack** — was making crashes worse by setting invalid JNIEnv*
-6. **Use direct JNI_OnLoad call** — no code copy needed; QEMU patches handle the JIT issue
+1. **Full 785-entry pre-resolve** — replaced 359-entry static table with data-driven loop over all 785 symbol names (782/785 resolved via dlsym, 3 Bionic-only fallbacks)
+2. **Diagnosed dl_mcount profiling** — discovered rtld_global.dl_profile = 0x40 (profiling ENABLED). Clarified QEMU user-mode uses its own ld-linux, not the guest one
+3. **Refined noping approach** — 128KB noping + mprotect works but corrupts PLT fixup code. 4-byte noping with correct mprotect range is the right approach but needs larger cache flush
 
 ### Key Source Files
 
