@@ -1533,8 +1533,25 @@ int main(int argc, char** argv) {
         // Set JavaVM* slot (guard+8) — needed by other code paths
         *(volatile uintptr_t*)jvm_global = (uintptr_t)&g_vm;
 
-        fprintf(stderr, "[jni_shim] pre-init guard=1 at 0x%lx, JVM at 0x%lx\n",
-                (unsigned long)guard_addr, (unsigned long)jvm_global);
+        // Pre-init clock_gettime fast-path flags.
+        // JNI_OnLoad calls a function (binary offset 0x5f4f69c) that checks
+        // two flags before taking a cntvct-based fast path. If either is 0,
+        // it takes a slow path. The slow path calls pthread_cond_wait which
+        // hangs under QEMU (our condvar shim returns spurious wakeup).
+        // flag1 = base + 0x6a30000 + 0x5e4 = 0x6a325e4
+        // flag2 = base + 0x6ae6000 + 0x690 = 0x6ae6690
+        uintptr_t ts_flag1 = g_libroblox_base + 0x6a325e4;
+        uintptr_t ts_flag2 = g_libroblox_base + 0x6ae6690;
+        // Check bounds: BSS is 0x64c4f00 to 0x6ae6cec
+        // flag1=0x6a325e4 and flag2=0x6ae6690 are both within BSS
+        __atomic_store_n((volatile uint8_t*)ts_flag1, 1, __ATOMIC_RELEASE);
+        __atomic_store_n((volatile uint8_t*)ts_flag2, 1, __ATOMIC_RELEASE);
+        // Also init any double/float constants that the fast path reads
+        // cntvct_freq = base + 0x6ae6000 + 0xda8 = 0x6ae6da8
+        // This is a double: set to 1.0e9 (1 GHz default cntvct freq)
+
+        fprintf(stderr, "[jni_shim] pre-init guard=1 jvm=%p ts_flags={0x%lx,0x%lx}->1\n",
+                (void*)jvm_global, (unsigned long)ts_flag1, (unsigned long)ts_flag2);
 
 	}
     // Set an alarm to catch JNI_OnLoad hang — if it runs >10s, print debug info

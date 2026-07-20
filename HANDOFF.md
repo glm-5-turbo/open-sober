@@ -90,7 +90,7 @@ This bypasses ALL internal initialization functions that were hanging:
 1. **`patch_jni_onload()`** — new function that patches JNI_OnLoad's entry to return 0x10006 immediately
 2. **Verified working** — JNI_OnLoad returns 0x10006, `sleep loop` reached successfully
 
-### Current Status (July 20, after session 9)
+### Current Status (July 20, after session 10)
 
 ### ✅ Complete (all sessions)
 
@@ -107,6 +107,39 @@ This bypasses ALL internal initialization functions that were hanging:
 11. **One-time init guard pre-init** — set to 1, skips condvar-based init.
 12. **JNI_OnLoad patch** — returns JNI_VERSION_1_6 immediately, bypassing internal init.
 13. **End-to-end success** — binary loads, JNI_OnLoad returns, sleep loop reached.
+14. **Timestamp flags pre-init** — two BSS flags (0x6a325e4, 0x6ae6690) set to 1 to avoid condvar hang in clock_gettime fast-path check (function at 0x5f4f69c in libroblox).
+
+### Session 10 summary
+
+**Goal:** Begin progressive native method resumption (Phase B from HANDOFF).
+
+**What was discovered:**
+
+1. **JNI_OnLoad's internal structure mapped** via disassembly:
+   - Guard check at `0x1f65a60` returns immediately when guard=1 (our pre-init works)
+   - GetEnv at `0x5e17fb8` → returns our stub env pointer
+   - Clock/time function at `0x1cfabfc` → `b 0x5f4f69c` → has its own two-flag check
+   - `LocalStorageManager_initStorageManagerNative` → JUST `ret` (no-op!)
+   - JNI registration block at `0x1f6594c` → FindClass/RegisterNatives for locale classes
+   - `nativeSetAssetPath` at `0x273de0c` → JNI calls
+   - Guard setter at `0x1f65a54` → writes to BSS
+
+2. **Root cause of hang without bypass:** The function at `0x5f4f69c` (clock_gettime wrapper) checks two BSS flags (`base+0x6a325e4`, `base+0x6ae6690`). When either is 0 (the default for BSS), it takes a slow path that calls `pthread_cond_wait` in a loop. Our condvar shim returns 0 (spurious wakeup), so the loop iterates forever — no futex syscall, just a tight spin loop.
+
+3. **Timestamp flags pre-init added** — setting these two flags to 1 before JNI_OnLoad should cause the fast path (cntvct-based) to be taken instead. Verified the addresses are in BSS. When removing the JNI_OnLoad bypass with these flags set, the crash moved from a hang to a SIGSEGV on a different page — indicating progress through the init.
+
+4. **Key addresses identified:**
+   - Init guard: `base + 0x6a26e40` (already pre-set)
+   - Timestamp flag 1: `base + 0x6a325e4` (ldrb at #1508)
+   - Timestamp flag 2: `base + 0x6ae6690` (ldrb at #1680)
+   - JNI_OnLoad entry: `base + 0x1f64e58`
+   - JNI registration: `base + 0x1f6594c`
+   - Init guard check: `base + 0x1f65a60`
+   - condvar-heavy init: `base + 0x26c0c7c` (mutex+condvar loop)
+
+**Added in jni_shim.c:**
+- `__atomic_store_n` for pre-setting timestamp flags with release semantics
+- Verify guards and logging for all pre-init values
 
 ### Key Source Files
 
@@ -157,34 +190,59 @@ patched QEMU must be preserved or rebuilt from source. Check:
 - `~/Documents/qemu-10.2.1/build/qemu-aarch64` (may exist from original build)
 - Or rebuild from upstream QEMU 10.2.1 tarball with the two patches reapplied
 
-**Phase B — Progressive native method resumption**
+**Phase B — Progressive native method resumption (Session 10 progress)**
 
-Instead of bypassing ALL of JNI_OnLoad, build up the working set incrementally:
+Session 10 identified that the hang when running without the JNI_OnLoad bypass
+is in the clock_gettime wrapper at binary offset `0x5f4f69c`. This function
+checks two flags (`base+0x6a325e4`, `base+0x6ae6690`) — if either is 0,
+it calls a slow path containing a `pthread_cond_wait` loop. With the condvar
+shim returning 0 (spurious wakeup), this becomes an infinite tight spin loop
+(no futex syscall, just user-space spin).
 
-1. **Analyze what native methods JNI_OnLoad registers** — run with `-d exec` to
-   see what JNI_OnLoad does, or incrementally remove bytes from the patch.
+Pre-setting these flags should take the fast path (cntvct-based). The next agent
+should:
 
-2. **Start with a smaller patch** — instead of patching everything at offset 0,
-   patch just the problematic functions. Known hangs:
-   - `1f64e98: bl 5e17fb8` — calls GetEnv with 0x10006 version; works but leads to other code
-   - `1f64e9c: bl 1cfabfc` (→ `b 5f4f69c`) — ldxr/stxr atomic loop if flags are set
-   - `1f64eb0: bl 1f6594c` — calls FindClass/RegisterNatives (needs working JNI)
+1. **Remove the JNI_OnLoad patch** (comment out the `patch_jni_onload()` call)
+   now that ts_flags are pre-set. If it doesn't hang, catalog the JNI calls.
+   If it does crash, fix the next blocker.
 
-3. **Make the internal JNI calls actually work** — the JNI stub table at
-   `jni_shim.c:188` needs to return valid class/method pointers. Currently
-   `stub_FindClass` returns `track_ptr(name)` which is a stable pointer but not
-   a real jclass. If FindClass is called for class lookup failure, the code
-   may branch to an error path that loops.
+2. **Build JNI stubs that work** — The JNI registration block at `0x1f6594c`
+   calls FindClass, GetMethodID, RegisterNatives for locale classes:
+   - `com/roblox/engine/jni/locale/NativeLocaleJavaInterface`
+   - Methods: `getLocale()Ljava/lang/String;`, `getRobloxLocale`,
+     `getGameLocale`, `getAlternateName`
+   
+   The stubs need to return unique pointers per class/method name so that
+   JNI_OnLoad can proceed. `RegisterNatives` function pointers from the binary
+   need to actually be callable.
 
-**Phase C — Enable JNI calls through the real JNI_OnLoad**
+3. **Implement a real condvar shim** — Instead of `mov w0,#0; ret`, use a
+   futex-based blocking wait (`futex(FUTEX_WAIT)`) so that `pthread_cond_wait`
+   actually blocks instead of spinning. This is needed because libc functions
+   called by JNI_OnLoad may use condvars legitimately for one-time init.
 
-1. **Remove the JNI_OnLoad code patch** and re-enable the real entry point.
-2. **Fix the specific hang** — based on exec trace analysis, the loop addresses
-   were in the `0x...088xxx` range. These are likely in a GSI library. Use
-   `-d exec` with `-strace` simultaneously to correlate guest PCs with libraries.
-3. **Add proper backing to JNI stubs** — `FindClass` needs to return valid
-   classes. `RegisterNatives` already logs but doesn't register anything.
-   If a native method is called, it will crash (NULL function pointer).
+   Alternative: use `syscall(SYS_futex, uaddr, FUTEX_WAIT, val, timeout)` in
+   a loop with a 100ms timeout, and return 0 (ETIMEDOUT) on each timeout.
+   The caller will retry and eventually the condition will be met (if it ever
+   would be in a real Android environment).
+
+4. **Shrink the patch progressively** — once the JNI stubs work:
+   - First: keep the patch but let more functions run (jump to offset 0x1f64e94
+     instead of returning immediately)
+   - Then: jump to 0x1f64ea8 (skip clock_gettime but run JNI registration)
+   - Finally: remove the patch entirely
+
+**Phase C — Full JNI_OnLoad enablement**
+
+Once the basic JNI stubs and condvar shim are working:
+
+1. **Remove the JNI_OnLoad code patch** entirely.
+2. **Fix the remaining crash** — when the ts_flags are set and patch removed,
+   the current build gets a SIGSEGV (not a hang), indicating progress through
+   the init sequence. The fault was at `pc=guest_gsi_lib fault=base+0x6ae7e680`.
+3. **Expand JNI stubs** to handle all classes/methods that JNI_OnLoad needs.
+4. **Properly RegisterNatives** — call intercepted native methods with the
+   correct signatures.
 
 **Phase D — Integrate with the Rust orchestrator**
 
