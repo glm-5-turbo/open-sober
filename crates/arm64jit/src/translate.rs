@@ -109,7 +109,9 @@ pub fn translate(
     fixups: &mut Vec<Fixup>,
 ) -> Result<(), String> {
     match inst {
-        Inst::MoveWide { rd, imm16, hw, opc, .. } => {
+        Inst::MoveWide {
+            rd, imm16, hw, opc, ..
+        } => {
             let val = (imm16 as u64) << ((hw as u64) * 16);
             // opc: 0=movz,1=movk,2=movn. movz/movk write imm (movk merges later,
             // treated as movz for the first pass).
@@ -120,7 +122,14 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::AddSubImm { rd, rn, imm12, shift12, sub, .. } => {
+        Inst::AddSubImm {
+            rd,
+            rn,
+            imm12,
+            shift12,
+            sub,
+            ..
+        } => {
             let imm: u64 = (imm12 as u64) << if shift12 { 12 } else { 0 };
             ldg(buf, RAX, rn as u32);
             if sub {
@@ -133,7 +142,15 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::AddSubReg { rd, rn, rm, sub, shift, sh_amt, .. } => {
+        Inst::AddSubReg {
+            rd,
+            rn,
+            rm,
+            sub,
+            shift,
+            sh_amt,
+            ..
+        } => {
             ldg(buf, RAX, rn as u32);
             ldg(buf, RCX, rm as u32);
             apply_shift_const(buf, RCX, shift, sh_amt);
@@ -197,23 +214,48 @@ pub fn translate(
                     buf.mov_load64(RAX, RDX, 0);
                     stg(buf, rt as u32, RAX);
                 }
-                (4, true) => {
-                    buf.mov_load32(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
-                }
                 (8, false) => {
                     ldg(buf, RAX, rt as u32);
                     buf.mov_store64(RDX, 0, RAX);
+                }
+                (4, true) => {
+                    buf.mov_load32(RAX, RDX, 0); // w zero-extends
+                    stg(buf, rt as u32, RAX);
                 }
                 (4, false) => {
                     ldg(buf, RAX, rt as u32);
                     buf.mov_store32(RDX, 0, RAX);
                 }
+                (2, true) => {
+                    buf.movzx_word_mem(RAX, RDX, 0); // ldrh zero-extends
+                    stg(buf, rt as u32, RAX);
+                }
+                (2, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store16(RDX, 0, RAX);
+                }
+                (1, true) => {
+                    buf.movzx_byte_mem(RAX, RDX, 0); // ldrb zero-extends
+                    stg(buf, rt as u32, RAX);
+                }
+                (1, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store8(RDX, 0, RAX);
+                }
                 (s, _) => return Err(format!("LdStrImm size {} not implemented", s)),
             }
             Ok(())
         }
-        Inst::LdStPair { rt, rt2, rn, imm, ld, writeback, preidx, size_64 } => {
+        Inst::LdStPair {
+            rt,
+            rt2,
+            rn,
+            imm,
+            ld,
+            writeback,
+            preidx,
+            size_64,
+        } => {
             let esize = if size_64 { 8i32 } else { 4i32 };
             let imm32 = imm as i32;
             // eff base: pre-index adjusts the address by imm before the access;
@@ -258,6 +300,72 @@ pub fn translate(
                     buf.lea64(RCX, RCX, wb_off);
                 }
                 stg(buf, rn as u32, RCX);
+            }
+            Ok(())
+        }
+        Inst::LdStrReg {
+            rt,
+            rn,
+            rm,
+            size,
+            ld,
+            shift,
+        } => {
+            // addr = rn + (rm << shift_amt), shift_amt = log2(size) when S=1.
+            let shift_amt = if shift {
+                match size {
+                    1 => 0,
+                    2 => 1,
+                    4 => 2,
+                    _ => 3,
+                }
+            } else {
+                0
+            };
+            ldg(buf, RAX, rn as u32); // address base in RAX
+            ldg(buf, RCX, rm as u32); // index in RCX
+            if shift_amt != 0 {
+                // Currently only constant <=3 via the (unused) sar_cl; emit shift left.
+                // x86 has no shl-by-imm op in this emitter; use add-based *2 for 1..3.
+                for _ in 0..shift_amt {
+                    buf.add_rr64(RCX, RCX); // RCX += RCX (shift left by 1)
+                }
+            }
+            buf.add_rr64(RAX, RCX); // RAX = effective address
+            match (size, ld) {
+                (8, true) => {
+                    buf.mov_load64(RCX, RAX, 0);
+                    stg(buf, rt as u32, RCX);
+                }
+                (8, false) => {
+                    ldg(buf, RCX, rt as u32);
+                    buf.mov_store64(RAX, 0, RCX);
+                }
+                (4, true) => {
+                    buf.mov_load32(RCX, RAX, 0);
+                    stg(buf, rt as u32, RCX);
+                }
+                (4, false) => {
+                    ldg(buf, RCX, rt as u32);
+                    buf.mov_store32(RAX, 0, RCX);
+                }
+                (2, true) => {
+                    buf.movzx_word_mem(RCX, RAX, 0);
+                    stg(buf, rt as u32, RCX);
+                }
+                (2, false) => {
+                    ldg(buf, RCX, rt as u32);
+                    buf.mov_store16(RAX, 0, RCX);
+                }
+                (1, true) => {
+                    buf.movzx_byte_mem(RCX, RAX, 0);
+                    stg(buf, rt as u32, RCX);
+                }
+                (1, false) => {
+                    ldg(buf, RCX, rt as u32);
+                    buf.mov_store8(RAX, 0, RCX);
+                }
+                (s, _) => return Err(format!("LdStrReg size {} not implemented", s)),
             }
             Ok(())
         }
@@ -315,7 +423,11 @@ pub fn translate(
             buf.test_rr64(RAX, RAX);
             let cc = if nonzero { 0x85 } else { 0x84 }; // jnz / jz
             let disp = buf.jcc_rel32(cc);
-            fixups.push(Fixup { target_pc: target, disp_off: disp, cc });
+            fixups.push(Fixup {
+                target_pc: target,
+                disp_off: disp,
+                cc,
+            });
             Ok(())
         }
         Inst::BCond { cond, imm } => {
@@ -324,7 +436,11 @@ pub fn translate(
                 0xE => {
                     // AL: unconditional branch via jmp
                     let disp = buf.jmp_rel32();
-                    fixups.push(Fixup { target_pc: target, disp_off: disp, cc: 0xff });
+                    fixups.push(Fixup {
+                        target_pc: target,
+                        disp_off: disp,
+                        cc: 0xff,
+                    });
                 }
                 0xF => {
                     // NV: never executed -> nothing to emit
@@ -333,7 +449,11 @@ pub fn translate(
                     let cc = x86_cc_for_cond(c)
                         .ok_or_else(|| format!("B.cond unsupported cond {:x}", c))?;
                     let disp = buf.jcc_rel32(cc);
-                    fixups.push(Fixup { target_pc: target, disp_off: disp, cc });
+                    fixups.push(Fixup {
+                        target_pc: target,
+                        disp_off: disp,
+                        cc,
+                    });
                 }
             }
             Ok(())

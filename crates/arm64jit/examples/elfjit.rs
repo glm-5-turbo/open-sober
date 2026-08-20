@@ -1,24 +1,21 @@
 //! Integration spike: load an aarch64 ELF (static non-PIE OR PIE/ET_DYN) with
-//! libloader's ELF loader, then run its entry function through the in-process
-//! arm64jit translator — NO QEMU.
+//! libloader's `load_elf_image`, which lays every PT_LOAD into one contiguous
+//! kernel-chosen mapping so **guest vaddr == host address**, then run the entry
+//! function through the in-process arm64jit translator — NO QEMU.
 //!
-//! This exercises the PIE mapping fix: guest virtual addresses (e_entry, ADRP
-//! targets) are translated through `LoadedElf::host_addr_of` into the real host
-//! address where the segment was mapped, so both static executables and shared
-//! objects / position-independent executables work the same way.
-//!
-//! Build a test static ELF with:
+//! Build a test ELF with:
 //!   cat > t.c <<'EOF'
 //!   int entry(void){ return 42; }
 //!   EOF
 //!   aarch64-linux-gnu-gcc -static -nostdlib -Wl,-e,entry t.c -o tiny.elf
 //!
-//! Build a test PIE/shared object with:
-//!   aarch64-linux-gnu-gcc -shared -o libpie.so pie.c
+//! Run with: cargo run -p arm64jit --example elfjit -- /path/to/tiny.elf [entry-guest-addr-hex]
 //!
-//! Run: cargo run -p arm64jit --example elfjit -- /path/to/elf
+//! Because guest==host, the `entry` you pass is BOTH the guest virtual address
+//! of the first instruction and (==) its host address; ADRP/ADR of globals and
+//! guest loads/stores dereference the correct host pointers directly.
 
-use arm64jit::jit::{compile_image, run, CpuState};
+use arm64jit::jit::{CpuState, compile_image, run};
 
 fn main() {
     let path = std::env::args()
@@ -26,64 +23,63 @@ fn main() {
         .expect("usage: elfjit <aarch64-elf> [entry-guest-addr-hex]");
     let entry_arg = std::env::args().nth(2);
 
-    let el = unsafe { libloader::elf::load_elf(std::path::Path::new(&path)) }
-        .expect("load_elf");
+    let el = unsafe { libloader::elf::load_elf_image(std::path::Path::new(&path)) }
+        .expect("load_elf_image");
 
-    // Guest entry: the ELF's own e_entry unless overridden.
-    let entry = entry_arg
-        .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).expect("entry addr"))
-        .unwrap_or(el.info.entry);
+    // Guest entry: the ELF's own e_entry (already relocated to guest space by
+    // load_elf_image) unless a link-time address is supplied, in which case we
+    // translate it to guest/runtime space with guest_of().
+    let entry = match entry_arg {
+        Some(h) => {
+            let link = u64::from_str_radix(h.trim_start_matches("0x"), 16)
+                .unwrap_or_else(|e| panic!("bad entry hex: {e}"));
+            el.guest_of(link)
+        }
+        None => el.info.entry,
+    };
 
     println!(
         "loaded '{}': is_pie={} base_load_vaddr=0x{:x} e_entry=0x{:x}",
-        path,
-        el.info.is_pie,
-        el.info.base_load_addr,
-        el.info.entry
+        path, el.info.is_pie, el.info.base_load_addr, el.info.entry
     );
     for s in &el.segments {
         println!(
-            "  segment guest=[0x{:x},0x{:x}) host=[0x{:x},0x{:x}) prot={}{}{}",
+            "  segment guest=[0x{:x},0x{:x}) host=same prot={}{}{}",
             s.guest_vaddr,
             s.guest_vaddr + s.memsz,
-            s.vaddr,
-            s.vaddr + s.memsz,
-            if s.prot.read { 'r' } else { '-' },
-            if s.prot.write { 'w' } else { '-' },
-            if s.prot.execute { 'x' } else { '-' },
+            if s.prot.read { "r" } else { "-" },
+            if s.prot.write { "w" } else { "-" },
+            if s.prot.execute { "x" } else { "-" }
         );
     }
 
-    // ---- PIE-aware mapping ----
-    // Find the executable ("text") segment. `base` = guest vaddr of its start,
-    // `image` = the host-mapped bytes of that segment, `entry` = the guest addr
-    // to begin executing.
+    // Pick the executable (text) segment to translate code out of.
     let seg = el
         .segments
         .iter()
         .find(|s| s.prot.execute)
         .expect("no executable segment");
-    let base = seg.guest_vaddr;
-    let host_start = seg.vaddr;
-    let host_end = seg.vaddr + seg.memsz;
-    // Translate the chosen guest entry to host via the segment offset.
-    let host_entry = el.host_addr_of(entry).expect("entry not in any segment");
+    let base = seg.guest_vaddr; // == host addr of image[0] (guest==host)
+    let len = seg.memsz as usize;
 
     println!(
-        "running entry guest=0x{:x} host=0x{:x} (segment base guest=0x{:x} host=0x{:x} size=0x{:x})",
-        entry, host_entry, base, host_start, seg.memsz
+        "running entry guest=0x{:x} host=0x{:x} (segment base guest=0x{:x} size=0x{:x})",
+        entry, entry, base, len
     );
 
-    // `image` is the host bytes of the text segment. compile_image expects
-    // `image[0]` to be the instruction whose guest address is `base`, and
-    // `entry` the guest address of the first instruction to run.
-    let image = unsafe { std::slice::from_raw_parts(host_start as *const u8, seg.memsz as usize) };
+    // image = the executable segment's bytes. Because guest==host, the `base`
+    // passed to compile_image is the guest address of image[0] and the `entry`
+    // is the guest address of the first instruction to run.
+    let image = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
     let mut st = CpuState::new();
     match compile_image(image, base, entry, &mut st as *mut CpuState) {
         Err(e) => {
             // compile_image errors when it hits an instruction the translator
-            // can't handle; the error string embeds the offending guest pc.
-            eprintln!("arm64jit stopped at/after guest 0x{:x}: {e}", entry);
+            // can't handle; `e` embeds the offending guest pc.
+            eprintln!(
+                "arm64jit stopped on unsupported instr at/near guest 0x{:x}: {e}",
+                entry
+            );
             std::process::exit(1);
         }
         Ok(blk) => {

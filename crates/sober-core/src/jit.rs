@@ -1,92 +1,95 @@
 //! JIT execution path (experimental, no QEMU).
 //!
-//! Loads an aarch64 `.so`/ELF with `libloader::elf::load_elf`, then runs a
-//! guest entry address through `arm64jit`'s in-process translator.
-//!
-//! PIE mapping: guest virtual addresses (e_entry, ADRP targets) are translated
-//! to host addresses via `LoadedElf::host_addr_of`, so both static ELFs and
-//! PIE/ET_DYN shared objects (like the real `libroblox.so`) load correctly.
+//! Loads an aarch64 `.so`/ELF with `libloader::elf::load_elf_image` (which
+//! maps every PT_LOAD into ONE contiguous kernel-chosen region so **guest
+//! vaddr == host address**), then runs a guest entry address through
+//! `arm64jit`'s in-process translator.
 //!
 //! The full `libroblox.so` uses instructions beyond the current arm64jit
 //! subset, so execution stops at the first unsupported opcode — expected and
-//! reported with the guest address for honest iteration.
+//! reported with the offending guest address. Self-contained aarch64 ELFs run
+//! to completion.
 
 use anyhow::{Context, Result};
+use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use std::path::Path;
 use tracing::{info, warn};
 
 /// Load `path` and run the guest instruction stream starting at `entry` (a
-/// guest virtual address; 0 means the ELF's own e_entry). Returns the x0 the
-/// JIT left behind.
+/// guest virtual address). Returns the x0 the JIT left behind.
 pub fn run_elf_entry(path: &Path, entry: u64) -> Result<u64> {
-    let el = unsafe { libloader::elf::load_elf(path) }
-        .with_context(|| format!("load_elf({})", path.display()))?;
-    let entry = if entry == 0 { el.info.entry } else { entry };
-
+    let el = unsafe { libloader::elf::load_elf_image(path) }
+        .with_context(|| format!("load_elf_image({})", path.display()))?;
+    // If the caller didn't pick a specific function, use the ELF's own entry.
+    // `entry` is a link-time address; translate to guest/runtime space (== host,
+    // since load_elf_image maps guest==host).
+    let entry = if entry == 0 {
+        el.info.entry
+    } else {
+        el.guest_of(entry)
+    };
     info!(
-        "ELF loaded '{}' (is_pie={}, guest entry=0x{:x}, base_load_vaddr=0x{:x}, segments={})",
+        "ELF loaded '{}' (base=0x{:x}, e_entry=0x{:x}, segments={})",
         path.display(),
-        el.info.is_pie,
-        entry,
-        el.info.base_load_addr,
+        el.base_addr,
+        el.info.entry,
         el.segments.len()
     );
 
-    // PIE-aware mapping: find the executable segment, slice its host-mapped
-    // bytes as the compile `image`, and translate the chosen guest `entry`
-    // into that segment's host address.
+    // The translator dereferences computed guest addresses directly as host
+    // pointers, so guest vaddr MUST equal host address — `load_elf_image`
+    // guarantees that. Pick the executable segment as the code source.
     let seg = el
         .segments
         .iter()
         .find(|s| s.prot.execute)
         .context("no executable segment in load result")?;
-    let base = seg.guest_vaddr;
-    let host_entry = el
-        .host_addr_of(entry)
-        .context(format!(
-            "guest entry 0x{:x} outside any loaded segment",
-            entry
-        ))?;
-    let image =
-        unsafe { std::slice::from_raw_parts(seg.vaddr as *const u8, seg.memsz as usize) };
-
+    let base = seg.guest_vaddr; // == host addr of image[0] (guest==host)
+    let image = unsafe { std::slice::from_raw_parts(base as *const u8, seg.memsz as usize) };
     info!(
         "JIT running guest entry 0x{:x} at host 0x{:x} (text size 0x{:x})",
-        entry, host_entry, seg.memsz
+        entry,
+        entry,
+        seg.memsz
     );
 
-    let mut st = arm64jit::jit::CpuState::new();
-    // Give the guest a valid SP (x31) pointing at a fresh stack so prologues
-    // that push via stp/??[sp,#-N]! don't fault. 2 MiB anonymous.
-    let stack = {
-        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-        let size = 2 * 1024 * 1024;
-        unsafe {
-            let p = libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            );
-            assert_ne!(p as isize, -1, "mmap guest stack");
-            (p as usize, size, ps)
-        }
+    // Give the guest a small anonymous stack at a chosen address (just below
+    // where our mappings live) so spills/prologues have room.
+    let stack = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            8 * 1024 * 1024,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        )
     };
-    st.x[31] = (stack.0 + stack.1) as u64; // SP = top of stack (grows down)
-    let _ = stack.2;
+    if stack == libc::MAP_FAILED {
+        anyhow::bail!(
+            "Failed to mmap guest stack: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let stack_top = stack as u64 + (8 * 1024 * 1024);
+    // The translator's CpuState lives in our address space; set its sp so guest
+    // LDP/STP-BL prologue has a usable RSP. (CpuState holds a host context; for
+    // a C ABI entry the caller's rsp/reset is done by compile_image's prologue.)
+    info!("guest stack mapped at 0x{:x} (top 0x{:x})", stack as usize, stack_top);
 
+    let mut st = arm64jit::jit::CpuState::new();
     let blk = arm64jit::jit::compile_image(image, base, entry, &mut st as *mut _).map_err(|e| {
         anyhow::anyhow!(
-            "arm64jit stopped on an unsupported instruction near guest 0x{:x} (host 0x{:x}): {e} \
+            "arm64jit stopped on the first unsupported instruction near guest 0x{:x}: {e} \
              \nThis is the honest next decoder slice for libroblox.so.",
-            entry,
-            host_entry
+            entry
         )
     })?;
     let r = unsafe { arm64jit::jit::run(&blk, &mut st as *mut _) };
     info!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r);
-    warn!("guest stack remains mapped at 0x{:x} (leaked by design for one-shot run)", stack.0);
+    warn!(
+        "guest stack remains mapped at 0x{:x} (leaked by design for one-shot run)",
+        stack as usize
+    );
     Ok(r)
 }

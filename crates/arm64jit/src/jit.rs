@@ -106,8 +106,7 @@ pub fn compile(insts: &[Inst], state: *mut CpuState) -> Result<JitBlock, String>
     // translate each instruction at its guest offset, recording offsets.
     // Because guest start pc = 0 and each inst is 4 bytes, guest "address" of
     // inst[i] = i*4.
-    let mut host_of_guest: std::collections::HashMap<u64, usize> =
-        std::collections::HashMap::new();
+    let mut host_of_guest: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for (i, &inst) in insts.iter().enumerate() {
         let guest_pc = (i as u64) * 4;
         host_of_guest.insert(guest_pc, buf.len());
@@ -119,27 +118,32 @@ pub fn compile(insts: &[Inst], state: *mut CpuState) -> Result<JitBlock, String>
     buf.ret();
 
     // Resolve fixups now (buffer-relative). The rel32 displacement at
-        // fx.disp_off is relative to (disp_off + 4), the address immediately
-        // after the displacement field. target is host offset of the target.
-        for fx in &fixups {
-            let target = *host_of_guest
-                .get(&fx.target_pc)
-                .ok_or_else(|| format!("branch to untranslated pc {:x}", fx.target_pc))?;
-            let disp = target as i64 - (fx.disp_off as i64 + 4);
-            let bytes = (disp as u32).to_le_bytes();
-            buf.bytes[fx.disp_off..fx.disp_off + 4].copy_from_slice(&bytes);
-        }
+    // fx.disp_off is relative to (disp_off + 4), the address immediately
+    // after the displacement field. target is host offset of the target.
+    for fx in &fixups {
+        let target = *host_of_guest
+            .get(&fx.target_pc)
+            .ok_or_else(|| format!("branch to untranslated pc {:x}", fx.target_pc))?;
+        let disp = target as i64 - (fx.disp_off as i64 + 4);
+        let bytes = (disp as u32).to_le_bytes();
+        buf.bytes[fx.disp_off..fx.disp_off + 4].copy_from_slice(&bytes);
+    }
 
     let code = buf.as_slice().to_vec();
     let ptr = map_exec(&code);
-    Ok(JitBlock { ptr, len: code.len() })
+    Ok(JitBlock {
+        ptr,
+        len: code.len(),
+    })
 }
 
 /// Execute a compiled block against `state`, returning the value left in x0.
-pub unsafe fn run(blk: &JitBlock, state: *mut CpuState) -> u64 { unsafe {
-    let f: extern "C" fn(*mut CpuState) -> u64 = std::mem::transmute(blk.ptr);
-    f(state)
-}}
+pub unsafe fn run(blk: &JitBlock, state: *mut CpuState) -> u64 {
+    unsafe {
+        let f: extern "C" fn(*mut CpuState) -> u64 = std::mem::transmute(blk.ptr);
+        f(state)
+    }
+}
 
 /// Convenience: translate+call a slice of raw guest bytes (AArch64) reached at
 /// the given initial PC, executing them against `state`. Returns the final x0.
@@ -158,10 +162,20 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
 /// function, following branches and BL calls so any reachable code is
 /// present. `entry` is the guest address to start from. Instructions reached
 /// only via branch/call (not just linear fallthrough) are included.
-pub fn compile_image(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Result<JitBlock, String> {
+pub fn compile_image(
+    image: &[u8],
+    base: u64,
+    entry: u64,
+    state: *mut CpuState,
+) -> Result<JitBlock, String> {
     // Protect against nonsense sizes.
     if entry < base || entry - base >= image.len() as u64 {
-        return Err(format!("entry {:x} outside image [{:x}, {:x})", entry, base, base + image.len() as u64));
+        return Err(format!(
+            "entry {:x} outside image [{:x}, {:x})",
+            entry,
+            base,
+            base + image.len() as u64
+        ));
     }
 
     let mut buf = CodeBuf::new();
@@ -185,7 +199,8 @@ pub fn compile_image(image: &[u8], base: u64, entry: u64, state: *mut CpuState) 
                 break; // reached already-emitted code (loop back-edge)
             }
             let off = (cur - base) as usize;
-            let word = u32::from_le_bytes([image[off], image[off + 1], image[off + 2], image[off + 3]]);
+            let word =
+                u32::from_le_bytes([image[off], image[off + 1], image[off + 2], image[off + 3]]);
             let inst = decode::decode(word);
             // record a host label for this guest pc *before* constraining the
             // shape of the block (branches patch to it).
@@ -236,7 +251,10 @@ pub fn compile_image(image: &[u8], base: u64, entry: u64, state: *mut CpuState) 
 
     let code = buf.as_slice().to_vec();
     let ptr = map_exec(&code);
-    Ok(JitBlock { ptr, len: code.len() })
+    Ok(JitBlock {
+        ptr,
+        len: code.len(),
+    })
 }
 
 #[cfg(test)]
@@ -275,179 +293,178 @@ mod tests {
     }
 
     #[test]
-        fn cbz_controls_branch() {
-            // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
-            //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;
-            //  d2800280 mov x0,#20 ; d65f03c0 ret ;
-            //  d2800140 mov x0,#10 ; d65f03c0 ret
-            let code = [
-                0x81u8, 0x02, 0x80, 0xd2, // mov x1,#20
-                0x60, 0x00, 0x00, 0xb4, // cbz x0, +0x10
-                0x80, 0x02, 0x80, 0xd2, // mov x0,#20
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-                0x40, 0x01, 0x80, 0xd2, // mov x0,#10
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-            ];
-            // x0 == 0 -> cbz taken -> x0 = 10
-            let mut st_take = CpuState::new();
-            let r = exec_bytes(&mut st_take, &code, 0).expect("exec-take");
-            assert_eq!(r, 10, "x0==0 should take cbz branch");
-            // x0 != 0 -> fall through -> x0 = 20
-            let mut st_no = CpuState::new();
-            st_no.x[0] = 99;
-            let r = exec_bytes(&mut st_no, &code, 0).expect("exec-no");
-            assert_eq!(r, 20, "x0!=0 should fall through");
-        }
-
-        #[test]
-            fn cmp_ble_branch() {
-            // Real aarch64 from objdump (g): return w0>3 ? 1 : 0
-            // 71000c1f cmp w0,#3 ; 5400006d b.le 0x10 ; 52800020 mov w0,#1 ;
-            //  d65f03c0 ret ; 52800000 mov w0,#0 ; d65f03c0 ret
-            let code = [
-                0x1fu8, 0x0c, 0x00, 0x71, // cmp w0, #3
-                0x6d, 0x00, 0x00, 0x54, // b.le 0x10
-                0x20, 0x00, 0x00, 0x52, // mov w0, #1
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-                0x00, 0x00, 0x80, 0x52, // mov w0, #0
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-            ];
-            // w0=2 -> <=3 -> branch taken -> return 0
-            let mut st_le = CpuState::new();
-            st_le.x[0] = 2;
-            let r = exec_bytes(&mut st_le, &code, 0).expect("exec-le");
-            assert_eq!(r, 0, "x0=2 (<=3) should take b.le -> 0");
-            // w0=5 -> >3 -> fall through -> return 1
-            let mut st_gt = CpuState::new();
-            st_gt.x[0] = 5;
-            let r = exec_bytes(&mut st_gt, &code, 0).expect("exec-gt");
-            assert_eq!(r, 1, "x0=5 (>3) should fall through -> 1");
-        }
-
-        #[test]
-        fn bl_compiles_and_calls_leaf() {
-            // caller = (x0+5)*2, via `bl h` then `add w0,w0,w0`.
-            // 94000003 bl 0xc ; 0b000000 add w0,w0,w0 ; d65f03c0 ret
-            // 11001400 add w0,w0,#5 ; d65f03c0 ret
-            let image = [
-                0x03u8, 0x00, 0x00, 0x94, // bl 0xc
-                0x00, 0x00, 0x00, 0x0b, // add w0, w0, w0
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-                0x00, 0x14, 0x00, 0x11, // add w0, w0, #5
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-            ];
-            // caller(5) = (5+5)*2 = 20 ; caller(0) = 10
-            let mut st = CpuState::new();
-            st.x[0] = 5;
-            let blk = compile_image(&image, 0, 0, &mut st as *mut CpuState).expect("compile");
-            let r = unsafe { run(&blk, &mut st as *mut CpuState) };
-            assert_eq!(r, 20, "caller(5) should be 20");
-        }
-
-        #[test]
-        fn ldstp_jit_prologue_roundtrip() {
-            // f(a,b): stp x0,x1,[sp,#-16]! ; mov x0,#0 ; mov x1,#0 ;
-            // ldp x0,x1,[sp],#16 ; ret  => returns original x0, sp restored.
-            let code = [
-                0xe0u8, 0x07, 0xbf, 0xa9, // stp x0,x1,[sp,#-16]!
-                0x00, 0x00, 0x80, 0xd2, // mov x0,#0
-                0x01, 0x00, 0x80, 0xd2, // mov x1,#0
-                0xe0, 0x07, 0xc1, 0xa8, // ldp x0,x1,[sp],#16
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-            ];
-            let mut st = CpuState::new();
-            let base = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    0x4000usize,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
-            };
-            assert_ne!(base as isize, -1, "mmap for stack");
-            let sp = base as usize + 0x3000;
-            st.x[31] = sp as u64;
-            st.x[0] = 0xdead_beef_cafe_0000;
-            st.x[1] = 0x1122_3344_5566_7788;
-            let r = exec_bytes(&mut st, &code, 0).expect("exec stp/ldp");
-            assert_eq!(r, 0xdead_beef_cafe_0000, "x0 round-trips through stack");
-            assert_eq!(st.x[31], sp as u64, "sp restored after post-index load");
-            unsafe { libc::munmap(base, 0x4000) };
-        }
-
-        #[test]
-        fn logic_ops_execute_real_code() {
-            // 2a0003e1 mov w1,w0 ; 2a010000 orr w0,w0,w1 ;
-            // 4a010000 eor w0,w0,w1 ; 0a010000 and w0,w0,w1 ; ret
-            // (w0|w1)^w1 & w1   with w1==w0 => consistent result.
-            let code = [
-                0xe1, 0x03, 0x00, 0x2a, // mov w1, w0  (orr wzr,w0)
-                0x00, 0x00, 0x01, 0x2a, // orr w0, w0, w1
-                0x00, 0x00, 0x01, 0x4a, // eor w0, w0, w1
-                0x00, 0x00, 0x01, 0x0a, // and w0, w0, w1
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-            ];
-            let mut st = CpuState::new();
-            st.x[0] = 123u64;
-            let r = exec_bytes(&mut st, &code, 0).expect("exec logic");
-            assert_eq!(r, 0, "logical chain should reduce to 0");
-        }
-
-        #[test]
-        fn mov_reg_alias_jit() {
-            // mov x0, x1  =  orr x0, xzr, x1  (0xaa0103e0) ; ret
-            let code = [
-                0xe0, 0x03, 0x01, 0xaa, // mov x0, x1
-                0xc0, 0x03, 0x5f, 0xd6, // ret
-            ];
-            let mut st = CpuState::new();
-            st.x[1] = 0xfeed_face_cafe_0000;
-            let r = exec_bytes(&mut st, &code, 0).expect("exec mov reg");
-            assert_eq!(r, 0xfeed_face_cafe_0000, "mov x0,x1 copies register");
-        }
-
-        #[test]
-        fn adrp_ldr_reads_global() {
-            // Real global read: adrp x0, g ; add x0,x0,#0 ; ldr w0,[x0] ; ret.
-            // Image maps code at page 0, global `g` (==33) at page 0x1000.
-            let mut image = [0u8; 0x20004];
-            // adrp x0, 0x20000 (real encoding 0x90000100) ; add x0,x0,#0 ; ldr w0,[x0] ; ret
-            for (i, b) in [0x00u8, 0x01, 0x00, 0x90].iter().enumerate() {
-                image[i] = *b;
-            }
-            for (i, b) in [0x00u8, 0x00, 0x00, 0x91].iter().enumerate() {
-                image[4 + i] = *b;
-            }
-            for (i, b) in [0x00u8, 0x00, 0x40, 0xb9].iter().enumerate() {
-                image[8 + i] = *b;
-            }
-            for (i, b) in [0xc0u8, 0x03, 0x5f, 0xd6].iter().enumerate() {
-                image[12 + i] = *b;
-            }
-            // global g at 0x20000 = 33
-            image[0x20000] = 33;
-            // 64-bit scale: also confirm big constant is not relevant here (w32)
-            let len = image.len();
-            let rw = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    len,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
-            };
-            assert_ne!(rw as isize, -1, "mmap image");
-            unsafe { std::ptr::copy_nonoverlapping(image.as_ptr(), rw as *mut u8, len) };
-            let base = rw as usize as u64;
-            let mut st = CpuState::new();
-            let blk =
-                compile_image(&image, base, base, &mut st as *mut CpuState).expect("compile");
-            let r = unsafe { run(&blk, &mut st as *mut CpuState) };
-            assert_eq!(r, 33, "readg() should load the global g=33");
-            unsafe { libc::munmap(rw, len) };
-        }
+    fn cbz_controls_branch() {
+        // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
+        //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;
+        //  d2800280 mov x0,#20 ; d65f03c0 ret ;
+        //  d2800140 mov x0,#10 ; d65f03c0 ret
+        let code = [
+            0x81u8, 0x02, 0x80, 0xd2, // mov x1,#20
+            0x60, 0x00, 0x00, 0xb4, // cbz x0, +0x10
+            0x80, 0x02, 0x80, 0xd2, // mov x0,#20
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+            0x40, 0x01, 0x80, 0xd2, // mov x0,#10
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        // x0 == 0 -> cbz taken -> x0 = 10
+        let mut st_take = CpuState::new();
+        let r = exec_bytes(&mut st_take, &code, 0).expect("exec-take");
+        assert_eq!(r, 10, "x0==0 should take cbz branch");
+        // x0 != 0 -> fall through -> x0 = 20
+        let mut st_no = CpuState::new();
+        st_no.x[0] = 99;
+        let r = exec_bytes(&mut st_no, &code, 0).expect("exec-no");
+        assert_eq!(r, 20, "x0!=0 should fall through");
     }
+
+    #[test]
+    fn cmp_ble_branch() {
+        // Real aarch64 from objdump (g): return w0>3 ? 1 : 0
+        // 71000c1f cmp w0,#3 ; 5400006d b.le 0x10 ; 52800020 mov w0,#1 ;
+        //  d65f03c0 ret ; 52800000 mov w0,#0 ; d65f03c0 ret
+        let code = [
+            0x1fu8, 0x0c, 0x00, 0x71, // cmp w0, #3
+            0x6d, 0x00, 0x00, 0x54, // b.le 0x10
+            0x20, 0x00, 0x00, 0x52, // mov w0, #1
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+            0x00, 0x00, 0x80, 0x52, // mov w0, #0
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        // w0=2 -> <=3 -> branch taken -> return 0
+        let mut st_le = CpuState::new();
+        st_le.x[0] = 2;
+        let r = exec_bytes(&mut st_le, &code, 0).expect("exec-le");
+        assert_eq!(r, 0, "x0=2 (<=3) should take b.le -> 0");
+        // w0=5 -> >3 -> fall through -> return 1
+        let mut st_gt = CpuState::new();
+        st_gt.x[0] = 5;
+        let r = exec_bytes(&mut st_gt, &code, 0).expect("exec-gt");
+        assert_eq!(r, 1, "x0=5 (>3) should fall through -> 1");
+    }
+
+    #[test]
+    fn bl_compiles_and_calls_leaf() {
+        // caller = (x0+5)*2, via `bl h` then `add w0,w0,w0`.
+        // 94000003 bl 0xc ; 0b000000 add w0,w0,w0 ; d65f03c0 ret
+        // 11001400 add w0,w0,#5 ; d65f03c0 ret
+        let image = [
+            0x03u8, 0x00, 0x00, 0x94, // bl 0xc
+            0x00, 0x00, 0x00, 0x0b, // add w0, w0, w0
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+            0x00, 0x14, 0x00, 0x11, // add w0, w0, #5
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        // caller(5) = (5+5)*2 = 20 ; caller(0) = 10
+        let mut st = CpuState::new();
+        st.x[0] = 5;
+        let blk = compile_image(&image, 0, 0, &mut st as *mut CpuState).expect("compile");
+        let r = unsafe { run(&blk, &mut st as *mut CpuState) };
+        assert_eq!(r, 20, "caller(5) should be 20");
+    }
+
+    #[test]
+    fn ldstp_jit_prologue_roundtrip() {
+        // f(a,b): stp x0,x1,[sp,#-16]! ; mov x0,#0 ; mov x1,#0 ;
+        // ldp x0,x1,[sp],#16 ; ret  => returns original x0, sp restored.
+        let code = [
+            0xe0u8, 0x07, 0xbf, 0xa9, // stp x0,x1,[sp,#-16]!
+            0x00, 0x00, 0x80, 0xd2, // mov x0,#0
+            0x01, 0x00, 0x80, 0xd2, // mov x1,#0
+            0xe0, 0x07, 0xc1, 0xa8, // ldp x0,x1,[sp],#16
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                0x4000usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base as isize, -1, "mmap for stack");
+        let sp = base as usize + 0x3000;
+        st.x[31] = sp as u64;
+        st.x[0] = 0xdead_beef_cafe_0000;
+        st.x[1] = 0x1122_3344_5566_7788;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec stp/ldp");
+        assert_eq!(r, 0xdead_beef_cafe_0000, "x0 round-trips through stack");
+        assert_eq!(st.x[31], sp as u64, "sp restored after post-index load");
+        unsafe { libc::munmap(base, 0x4000) };
+    }
+
+    #[test]
+    fn logic_ops_execute_real_code() {
+        // 2a0003e1 mov w1,w0 ; 2a010000 orr w0,w0,w1 ;
+        // 4a010000 eor w0,w0,w1 ; 0a010000 and w0,w0,w1 ; ret
+        // (w0|w1)^w1 & w1   with w1==w0 => consistent result.
+        let code = [
+            0xe1, 0x03, 0x00, 0x2a, // mov w1, w0  (orr wzr,w0)
+            0x00, 0x00, 0x01, 0x2a, // orr w0, w0, w1
+            0x00, 0x00, 0x01, 0x4a, // eor w0, w0, w1
+            0x00, 0x00, 0x01, 0x0a, // and w0, w0, w1
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[0] = 123u64;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec logic");
+        assert_eq!(r, 0, "logical chain should reduce to 0");
+    }
+
+    #[test]
+    fn mov_reg_alias_jit() {
+        // mov x0, x1  =  orr x0, xzr, x1  (0xaa0103e0) ; ret
+        let code = [
+            0xe0, 0x03, 0x01, 0xaa, // mov x0, x1
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[1] = 0xfeed_face_cafe_0000;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec mov reg");
+        assert_eq!(r, 0xfeed_face_cafe_0000, "mov x0,x1 copies register");
+    }
+
+    #[test]
+    fn adrp_ldr_reads_global() {
+        // Real global read: adrp x0, g ; add x0,x0,#0 ; ldr w0,[x0] ; ret.
+        // Image maps code at page 0, global `g` (==33) at page 0x1000.
+        let mut image = [0u8; 0x20004];
+        // adrp x0, 0x20000 (real encoding 0x90000100) ; add x0,x0,#0 ; ldr w0,[x0] ; ret
+        for (i, b) in [0x00u8, 0x01, 0x00, 0x90].iter().enumerate() {
+            image[i] = *b;
+        }
+        for (i, b) in [0x00u8, 0x00, 0x00, 0x91].iter().enumerate() {
+            image[4 + i] = *b;
+        }
+        for (i, b) in [0x00u8, 0x00, 0x40, 0xb9].iter().enumerate() {
+            image[8 + i] = *b;
+        }
+        for (i, b) in [0xc0u8, 0x03, 0x5f, 0xd6].iter().enumerate() {
+            image[12 + i] = *b;
+        }
+        // global g at 0x20000 = 33
+        image[0x20000] = 33;
+        // 64-bit scale: also confirm big constant is not relevant here (w32)
+        let len = image.len();
+        let rw = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(rw as isize, -1, "mmap image");
+        unsafe { std::ptr::copy_nonoverlapping(image.as_ptr(), rw as *mut u8, len) };
+        let base = rw as usize as u64;
+        let mut st = CpuState::new();
+        let blk = compile_image(&image, base, base, &mut st as *mut CpuState).expect("compile");
+        let r = unsafe { run(&blk, &mut st as *mut CpuState) };
+        assert_eq!(r, 33, "readg() should load the global g=33");
+        unsafe { libc::munmap(rw, len) };
+    }
+}

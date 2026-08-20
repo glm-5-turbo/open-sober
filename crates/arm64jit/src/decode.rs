@@ -106,7 +106,12 @@ pub enum Inst {
         size_64: bool, // false => 32-bit W pair
     },
     // ---- compare-and-branch ----
-    Cbz { rt: u8, imm: i64, nonzero: bool, sf: bool },
+    Cbz {
+        rt: u8,
+        imm: i64,
+        nonzero: bool,
+        sf: bool,
+    },
     // ---- return (ret x30) ----
     Ret,
     // ---- fallback ----
@@ -172,18 +177,22 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
-    // ---- ADR / ADRP: bits[31:24] = 0x00 / 0x90 ----
+    // ---- ADR / ADRP: bits[31:24] = imm_lo + op(10000) ----
+    // The top byte varies with imm[1:0] (bits 30-29), so the discriminator is
+    // the opcode mask 0x9F000000: ADR = 0x10000000, ADRP = 0x90000000. Using a
+    // rigid `insn>>24 == 0x90` check misses real encodings (e.g. immlo=0b10
+    // yields top byte 0xD0, as in libroblox's 0xd0026a93).
     let immlo = (insn >> 29) & 0x3; // imm[1:0]
     let immhi = b(insn, 5, 23); // imm[20:2]
     let imm = ((immhi as u64) << 2) | (immlo as u64);
-    match insn >> 24 {
-        0x00 => {
+    match insn & 0x9F00_0000 {
+        0x1000_0000 => {
             return Inst::Adr {
                 rd: rd(insn),
                 imm: sext(imm, 21),
             };
         }
-        0x90 => {
+        0x9000_0000 => {
             return Inst::Adrp {
                 rd: rd(insn),
                 imm: sext(imm, 21) << 12,
@@ -342,42 +351,47 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- return (ret x30): 0xd65f03c0 ----
-        if insn & 0xffff_fc1f == 0xd65f_0000 {
-            return Inst::Ret;
-        }
+    if insn & 0xffff_fc1f == 0xd65f_0000 {
+        return Inst::Ret;
+    }
 
-        // ---- compare-and-branch (CBZ/CBNZ): cbz w=0x34 cbnz=0x35 cbzx=0xb4 cbnzx=0xb5 ----
-        if matches!(insn >> 24, 0x34 | 0x35 | 0xb4 | 0xb5) {
-            let sf = insn >> 31 == 1;
-            let nonzero = (insn >> 24) & 1 == 1;
-            let rt = (insn & 0x1f) as u8;
-            let imm19 = ((insn >> 5) & 0x7ffff) as u64;
-            let imm = sext(imm19, 19) * 4;
-            return Inst::Cbz { rt, imm, nonzero, sf };
-        }
+    // ---- compare-and-branch (CBZ/CBNZ): cbz w=0x34 cbnz=0x35 cbzx=0xb4 cbnzx=0xb5 ----
+    if matches!(insn >> 24, 0x34 | 0x35 | 0xb4 | 0xb5) {
+        let sf = insn >> 31 == 1;
+        let nonzero = (insn >> 24) & 1 == 1;
+        let rt = (insn & 0x1f) as u8;
+        let imm19 = ((insn >> 5) & 0x7ffff) as u64;
+        let imm = sext(imm19, 19) * 4;
+        return Inst::Cbz {
+            rt,
+            imm,
+            nonzero,
+            sf,
+        };
+    }
 
-        // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29) ----
-        if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8) {
-            let size_64 = insn >> 31 == 1; // sf
-            let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
-            let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
-            let preidx = indexed && (insn >> 24) & 1 == 1; // pre if bit24=1 within indexed
-            let scale = if size_64 { 8 } else { 4 };
-            let imm7 = b(insn, 15, 21) as i64;
-            let imm = sext(imm7 as u64, 7) * scale;
-            return Inst::LdStPair {
-                rt: rd(insn),
-                rt2: b(insn, 10, 14) as u8,
-                rn: b(insn, 5, 9) as u8,
-                imm,
-                ld,
-                writeback: indexed,
-                preidx,
-                size_64,
-            };
-        }
+    // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29) ----
+    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8) {
+        let size_64 = insn >> 31 == 1; // sf
+        let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
+        let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
+        let preidx = indexed && (insn >> 24) & 1 == 1; // pre if bit24=1 within indexed
+        let scale = if size_64 { 8 } else { 4 };
+        let imm7 = b(insn, 15, 21) as i64;
+        let imm = sext(imm7 as u64, 7) * scale;
+        return Inst::LdStPair {
+            rt: rd(insn),
+            rt2: b(insn, 10, 14) as u8,
+            rn: b(insn, 5, 9) as u8,
+            imm,
+            ld,
+            writeback: indexed,
+            preidx,
+            size_64,
+        };
+    }
 
-        Inst::Unsupported(insn)
+    Inst::Unsupported(insn)
 }
 
 #[cfg(test)]
@@ -411,49 +425,97 @@ mod tests {
     }
 
     #[test]
-        fn cbz_ground_truth() {
-            // "cbz x2, 0x10" = 0xb4000082 ; "cbnz x3" = 0xb5000083 ; "b" = 0x14000004
-            match decode(0xb4000082) {
-                Inst::Cbz { rt, imm, nonzero, sf } => {
-                    assert_eq!(rt, 2);
-                    assert_eq!(imm, 16); // target 0x10 from pc 0
-                    assert!(!nonzero);
-                    assert!(sf);
-                }
-                other => panic!("expected Cbz, got {:?}", other),
+    fn cbz_ground_truth() {
+        // "cbz x2, 0x10" = 0xb4000082 ; "cbnz x3" = 0xb5000083 ; "b" = 0x14000004
+        match decode(0xb4000082) {
+            Inst::Cbz {
+                rt,
+                imm,
+                nonzero,
+                sf,
+            } => {
+                assert_eq!(rt, 2);
+                assert_eq!(imm, 16); // target 0x10 from pc 0
+                assert!(!nonzero);
+                assert!(sf);
             }
-            assert_eq!(decode(0x14000004), Inst::B { imm: 16, link: false });
+            other => panic!("expected Cbz, got {:?}", other),
         }
-        #[test]
-            fn ret_decodes() {
-                let i = decode(0xd65f03c0); // RET
-                assert_eq!(i, Inst::Ret, "ret x30 should decode to Ret");
+        assert_eq!(
+            decode(0x14000004),
+            Inst::B {
+                imm: 16,
+                link: false
             }
+        );
+    }
+    #[test]
+    fn ret_decodes() {
+        let i = decode(0xd65f03c0); // RET
+        assert_eq!(i, Inst::Ret, "ret x30 should decode to Ret");
+    }
 
-            #[test]
-            fn ldstp_decode_ground_truth() {
-                // stp x0,x1,[x2,#16] = a9010440 ; ldp x29,x30,[sp],#16 = a8c17bfd
-                match decode(0xa9010440) {
-                    Inst::LdStPair { rt, rt2, rn, imm, ld, writeback, preidx, size_64 } => {
-                        assert_eq!(rt, 0); assert_eq!(rt2, 1); assert_eq!(rn, 2);
-                        assert_eq!(imm, 16); assert!(!ld); assert!(!writeback); assert!(size_64);
-                    }
-                    other => panic!("expected LdStPair, got {:?}", other),
-                }
-                match decode(0xa8c17bfd) {
-                    Inst::LdStPair { rt, rt2, rn, imm, ld, writeback, preidx, size_64 } => {
-                        assert_eq!(rt, 29); assert_eq!(rt2, 30); assert_eq!(rn, 31); // sp
-                        assert_eq!(imm, 16); assert!(ld); assert!(writeback); assert!(!preidx);
-                    }
-                    other => panic!("expected LdStPair post, got {:?}", other),
-                }
-                match decode(0xa9bf7bfd) {
-                    Inst::LdStPair { imm, writeback, preidx, ld, .. } => {
-                        assert_eq!(imm, -16); assert!(!ld); assert!(writeback); assert!(preidx);
-                    }
-                    other => panic!("expected LdStPair pre, got {:?}", other),
-                }
+    #[test]
+    fn ldstp_decode_ground_truth() {
+        // stp x0,x1,[x2,#16] = a9010440 ; ldp x29,x30,[sp],#16 = a8c17bfd
+        match decode(0xa9010440) {
+            Inst::LdStPair {
+                rt,
+                rt2,
+                rn,
+                imm,
+                ld,
+                writeback,
+                preidx,
+                size_64,
+            } => {
+                assert_eq!(rt, 0);
+                assert_eq!(rt2, 1);
+                assert_eq!(rn, 2);
+                assert_eq!(imm, 16);
+                assert!(!ld);
+                assert!(!writeback);
+                assert!(size_64);
             }
+            other => panic!("expected LdStPair, got {:?}", other),
+        }
+        match decode(0xa8c17bfd) {
+            Inst::LdStPair {
+                rt,
+                rt2,
+                rn,
+                imm,
+                ld,
+                writeback,
+                preidx,
+                size_64,
+            } => {
+                assert_eq!(rt, 29);
+                assert_eq!(rt2, 30);
+                assert_eq!(rn, 31); // sp
+                assert_eq!(imm, 16);
+                assert!(ld);
+                assert!(writeback);
+                assert!(!preidx);
+            }
+            other => panic!("expected LdStPair post, got {:?}", other),
+        }
+        match decode(0xa9bf7bfd) {
+            Inst::LdStPair {
+                imm,
+                writeback,
+                preidx,
+                ld,
+                ..
+            } => {
+                assert_eq!(imm, -16);
+                assert!(!ld);
+                assert!(writeback);
+                assert!(preidx);
+            }
+            other => panic!("expected LdStPair pre, got {:?}", other),
+        }
+    }
 
     #[test]
     fn movz_64_ground_truth() {

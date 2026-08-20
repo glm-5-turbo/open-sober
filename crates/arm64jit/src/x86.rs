@@ -170,6 +170,55 @@ impl CodeBuf {
         self.emit_mem(rd, base, disp);
     }
 
+    /// movzx r64 <- [mem (base+disp)] (16-bit load, zero-extend)
+    pub fn movzx_word_mem(&mut self, rd: u8, base: u8, disp: i32) {
+        if rd >= 8 || base >= 8 {
+            self.b(rex(false, rd, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0xB7);
+        self.emit_mem(rd, base, disp);
+    }
+
+    /// movsx r64 <- [mem (base+disp)] (byte load, sign-extend)
+    pub fn movsx_byte_mem(&mut self, rd: u8, base: u8, disp: i32) {
+        if rd >= 8 || base >= 8 {
+            self.b(rex(false, rd, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0xBE);
+        self.emit_mem(rd, base, disp);
+    }
+
+    /// movsx r64 <- [mem (base+disp)] (16-bit load, sign-extend)
+    pub fn movsx_word_mem(&mut self, rd: u8, base: u8, disp: i32) {
+        if rd >= 8 || base >= 8 {
+            self.b(rex(false, rd, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0xBF);
+        self.emit_mem(rd, base, disp);
+    }
+
+    /// mov [mem (base+disp)] <- r8 (byte store)
+    pub fn mov_store8(&mut self, base: u8, disp: i32, src: u8) {
+        if base >= 8 || src >= 8 {
+            self.b(rex(false, src, 0, base));
+        }
+        self.b(0x88);
+        self.emit_mem(src, base, disp);
+    }
+
+    /// mov [mem (base+disp)] <- r16 (16-bit store)
+    pub fn mov_store16(&mut self, base: u8, disp: i32, src: u8) {
+        self.b(0x66); // 16-bit operand-size prefix
+        if base >= 8 || src >= 8 {
+            self.b(rex(false, src, 0, base));
+        }
+        self.b(0x89);
+        self.emit_mem(src, base, disp);
+    }
+
     /// lea r64, [base + disp]
     pub fn lea64(&mut self, rd: u8, base: u8, disp: i32) {
         if rd >= 8 || base >= 8 {

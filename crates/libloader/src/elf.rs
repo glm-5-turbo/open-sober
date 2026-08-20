@@ -244,6 +244,162 @@ impl LoadedElf {
             .find(|s| s.prot.execute)
             .map(|s| (s.vaddr, s.vaddr + s.memsz))
     }
+
+    /// Translate a link-time (ELF-file) address into the guest/runtime address
+    /// used after `load_elf_image`. For a non-PIE the identity usually holds
+    /// (guest base == link base); for a PIE it adds the relocation delta. This
+    /// is how callers turn a symbol address (e.g. an offset into libroblox.so)
+    /// into the `entry` value `compile_image` expects.
+    #[allow(unused)]
+    pub fn guest_of(&self, link_addr: u64) -> u64 {
+        // load_elf_image maps so that guest == base + (link - min_vaddr).
+        // Equivalent: guest = link_addr + (self.base_addr - self.info.base_load_addr).
+        let base_load = self.info.base_load_addr;
+        self.base_addr as u64 + link_addr.wrapping_sub(base_load)
+    }
+}
+
+/// Load an aarch64 ELF for the JIT path in a way that guarantees the property
+/// the arm64jit translator relies on: **guest virtual address == host
+/// address**, so ADRP/ADR of globals and every guest load/store dereference
+/// the correct host pointer directly.
+///
+/// It maps ONE contiguous anonymous region (page-aligned) at a fixed JIT base,
+/// then lays each PT_LOAD into it at `guest = JIT_BASE + (p_vaddr - min_vaddr)`,
+/// zero-fills .bss, and applies per-segment mprotect. Because guest addresses
+/// are computed as `JIT_BASE + (link_vaddr - base_load_addr)`, every link-time
+/// address (e_entry, function offsets, ADRP-relative globals) resolves to a
+/// guest address that is also the real host address of the byte. `LoadedElf`
+/// therefore maps guest -> host as the identity.
+///
+/// Use [`LoadedElf::guest_of`] to translate a link-time (ELF-file) address into
+/// the guest/runtime address used for entry points.
+///
+/// `JIT_BASE` is `0x400000` for non-PIE (matches the ELF's own link addresses)
+/// and a fixed high base for PIE/ET_DYN (whose link vaddrs start at 0x0, which
+/// would collide with the NULL page).
+///
+/// This avoids the fragile per-segment `MAP_FIXED` in `load_elf`, which for a
+/// packed ET_DYN (like the real 117MB libroblox.so) lets a later segment's
+/// `MAP_FIXED` target overlap the previous huge text mapping and SIGSEGV.
+///
+/// SAFETY: mmap/mprotect/copy from file. The returned mapping is RWX where the
+/// ELF requests and lives until process exit (deliberate leak for a one-shot
+/// run; callers needing to unmap should track `base_addr`).
+#[allow(unused)]
+pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
+    let info = parse_elf(path)?;
+    let _file = File::open(path)?;
+
+    // Flatten all PT_LOAD into [link_min_vaddr, link_max_end).
+    let mut loads: Vec<&Elf64Phdr> = info
+        .phdrs
+        .iter()
+        .filter(|p| p.p_type == PT_LOAD)
+        .collect();
+    anyhow::ensure!(!loads.is_empty(), "no PT_LOAD segments in {}", path.display());
+    loads.sort_by_key(|p| p.p_vaddr);
+
+    let min_vaddr = loads.iter().map(|p| p.p_vaddr).min().unwrap_or(0);
+    let max_end = loads
+        .iter()
+        .map(|p| p.p_vaddr.saturating_add(p.p_memsz))
+        .max()
+        .unwrap_or(0);
+    anyhow::ensure!(max_end > min_vaddr, "empty load image");
+
+    // Choose a fixed guest/JIT base that does not collide with host mappings.
+    // For non-PIE use the link base (== min_vaddr, e.g. 0x400000); for PIE use
+    // a fixed high region since the link origin is 0x0 (NULL page).
+    let jit_base = if info.is_pie {
+        0x1_0000_0000usize // 0x100000000
+    } else {
+        align_down_u64(min_vaddr, 0x1000) as usize
+    };
+    let base_page = align_down_u64(min_vaddr, 0x1000);
+    let span = align_up_u64(max_end - base_page, 0x1000) as usize;
+
+    let addr = unsafe {
+        libc::mmap(
+            jit_base as *mut libc::c_void,
+            span,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        anyhow::bail!(
+            "Failed to mmap JIT image ({} bytes @0x{:x}): {}",
+            span,
+            jit_base,
+            std::io::Error::last_os_error()
+        );
+    }
+    let base = addr as usize;
+
+    // Lay each segment at base + (p_vaddr - min_vaddr). Guest vaddr of every
+    // byte == its host address (identity mapping), which is what the JIT needs.
+    let mut segments: Vec<LoadedSegment> = Vec::new();
+    for ph in &loads {
+        let offset_in_image = (ph.p_vaddr - base_page) as usize;
+        let host_ptr = base as u64 + (ph.p_vaddr - min_vaddr);
+        let filesz = ph.p_filesz as usize;
+
+        if filesz > 0 {
+            // Read the segment's file bytes into the mapped slot.
+            let mut f = std::fs::File::open(path)?;
+            use std::io::{Read as _, Seek as _};
+            f.seek(std::io::SeekFrom::Start(ph.p_offset))?;
+            let write_at = (addr as *mut u8).wrapping_add(offset_in_image);
+            let buf = unsafe { std::slice::from_raw_parts_mut(write_at, filesz) };
+            f.read_exact(buf)
+                .context("Failed to read segment into JIT image")?;
+        }
+        // Zero-fill .bss (memsz > filesz) — fresh mmap is already zeroed.
+
+        // Apply final protection for this segment's [host, host+memsz).
+        let prot_addr = align_down_u64(host_ptr, 0x1000) as usize;
+        let prot_end = align_up_u64(host_ptr + ph.p_memsz, 0x1000) as usize;
+        let posix = MemProt::from_elf(ph.p_flags).to_posix();
+        if unsafe { libc::mprotect(prot_addr as *mut libc::c_void, prot_end - prot_addr, posix) } != 0
+        {
+            anyhow::bail!(
+                "Failed to mprotect {}: {}",
+                prot_addr,
+                std::io::Error::last_os_error()
+            );
+        }
+
+        segments.push(LoadedSegment {
+            guest_vaddr: host_ptr, // guest == host
+            vaddr: host_ptr,
+            memsz: ph.p_memsz,
+            fd: -1,
+            prot: MemProt::from_elf(ph.p_flags),
+        });
+    }
+
+    // Relocate the recorded entry to guest space so callers can run it directly.
+    let mut info = info;
+    if info.entry >= min_vaddr {
+        info.entry = base as u64 + (info.entry - min_vaddr);
+    }
+
+    info!(
+        "Loaded JIT ELF '{}' as single {}MB image at host base 0x{:x} (guest==host, base_load=0x{:x})",
+        path.display(),
+        span / (1024 * 1024),
+        base,
+        min_vaddr
+    );
+
+    Ok(LoadedElf {
+        base_addr: base,
+        info,
+        segments,
+    })
 }
 
 // ---------------------------------------------------------------------------
