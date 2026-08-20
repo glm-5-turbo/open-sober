@@ -2065,6 +2065,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             size_64,
             q128,
             fp_d,
+            sext,
         } => {
             let esize = if q128 {
                 16i32
@@ -2127,10 +2128,20 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.mov_load64(RAX, RDX, access_off + esize);
                     stg(buf, rt2 as u32, RAX);
                 } else {
-                    buf.mov_load32(RAX, RDX, access_off);
-                    stg(buf, rt as u32, RAX);
-                    buf.mov_load32(RAX, RDX, access_off + esize);
-                    stg(buf, rt2 as u32, RAX);
+                    if sext {
+                        // ldpsw: load 32-bit, sign-extend to 64-bit X reg.
+                        buf.mov_load32(RAX, RDX, access_off);
+                        buf.movsxd_r64_r32(RAX, RAX);
+                        stg(buf, rt as u32, RAX);
+                        buf.mov_load32(RAX, RDX, access_off + esize);
+                        buf.movsxd_r64_r32(RAX, RAX);
+                        stg(buf, rt2 as u32, RAX);
+                    } else {
+                        buf.mov_load32(RAX, RDX, access_off);
+                        stg(buf, rt as u32, RAX);
+                        buf.mov_load32(RAX, RDX, access_off + esize);
+                        stg(buf, rt2 as u32, RAX);
+                    }
                 }
             } else {
                 // store rt at [eff], rt2 at [eff+esize]

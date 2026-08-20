@@ -115,6 +115,7 @@ pub enum Inst {
         size_64: bool, // false => 32-bit W pair
         q128: bool,    // true => 128-bit SIMD pair (ldp/stp q)
         fp_d: bool,    // true => 64-bit FP/vector d-pair (ldp/stp d)
+        sext: bool,    // true => ldpsw (sign-extend 32-bit loads to 64-bit X regs)
     },
     // ---- SIMD/NEON 128-bit vector load/store (ldr q0,[xN,#imm] / str q) ----
     VecLdStImm {
@@ -1850,10 +1851,11 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
-    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d | 0x6c | 0x2c) {
+    if matches!(insn >> 24, 0x29 | 0x69 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d | 0x6c | 0x2c) {
         let q128 = (insn >> 24) & 0xff == 0xad || (insn >> 24) & 0xff == 0xac; // 128-bit SIMD pair (ldp/stp q)
         let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x2d
             || (insn >> 24) & 0xff == 0x6c || (insn >> 24) & 0xff == 0x2c; // FP/vec d pair (offset+indexed)
+        let sext_en = (insn >> 24) & 0xff == 0x69; // ldpsw: sign-ext the 32-bit pair to 64-bit
         let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
         let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
@@ -1880,6 +1882,7 @@ pub fn decode(insn: u32) -> Inst {
             size_64,
             q128,
             fp_d,
+            sext: sext_en,
         };
     }
 
@@ -1976,6 +1979,7 @@ mod tests {
                 size_64,
                 q128,
                 fp_d,
+                sext,
             } => {
                 assert_eq!(rt, 0);
                 assert_eq!(rt2, 1);
@@ -2000,6 +2004,7 @@ mod tests {
                 size_64,
                 q128,
                 fp_d,
+                sext,
             } => {
                 assert_eq!(rt, 29);
                 assert_eq!(rt2, 30);
