@@ -1003,3 +1003,22 @@ a432acf, 09699e5 (control flow).
 into guest NZCV so any interleaving works) then BL function calls with a
 guest call stack. After flags, real `.c` compiled aarch64 (if/else, loops)
 can run.
+
+## Session 19 — arm64jit: flags + calls + stack pairs (23 tests, no QEMU)
+
+**Verified this session** (all through the from-scratch JIT on x86-64, no QEMU):
+- **cmp/subs → B.cond** (if/else): real `cmp w0,#3; b.le` returns 0 or 1 per ARM. Decoder
+  expanded to S-flag form `cmp w,#imm` = top 0x71/0xF1 (SUBS imm). `x86_cc_for_cond`
+  maps ARM cond→x86 jcc (EQ..LE); set-flag ALU leaves x86 flags live through the
+  follow-on `mov` stores(store to rd==31 suppressed).
+- **BL function calls + call-graph `compile_image`**: BFS walk follows branch/call
+  targets, compiles whole reachable region into ONE buffer; `BL` = save LR + host
+  `call rel32` (cc=0xfe fixup); a real leaf call `caller(x)=(x+5)*2` returns correctly.
+- **LDP/STP (load/store pair)**: offset/pre-index/post-index, 32/64-bit, decoded via
+  bit23=indexed, bit24=pre, bit22=load, imm7 signed scaled by 8/4; `stp/ldp` prologue
+  round-trips regs through real stack, sp restored.
+
+**Tests: 23/23 green. Tree clean.** Commits: 43f7af3 (flags+B.cond), 874800c (BL +
+compile_image), 0ee07fc (LDP/STP).
+**Next slice (3e):** adrp/adr (PC-relative), ORR/EOR/AND-reg + reg-reg MOV/aliases,
+then `adic` integration into libloader `--no-qemu`.
