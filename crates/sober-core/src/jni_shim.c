@@ -415,13 +415,11 @@ __attribute__((noinline))
 static int wrap_sysinfo(struct sysinfo *si) {
     int r = g_real_sysinfo ? g_real_sysinfo(si) : -1;
     if (r == 0 && si) {
-        si->freeram   = 256ULL * 1024ULL * 1024ULL * 1024ULL / si->mem_unit; /* 256 GiB free */
-        si->totalram  = 512ULL * 1024ULL * 1024ULL * 1024ULL / si->mem_unit; /* 512 GiB tot */
-        si->sharedram = 0;
-        si->freeswap  = 128ULL * 1024ULL * 1024ULL * 1024ULL; /* 128 GiB swap */
-        si->totalswap = 128ULL * 1024ULL * 1024ULL * 1024ULL;
-        si->bufferram = 0;
-        jlog("[jni_shim] sysinfo forge: freeram=%lu unit=%u\n",
+        /* REPORT THE REAL HOST VALUES, do NOT inflate.
+         * Roblox's MemoryPool sizes its arena from sysinfo.freeram; inflating
+         * it to 256 GiB made the pool attempt a giant reservation and abort.
+         * Let the real (host) free RAM drive a normal arena size. */
+        jlog("[jni_shim] sysinfo passthrough: freeram=%lu unit=%u\n",
              (unsigned long)si->freeram, si->mem_unit);
     }
     return r;
@@ -456,21 +454,16 @@ static int wrap_openat(int dirfd, const char *path, int flags, ...) {
 __attribute__((noinline))
 static ssize_t wrap_read(int fd, void *buf, size_t count) {
     if (fd == g_ovc_fd) {
-        /* report overcommit_memory; the allocator uses this to decide how far
-         * it can over-commit its arena. The real host is "0" (heuristic); try
-         * reporting "2" (never overcommit) below so it doesn't attempt a huge
-         * always-overcommit reserve that then trips an internal sanity check.
-         * REVIEW: try "2\n" then "0\n" then "1\n" to find which the allocator
-         * accepts without aborting. */
-        const char *r = "2\n";
-        size_t n = strlen(r); if (n > count) n = count;
-        memcpy(buf, r, n); return (ssize_t)n;
+        /* REPORT THE REAL HOST overcommit value (0) — do not forge.
+         * Forging "1"/"2" made the MemoryPool pick an implausible arena policy
+         * and abort. The real host value (0 = heuristic) matches what Roblox
+         * expects on a normal device. */
+        return g_real_read(fd, buf, count);
     }
     if (fd == g_mem_fd && buf && count >= 128) {
-        /* fake meminfo: plenty of available memory */
-        const char *r = "MemTotal:        16000000 kB\nMemFree:         15000000 kB\nMemAvailable:    14900000 kB\n";
-        size_t n = strlen(r); if (n > count) n = count;
-        memcpy(buf, r, n); return (ssize_t)n;
+        /* REPORT THE REAL HOST /proc/meminfo — do not forge. Consistent with
+         * sysinfo passthrough so the MemoryPool sizes its arena sanely. */
+        return g_real_read(fd, buf, count);
     }
     return g_real_read(fd, buf, count);
 }
@@ -794,7 +787,7 @@ static void patch_all_jumpslots(uint64_t base) {
                            fn = (void*)wrap_android_set_abort_message;
                        } else if (!strcmp(buf,"__android_log_print")) {   /* reveal fatal logs */
                                    fn = (void*)wrap_android_log_print;
-                               } else if (!strcmp(buf,"abort")) {   /* don't die on OOM NULL; log+continue */
+                               } else if (!strcmp(buf,"abort")) {   /* log+continue so we can observe the phase after an OOM abort */
                                    fn = (void*)wrap_abort;
                                } else {
             fn = g_real_libc ? dlsym(g_real_libc, buf) : NULL;
@@ -849,6 +842,65 @@ static void patch_at_offset(uintptr_t base, uint32_t binary_offset, uint32_t ins
 // Phase 1a patch: NOP only the clock/time init call at binary offset 0x1f64e9c.
 // nativeSetAssetPath at 0x1f64eb8 is NOT modified.
 // Using a single mprotect of one page (no QEMU TCG conflicts with registration fn).
+// Run Roblox's real .init_array constructors. The unpacked libroblox.so has a
+// NON-empty .init_array section (vaddr 0x630bfc0, size 0x6ce0 = 3484 pointers)
+// but DT_INIT_ARRAYSZ is 0, so glibc never runs the book's static constructors
+// (which seed the MemoryPool / TLS arena globals -> without them the small
+// allocator's free-list is empty and it aborts). We:
+//   1) resolve each RELATIVE reloc whose target is inside .init_array to
+//      base+addend (store the actual constructor address),
+//   2) invoke them in ascending-address order, matching glibc semantics.
+static void run_libroblox_init_array(uint64_t base) {
+    const uint64_t IA  = 0x630bfc0;             /* .init_array vaddr */
+    const uint64_t IAS = 0x6ce0;                /* .init_array size   */
+    jlog("[jni_shim] run_init_array entry base=%p\n", (void*)base);
+    if (!g_robo.have || !g_robo.e.rela || !g_robo.e.rela_num) {
+        jlog("[jni_shim] run_init_array: no rela table, skipping\n");
+        return;
+    }
+    /* ensure the target data pages (GOT/.data/.data.rel.ro/.init_array within
+     * the RW-relocs range) are writable before resolving/calling */
+    {
+        /* .got ends ~0x5a0000+; .init_array ends ~0x6312ca0+0x6ce0=0x6319ba0.
+         * Cover base+0x5a00000 .. base+0x6320000 plus a tile for .gsi. */
+        uintptr_t start = (base + 0x5a00000) & ~0xfffULL;
+        mprotect((void*)start, 0x6320000 - 0x5a00000 + 0x1000,
+                 PROT_READ|PROT_WRITE|PROT_EXEC);
+    }
+    /* 1) apply R_AARCH64_RELATIVE relocations ONLY for .init_array targets.
+     *    The loader normally applies RELATIVE relocs to .data/.got/.data.rel.ro
+     *    itself; it SKIPS .init_array because DT_INIT_ARRAYSZ==0 (it never runs
+     *    constructors, so it never resolves their entries). So apply here only
+     *    for slots within the .init_array vaddr range. */
+    for (size_t i = 0; i < g_robo.e.rela_num; i++) {
+        const Elf64_Rela *r = &g_robo.e.rela[i];
+        unsigned type = r->r_info & 0xffffffffUL;            /* R_AARCH64_RELATIVE = 1027 */
+        if (type != 1027) continue;
+        uint64_t off = r->r_offset;
+        if (off < IA || off >= IA + IAS) continue;           /* init_array only */
+        volatile uint64_t *slot = (volatile uint64_t*)(base + off);
+        *slot = base + (uint64_t)r->r_addend;
+    }
+    jlog("[jni_shim] init_array resolved\n");
+    uint64_t *arr = (uint64_t*)(base + IA);
+    size_t n = IAS / 8;
+    jlog("[jni_shim] running %zu libro init_array ctors\n", n);
+    for (size_t i = 0; i < n; i++) {
+        uintptr_t fn = (uintptr_t)arr[i];
+        if (fn < base || fn >= base + 0x7000000ULL) {
+            jlog("[jni_shim]   ctor[%zu] bad addr 0x%lx, stopping\n",
+                 i, (unsigned long)fn);
+            break;
+        }
+        void (*ctor)(void) = (void (*)(void))fn;
+        jlog("[jni_shim]   ctor[%zu] @ base+0x%lx\n", i,
+             (unsigned long)(fn - base));
+        ctor();
+    }
+}
+
+// Phase 1a patch: NOP only the clock/time init call at binary offset 0x1f64e9c.
+// nativeSetAssetPath at 0x1f64eb8 is NOT modified.
 static void patch_jni_onload_phase1(uintptr_t base) {
     uintptr_t clock_addr = base + 0x1f64e9c;
     uintptr_t patch_page = clock_addr & ~0xfffULL;
@@ -2024,6 +2076,14 @@ int main(int argc, char** argv) {
     // libro's PLT `br x17` never jumps into non-code (the busy-spin cause).
     if (g_libroblox_base && g_robo.have) {
         patch_all_jumpslots(g_libroblox_base);
+    }
+
+    // Run Roblox's real .init_array static constructors (they seed the
+    // MemoryPool/TLS arena globals the allocator needs; DT_INIT_ARRAYSZ is 0 in
+    // the unpacked lib so glibc never runs them). Do this AFTER jumpslot patch
+    // so constructors that call out through the PLT hit real functions.
+    if (g_libroblox_base && g_robo.have) {
+        run_libroblox_init_array(g_libroblox_base);
     }
 
 
