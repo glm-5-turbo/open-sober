@@ -1317,3 +1317,70 @@ x86 flags. This is a self-contained subsystem:
 
 `git log` since 20: `6618c5e` — "arm64jit: PC-driven dispatcher (blr/br/ret)
 + push 5 more decoder walls". Working tree clean.
+
+## Session 22 (Aug 20, 2026) — NZCV flags + CSEL/CSET family; stp/ldp d; LDAR/STLR
+
+Commit: `6dceb47` (dev). **Session 21's NZCV wall is crossed — and the JIT now
+executes real libroblox.so all the way into floating-point arithmetic.**
+
+### 1. The NZCV condition-flags subsystem (the 21st wall)
+
+- New `store_nzcv(buf)`: after every `S`-flag arch op (`cmp`/`subs`/`adds`),
+  snapshots x86 rflags (`pushfq`/`pop`) and packs either into
+  `CpuState.nzcv:u32` with **N=bit31, Z=bit30, C=bit29, V=bit28**.
+- New `load_nzcv_to_eflags(buf)`: the inverse — reads the packed NZCV, bit-shuffles
+  it back into an x86 eflags image (CF/nzcv.29, ZF/.30, SF/.31, OF/.28), and does
+  `push; popfq` so the immediately-following native `jcc`/`cmovcc` evaluates the
+  guest condition. This matters because the dispatcher reloads operands between the
+  setter and the consumer, clobbering live flags.
+- `cmp`/`cmn` (rd==31, s=true) now write flags only; `b.cond` reads stored flags
+  (not stale live x86 flags).
+- **CSEL/CSINC/CSINV/CSNEG** (incl. `CSET`/`CINC` aliases): `rd = c ? rn : f(rm)`
+  computed with a `cmovcc` on the repainted flags, `f` = identity/`+1`/`not`/`neg`.
+  Handles the `cset`/`cinc` disasm aliases via the generic csinc.
+
+**Decode-order gotcha (pitfall):** the CSEL X-variant shares top byte `0x9a`
+with the logical ORR/EOR/BIC family, so `(insn&0x7fe00000)==0x1a800000` MUST be
+checked *before* the LogicReg decoder or csel is swallowed as an `EOR`.
+
+### 2. Three x86-emitter bugs found & fixed (latent, hit only when new high-reg/FP code selected them)
+
+- **rex()**: R/X/B bits were placed at 0x10/0x20/0x08 instead of 0x04/0x02/0x01 —
+  any 64-bit op touching a register ≥8 (e.g. R10 in csel) emitted an invalid
+  `0x50-0x5F` prefix; fixed to the real REX.R/X/B mapping.
+- **cmov_rr64**: emitted the jcc opcode (double-0x40) and lacked REX.R/B for
+  R10/RDI. The REX fix plus a `-0x40` cc-domain correction made it emit a real
+  `cmovcc`.
+- The eflags-restoration tail originally pushed the wrong scratch (nzcv instead
+  of the built eflags), causing a segfault only on one branch of the cset test.
+
+### 3. The next two decode walls from *executing* libroblox.so
+
+- **`stp/ldp d` (FP/vector 64-bit pair, top `0x6d`, scale 8)**: d-regs are the
+  low 64 bits of `CpuState.v[k]`; each reg transfers one u64 at
+  `VECTOR_BASE + 8*reg`. (q128 stays scale 16 / 16 bytes.)
+- **`LDAR/STLR` acquire-release** (`mask 0x3fe00000 → 0x08800000/0x08c00000`,
+  ~5787 uses in the binary): treated as plain loads/stores — ordering is a no-op
+  in the single-threaded JIT.
+
+### 4. Verified progress on the real binary
+
+```
+running entry guest=0x101c34480
+arm64jit run_loop stopped: translate: unhandled Unsupported(1829831680) at 0x101c39f80  # stp d
+  (pushed to) Unsupported(509675520) at 0x101c3a348   # fmul d0,d0,d1  <- current wall
+```
+The JIT now runs **past** `csel`/`cset`, through `stp d` and `ldarb`, and stops
+on the genuine **floating-point** instruction `fmul d0, d0, d1` (`0x1E610800`) —
+the scalar-FP arithmetic layer that Session 20's note originally mislabeled.
+This is the FP layer (mulsd/addsd/fdivsd...) and the fp-immediate move/fmov.
+
+### 5. Tests
+
+`cargo test -p arm64jit` → **31 pass** (added `csel_family_ground_truth`,
+`stp_d_zero`, `ldar_stlr_plain`). Full workspace 60+ pass except a **pre-existing,
+unrelated** `libloader/src/android.rs` filesystem idempotency failure (untouched
+by this session).
+
+`git log` since 20: `6618c5e` (Session-21 dispatcher), `6dceb47` (this session).
+Working tree clean (commit `6dceb47`).
