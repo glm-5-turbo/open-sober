@@ -302,6 +302,10 @@ pub enum Inst {
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
     // ---- SIMD unsigned compare-higher 2D: cmhi Vd.2D, Vn.2D, Vm.2D ----
     SimdCmhiD { rd: u8, rn: u8, rm: u8 },
+    // ---- SIMD unzip even: uzp1 Vd.T, Vn.T, Vm.T ----
+    SimdUz1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
+    // ---- SIMD element extract to GPR: umov/smov Rd, Vn.bits[idx] ----
+    SimdMovEl { rd: u8, rn: u8, esize: u8, index: u8, signed: bool, is_x: bool },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
     // ---- SIMD narrowing extract: xtn Vd.T, Vn.U (low halves) ----
@@ -1428,7 +1432,33 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
                                                                                                                                                                                                         return Inst::SimdCmhiD { rd, rn, rm };
                                                                                                                                                                                                     }
-                                                                                                                                                                                                        // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
+                                                                                                                                                                                                    // ---- SIMD unzip even: uzp1 Vd.T, Vn.T, Vm.T ----
+                                                                                                                                                                                                    // opcode bits[13:8] = 0x18 (verified non-colliding vs uzp2/zip1/zip2/trn1/trn2).
+                                                                                                                                                                                                    // esize = 1 << bits[23:22]; q = bit30. Vd[i] = Vn[2i], Vd[n+i] = Vm[2i].
+                                                                                                                                                                                                    if (insn & 0x3f00) == 0x1800 {
+                                                                                                                                                                                                         let esize = (1 << ((insn >> 22) & 0x3)) as u8;
+                                                                                                                                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                         let q = (insn >> 30) & 1 == 1;
+                                                                                                                                                                                                         return Inst::SimdUz1 { rd, rn, rm, esize, q };
+                                                                                                                                                                                                             }
+                                                                                                                                                                                                             // ---- SIMD element extract to GPR: umov/smov Rd, Vn.bits[idx] ----
+                                                                                                                                                                                                             // Gate &0xbfe0_fc00: 0x0e00_3c00 (umov, widen-0) / 0x0e00_2c00 (smov, widen-s).
+                                                                                                                                                                                                             // esize = 1<<tz(imm5), index = imm5>>(tz+1); is_x = bit30.
+                                                                                                                                                                                                             let ge = insn & 0xbfe0_fc00;
+                                                                                                                                                                                                             if ge == 0x0e00_3c00 || ge == 0x0e00_2c00 {
+                                                                                                                                                                                                                 let signed = ge == 0x0e00_2c00;
+                                                                                                                                                                                                                 let is_x = ((insn >> 30) & 0x1) == 1;
+                                                                                                                                                                                                                 let imm5 = (insn >> 16) & 0x1f;
+                                                                                                                                                                                                                 let tz = imm5.trailing_zeros();
+                                                                                                                                                                                                                 let esize = (1 << tz) as u8;
+                                                                                                                                                                                                                 let index = (imm5 >> (tz + 1)) as u8;
+                                                                                                                                                                                                                 let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                 let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                 return Inst::SimdMovEl { rd, rn, esize, index, signed, is_x };
+                                                                                                                                                                                                             }
+                                                                                                                                                                                                             // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
                                                                                                                                                                                                         // Each element is all-ones if Vn[i]==Vm[i], else 0.
                                                                                                                                                                                                         // Gate &0xffe0_fc00 residues: 2d=0x6ee08c00, 4s=0x6ea08c00,
                                                                                                                                                                                                         // 2s=0x2ea08c00, 16b=0x6e208c00, 8b=0x2e208c00, 8h=0x6e608c00,

@@ -1427,6 +1427,49 @@ pub fn translate(
                                                                                                                                                                                                                                                 }
                                                                                                                                                                                                                                                 Ok(())
                                                                                                                                                                                                                                             }
+Inst::SimdUz1 { rd, rn, rm, esize, q } => {
+            // uzp1 Vd.T, Vn.T, Vm.T: even-indexed elements of Vn then Vm.
+            // Vd[i]=Vn[2i] for i in 0..n/2; Vd[n/2+i]=Vm[2i]. n = 8 or 16 bytes.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let n: i32 = if q { 16 } else { 8 };
+            let es = esize as i32;
+            for i in 0..(n / (2 * es)) {
+                let ei = 2 * i * es;
+                // Vd[i] = Vn[2i]
+                match esize {
+                    8 => { buf.mov_load64(RAX, RBX, slot(rn) + ei); buf.mov_store64(RBX, slot(rd) + i * es, RAX); }
+                    4 => { buf.mov_load32(RAX, RBX, slot(rn) + ei); buf.mov_store32(RBX, slot(rd) + i * es, RAX); }
+                    2 => { buf.mov_load32(RAX, RBX, slot(rn) + ei); buf.mov_store16(RBX, slot(rd) + i * es, RAX); }
+                    _ => { buf.mov_load32(RAX, RBX, slot(rn) + ei); buf.mov_store8(RBX, slot(rd) + i * es, RAX); }
+                }
+                // Vd[n/2 + i] = Vm[2i]
+                match esize {
+                                    8 => { buf.mov_load64(RAX, RBX, slot(rm) + ei); buf.mov_store64(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
+                                    4 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store32(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
+                                    2 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store16(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
+                                    _ => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store8(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
+                }
+            }
+            Ok(())
+}
+Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
+            // umov/smov Rd, Vn.bits[idx]: load esize-byte element at offset
+            // index*esize, extend zero (umov) or sign (smov) into GPR rd.
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16 + (index as i32) * (esize as i32);
+            match (esize, signed, is_x) {
+                (8, _, _) => buf.mov_load64(RAX, RBX, src),
+                (4, true, true) => { buf.mov_load32(RAX, RBX, src); buf.movsxd_r64_r32(RAX, RAX); }
+                (4, _, _) => buf.mov_load32(RAX, RBX, src),
+                (2, true, _) => buf.movsx_word_mem(RAX, RBX, src),
+                (2, false, _) => buf.movzx_word_mem(RAX, RBX, src),
+                (1, true, _) => buf.movsx_byte_mem(RAX, RBX, src),
+                (1, false, _) => buf.movzx_byte_mem(RAX, RBX, src),
+                    _ => unreachable!("smov/umov esize must be 1/2/4/8"),
+                }
+            if is_x { buf.mov_store64(RBX, slot(rd as u32), RAX); }
+            else { buf.mov_store32(RBX, slot(rd as u32), RAX); }
+            Ok(())
+}
                                                                                                                                                                                 Inst::SimdCmEq { rd, rn, rm, lanes, esize } => {
             // cmeq Vd.T, Vn.T, Vm.T: each element is all-ones if Vn[i]==Vm[i]
             // else 0. Compare the esize-byte element (zero-extended via the
