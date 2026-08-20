@@ -783,3 +783,21 @@ C. OR run Roblox's real allocator init (don't bypass it) by removing the NOP
    override, letting the arena seed normally. This is likely the correct fix.
 D. After JNI_OnLoad returns (registers 3 methods), boot the GUI on `:0` and
    start the vision phase (cua-driver, Step 5 on the task list).
+
+### Refined root cause (same session, commit after abort-intercept)
+- Neutralizing `abort` (GOT -> wrap_abort that logs caller and returns) makes the
+  quadruple-abort at 0x2692DD0/DD4/DD8/DDC log caller offsets then return. After
+  they return, JNI_OnLoad keeps executing but busy-spins (0 syscalls). So
+  suppressing abort is NOT a fix — it's a diagnostic.
+- `0x1c35484` (the per-thread TLS/small alloc) verified: empty free-list ->
+  fall through to the book's own MemoryPool allocator (0x1c3635c), NOT glibc
+  malloc. strace shows **0 mmap syscalls after JNI_OnLoad**, so the NULL is
+  **pure book-side user-space**: the MemoryPool arena/chunk bitmap is empty /
+  unseeded because Roblox's real allocator-init never ran (bypassed by the
+  JNI_OnLoad progressive patches + guard/ts_flags override). It is NOT a real
+  host-memory OOM even though we also forge sysinfo+meminfo+overcommit.
+- **CONCLUSION: option C — run Roblox's real allocator/MemoryPool init (do not
+  bypass it) — is the right path.** Find the pool init entry (likely a
+  constructor / a `Java_..._initializeGC`/`Memory` JNI or a static init that is
+  currently NOP'd or skipped) and either let it run or manually call it to seed
+  the per-thread pool chunk-base, so the small allocator's free-list is non-empty.
