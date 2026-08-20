@@ -1477,9 +1477,11 @@ name = "sober-core"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
+ "arm64jit",
  "clap",
  "dirs",
  "libc",
+ "libloader",
  "reqwest",
  "serde",
  "serde_json",

@@ -13,6 +13,7 @@
 mod apk;
 mod config;
 mod qemu;
+mod jit;
 mod android_env;
 mod dirs_setup;
 
@@ -45,6 +46,11 @@ struct Cli {
     /// Command to run: "auth" (login only), "play" (play game), "launch" (full flow)
     #[arg(default_value = "launch")]
     command: String,
+
+    /// Use the in-process ARM64->x86-64 JIT instead of QEMU (experimental).
+    /// Loads the Roblox .so with libloader and runs its entry via arm64jit.
+    #[arg(long, default_value_t = false)]
+    jit: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -122,6 +128,16 @@ fn run_play(cli: &Cli, cfg: &config::SoConfig) -> anyhow::Result<()> {
     // Set up Android environment
     let env = android_env::AndroidEnv::setup()?;
     info!("Android environment ready at: {}", env.root.display());
+
+    if cli.jit {
+        info!("Launching via in-process JIT (no QEMU)...");
+        let libs = apk::extract_libs(&apk_path, &env.root)?;
+        let bin = qemu::find_main_binary(&libs)?;
+        let en_try: u64 = 0;
+        let r = jit::run_elf_entry(&bin, en_try)?;
+        println!("JIT entry returned {r}");
+        return Ok(());
+    }
 
     // Launch via QEMU user-mode
     info!("Launching Roblox via QEMU user-mode...");

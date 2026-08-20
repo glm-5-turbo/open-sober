@@ -368,7 +368,7 @@ fn setup_bionic_shim(env: &AndroidEnv) -> Result<()> {
 }
 
 /// Find the main Roblox shared library among extracted libs.
-fn find_main_binary(libs: &[std::path::PathBuf]) -> Result<std::path::PathBuf> {
+pub fn find_main_binary(libs: &[std::path::PathBuf]) -> Result<std::path::PathBuf> {
     // Order of preference for main Roblox binary
     let candidates = [
         "libroblox.so",

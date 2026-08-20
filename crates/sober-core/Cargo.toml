@@ -21,3 +21,5 @@ walkdir = "2"
 zip = "2"
 sha2 = "0.10"
 dirs = "6"
+libloader = { path = "../libloader" }
+arm64jit = { path = "../arm64jit" }
