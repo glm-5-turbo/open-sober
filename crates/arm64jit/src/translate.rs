@@ -292,7 +292,24 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::Cbz { rt, imm, nonzero, .. } => {
+        Inst::Adr { rd, imm } => {
+            // rd = pc + imm (load the effective address of a nearby symbol)
+            let target = (pc as i64).wrapping_add(imm);
+            buf.mov_ri64(RAX, target as u64);
+            stg(buf, rd as u32, RAX);
+            Ok(())
+        }
+        Inst::Adrp { rd, imm } => {
+            // rd = page(PC) + (imm<<12)  -- page-aligned effective address.
+            let page = (pc as i64) & !0xfff_i64;
+            let target = page.wrapping_add(imm);
+            buf.mov_ri64(RAX, target as u64);
+            stg(buf, rd as u32, RAX);
+            Ok(())
+        }
+        Inst::Cbz {
+            rt, imm, nonzero, ..
+        } => {
             let target = pc.wrapping_add(imm as u64);
             ldg(buf, RAX, rt as u32); // test rt
             buf.test_rr64(RAX, RAX);

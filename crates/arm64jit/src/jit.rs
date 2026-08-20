@@ -407,4 +407,47 @@ mod tests {
             let r = exec_bytes(&mut st, &code, 0).expect("exec mov reg");
             assert_eq!(r, 0xfeed_face_cafe_0000, "mov x0,x1 copies register");
         }
+
+        #[test]
+        fn adrp_ldr_reads_global() {
+            // Real global read: adrp x0, g ; add x0,x0,#0 ; ldr w0,[x0] ; ret.
+            // Image maps code at page 0, global `g` (==33) at page 0x1000.
+            let mut image = [0u8; 0x20004];
+            // adrp x0, 0x20000 (real encoding 0x90000100) ; add x0,x0,#0 ; ldr w0,[x0] ; ret
+            for (i, b) in [0x00u8, 0x01, 0x00, 0x90].iter().enumerate() {
+                image[i] = *b;
+            }
+            for (i, b) in [0x00u8, 0x00, 0x00, 0x91].iter().enumerate() {
+                image[4 + i] = *b;
+            }
+            for (i, b) in [0x00u8, 0x00, 0x40, 0xb9].iter().enumerate() {
+                image[8 + i] = *b;
+            }
+            for (i, b) in [0xc0u8, 0x03, 0x5f, 0xd6].iter().enumerate() {
+                image[12 + i] = *b;
+            }
+            // global g at 0x20000 = 33
+            image[0x20000] = 33;
+            // 64-bit scale: also confirm big constant is not relevant here (w32)
+            let len = image.len();
+            let rw = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(rw as isize, -1, "mmap image");
+            unsafe { std::ptr::copy_nonoverlapping(image.as_ptr(), rw as *mut u8, len) };
+            let base = rw as usize as u64;
+            let mut st = CpuState::new();
+            let blk =
+                compile_image(&image, base, base, &mut st as *mut CpuState).expect("compile");
+            let r = unsafe { run(&blk, &mut st as *mut CpuState) };
+            assert_eq!(r, 33, "readg() should load the global g=33");
+            unsafe { libc::munmap(rw, len) };
+        }
     }
