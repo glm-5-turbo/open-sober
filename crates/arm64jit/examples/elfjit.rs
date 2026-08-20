@@ -96,6 +96,20 @@ fn main() {
         }
     }
 
+    // --- Bootstrap a guest runtime the binary can actually use -------------
+    // (1) Guest stack: allocate a real writable region (guest==host addressing,
+    //     so its host pointer is a valid guest pointer) and point SP at the top.
+    // (2) TLS base: point CpuState.tpidr at a writable region so `mrs tpidr_el0`
+    //     returns a non-zero, writable base (FS/GS-style thread pointer).
+    const STACK_SIZE: usize = 4 * 1024 * 1024;
+    let stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
+    let sp = stack.as_ptr() as u64 + STACK_SIZE as u64; // top (stack grows down)
+    st.set(31, sp); // x31 = SP
+    const TLS_SIZE: usize = 1024 * 64;
+    let tls = Box::leak(vec![0u8; TLS_SIZE].into_boxed_slice());
+    st.tpidr = tls.as_ptr() as u64;
+    println!("guest sp=0x{:x} tls=0x{:x}", sp, st.tpidr);
+
     // PC-driven dispatcher: compiles reachable regions and re-enters on
     // indirect branch (`blr`) / `br` / `ret`, so real (blr-heavy) Roblox code
     // can actually *execute* rather than stopping at the first blr.
