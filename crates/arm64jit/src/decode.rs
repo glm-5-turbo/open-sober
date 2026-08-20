@@ -174,13 +174,16 @@ pub enum Inst {
        //   FMOV Xd,Dn 0x9E660000 (read low 64 of Dn into Xd)
        //   FMOV Sd,Wn 0x1E270000 / FMOV Wd,Sn 0x1E260000
        FmovGp {
-           f: bool, // false = GP->FP (X/Sd <- X/Wn), true = FP->GP (Xd/Wd <- D/Sn)
-           sz: bool, // true = double (d/x), false = single (s/w)
-           rd: u8,
-           rn: u8,
-       },
-    // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
-    BitField {
+               f: bool,  // false = GP->FP (X/Sd <- X/Wn), true = FP->GP (Xd/Wd <- D/Sn)
+               sz: bool, // true = double (d/x), false = single (s/w)
+               rd: u8,
+               rn: u8,
+           },
+           // ---- NEON: cnt V.8b (per-byte popcount) and uaddlv H, V.8b (byte sum) ----
+           SimdPopcnt { rd: u8, rn: u8 }, // cnt v{d}.8b, v{m}.8b
+           SimdSum8 { rd: u8, rn: u8 },   // uaddlv h{rd}, v{rn}.8b
+           // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
+           BitField {
         rd: u8,
         rn: u8,
         immr: u32,
@@ -802,11 +805,24 @@ pub fn decode(insn: u32) -> Inst {
                         _ => None,
                     };
                     if let Some(f) = fmov {
-                        let sz = matches!(base, 0x9e66_0000 | 0x9e67_0000); // d/x double
-                        let rn = ((insn >> 5) & 0x1f) as u8;
-                        let rd = (insn & 0x1f) as u8;
-                        return Inst::FmovGp { f, sz, rd, rn };
-                    }
+                            let sz = matches!(base, 0x9e66_0000 | 0x9e67_0000); // d/x double
+                            let rn = ((insn >> 5) & 0x1f) as u8;
+                            let rd = (insn & 0x1f) as u8;
+                            return Inst::FmovGp { f, sz, rd, rn };
+                        }
+
+                        // ---- NEON bit-popcount idiom: cnt Vd.8b,Vn.8b and uaddlv hD,Vn.8b ----
+                            // cnt vD.8b,vN.8b = 0x0e20_5800 | n<<5 | d ; uaddlv hD,vN.8b = 0x2e30_3800...
+                            if (insn & 0xffff_fc00) == 0x0e20_5800 {
+                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                let rd = (insn & 0x1f) as u8;
+                                return Inst::SimdPopcnt { rd, rn };
+                            }
+                            if (insn & 0xffff_fc00) == 0x2e30_3800 {
+                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                let rd = (insn & 0x1f) as u8;
+                                return Inst::SimdSum8 { rd, rn };
+                            }
 
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
     if insn & 0x7e00_0000 == 0x3600_0000 {

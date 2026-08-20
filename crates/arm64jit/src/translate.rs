@@ -741,6 +741,61 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdPopcnt { rd, rn } => {
+            // cnt v{rd}.8b, v{rn}.8b : per-byte bit-popcount via SWAR.
+            let slot = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            buf.mov_load64(RAX, RBX, slot); // x
+            // x = x - ((x >> 1) & 0x5555_5555_5555_5555)
+            buf.mov_rr64(RDX, RAX);
+            buf.shr_ri8(RDX, 1);
+            buf.mov_ri64(RCX, 0x5555_5555_5555_5555);
+            buf.and_rr64(RDX, RCX);
+            buf.sub_rr64(RAX, RDX);
+            // x = (x & 0x3333...) + ((x >> 2) & 0x3333...)
+            buf.mov_rr64(RDX, RAX);
+            buf.shr_ri8(RDX, 2);
+            buf.mov_ri64(RCX, 0x3333_3333_3333_3333);
+            buf.and_rr64(RDX, RCX);
+            buf.and_rr64(RAX, RCX);
+            buf.add_rr64(RAX, RDX);
+            // x = (x + (x >> 4)) & 0x0f0f_0f0f_0f0f_0f0f
+            buf.mov_rr64(RDX, RAX);
+            buf.shr_ri8(RDX, 4);
+            buf.add_rr64(RAX, RDX);
+            buf.mov_ri64(RCX, 0x0f0f_0f0f_0f0f_0f0f);
+            buf.and_rr64(RAX, RCX);
+            let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            buf.mov_store64(RBX, dslot, RAX);
+            Ok(())
+        }
+        Inst::SimdSum8 { rd, rn } => {
+            // uaddlv h{rd}, v{rn}.8b : sum the 8 bytes of the slot into the
+            // low 16 bits (zero-extended to the d slot). Bytes in are each an
+            // 8-bit popcount (<= 8), so the sum fits well within the half.
+            let slot = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            buf.mov_load64(RAX, RBX, slot); // x
+            buf.mov_ri64(RCX, 0x00ff_00ff_00ff_00ff);
+            buf.mov_rr64(RDX, RAX);
+            buf.shr_ri8(RDX, 8);
+            buf.and_rr64(RDX, RCX);
+            buf.and_rr64(RAX, RCX);
+            buf.add_rr64(RAX, RDX); // s16 = per-16 sums
+            buf.mov_rr64(RDX, RAX);
+            buf.shr_ri8(RDX, 16);
+            buf.mov_ri64(RCX, 0x0000_ffff_0000_ffff);
+            buf.and_rr64(RDX, RCX);
+            buf.and_rr64(RAX, RCX);
+            buf.add_rr64(RAX, RDX); // per-32 sums
+            buf.mov_rr64(RDX, RAX);
+            buf.shr_ri8(RDX, 32);
+            buf.mov_ri64(RCX, 0x0000_0000_ffff_ffff);
+            buf.and_rr64(RDX, RCX);
+            buf.and_rr64(RAX, RCX);
+            buf.add_rr64(RAX, RDX); // total
+            let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            buf.mov_store64(RBX, dslot, RAX);
+            Ok(())
+        }
         Inst::LdStPair {
             rt,
             rt2,
