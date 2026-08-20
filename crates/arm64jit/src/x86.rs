@@ -310,6 +310,28 @@ impl CodeBuf {
     pub fn divsd(&mut self, dst: u8, src: u8) {
         self.sd(0x5E, dst, src);
     }
+    /// cvttsd2si r64, xmm  (F2 48 0F 2C /r) — truncate toward zero
+    pub fn cvttsd2si(&mut self, rd: u8, xmm: u8) {
+        self.b(0xF2);
+        self.b(0x48);
+        if rd >= 8 || xmm >= 8 {
+            self.b(rex(true, rd, 0, xmm));
+        }
+        self.b(0x0F);
+        self.b(0x2C);
+        self.b(modrm(3, rd & 7, xmm & 7)); // reg=GPR(dst), rm=xmm(src)
+    }
+    /// cvtsd2si r64, xmm  (F2 48 0F 2D /r) — round per MXCSR (default nearest)
+    pub fn cvtsd2si(&mut self, rd: u8, xmm: u8) {
+        self.b(0xF2);
+        self.b(0x48);
+        if rd >= 8 || xmm >= 8 {
+            self.b(rex(true, rd, 0, xmm));
+        }
+        self.b(0x0F);
+        self.b(0x2D);
+        self.b(modrm(3, rd & 7, xmm & 7));
+    }
 
     /// lea r64, [base + disp]
     pub fn lea64(&mut self, rd: u8, base: u8, disp: i32) {
@@ -467,12 +489,19 @@ impl CodeBuf {
         self.b(imm);
     }
     /// shr r64, imm8  (encoding 48 C1 /5 ib)
-    pub fn shr_ri8(&mut self, rd: u8, imm: u8) {
-        self.b(0x48);
-        self.b(0xC1);
-        self.b(modrm(3, 5, rd & 7));
-        self.b(imm);
-    }
+       pub fn shr_ri8(&mut self, rd: u8, imm: u8) {
+           self.b(0x48);
+           self.b(0xC1);
+           self.b(modrm(3, 5, rd & 7));
+           self.b(imm);
+       }
+       /// sar r64, imm8  (encoding 48 C1 /7 ib) — arithmetic (sign) shift right
+       pub fn sar_ri8(&mut self, rd: u8, imm: u8) {
+           self.b(0x48);
+           self.b(0xC1);
+           self.b(modrm(3, 7, rd & 7));
+           self.b(imm);
+       }
 
     // ---- control flow ----
     /// jmp rel32; returns patch offset for disp

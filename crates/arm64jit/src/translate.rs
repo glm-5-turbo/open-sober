@@ -269,8 +269,7 @@ pub fn translate(
             sh_amt,
             sf,
         } => {
-            let _ = s; // ANDS/ORRS/EORS also clear flags; reused via x86 flags if needed
-            let _ = sf;
+            let _ = sf; // operand size handled by existing emitters; sf informative
             // rn == 31 (XZR) reads as zero (common for the `mov xd, xm` alias
             // `orr xd, xzr, xm`); otherwise load rn.
             if rn == 31 {
@@ -285,6 +284,11 @@ pub fn translate(
                 1 => buf.or_rr64(RAX, RCX),  // ORR
                 2 => buf.xor_rr64(RAX, RCX), // EOR
                 _ => return Err(format!("LogicReg op {} not implemented", op)),
+            }
+            if s {
+                // ANDS/ORRS/EORS/TST set NZCV: x86 `and/or/xor` set CF=0,OF=0 and
+                // ZF/SF from the result, which is exactly AArch64's N/Z/C/V here.
+                store_nzcv(buf);
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
@@ -429,6 +433,54 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::BitField { rd, rn, immr, imms, sf, arith } => {
+            let bits = if sf { 64u32 } else { 32u32 };
+            ldg(buf, RAX, rn as u32); // load Rn
+            if imms == bits - 1 {
+                // LSR (logical) or ASR (arithmetic/sign) by immr
+                let sh = (immr & (bits - 1)) as u8;
+                if arith {
+                    buf.sar_ri8(RAX, sh);
+                } else {
+                    buf.shr_ri8(RAX, sh);
+                }
+            } else if immr == (imms + 1) % bits {
+                // LSL (alias) : shift left by (bits-1-imms)
+                let sh = ((bits - 1 - imms) & (bits - 1)) as u8;
+                buf.shl_ri8(RAX, sh);
+            } else {
+                // general UBFM/SBFM extract: (Rn >> immr) & low(width) bits,
+                // then optionally sign-extend from `width`.
+                let width = imms - immr + 1;
+                let sh = (immr & (bits - 1)) as u8;
+                buf.shr_ri8(RAX, sh); // drop low immr bits
+                // keep only `width` low bits
+                if width < bits {
+                    let mask: u64 = (1u64 << width) - 1;
+                    if mask & 0xffff_ffff == mask {
+                        buf.and_ri64(RAX, mask as u32);
+                    } else {
+                        buf.mov_ri64(RCX, mask);
+                        buf.and_rr64(RAX, RCX);
+                    }
+                }
+                if arith {
+                    // sign-extend the `width`-bit field to `bits`:
+                    // shift left to push the sign bit to the top, then arithmetic
+                    // shift right back (replicates the sign).
+                    let se = (bits - width) as u8;
+                    buf.shl_ri8(RAX, se);
+                    buf.sar_ri8(RAX, se);
+                }
+            }
+            if !sf {
+                buf.and_ri64(RAX, 0xffff_ffff);
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
         Inst::FpScalar { rd, rn, rm, op, sz } => {
             // scalar FP on d/s regs. d-reg = low 8 bytes of CpuState.v[reg].slot
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16; // low 8B of a 16B slot
@@ -468,6 +520,19 @@ pub fn translate(
                     buf.movq_store(RBX, vslot(rd), 0);
                 }
                 _ => return Err(format!("FpScalar op {op} not implemented")),
+            }
+            Ok(())
+        }
+        Inst::FcvtToInt { rd, rn, mode, sf } => {
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.movq_load(0, RBX, vslot(rn)); // d-source (low 8B) -> xmm0
+            if mode == 2 {
+                buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
+            } else {
+                buf.cvttsd2si(RAX, 0); // fcvtzs: truncate toward zero
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
             }
             Ok(())
         }

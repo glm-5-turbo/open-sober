@@ -159,8 +159,24 @@ pub enum Inst {
         rd: u8,
         rn: u8,
         rm: u8,
-        op: u8, // 0=move,1=abs,2=neg,3=sqrt,4=mul,5=add,6=sub,7=div
+        op: u8, // 4=mul,5=add,6=sub,7=div
         sz: bool, // true = double
+    },
+    // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
+    FcvtToInt {
+        rd: u8,
+        rn: u8, // source fp reg
+        mode: u8, // 0=fcvtzs, 2=fcvtas
+        sf: bool, // 64-bit dest
+    },
+    // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
+    BitField {
+        rd: u8,
+        rn: u8,
+        immr: u32,
+        imms: u32,
+        sf: bool,   // 64-bit
+        arith: bool, // true = arithmetic shift (SBFM/asr) sign-extends
     },
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
@@ -367,12 +383,19 @@ pub fn decode(insn: u32) -> Inst {
     // top byte: 0x0a xx-family; opc = bits[30:29], N = bit21
     if matches!(
         top,
-        0x0a | 0x2a | 0x4a | 0x6a | 0x8a | 0x9a | 0xaa | 0xba | 0xca | 0xda
+        0x0a | 0x2a | 0x4a | 0x6a | 0x8a | 0x9a | 0xaa | 0xba | 0xca | 0xda | 0x3a | 0x7a
+            | 0xea | 0xfa
     ) {
         let n = b(insn, 21, 21);
         let opc = b(insn, 29, 30); // ops: 0=AND/BIC, 1=ORR/ORN, 2=EOR/EON, 3=AND/OR/EOR + set-flags
-        let s = opc == 0b11; // the ANDS/ORRS(...) set-flags family is opc==3, NOT a separate S bit.
-        let op = (opc & 0b11) as u8 | ((n == 1) as u8) << 2; // +4 = inverted variant (BIC/ORN/EON)
+        let s = opc == 0b11; // the ANDS/BICS set-flags family is opc==3, not a separate S bit.
+        // opc==3 always means AND (with N deciding AND vs BIC); the base opcode for the
+        // non-set variants is opc itself (0=AND,1=ORR,2=EOR), +4 when N (BIC/ORN/EON).
+        let op = if opc == 0b11 {
+            if n == 1 { 4 } else { 0 } // BICS / ANDS
+        } else {
+            (opc & 0b11) as u8 | ((n == 1) as u8) << 2
+        };
         let shift = ShiftKind::from_u32(b(insn, 22, 23));
         let rm = b(insn, 16, 20) as u8;
         let sh_amt = b(insn, 10, 15) as u8;
@@ -552,6 +575,41 @@ pub fn decode(insn: u32) -> Inst {
         };
         if let Some(op) = op {
             return Inst::FpScalar { rd, rn, rm, op, sz };
+        }
+    }
+
+    // ---- bitfield (UBFM/SBFM): lsr/lsl (UBFM) and asr (SBFM) aliases ----
+    // top bytes: UBM-X=0xd3 UBM-W=0x53 SBM-X=0x93 SBM-W=0x13.
+    if matches!(insn >> 24, 0xd3 | 0x53 | 0x93 | 0x13) {
+        let sf = (insn >> 31) & 1 == 1;
+        let arith = matches!(insn >> 24, 0x93 | 0x13);
+        let bits = if sf { 64u32 } else { 32u32 };
+        let immr = b(insn, 16, 21);
+        let imms = b(insn, 10, 15);
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        // Accept the shift aliases (lsr/asr/lsl) plus the general extract aliases
+        // (ubfx/sbfx/uxb/sxtb/ughl. any immr<=imms) — BFM-insert (bfi/bfc) left later.
+        let is_valid = (imms == bits - 1) // LSR/ASR
+            || (immr == (imms + 1) % bits) // LSL
+            || (immr <= imms); // UBFX/SBFX + zero/sign-extend
+        if is_valid && (rd != 31) {
+            return Inst::BitField { rd, rn, immr, imms, sf, arith };
+        }
+    }
+
+    // ---- FP convert to signed integer (fcvtzs/fcvtas): Dn|Sn -> Rd ----
+    // class (insn & 0x5f20fc00)==0x1e200000 ; opc = bits[17:19] (2=fcvtas,0=fcvtzs)
+    if insn & 0x5f20_fc00 == 0x1e20_0000 {
+        let mode = ((insn >> 17) & 7) as u8; // 0=fcvtzs(toward-zero), 2=fcvtas(nearest-away)
+        if mode == 0 || mode == 2 {
+            let sf = (insn >> 31) & 1 == 1;
+            let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
+            if sz {
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let rd = (insn & 0x1f) as u8;
+                return Inst::FcvtToInt { rd, rn, mode, sf };
+            }
         }
     }
 
