@@ -137,6 +137,10 @@ pub enum Inst {
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
     SimDup { rd: u8, rn: u8, esize: u8, src_idx: u8, q: bool },
+    // ---- SIMD vector immediate: fmov Vd.T, #imm ----
+    SimdFmovImm { rd: u8, esize: u8, value_bits: u64, q: bool },
+    // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T ----
+    FcvVec { rd: u8, rn: u8, signed: bool, esize: u8, q: bool },
     // ---- compare-and-branch ----
     Cbz {
         rt: u8,
@@ -537,6 +541,28 @@ fn rn(insn: u32) -> u8 {
 }
 
 pub fn decode(insn: u32) -> Inst {
+    // ---- SIMD vector immediate: fmov Vd.T, #imm ----
+    // Disjoint gate (15 asm-verified): Q/esz prefix in {0x0f,2f,4f,6f}00_0000
+    // and fixed low bits 15-10 == 0xF400. imm8 = [5..9]|[16..18]<<5. MUST precede
+    // the broad MOVI/vector-imm gate (which also claims 0x6f), so it is first here.
+    if ((insn & 0xffe0_0000) == 0x0f00_0000 || (insn & 0xffe0_0000) == 0x2f00_0000
+    || (insn & 0xffe0_0000) == 0x4f00_0000 || (insn & 0xffe0_0000) == 0x6f00_0000)
+    && (insn & 0x0000_f400) == 0x0000_f400 {
+        let esize = if (insn >> 29) & 1 == 0 { 4u8 } else { 8u8 };
+        let q = (insn >> 30) & 1 == 1;
+        let imm8 = ((insn >> 5) & 0x1f) | (((insn >> 16) & 0x7) << 5);
+        let value_bits = decode_fmov_imm(imm8, esize == 8);
+        return Inst::SimdFmovImm { rd: (insn & 0x1f) as u8, esize, value_bits, q };
+    }
+    // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T (FPI(FPc))----
+    if matches!(insn & 0xffe0_fc00, 0x0ea0_b800 | 0x2ea0_b800 | 0x4ea0_b800 | 0x4ee0_b800 | 0x6ea0_b800 | 0x6ee0_b800) {
+        let e = if (insn >> 20) & 1 == 1 { 8u8 } else { 4u8 };
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let signed = (insn >> 29) & 1 == 0;
+        let q = (insn >> 30) & 1 == 1;
+        return Inst::FcvVec { rd, rn, signed, esize: e, q };
+    }
     // ---- unconditional branch: bits[30:26] = 0b00101, bit31=link ----
     if b(insn, 26, 30) == 0b00101 {
         let link = insn >> 31 == 1;
@@ -1569,8 +1595,8 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
-    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xad | 0x6d | 0x2d) {
-        let q128 = (insn >> 24) & 0xff == 0xad; // 128-bit SIMD pair (ldp/stp q)
+    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d) {
+        let q128 = (insn >> 24) & 0xff == 0xad || (insn >> 24) & 0xff == 0xac; // 128-bit SIMD pair (ldp/stp q)
         let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x2d; // FP/vec d pair
         let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp

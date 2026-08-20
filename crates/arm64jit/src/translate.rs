@@ -1515,6 +1515,47 @@ pub fn translate(
                     Ok(())
                 }
                 // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
+        Inst::SimdFmovImm { rd, esize, value_bits, q } => {
+            // fmov Vd.T, #imm: broadcast the immediate FP float (esize bytes,
+            // 64-bit double or 32-bit single bits) into every lane of Vd.
+            let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            if esize == 8 {
+                buf.mov_ri64(RAX, value_bits);
+            } else {
+                buf.mov_ri64(RAX, value_bits & 0xffff_ffff);
+            }
+            let total = if q { 16i32 } else { 8i32 };
+            let mut off = 0i32;
+            while off < total {
+                if esize == 8 {
+                    buf.mov_store64(RBX, slot + off, RAX);
+                } else {
+                    buf.mov_store32(RBX, slot + off, RAX);
+                }
+                off += esize as i32;
+            }
+            Ok(())
+        }
+        Inst::FcvVec { rd, rn, signed, esize, q } => {
+            // fcvtzu/fcvtzs Vd.T, Vn.T: convert each FP lan e (esize bytes) to an
+            // int, truncating toward zero. Per-lane movq->cvttsd2si (signed), then
+            // clamp negatives to 0 for the unsigned fcvtzu (mirrors scalar FcvtToInt).
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let m = esize as i32;
+            for l in 0..lanes {
+                buf.movq_load(0, RBX, src + l * m);
+                buf.cvttsd2si(RAX, 0);
+                if !signed {
+                    buf.xor_rr64(RCX, RCX);
+                    buf.test_rr64(RAX, RAX);
+                    buf.cmov_rr64(0x48, RAX, RCX);
+                }
+                buf.movq_store(RBX, dst + l * m, 0);
+            }
+            Ok(())
+        }
                 Inst::SimDup { rd, rn, esize, src_idx, q } => {
                     // dup Vd.T, Vn.T[src]: broadcast element at Vn[src_idx*esize] across
                     // all q?16:8 bytes of Vd (all lanes identical).
