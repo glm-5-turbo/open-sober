@@ -1566,3 +1566,52 @@ step to actually *boot* is still the guest `svc` routing (real syscall table +
 mmap/open/futex/...) and the indirect-branch/`blr` landing correctness that drives
 execution into the right return addresses (the `0x00000000` pad hit). `cargo test
 -p arm64jit` → 36 pass; workspace clean.
+
+## Session 27 (Aug 20, 2026) — root-cause fix for the `.text` pad; DecodeBitMasks; scvtf
+
+### The headline bug (why the JIT was stuck at the 0x00000000 pad)
+The stop at `.text` zero-fill `0x1026a1584` last session was NOT an indirect `br`/`blr`
+return-address issue. Real root cause: `compile_image` translated an **unconditional `b`**
+(emitting the `jmp`) but then kept walking the **linear block** into the 4 bytes after
+the `b`, tried to `translate(0x00000000)` → `Unsupported(0)`. Fix: `Inst::B{link:false}`
+is now terminal for the block (same break path as Ret/Br/Blr), so the walk stops right
+after the `jmp`. This single fix walked the guest from deep in FMOD/MessageBus/audio
+(`0x1026a1584`) all the way back **up to the entry-point startup code** — the earlier
+"return-address/blr" hypothesis was wrong; it was block fall-through corruption.
+
+### New instructions & decode fixes this session
+- **LogicalImmediate (`decode_logical_mask`) rewritten** to the ARM `DecodeBitMasks`
+  procedure (every element size 2..64, incl. the N=0/32-bit + leading-`imms`-run case).
+  Unblocked `mov x8,#0xcccccccccccccccc`, `mov x0,#0x55555555...`, `orr x8,x22,#0x1`,
+  which previously fell through to `Unsupported`. Honesty regression `mov_ccc_imm_and_orr_one_and_scvtf`
+  caught two real bugs in my first two attempts:
+  1. rejecting `S==0` (ARM rejects **S==all-ones**, not S==0).
+  2. `rotate_right` on the full u64 then masking to esize discarded the element
+     (e.g. the 4-bit `0xC` element of `0xCCCC..` → 0). Fixed with an **esize-local
+     shift rotate** `(ones<<r | ones>>(esize-r)) & esize_mask`.
+- **`scvtf`** (signed integer → FP, `Inst::Scvtf{rd,rn,to_double,sf}`): decode gate
+  `(insn&0x7ff0_fc00)==0x1e60_0000 && (insn&0x20000)!=0` (double dest; bit17 separates it
+  from FP→int `fcvtns/fcvtzs/fcvtas` at the same base). Translate: `ldg Rn` →
+  `cvtsi2sd`/`cvtsi2ss` → `movq_store`/`mov_store32` into v{rd}. Added x86 emits
+  `cvtsi2sd`/`cvtsi2ss` (F2/F3 [REX.W] 0F 2A /r).
+
+### Current wall running real libroblox.so
+```
+stopped: Unsupported(0x9e790013) at guest pc 0x105dfdac8
+   fcvtzu x19, d0  (unsigned double->int64) — a genuinely new FP->unsigned conversion.
+```
+The guest now runs real startup/audio/MessageBus code from the entry point; the fix
+`b`-fall-through bug was the bridge that finally let the block graph route correctly.
+`fcvtzu` (and later `ucvtf`) are low-volume but real ISA surface — x86-64 has no scalar
+FP→u64 instruction, so it needs a careful honest sequence (NOT a silently-wrong
+`cvttsd2si`).
+
+### Verification
+`cargo test -p arm64jit` → **37 passed** (36 + new honesty regression). Workspace
+`cargo build --workspace` clean. `git status` has exactly this session's 4 source files
++ HANDOFF. Commit `[…sess27-sha…]` may be updated by user.
+
+### Open (next concrete)
+1. `fcvtzu`/`ucvt*` — unsigned FP↔int with verified x86-64 u64 handling.
+2. guest `svc` → real AArch64→x86-64 syscall table (mmap/futex/mprotect/…) — still
+   `-ENOSYS` (exit-only) per the honesty rule.

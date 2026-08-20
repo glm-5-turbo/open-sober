@@ -767,6 +767,26 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::Scvtf {
+            rd,
+            rn,
+            to_double,
+            sf,
+        } => {
+            // scvtf -> cvtsi2{sd|ss}: load the integer Rn, widen per `sf`, and
+            // store the float into v{rd} (low 8B for double, low 4B for single).
+            let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            ldg(buf, RAX, rn as u32); // integer src (already sign-correct in x64)
+            if to_double {
+                buf.cvtsi2sd(0, sf, RAX);
+                buf.movq_store(RBX, vslot, 0); // low 8B = double value
+            } else {
+                buf.cvtsi2ss(0, sf, RAX);
+                buf.movd_r32_xmm(RAX, 0); // RAX = low 32 bits of the single
+                buf.mov_store32(RBX, vslot, RAX); // low 4B = single value
+            }
+            Ok(())
+        }
         Inst::SimdPopcnt { rd, rn } => {
             // cnt v{rd}.8b, v{rn}.8b : per-byte bit-popcount via SWAR.
             let slot = crate::jit::VECTOR_BASE + (rn as i32) * 16;

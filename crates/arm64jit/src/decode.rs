@@ -164,11 +164,18 @@ pub enum Inst {
     },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
-           rd: u8,
-           rn: u8,   // source fp reg
-           mode: u8, // 0=fcvtzs, 2=fcvtas
-           sf: bool, // 64-bit dest
-       },
+            rd: u8,
+            rn: u8,   // source fp reg
+            mode: u8, // 0=fcvtzs, 2=fcvtas
+            sf: bool, // 64-bit dest
+        },
+        // ---- FP convert from signed integer (scvtf: Wn|Xn -> Sd|Dd) ----
+        Scvtf {
+            rd: u8,        // destination FP reg
+            rn: u8,        // source integer reg
+            to_double: bool, // true => Dd (double), false => Sd (single)
+            sf: bool,      // true => 64-bit source reg (Rn), false => 32-bit (Wn)
+        },
        // ---- FMOV between a core register and a scalar FP register ----
        //   FMOV Dd,Xn 0x9E670000 (write GPR to low 64 of Dd, zero hi)
        //   FMOV Xd,Dn 0x9E660000 (read low 64 of Dn into Xd)
@@ -290,37 +297,66 @@ fn b(insn: u32, lo: u32, hi: u32) -> u32 {
     (insn >> lo) & ((1u32 << (hi - lo + 1)) - 1)
 }
 
-/// Decode an AArch64 logical-immediate bitmask from `N`/`immr`/`imms`.
-/// Returns the 64-bit operand mask, or None if the encoding is invalid.
-/// Element size: N=1 -> 64-bit element; N=0 -> 32-bit element (replicated twice
-/// to fill the 64-bit register, as used by X-register ANDIMM/ORRIMM etc.).
-fn decode_logical_mask(n: u32, immr: u32, imms: u32) -> Option<u64> {
-    if n == 1 {
-        // 64-bit element.
-        if imms >= 64 {
-            return None;
-        }
-        let ones: u64 = (1u64 << (imms + 1)).wrapping_sub(1);
-        let mask64: u64 = u64::MAX;
-        Some(if immr == 0 {
-            ones
-        } else {
-            (ones.rotate_right(immr)) & mask64
-        })
-    } else {
-        // 32-bit element (N=0): valid only when imms < 32.
-        if imms >= 32 {
-            return None;
-        }
-        let ones: u32 = (1u32 << (imms + 1)).wrapping_sub(1);
-        let e32: u32 = if immr == 0 {
-            ones
-        } else {
-            ones.rotate_right(immr)
-        };
-        // Replicate the 32-bit element twice to form the 64-bit mask.
-        Some((e32 as u64) | ((e32 as u64) << 32))
+/// Decode an AArch64 logical-immediate bitmask from `N`/`immr`/`imms`,
+/// following the ARM ARM `DecodeBitMasks(...)` procedure (DDI0487, "OG­7,
+/// Logical instructions" / immediately-encoded uses). Returns the `datasize`-bit
+/// operand mask, or `None` if the encoding is architecturally invalid.
+///
+/// This handles every element size (64/32/16/8) and the N=0 case where `imms`
+/// carries a leading run of 1s that my earlier N==1/N==0 split rejected — that
+/// edge is what made a real `mov x8,#0xcccccccccccccccc` (imm = alternating bits)
+/// wrongly fall through to `Unsupported`.
+fn decode_logical_mask(n: u32, immr: u32, imms: u32, datasize: u64) -> Option<u64> {
+    // DecodeBitMasks (ARM ARM DDI0487): len = HighestSetBit( immN : NOT(imms) ).
+    // `imms` is a 6-bit field; the "NOT" includes the immN carry-in at bit 6.
+    let combined = (((n as u64) & 1) << 6) | (((!imms) & 0x3f) as u64);
+    if combined == 0 {
+        return None; // len = -1 => Undefined
     }
+    let len = 63 - combined.leading_zeros(); // highest set bit index over 7-bit field (0..=6)
+    if len < 1 || len >= 7 {
+        return None; // element must be at least 2 bits
+    }
+    let esize: u64 = 1u64 << len; // element size in bits (2,4,8,16,32,64)
+    let levels: u64 = esize - 1; // masks the search bits (S/R)
+    if (imms as u64 & levels) == levels {
+        // ARM DecodeBitMasks: S == all-ones (imms AND levels == levels) is
+        // Undefined. S == 0 IS valid (yields the mask 0x1), so do NOT reject S==0.
+        return None;
+    }
+    let s = (imms as u64 & levels) as u32; // S = imms AND levels
+    let r = (immr as u64 & levels) as u32; // R = immr AND levels
+    // welem = (1 << (S+1)) - 1, truncated to `esize` bits (a run of (S+1) ones),
+    // then ROR by R **within the esize-bit element** (ARM: ROR(welem, R) on an
+    // esize-bit value; rotating a full-u64 here is what produced the wrong mask).
+    let esize_mask: u64 = if esize >= 64 { u64::MAX } else { (1u64 << esize) - 1 };
+    let sl1 = s as u64 + 1; // S+1 in [1, esize]  (esize<=64)
+    let ones: u64 = if sl1 == 64 {
+        u64::MAX // 1<<64 not representable; all ones
+    } else {
+        (1u64 << sl1).wrapping_sub(1)
+    } & esize_mask;
+    let welem = if r == 0 {
+        ones
+    } else {
+        // Rotate right by R **within the esize-bit element** (ARM ROR on an
+        // esize-bit value). A full-u64 `rotate_right` pushes the high 4-bit
+        // element into bits 63.. which `& esize_mask` would then discard — so
+        // use a shift-based esize-local rotate.
+        let r = r as usize;
+        (ones << r | ones >> (esize as usize - r)) & esize_mask
+    };
+    // Replicate the `esize`-bit element across the full `datasize` register.
+    let mut mask: u64 = 0;
+    let mut i: u64 = 0;
+    while i < datasize {
+        mask |= welem << i;
+        i += esize;
+    }
+    if datasize < 64 {
+        mask &= (1u64 << datasize) - 1;
+    }
+    Some(mask)
 }
 /// Sign-extend a `bits`-wide value.
 #[inline]
@@ -562,7 +598,7 @@ pub fn decode(insn: u32) -> Inst {
         let n = (insn >> 22) & 1;
         let immr = b(insn, 16, 21);
         let imms = b(insn, 10, 15);
-        if let Some(mask) = decode_logical_mask(n, immr, imms) {
+        if let Some(mask) = decode_logical_mask(n, immr, imms, if sf { 64 } else { 32 }) {
             return Inst::LogicImm {
                 rd,
                 rn,
@@ -819,12 +855,30 @@ pub fn decode(insn: u32) -> Inst {
             let sf = (insn >> 31) & 1 == 1;
             let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
             if sz {
-                            let rn = ((insn >> 5) & 0x1f) as u8;
-                            let rd = (insn & 0x1f) as u8;
-                            return Inst::FcvtToInt { rd, rn, mode, sf };
-                        }
-                    }
-                }
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let rd = (insn & 0x1f) as u8;
+                return Inst::FcvtToInt { rd, rn, mode, sf };
+            }
+        }
+    }
+
+        // ---- FP convert from signed integer (scvtf): Wn|Xn -> Dd (double) ----
+        // `scvtf d0, w0 = 0x1e620000`. The int->FP family is at base 0x1e60_0000
+        // (double dest) / 0x1e22_0000 (single); FP->int `fcvt*` sits at the SAME
+        // 0x1e60_0000 base but has bit17=0 (fcvtns=0x1e600000, fcvtzs=0x1e780000,
+        // fcvtas=0x1e7a0000), whereas `scvtf` sets bit17 — so require bit17.
+        if (insn & 0x7ff0_fc00) == 0x1e60_0000 && (insn & 0x20000) != 0 {
+            let sf = (insn >> 31) & 1 == 1; // 1 => 64-bit integer src (Xn)
+            let to_double = true;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            return Inst::Scvtf {
+                rd,
+                rn,
+                to_double,
+                sf,
+            };
+        }
 
                 // ---- FMOV between core and scalar FP register ----
                 // Bases: FMOV Xd,Dn 0x9E660000 ; FMOV Dd,Xn 0x9E670000
@@ -1536,4 +1590,27 @@ mod tests {
                                     other => panic!("expected Svc#7a, got {other:?}"),
                                 }
                             }
+}
+
+#[cfg(test)]
+mod logical_imm_regressions {
+    use super::*;
+
+    #[test]
+    fn mov_ccc_imm_and_orr_one_and_scvtf() {
+        // mov x8,#0xcccc... : DecodeBitMasks element edge we fixed.
+        let w1 = decode(0xb202e7e8);
+        assert!(
+            matches!(w1, Inst::LogicImm { mask: 0xcccc_cccc_cccc_cccc, op: 1, ..}),
+            "mov x8,#0xccc -> {w1:?}"
+        );
+        // orr x8,x22,#0x1  : S==0 is a valid immediate (we reject S==all-ones).
+        let w2 = decode(0xb24002c8);
+        assert!(matches!(w2, Inst::LogicImm { mask: 0x1, ..}), "orr #1 -> {w2:?}");
+        // scvtf d0, w0 = 0x1e620000.
+        let w3 = decode(0x1e620000);
+        assert!(matches!(w3, Inst::Scvtf { rd: 0, rn: 0, to_double: true, sf: false , ..}), "scvtf -> {w3:?}");
+        // fcvtns w0, d0 = 0x1e600000 must NOT decode as Scvtf (bit17=0).
+        assert!(!matches!(decode(0x1e600000), Inst::Scvtf { .. }));
+    }
 }

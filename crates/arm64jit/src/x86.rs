@@ -389,6 +389,33 @@ impl CodeBuf {
         self.b(modrm(3, rd & 7, xmm & 7));
     }
 
+    /// cvtsi2sd xmm, r/m{32|64}  (F2 [REX.W] 0F 2A /r) — signed int -> double
+    pub fn cvtsi2sd(&mut self, xmm: u8, src64: bool, rs: u8) {
+        self.b(0xF2);
+        if src64 {
+            self.b(0x48);
+        }
+        if xmm >= 8 || rs >= 8 {
+            self.b(rex(src64, xmm, 0, rs));
+        }
+        self.b(0x0F);
+        self.b(0x2A);
+        self.b(modrm(3, xmm & 7, rs & 7));
+    }
+    /// cvtsi2ss xmm, r/m{32|64}  (F3 [REX.W] 0F 2A /r) — signed int -> single
+    pub fn cvtsi2ss(&mut self, xmm: u8, src64: bool, rs: u8) {
+        self.b(0xF3);
+        if src64 {
+            self.b(0x48);
+        }
+        if xmm >= 8 || rs >= 8 {
+            self.b(rex(src64, xmm, 0, rs));
+        }
+        self.b(0x0F);
+        self.b(0x2A);
+        self.b(modrm(3, xmm & 7, rs & 7));
+    }
+
     /// cvtsd2ss xmm_dst, xmm_src (F2 0F 5A /r) — double -> single (narrow)
     pub fn cvtsd2ss(&mut self, dst: u8, src: u8) {
         self.b(0xF2);

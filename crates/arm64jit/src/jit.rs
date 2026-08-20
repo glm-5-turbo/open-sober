@@ -336,10 +336,19 @@ pub fn compile_image(
                 }
             }
             translate::translate(&mut buf, cur, inst, &mut fixups)?;
-            // Ret / indirect transfers are terminal: stop this block.
+            // Ret / indirect transfers / unconditional B are terminal: stop this
+            // block (an unconditional `b` must NOT fall through to the next word,
+            // which may be `.text` zero-fill or an unrelated function — landing
+            // there is how we were hitting `Unsupported(0x00000000)` pads).
             if matches!(
                 inst,
-                Inst::Ret | Inst::Unsupported(_) | Inst::Br { .. } | Inst::Blr { .. }
+                Inst::Ret
+                    | Inst::Unsupported(_)
+                    | Inst::Br { .. }
+                    | Inst::Blr { .. }
+                    | Inst::B {
+                        link: false, ..
+                    }
             ) {
                 break;
             }
