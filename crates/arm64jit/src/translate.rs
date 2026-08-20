@@ -1506,7 +1506,43 @@ pub fn translate(
                     }
                     Ok(())
                 }
+                Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
+                    // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
+                    let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;
+                    let dst = crate::jit::VECTOR_BASE + (rd as i32)*16 + (dst_idx as i32)*8;
+                    buf.mov_load64(RAX, RBX, src);
+                    buf.mov_store64(RBX, dst, RAX);
+                    Ok(())
+                }
                 // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
+                Inst::SimDup { rd, rn, esize, src_idx, q } => {
+                    // dup Vd.T, Vn.T[src]: broadcast element at Vn[src_idx*esize] across
+                    // all q?16:8 bytes of Vd (all lanes identical).
+                    let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*(esize as i32);
+                    match esize {
+                        8 => buf.mov_load64(RAX, RBX, src),
+                        4 => buf.mov_load32(RAX, RBX, src),
+                        2 => buf.movzx_word_mem(RAX, RBX, src),
+                        _ => buf.movzx_byte_mem(RAX, RBX, src),
+                    }
+                    let slot = crate::jit::VECTOR_BASE + (rd as i32)*16;
+                    let total = if q { 16i32 } else { 8i32 };
+                    let mut off = 0i32;
+                    while off < total {
+                        match esize {
+                            8 => buf.mov_store64(RBX, slot + off, RAX),
+                            4 => buf.mov_store32(RBX, slot + off, RAX),
+                            2 => buf.mov_store16(RBX, slot + off, RAX),
+                            _ => buf.mov_store8(RBX, slot + off, RAX),
+                        }
+                        off += esize as i32;
+                    }
+                    if !q {
+                        buf.mov_ri64(RAX, 0);
+                        buf.mov_store64(RBX, slot + 8, RAX);
+                    }
+                    Ok(())
+                }
                 // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
                                                                                                                                                                                 Inst::SimdBit { rd, rn, rm } => {
                                                                                                                                                                                     let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
