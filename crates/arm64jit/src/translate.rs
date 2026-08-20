@@ -581,6 +581,17 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::Ror { rd, rn, rot, sf } => {
+            // Extend to 64-bit, rotate right by rot, then store (W-mask for !sf).
+            ldg(buf, RAX, rn as u32);
+            let r = (rot & (if sf { 63u32 } else { 31u32 })) as u8;
+            buf.ror_ri8(RAX, r);
+            if !sf {
+                buf.and_ri64(RAX, 0xffff_ffff);
+            }
+            stg(buf, rd as u32, RAX);
+            Ok(())
+        }
         Inst::BitField { rd, rn, immr, imms, sf, arith } => {
             let bits = if sf { 64u32 } else { 32u32 };
             ldg(buf, RAX, rn as u32); // load Rn
@@ -829,6 +840,16 @@ pub fn translate(
             buf.mov_store64(RBX, vslot(rd) + 8, RAX); // high 64 of Vd
             Ok(())
         }
+        Inst::Simd4s { rd, rn, rm, op: 0 } => {
+            // add Vd.4s, Vn.4s, Vm.4s : 4x32-bit lane add via paddd.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.movdqu_load(0, RBX, slot(rn)); // xmm0 = Vn (128-bit)
+            buf.movdqu_load(1, RBX, slot(rm)); // xmm1 = Vm
+            buf.paddd(0, 1); // xmm0 = Vn + Vm (4x32)
+            buf.movdqu_store(RBX, slot(rd), 0); // Vd = result
+            Ok(())
+        }
+        Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
         Inst::LdStPair {
             rt,
             rt2,

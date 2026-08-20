@@ -190,6 +190,15 @@ pub enum Inst {
                            },
                            // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
                            InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
+                           // ---- EXTR / ROR rotate: rm==rn in the EXTR base ----
+                           Ror { rd: u8, rn: u8, rot: u32, sf: bool }, // ror rd,rn,#rot
+                           // ---- NEON lane add: add Vd.4s, Vn.4s, Vm.4s ---------
+                           Simd4s {
+                                               rd: u8,
+                                               rn: u8,
+                                               rm: u8,
+                                               op: u8, // 0=add (currently), future sub/etc
+                                           },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -751,6 +760,18 @@ pub fn decode(insn: u32) -> Inst {
         }
     }
 
+    // ---- EXTR / ROR rotate: class (insn&0x1fe00000) in {0x13800000,0x13c00000}
+//      (the EXTR base; UBFM is 0x130/0x136 — disjoint). rm==rn => rotation.
+    if matches!(insn & 0x1fe0_0000, 0x1380_0000 | 0x13c0_0000)
+        && ((insn >> 16) & 0x1f) == ((insn >> 5) & 0x1f)
+    {
+        let sf = (insn >> 31) & 1 == 1;
+        let rot = b(insn, 10, 15); // rotation amount (6-bit, 0..63)
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::Ror { rd, rn, rot, sf };
+    }
+
     // ---- bitfield (UBFM/SBFM): lsr/lsl (UBFM) and asr (SBFM) aliases ----
     // top bytes: UBM-X=0xd3 UBM-W=0x53 SBM-X=0x93 SBM-W=0x13.
     if matches!(insn >> 24, 0xd3 | 0x53 | 0x93 | 0x13) {
@@ -849,6 +870,15 @@ pub fn decode(insn: u32) -> Inst {
                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                         let rd = (insn & 0x1f) as u8;
                                         return Inst::InsD1D0 { rd, rn };
+                                    }
+
+                                    // ---- NEON int add (4x32 lanes): add Vd.4s, Vn.4s, Vm.4s ----
+                                    // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01).
+                                    if (insn & 0x2f20_0c00) == 0x0e20_0400 && (insn & 0x3) != 3 {
+                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                        let rd = (insn & 0x1f) as u8;
+                                        return Inst::Simd4s { rd, rn, rm, op: 0 };
                                     }
 
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
@@ -1457,6 +1487,32 @@ mod tests {
             other => panic!("expected SysReg MSR tpidr_el0, got {other:?}"),
         }
         // A non-TLS sysreg (mrs x0, cntfrq_el0) must NOT decode to SysReg.
-        assert!(!matches!(decode(0xd53be020), Inst::SysReg { .. }));
-    }
-}
+                assert!(!matches!(decode(0xd53be020), Inst::SysReg { .. }));
+            }
+
+            #[test]
+            fn ror_exclude() {
+                // ror x0, x1, #12 = 0x93c13020 (real libroblox EXTR rotate)
+                match decode(0x93c13020) {
+                    Inst::Ror { rd, rn, rot, sf } => {
+                        assert_eq!(rd, 0);
+                        assert_eq!(rn, 1);
+                        assert_eq!(rot, 12);
+                        assert!(sf);
+                    }
+                    other => panic!("expected Ror, got {other:?}"),
+                }
+                // ror w23, w22, #20 = 0x139652d7 (real)
+                match decode(0x139652d7) {
+                    Inst::Ror { rd, rn, rot, sf } => {
+                        assert_eq!(rd, 23);
+                        assert_eq!(rn, 22);
+                        assert_eq!(rot, 20);
+                        assert!(!sf);
+                    }
+                    other => panic!("expected Ror, got {other:?}"),
+                }
+                // A real UBFM extract (lsl) must NOT be mis-decodded as Ror.
+                assert!(!matches!(decode(0xbbf13c69), Inst::Ror { .. }));
+            }
+        }
