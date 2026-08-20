@@ -265,6 +265,13 @@ pub enum Inst {
     // Gate `(insn & 0xffff_fc00) == 0x4e040c00` (the 4S GPR-source dup; distinct
     // from the vector-lane dup 0x4e180400 / 0x4e040400). rn (W source) bits 5-9.
     SimdDupSReg { rd: u8, rn: u8 },
+    // ---- SIMD 16-byte logical OR: orr Vd.16B, Vn.16B, Vm.16B ----
+    // Gate (insn & 0xffe0_fc00)==0x0ea01c00 (also the `mov Vd.16B,Vn.16B` copy
+    // alias rm==rn, e.g. real 0x4ea01c02). ORs the full 16-byte vector slot.
+    SimdOrr16 { rd: u8, rn: u8, rm: u8 },
+    // ---- SIMD 32-bit lane multiply: mul Vd.4S/Vd.2S, Vn., Vm. ----
+    // 4S gate (Q=1) 0x4ea09c00 ; 2S gate (Q=0) 0x0ea09c00. Per-lane low-32 product.
+    SimdMul { rd: u8, rn: u8, rm: u8, lanes: u8 },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -1153,10 +1160,29 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                         }
                                                                                                         // ---- SIMD dup from GPR: dup Vd.4S, Wn ----
                                                                                                         if (insn & 0xffff_fc00) == 0x4e040c00 {
-                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                            let rd = (insn & 0x1f) as u8;
-                                                                                                            return Inst::SimdDupSReg { rd, rn };
-                                                                                                        }
+                                                                                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                let rd = (insn & 0x1f) as u8;
+                                                                                                                return Inst::SimdDupSReg { rd, rn };
+                                                                                                            }
+                                                                                                            // ---- SIMD 16-byte logical OR: orr Vd.16B, Vn.16B, Vm.16B ----
+                                                                                                            // (insn & 0xffe0_fc00)==0x4ea01c00 catches both real `mov v2.16b` (0x4ea01c02,
+                                                                                                                // rm==rn copy) and `orr v3.16b` (0x4ea41c63). Q=1 => 0x4ea0 (bit30). OR all 16B.
+                                                                                                                if (insn & 0xffe0_fc00) == 0x4ea0_1c00 {
+                                                                                                                let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                let rd = (insn & 0x1f) as u8;
+                                                                                                                return Inst::SimdOrr16 { rd, rn, rm };
+                                                                                                                    }
+                                                                                                                    // ---- SIMD 32-bit lane multiply: mul Vd.4S/Vd.2S, Vn., Vm. ----
+                                                                                                                    // 4S (Q=1) gate 0x4ea09c00 ; 2S (Q=0) gate 0x0ea09c00.
+                                                                                                                    let sm = insn & 0xffe0_fc00;
+                                                                                                                    let mul_lanes = if sm == 0x4ea0_9c00 { Some(4) } else if sm == 0x0ea0_9c00 { Some(2) } else { None };
+                                                                                                                    if let Some(lanes) = mul_lanes {
+                                                                                                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                        let rd = (insn & 0x1f) as u8;
+                                                                                                                        return Inst::SimdMul { rd, rn, rm, lanes };
+                                                                                                                    }
                                                                                                         // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {

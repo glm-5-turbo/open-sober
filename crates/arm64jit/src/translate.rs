@@ -1127,11 +1127,37 @@ pub fn translate(
                             ldg(buf, RAX, rn as u32); // Wn read (zero-extended into RAX's low 32)
                             buf.and_ri64(RAX, 0xffff_ffff);
                             for i in 0..4u32 {
-                                buf.mov_store32(RBX, slot(rd) + (i * 4) as i32, RAX);
-                            }
-                            Ok(())
-                        }
-                        Inst::LdStPair {
+                                                            buf.mov_store32(RBX, slot(rd) + (i * 4) as i32, RAX);
+                                                        }
+                                                        Ok(())
+                                                    }
+                                                    Inst::SimdOrr16 { rd, rn, rm } => {
+                                                        // orr Vd.16B, Vn.16B, Vm.16B (also `mov Vd.16B,Vn.16B`
+                                                        // copy when rm==rn): OR across all 16 bytes, 8 at a time.
+                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                        for off in [0i32, 8i32] {
+                                                            buf.mov_load64(RAX, RBX, slot(rn) + off);
+                                                            buf.mov_load64(RCX, RBX, slot(rm) + off);
+                                                            buf.or_rr64(RAX, RCX);
+                                                            buf.mov_store64(RBX, slot(rd) + off, RAX);
+                                                                                        }
+                                                                                        Ok(())
+                                                                                    }
+                                                                                    Inst::SimdMul { rd, rn, rm, lanes } => {
+                                                                                        // mul Vd.4S/Vd.2S, Vn., Vm.: per 32-bit lane, low-32 product
+                                                                                        // (mod-2^32 wrap). 64-bit imul of zero-extended 32-bit operands
+                                                                                        // yields the low-32 product correctly for both signed words.
+                                                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                        for i in 0..lanes {
+                                                                                            let off = (i as i32) * 4;
+                                                                                            buf.mov_load32(RAX, RBX, slot(rn) + off);
+                                                                                            buf.mov_load32(RCX, RBX, slot(rm) + off);
+                                                                                            buf.imul_rr64(RAX, RCX); // low 32 = (a*b) mod 2^32
+                                                                                            buf.mov_store32(RBX, slot(rd) + off, RAX);
+                                                                                        }
+                                                                                        Ok(())
+                                                                                    }
+                                                                                    Inst::LdStPair {
             rt,
             rt2,
             rn,
