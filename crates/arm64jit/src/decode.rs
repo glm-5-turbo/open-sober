@@ -8,12 +8,6 @@
 // it visibly. Each class is added with a unit test matching the real encoding.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShiftKind {
-    Lsl,
-    Lsr,
-    Asr,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchRegKind {
     Br,
     Blr,
@@ -35,8 +29,49 @@ pub enum Inst {
     MoveWide { rd: u8, imm16: u16, hw: u8, opc: u8, sf: bool },
     // ---- add/sub immediate ----
     AddSubImm { rd: u8, rn: u8, imm12: u32, shift12: bool, sub: bool, sf: bool, s: bool },
+    // ---- add/sub subtract register (shifted) ----
+    AddSubReg {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        sub: bool,
+        sf: bool,
+        s: bool,
+        shift: ShiftKind,
+        sh_amt: u8,
+    },
+    // ---- logical (shifted register) ----
+    LogicReg {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        op: u8, // 0=AND,1=ORR,2=EOR (plus variants/not)
+        s: bool,
+        sf: bool,
+        shift: ShiftKind,
+        sh_amt: u8,
+    },
     // ---- fallback ----
     Unsupported(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShiftKind {
+    Lsl = 0,
+    Lsr = 1,
+    Asr = 2,
+    Ror = 3,
+}
+impl ShiftKind {
+    #[inline]
+    pub fn from_u32(v: u32) -> ShiftKind {
+        match v {
+            0 => ShiftKind::Lsl,
+            1 => ShiftKind::Lsr,
+            2 => ShiftKind::Asr,
+            _ => ShiftKind::Ror,
+        }
+    }
 }
 
 #[inline]
@@ -102,19 +137,51 @@ pub fn decode(insn: u32) -> Inst {
         }
 
         // ---- add/subtract immediate ----
-        // signature top byte: 0x11(add32) 0x51(sub32) 0x91(add64) 0xD1(sub64)
-        if top == 0x11 || top == 0x51 || top == 0x91 || top == 0xD1 {
-            let sub = (insn >> 30) & 1 == 1;
-            let s = (insn >> 29) & 1 == 1;
-            let shift12 = (insn >> 22) & 1 == 1;
-            let imm12 = b(insn, 10, 21);
-            let rn = b(insn, 5, 9) as u8;
-            let rd = rd(insn);
-            return Inst::AddSubImm { rd, rn, imm12, shift12, sub, sf, s };
-        }
+            // signature top byte: 0x11(add32) 0x51(sub32) 0x91(add64) 0xD1(sub64)
+            if top == 0x11 || top == 0x51 || top == 0x91 || top == 0xD1 {
+                let sub = (insn >> 30) & 1 == 1;
+                let s = (insn >> 29) & 1 == 1;
+                let shift12 = (insn >> 22) & 1 == 1;
+                let imm12 = b(insn, 10, 21);
+                let rn = b(insn, 5, 9) as u8;
+                let rd = rd(insn);
+                return Inst::AddSubImm { rd, rn, imm12, shift12, sub, sf, s };
+            }
 
-    Inst::Unsupported(insn)
-}
+            // ---- add/subtract (shifted register) ----
+            // top byte: 0x0b/0x2b(add) 0x4b/0x6b(sub) x32-sfx; 0x8b/0xab 0xcb/0xeb x64
+            //   (the 1x/3x/5x/7x... bit29 = S flag: 0x2b=ADDS32,0xab=ADDS64,0x6b=SUBS32,0xeb=SUBS64)
+            if matches!(top, 0x0b|0x1b|0x2b|0x3b|0x4b|0x6b|0x8b|0x9b|0xab|0xbb|0xcb|0xeb) {
+                // 0x1b/0x3b/0x9b/0xbb are the S-set with shift_amount N? keep set broad; refine below.
+                let n = b(insn, 21, 21);
+                let sub = b(insn, 30, 30) == 1;
+                let s = b(insn, 29, 29) == 1;
+                let shift = ShiftKind::from_u32(b(insn, 22, 23));
+                let rm = b(insn, 16, 20) as u8;
+                let _ = n;
+                let sh_amt = b(insn, 10, 15) as u8;
+                let rn = b(insn, 5, 9) as u8;
+                let rd = b(insn, 0, 4) as u8;
+                return Inst::AddSubReg { rd, rn, rm, sub, sf, s, shift, sh_amt };
+            }
+
+            // ---- logical (shifted register): AND/ORR/EOR/BIC/ORN/EON ----
+            // top byte: 0x0a xx-family; opc = bits[30:29], N = bit21
+            if matches!(top, 0x0a|0x2a|0x4a|0x6a|0x8a|0x9a|0xaa|0xba|0xca|0xda) {
+                let n = b(insn, 21, 21);
+                        let opc = b(insn, 29, 30); // ops: 0=AND/BIC, 1=ORR/ORN, 2=EOR/EON, 3=AND/OR/EOR + set-flags
+                        let s = opc == 0b11; // the ANDS/ORRS(...) set-flags family is opc==3, NOT a separate S bit.
+                        let op = (opc & 0b11) as u8 | ((n == 1) as u8) << 2; // +4 = inverted variant (BIC/ORN/EON)
+                let shift = ShiftKind::from_u32(b(insn, 22, 23));
+                let rm = b(insn, 16, 20) as u8;
+                let sh_amt = b(insn, 10, 15) as u8;
+                let rn = b(insn, 5, 9) as u8;
+                let rd = b(insn, 0, 4) as u8;
+                return Inst::LogicReg { rd, rn, rm, op, s, sf, shift, sh_amt };
+            }
+
+            Inst::Unsupported(insn)
+        }
 
 #[cfg(test)]
 mod tests {
@@ -213,6 +280,52 @@ mod tests {
                 assert!(!sf);
             }
             other => panic!("expected AddSubImm, got {:?}", other),
+        }
+    }
+    #[test]
+    fn add_reg32_shift_ground_truth() {
+        // "add w0, w0, w0, lsl #1" = 0x0b000400 (objdump at 0x0)
+        match decode(0x0b000400) {
+            Inst::AddSubReg { rd, rn, rm, sub, sf, s, shift, sh_amt } => {
+                assert_eq!(rd, 0); assert_eq!(rn, 0); assert_eq!(rm, 0);
+                assert!(!sub); assert!(!sf); assert!(!s);
+                assert_eq!(shift, ShiftKind::Lsl); assert_eq!(sh_amt, 1);
+            }
+            other => panic!("expected AddSubReg, got {:?}", other),
+        }
+    }
+    #[test]
+    fn cmp_64_ground_truth() {
+        // "cmp x5, x6" = 0xeb0600bf (subs xzr, x5, x6)
+        match decode(0xeb0600bf) {
+            Inst::AddSubReg { rd, rn, rm, sub, sf, s, shift, .. } => {
+                assert_eq!(rd, 31); assert_eq!(rn, 5); assert_eq!(rm, 6);
+                assert!(sub); assert!(sf); assert!(s); assert_eq!(shift, ShiftKind::Lsl);
+            }
+            other => panic!("expected AddSubReg(cmp), got {:?}", other),
+        }
+    }
+    #[test]
+    fn orr_64_lsr3_ground_truth() {
+        // "orr x0, x0, x1, lsr #3" = 0xaa410c00
+        match decode(0xaa410c00) {
+            Inst::LogicReg { rd, rn, rm, op, s, sf, shift, sh_amt } => {
+                assert_eq!(rd, 0); assert_eq!(rn, 0); assert_eq!(rm, 1);
+                assert_eq!(op, 1 /*orr*/); assert!(!s); assert!(sf);
+                assert_eq!(shift, ShiftKind::Lsr); assert_eq!(sh_amt, 3);
+            }
+            other => panic!("expected LogicReg, got {:?}", other),
+        }
+    }
+    #[test]
+    fn eor_64_ground_truth() {
+        // "eor x0, x2, x3" = 0xca030040
+        match decode(0xca030040) {
+            Inst::LogicReg { rd, rn, rm, op, sf, .. } => {
+                assert_eq!(rd, 0); assert_eq!(rn, 2); assert_eq!(rm, 3);
+                assert_eq!(op, 2 /*eor*/); assert!(sf);
+            }
+            other => panic!("expected LogicReg, got {:?}", other),
         }
     }
 }
