@@ -1652,6 +1652,42 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdAddw { rd, rn, rm, sign, esrc } => {
+                    // uaddw/saddw Vd.T, Vn.T, Vm.(T/2): Vd[i] = Vn[i] + extend(Vm_hi)
+                    // narrow source element = esrc bytes, dest element = 2*esrc.
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let der = (esrc as i32) * 2;      // dest element width
+                    let lanes = 8usize >> esrc.trailing_zeros() as usize;
+                    for i in 0..lanes {
+                        let nsrc = vslot(rn) + (i as i32) * der;   // Vn wide elem
+                        let msrc = vslot(rm) + (i as i32) * (esrc as i32);
+                        let dst = vslot(rd) + (i as i32) * der;
+                        match der {
+                            4 => buf.mov_load32(RAX, RBX, nsrc),
+                            8 => buf.mov_load64(RAX, RBX, nsrc),
+                            _ => buf.mov_load32(RAX, RBX, nsrc),
+                        }
+                        match (esrc, sign) {
+                            (1, false) => buf.movzx_byte_mem(RCX, RBX, msrc),
+                            (1, true) => buf.movsx_byte_mem(RCX, RBX, msrc),
+                            (2, false) => buf.movzx_word_mem(RCX, RBX, msrc),
+                            (2, true) => buf.movsx_word_mem(RCX, RBX, msrc),
+                            (4, false) => buf.mov_load32(RCX, RBX, msrc),
+                            (4, true) => buf.mov_load32(RCX, RBX, msrc),
+                            _ => unreachable!(),
+                        }
+                        if esrc == 4 && sign {
+                            buf.movsxd_r64_r32(RCX, RCX);
+                        }
+                        buf.add_rr64(RAX, RCX);
+                        match der {
+                            4 => buf.mov_store32(RBX, dst, RAX),
+                            8 => buf.mov_store64(RBX, dst, RAX),
+                            _ => buf.mov_store16(RBX, dst, RAX),
+                        }
+                    }
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
                     // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
                     let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;

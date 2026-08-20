@@ -137,6 +137,8 @@ pub enum Inst {
     Ld1L { rd: u8, rn: u8, esize: u8, index: u8 },
     // ---- SIMD widen/long load: uxtl/sxtl Vd.TL, Vn.T (sign/zero extend) ----
     SimdXtl { rd: u8, rn: u8, sign: bool, esrc: u8 },
+    // ---- SIMD add/sub-wide: uaddw/saddw Vd.T, Vn.T, Vm.T/2 ----
+    SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -940,6 +942,21 @@ pub fn decode(insn: u32) -> Inst {
             rd: (insn & 0x1f) as u8,
             rn: b(insn, 5, 9) as u8,
             sign: xt == 0x0f00_0400,
+            esrc,
+        };
+    }
+
+    // ---- SIMD add/sub-wide: uaddw/saddw Vd.T, Vn.T, Vm.(T/2) ----
+    // Gate: >>24 in {0x0e,0x2e,0x4e,0x6e} (u=bit29=1, s=0) with bit12=1 (wide not
+    // long -- addl has bit12=0). Narrow source elem = 1<<((insn>>22)&3) (B/H/S);
+    // dest element = 2x source; lanes = (8 / esrc).
+    if matches!((insn >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e) && (insn & 0x0000_1800) == 0x0000_1000 && (insn & 0x0000_0c00) == 0 {
+        let esrc = 1u8 << ((insn >> 22) & 0x3);
+        return Inst::SimdAddw {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            sign: ((insn >> 29) & 1) == 0,
             esrc,
         };
     }
