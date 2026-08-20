@@ -356,6 +356,27 @@ pub fn decode(insn: u32) -> Inst {
             return Inst::Cbz { rt, imm, nonzero, sf };
         }
 
+        // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29) ----
+        if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8) {
+            let size_64 = insn >> 31 == 1; // sf
+            let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
+            let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
+            let preidx = indexed && (insn >> 24) & 1 == 1; // pre if bit24=1 within indexed
+            let scale = if size_64 { 8 } else { 4 };
+            let imm7 = b(insn, 15, 21) as i64;
+            let imm = sext(imm7 as u64, 7) * scale;
+            return Inst::LdStPair {
+                rt: rd(insn),
+                rt2: b(insn, 10, 14) as u8,
+                rn: b(insn, 5, 9) as u8,
+                imm,
+                ld,
+                writeback: indexed,
+                preidx,
+                size_64,
+            };
+        }
+
         Inst::Unsupported(insn)
 }
 
@@ -404,10 +425,35 @@ mod tests {
             assert_eq!(decode(0x14000004), Inst::B { imm: 16, link: false });
         }
         #[test]
-        fn ret_decodes() {
-            let i = decode(0xd65f03c0); // RET
-            assert_eq!(i, Inst::Ret, "ret x30 should decode to Ret");
-        }
+            fn ret_decodes() {
+                let i = decode(0xd65f03c0); // RET
+                assert_eq!(i, Inst::Ret, "ret x30 should decode to Ret");
+            }
+
+            #[test]
+            fn ldstp_decode_ground_truth() {
+                // stp x0,x1,[x2,#16] = a9010440 ; ldp x29,x30,[sp],#16 = a8c17bfd
+                match decode(0xa9010440) {
+                    Inst::LdStPair { rt, rt2, rn, imm, ld, writeback, preidx, size_64 } => {
+                        assert_eq!(rt, 0); assert_eq!(rt2, 1); assert_eq!(rn, 2);
+                        assert_eq!(imm, 16); assert!(!ld); assert!(!writeback); assert!(size_64);
+                    }
+                    other => panic!("expected LdStPair, got {:?}", other),
+                }
+                match decode(0xa8c17bfd) {
+                    Inst::LdStPair { rt, rt2, rn, imm, ld, writeback, preidx, size_64 } => {
+                        assert_eq!(rt, 29); assert_eq!(rt2, 30); assert_eq!(rn, 31); // sp
+                        assert_eq!(imm, 16); assert!(ld); assert!(writeback); assert!(!preidx);
+                    }
+                    other => panic!("expected LdStPair post, got {:?}", other),
+                }
+                match decode(0xa9bf7bfd) {
+                    Inst::LdStPair { imm, writeback, preidx, ld, .. } => {
+                        assert_eq!(imm, -16); assert!(!ld); assert!(writeback); assert!(preidx);
+                    }
+                    other => panic!("expected LdStPair pre, got {:?}", other),
+                }
+            }
 
     #[test]
     fn movz_64_ground_truth() {

@@ -175,6 +175,54 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::LdStPair { rt, rt2, rn, imm, ld, writeback, preidx, size_64 } => {
+            let esize = if size_64 { 8i32 } else { 4i32 };
+            let imm32 = imm as i32;
+            // eff base: pre-index adjusts the address by imm before the access;
+            // post/offset use rn (post then adds imm for writeback).
+            ldg(buf, RDX, rn as u32); // RDX = rn
+            let (access_off, wb_off) = if preidx {
+                (imm32, imm32) // access at rn+imm, then rn=rn+imm
+            } else {
+                (0i32, if writeback { imm32 } else { 0 }) // access at rn, wb adds imm
+            };
+            if ld {
+                // load rt = [RDX + access_off], rt2 = [.. + esize]
+                if size_64 {
+                    buf.mov_load64(RAX, RDX, access_off);
+                    stg(buf, rt as u32, RAX);
+                    buf.mov_load64(RAX, RDX, access_off + esize);
+                    stg(buf, rt2 as u32, RAX);
+                } else {
+                    buf.mov_load32(RAX, RDX, access_off);
+                    stg(buf, rt as u32, RAX);
+                    buf.mov_load32(RAX, RDX, access_off + esize);
+                    stg(buf, rt2 as u32, RAX);
+                }
+            } else {
+                // store rt at [eff], rt2 at [eff+esize]
+                if size_64 {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store64(RDX, access_off, RAX);
+                    ldg(buf, RAX, rt2 as u32);
+                    buf.mov_store64(RDX, access_off + esize, RAX);
+                } else {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store32(RDX, access_off, RAX);
+                    ldg(buf, RAX, rt2 as u32);
+                    buf.mov_store32(RDX, access_off + esize, RAX);
+                }
+            }
+            if writeback {
+                // rn = rn + wb_off
+                ldg(buf, RCX, rn as u32);
+                if wb_off != 0 {
+                    buf.lea64(RCX, RCX, wb_off);
+                }
+                stg(buf, rn as u32, RCX);
+            }
+            Ok(())
+        }
         Inst::Ret => {
             // return x0 in RAX, then ret (matches the JIT fn convention that the
             // epilogue also uses). $[x0] at RBX+0.

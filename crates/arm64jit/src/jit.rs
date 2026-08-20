@@ -343,4 +343,37 @@ mod tests {
             let r = unsafe { run(&blk, &mut st as *mut CpuState) };
             assert_eq!(r, 20, "caller(5) should be 20");
         }
+
+        #[test]
+        fn ldstp_jit_prologue_roundtrip() {
+            // f(a,b): stp x0,x1,[sp,#-16]! ; mov x0,#0 ; mov x1,#0 ;
+            // ldp x0,x1,[sp],#16 ; ret  => returns original x0, sp restored.
+            let code = [
+                0xe0u8, 0x07, 0xbf, 0xa9, // stp x0,x1,[sp,#-16]!
+                0x00, 0x00, 0x80, 0xd2, // mov x0,#0
+                0x01, 0x00, 0x80, 0xd2, // mov x1,#0
+                0xe0, 0x07, 0xc1, 0xa8, // ldp x0,x1,[sp],#16
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut st = CpuState::new();
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    0x4000usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(base as isize, -1, "mmap for stack");
+            let sp = base as usize + 0x3000;
+            st.x[31] = sp as u64;
+            st.x[0] = 0xdead_beef_cafe_0000;
+            st.x[1] = 0x1122_3344_5566_7788;
+            let r = exec_bytes(&mut st, &code, 0).expect("exec stp/ldp");
+            assert_eq!(r, 0xdead_beef_cafe_0000, "x0 round-trips through stack");
+            assert_eq!(st.x[31], sp as u64, "sp restored after post-index load");
+            unsafe { libc::munmap(base, 0x4000) };
+        }
     }
