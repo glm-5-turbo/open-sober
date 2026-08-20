@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/types.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <errno.h>
@@ -515,22 +517,19 @@ static void alarm_sa_handler(int sig, siginfo_t *info, void *ctx) {
     ucontext_t *u = (ucontext_t*)ctx;
     uintptr_t pc = u->uc_mcontext.pc;
     uintptr_t sp = u->uc_mcontext.sp;
-    uintptr_t fp = u->uc_mcontext.regs[29]; // x29
-    uintptr_t lr = u->uc_mcontext.regs[30]; // x30
-    /* Try to walk a few frames from the interrupted code */
-    uintptr_t frames[4] = {lr, 0, 0, 0};
-    uintptr_t frame = fp;
-    for (int i = 1; i < 4 && frame && frame != (uintptr_t)-1; i++) {
-        uintptr_t next_fp = *(volatile uintptr_t*)frame;
-        uintptr_t next_lr = *(volatile uintptr_t*)(frame + 8);
-        frames[i] = next_lr;
-        frame = next_fp;
+    uintptr_t fp = u->uc_mcontext.regs[29];
+    uintptr_t lr = u->uc_mcontext.regs[30];
+    /* async-signal-safe sample: append guest PC to a file (jlog/fprintf is not
+     * safe to call from a handler under QEMU user-mode). */
+    int fd = open("/tmp/hb.log", O_WRONLY|O_CREAT|O_APPEND, 0600);
+    if (fd >= 0) {
+        char b[160];
+        int n = snprintf(b, sizeof b,
+            "HB(%d) pc=0x%lx sp=0x%lx fp=0x%lx lr=0x%lx\n",
+            count, (unsigned long)pc,(unsigned long)sp,(unsigned long)fp,(unsigned long)lr);
+        if (n>0) { if ((size_t)n>=sizeof b) n=sizeof b-1; write(fd, b, (size_t)n); }
+        close(fd);
     }
-    jlog( "[jni_shim] JNI_OnLoad still running (%ds) PC=0x%lx SP=0x%lx LR=0x%lx BT={0x%lx,0x%lx,0x%lx,0x%lx}\n",
-            count * 5, (unsigned long)pc, (unsigned long)sp, (unsigned long)lr,
-            (unsigned long)frames[0], (unsigned long)frames[1],
-            (unsigned long)frames[2], (unsigned long)frames[3]);
-    fflush(stderr);
 }
 
 static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
@@ -885,6 +884,15 @@ static void run_libroblox_init_array(uint64_t base) {
     uint64_t *arr = (uint64_t*)(base + IA);
     size_t n = IAS / 8;
     jlog("[jni_shim] running %zu libro init_array ctors\n", n);
+
+    /* Heartbeat: periodic SIGALRM to sample the guest PC if a ctor hangs
+     * (earlier arm than the JNI_OnLoad heartbeat, since ctors run first).
+     * Under QEMU user-mode the handler sees the guest PC in ucontext. */
+    struct sigaction hs; memset(&hs,0,sizeof(hs));
+    hs.sa_sigaction = alarm_sa_handler; hs.sa_flags = SA_SIGINFO;
+    sigemptyset(&hs.sa_mask); sigaction(SIGALRM, &hs, NULL);
+    alarm(3);
+
     for (size_t i = 0; i < n; i++) {
         uintptr_t fn = (uintptr_t)arr[i];
         if (fn < base || fn >= base + 0x7000000ULL) {
