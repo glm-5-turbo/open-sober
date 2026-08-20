@@ -1530,3 +1530,39 @@ a) an SIMD or FP op above is subtly wrong (verify popcount `cnt`+`uaddlv`, `fcvt
 immediate next step: add guest `sp` (map a real stack) + route `svc` syscalls,
 then verify the arithmetic blocks against normal host x86 expectations.  Also
 open: `bti`/PAC `ic`/`dc` hints beyond the existing NOP mask.
+
+## Session 26 — ror/SIMD verified; guest stack/TLS stabilize; svc hookpoint
+
+### New instructions & bootstrap this session
+- `ror`/EXTR rotate (`Inst::Ror`) — class `(insn&0x1fe00000)` in `{0x13800000,0x13c00000}`
+  (disjoint from UOFM 0x130/0x136), `rm==rn`, `imms`(bits[10:15]) is the rotation.
+  `ror_ri8` (48 C1 /1). Test `ror_exclusive`. Real FMOD audio-mix ROR loop now executes.
+- **SIMD lane add** `add Vd.4s,Vn.4s,Vm.4s` (`Inst::Simd4s`, op 0) via x86 `paddd`
+  + `movdqu_load/store`. First genuine SIMD *arithmetic* (prev was the popcount idiom).
+- **Guest Stack + TLS bootstrap** in `elfjit`: allocates a 4MB guest stack, sets
+  `x31=sp` to its top, allocates a writable 64KB TLS and sets `CpuState.tpidr` so
+  `mrs tpidr_el0` returns a non-zero writable base. Stack-frame save/restore
+  (`stp x29,x30,[sp,...]/ldp ... [sp],...`) and `ret` now use real memory.
+- **`svc #imm` hook point** — `Inst::Svc` decode+translate → host `guest_svc()`
+  dispatcher. Incremental: handles exit/exit_group (clean `process::exit`); all
+  other syscalls return `-ENOSYS` (+JIT_TRACE_SVC log). Deliberately does NOT guess
+  AArch64→x86-64 syscall numbers (they differ for mmap/futex/…); correct routing is
+  a distinct open item.
+- **Honest reference test** `simd_popcount_and_4s_add_reference`: seeds the JIT with
+  a known 64-bit value and asserts `cnt v.8b + uaddlv h` == `u64::count_ones()` and
+  `add v.4s` lane sums — catches real miscomputations, not just "got further". (A
+  malformed hand-encoding made it initially fail; that was a *test* bug, not code.)
+
+### Current wall when running real libroblox.so
+```
+stopped: Unsupported(0x00000000) at guest pc 0x1026a1584
+   (execution landed on ELF .text zero-fill after a branch — likely a guest
+    return address / indirect br/blr resolution issue, before a syscall is hit)
+```
+The JIT now runs `nativeAppBridgeV2StartAppWithParams`, FMOD audio mixing, SIMD
+popcount, SIMD lane add, FP width-convert, integer mul/div, ror, exclusive atomics,
+TLS reads across many MB of real API code reaching MessageBus. The concrete next
+step to actually *boot* is still the guest `svc` routing (real syscall table +
+mmap/open/futex/...) and the indirect-branch/`blr` landing correctness that drives
+execution into the right return addresses (the `0x00000000` pad hit). `cargo test
+-p arm64jit` → 36 pass; workspace clean.
