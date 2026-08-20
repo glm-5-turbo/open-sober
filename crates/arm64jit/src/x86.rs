@@ -379,6 +379,35 @@ impl CodeBuf {
         self.b(modrm(3, rd & 7, xmm & 7));
     }
 
+    /// cvtsd2ss xmm_dst, xmm_src (F2 0F 5A /r) — double -> single (narrow)
+    pub fn cvtsd2ss(&mut self, dst: u8, src: u8) {
+        self.b(0xF2);
+        self.b(0x0F);
+        self.b(0x5A);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
+    /// cvtss2sd xmm_dst, xmm_src (F3 0F 5A /r) — single -> double (widen)
+    pub fn cvtss2sd(&mut self, dst: u8, src: u8) {
+        self.b(0xF3);
+        self.b(0x0F);
+        self.b(0x5A);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
+    /// movd r32, xmm (66 0F 7E /r) — copy low 32 bits of xmm to a GPR
+    pub fn movd_r32_xmm(&mut self, rd: u8, xmm: u8) {
+        self.b(0x66);
+        self.b(0x0F);
+        self.b(0x7E);
+        self.b(modrm(3, rd & 7, xmm & 7));
+    }
+    /// movd xmm, r32 (66 0F 6E /r) — copy low 32 bits of a GPR to xmm
+    pub fn movd_xmm_r32(&mut self, xmm: u8, rs: u8) {
+        self.b(0x66);
+        self.b(0x0F);
+        self.b(0x6E);
+        self.b(modrm(3, rs & 7, xmm & 7));
+    }
+
     /// lea r64, [base + disp]
     pub fn lea64(&mut self, rd: u8, base: u8, disp: i32) {
         if rd >= 8 || base >= 8 {
@@ -553,6 +582,13 @@ impl CodeBuf {
            self.b(imm);
        }
 
+    /// ror r64, imm8  (48 C1 /1 ib) — rotate right
+    pub fn ror_ri8(&mut self, rd: u8, imm: u8) {
+        self.b(0x48);
+        self.b(0xC1);
+        self.b(modrm(3, 1, rd & 7));
+        self.b(imm);
+    }
     // ---- control flow ----
     /// jmp rel32; returns patch offset for disp
     pub fn jmp_rel32(&mut self) -> usize {

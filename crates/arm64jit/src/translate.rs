@@ -596,6 +596,12 @@ pub fn translate(
                 // LSL (alias) : shift left by (bits-1-imms)
                 let sh = ((bits - 1 - imms) & (bits - 1)) as u8;
                 buf.shl_ri8(RAX, sh);
+            } else if imms + immr + 1 == bits {
+                // ROR (rotate right): the field spans the whole register, so the
+                // result is a pure rotate right by `imms`. (Verified against two
+                // real `ror rd, rn, #imm` words from libroblox: 0x139652d7 /
+                // 0x138f51eb, both ror #20 carry rotation in imms.)
+                buf.ror_ri8(RAX, (imms & (bits - 1)) as u8);
             } else if immr > imms {
                 // BFI/BFC insert: lsb = (bits-immr)&(bits-1); width = imms+1.
                 // rd = (rd & ~mask) | ((Rn << lsb) & mask); mask = ((1<<width)-1)<<lsb
@@ -794,6 +800,33 @@ pub fn translate(
             buf.add_rr64(RAX, RDX); // total
             let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
             buf.mov_store64(RBX, dslot, RAX);
+            Ok(())
+        }
+        Inst::Fcvt { to_d, rd, rn } => {
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            if to_d {
+                // fcvt d{rd}, s{rn}: single -> double (widen).
+                buf.mov_load32(RAX, RBX, vslot(rn)); // single in low 32 of slot
+                buf.movd_xmm_r32(0, RAX);            // xmm0 = s{rn}
+                buf.cvtss2sd(0, 0);                   // xmm0 = (double) xmm0
+                let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                buf.movq_store(RBX, dslot, 0);       // low 64 = double result
+            } else {
+                // fcvt s{rd}, d{rn} : double -> single (narrow).
+                buf.movq_load(0, RBX, vslot(rn));     // xmm0 = double d{rn}
+                buf.cvtsd2ss(0, 0);                   // xmm0 = floating single
+                buf.movd_r32_xmm(RAX, 0);            // RAX = low 32 (single bits)
+                let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                buf.mov_store32(RBX, dslot, RAX);
+            }
+            Ok(())
+        }
+        Inst::InsD1D0 { rd, rn } => {
+            // mov v{rd}.d[1], v{rn}.d[0] : copy the low 64 (D[0]) of Rn into
+            // the high 64 (D[1]) of Rd.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.mov_load64(RAX, RBX, vslot(rn)); // low 64 of Vn
+            buf.mov_store64(RBX, vslot(rd) + 8, RAX); // high 64 of Vd
             Ok(())
         }
         Inst::LdStPair {

@@ -182,7 +182,15 @@ pub enum Inst {
            // ---- NEON: cnt V.8b (per-byte popcount) and uaddlv H, V.8b (byte sum) ----
            SimdPopcnt { rd: u8, rn: u8 }, // cnt v{d}.8b, v{m}.8b
            SimdSum8 { rd: u8, rn: u8 },   // uaddlv h{rd}, v{rn}.8b
-           // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
+                       // ---- scalar FP width convert (fcvt s,d / fcvt d,s) ----
+                       Fcvt {
+                               to_d: bool, // true = d0 = (double)(s src) ; false = s
+                               rd: u8,
+                               rn: u8,
+                           },
+                           // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
+                           InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
+                           // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
         rn: u8,
@@ -819,10 +827,29 @@ pub fn decode(insn: u32) -> Inst {
                                 return Inst::SimdPopcnt { rd, rn };
                             }
                             if (insn & 0xffff_fc00) == 0x2e30_3800 {
-                                let rn = ((insn >> 5) & 0x1f) as u8;
-                                let rd = (insn & 0x1f) as u8;
-                                return Inst::SimdSum8 { rd, rn };
-                            }
+                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                    let rd = (insn & 0x1f) as u8;
+                                    return Inst::SimdSum8 { rd, rn };
+                                }
+
+                                // ---- scalar FP width convert: fcvt sd (D->S) / fcvt ds (S->D) ----
+                                if (insn & 0xffff_fc00) == 0x1e62_4000 {
+                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                    let rd = (insn & 0x1f) as u8;
+                                    return Inst::Fcvt { to_d: false, rd, rn }; // s{rd} = (single) d{rn}
+                                }
+                                if (insn & 0xffff_fc00) == 0x1e22_c000 {
+                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                        let rd = (insn & 0x1f) as u8;
+                                        return Inst::Fcvt { to_d: true, rd, rn }; // d{rd} = (double) s{rn}
+                                    }
+
+                                    // ---- NEON mov Vd.D[1], Vn.D[0] (dup the low 64 into the high lane) ----
+                                    if (insn & 0xffff_fc00) == 0x6e18_0400 {
+                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                        let rd = (insn & 0x1f) as u8;
+                                        return Inst::InsD1D0 { rd, rn };
+                                    }
 
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
     if insn & 0x7e00_0000 == 0x3600_0000 {
