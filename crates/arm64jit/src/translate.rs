@@ -1042,7 +1042,71 @@ pub fn translate(
             Ok(())
         }
         Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
-        Inst::LdStPair {
+        Inst::SimdDupD { rd, rn, index } => {
+            // dup Vd.2D, Vn.D[index]: broadcast the selected 64-bit lane of Vn
+            // into both 64-bit lanes of Vd. index 0 => low 64, 1 => high 64.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let src_off = slot(rn) + (index as i32) * 8;
+            buf.mov_load64(RAX, RBX, src_off); // RAX = selected lane
+            let dst_slot = slot(rd);
+            buf.mov_store64(RBX, dst_slot, RAX); // lane 0
+            buf.mov_store64(RBX, dst_slot + 8, RAX); // lane 1
+            Ok(())
+        }
+        Inst::Ucvtf2d { rd, rn } => {
+            // ucvtf Vd.2D, Vn.2D : for each of the two 64-bit lanes of Vn (viewed as
+            // unsigned integers), convert to double and store into the matching lane
+            // of Vd. Honest u64->f64 with a sign-corrected `cvtsi2sd`:
+            //   xmm0 = (double)(int64)u          (exact & correct when u < 2^63)
+            //   if u >= 2^63: xmm0 += 2^64        (reconstructs (double)u; 2^64 exact)
+            // The JNS branch skips the add for non-negative u. This is the standard
+            // exact u64->double conversion (no range silently mishandled).
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            for lane in 0..2 {
+                let off = lane * 8;
+                // RDX = u64 lane value (unsigned).
+                buf.mov_load64(RDX, RBX, slot(rn) + off);
+                // xmm0 = (double)(int64)RDX
+                buf.cvtsi2sd(0, true, RDX);
+                // SF = sign(RDX); jump over the correction when u isn't >= 2^63.
+                buf.test_rr64(RDX, RDX);
+                let jns = buf.jcc_rel32(0x89); // 0F 89 = JNS rel32
+                // Correction only when the sign bit was set (u >= 2^63):
+                //   mov rcx, [2^64 as double]; movq xmm1, rcx; addsd xmm0, xmm1
+                buf.mov_ri64(RCX, 0x43f0_0000_0000_0000); // 2^64 (double bits)
+                buf.movq_xmm_r64(1, RCX);
+                buf.addsd(0, 1);
+                let end = buf.len();
+                // Patch the JNS displacement to skip the 3-insn correction block.
+                let disp = (end as i64 - (jns as i64 + 4)) as i32;
+                buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
+                // store low 64 of xmm0 -> Vd lane.
+                buf.movq_store(RBX, slot(rd) + off, 0);
+                            }
+                            Ok(())
+                        }
+                        Inst::Simd2dFp { rd, rn, rm, op } => {
+                            // 2xdouble lanewise FP: op Vd.2D, Vn.2D, Vm.2D. For each 64-bit lane:
+                            //   xmm0 = Vn lane; xmm1 = Vm lane; xmm0 op xmm1; store to Vd lane.
+                            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                            for lane in 0..2 {
+                                let off = lane * 8;
+                                buf.mov_load64(RDX, RBX, slot(rn) + off); // RDX = Vn.lane
+                                buf.movq_xmm_r64(0, RDX);
+                                buf.mov_load64(RDX, RBX, slot(rm) + off); // RDX = Vm.lane
+                                buf.movq_xmm_r64(1, RDX);
+                                match op {
+                                    0 => buf.divsd(0, 1), // fdiv
+                                    1 => buf.mulsd(0, 1), // fmul
+                                    2 => buf.addsd(0, 1), // fadd
+                                    3 => buf.subsd(0, 1), // fsub
+                                    _ => return Err(format!("Simd2dFp op {op} not implemented")),
+                                }
+                                buf.movq_store(RBX, slot(rd) + off, 0);
+                            }
+                            Ok(())
+                        }
+                        Inst::LdStPair {
             rt,
             rt2,
             rn,

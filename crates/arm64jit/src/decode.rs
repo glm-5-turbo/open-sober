@@ -237,12 +237,26 @@ pub enum Inst {
                            // ---- supervisor call (svc #imm) -> host syscall routing ----
                            Svc { imm: u16 },
                            // ---- NEON lane add: add Vd.4s, Vn.4s, Vm.4s ---------
-                           Simd4s {
-                                               rd: u8,
-                                               rn: u8,
-                                               rm: u8,
-                                               op: u8, // 0=add (currently), future sub/etc
-                                           },
+    Simd4s {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        op: u8, // 0=add (currently), future sub/etc
+    },
+    // ---- NEON vector unary unsigned int->double: ucvtf Vd.2D, Vn.2D ----
+    // Converts the two 64-bit lanes of Vn (viewed as unsigned) to two doubles
+    // in Vd. Gate (insn & 0xffe0_fc00)==0x6e60d800 (verified vs real decir0x6e61d842
+    // and compiler 0x6e61dbff; excludes scvtf/scalar/compare forms).
+    Ucvtf2d { rd: u8, rn: u8 },
+    // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
+    // Both 64-bit lanes of Vd get Vn's selected lane. Gate
+    // (insn & 0xffff_fc00)==0x4e180400 (the Q=1 vector dup-d; distinct from the
+    // 0x6e18:0x4e18 ins-variant). index in bit 16 (`[.../inst]` D[0] vs D[1]).
+    SimdDupD { rd: u8, rn: u8, index: u8 },
+    // ---- SIMD 2xdouble FP arithmetic: op Vd.2D, Vn.2D, Vm.2D (lanewise) ----
+    // op 0=fdiv,1=fmul,2=fadd,3=fsub. Gate mask 0xffe0_fc00 gives the
+    // per-op constants {0x6e60fc00,0x6e60dc00,0x4e60d400,0x4ee0d400}.
+    Simd2dFp { rd: u8, rn: u8, rm: u8, op: u8 },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -1091,13 +1105,50 @@ pub fn decode(insn: u32) -> Inst {
                                     }
 
                                     // ---- NEON int add (4x32 lanes): add Vd.4s, Vn.4s, Vm.4s ----
-                                    // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01).
-                                    if (insn & 0x2f20_0c00) == 0x0e20_0400 && (insn & 0x3) != 3 {
-                                        let rm = ((insn >> 16) & 0x1f) as u8;
-                                        let rn = ((insn >> 5) & 0x1f) as u8;
-                                        let rd = (insn & 0x1f) as u8;
-                                        return Inst::Simd4s { rd, rn, rm, op: 0 };
-                                    }
+                                        // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01).
+                                        if (insn & 0x2f20_0c00) == 0x0e20_0400 && (insn & 0x3) != 3 {
+                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                            let rd = (insn & 0x1f) as u8;
+                                            return Inst::Simd4s { rd, rn, rm, op: 0 };
+                                        }
+                                        // ---- NEON vector u64->f64: ucvtf Vd.2D, Vn.2D (2 unsigned lanes) ----
+                                        // Gate `(insn & 0xffe0_fc00) == 0x6e60d800`: masks rn/rd (bits 0-9, 16-20 via
+                                        // 0xffe0/fc00) and keeps the top+convert bits. Verified against real
+                                        // 0x6e61d842 (ucvtf v2.2d,v2.2d) and compiler 0x6e61dbff (ucvtf v31.2d,v31.2d);
+                                        // excludes scvtf (0x4e60d800), scalar d,d (0x7e60d800), and compare/fmov forms.
+                                        if (insn & 0xffe0_fc00) == 0x6e60_d800 {
+                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                let rd = (insn & 0x1f) as u8;
+                                                return Inst::Ucvtf2d { rd, rn };
+                                            }
+                                            // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
+                                                // Gate `(insn & 0xffff_fc00)==0x4e180400`: the Q=1 vector `dup` (element from
+                                                // the same vector), distinguished from the GPR-source `dup Vd.2D,Xn`
+                                                // (0x4e08_0000) and from `ins` (0x6e18_0400) by the top byte / imm.
+                                                // index for the D (64-bit) lane is bit12 (0 => D[0] low lane, 1 => D[1]
+                                                // high lane); rd in 0-4, rn in 5-9.
+                                                if (insn & 0xffff_fc00) == 0x4e180400 {
+                                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                                    let rd = (insn & 0x1f) as u8;
+                                                    let index = ((insn >> 20) & 1) as u8;
+                                                                                                            return Inst::SimdDupD { rd, rn, index };
+                                                                                                        }
+                                                                                                        // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
+                                                                                                        let s2 = insn & 0xffe0_fc00;
+                                                                                                        let op2d = match s2 {
+                                                                                                            0x6e60_fc00 => Some(0), // fdiv
+                                                                                                            0x6e60_dc00 => Some(1), // fmul
+                                                                                                            0x4e60_d400 => Some(2), // fadd
+                                                                                                            0x4ee0_d400 => Some(3), // fsub
+                                                                                                            _ => None,
+                                                                                                        };
+                                                                                                        if let Some(op) = op2d {
+                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                            return Inst::Simd2dFp { rd, rn, rm, op };
+                                                                                                        }
 
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
     if insn & 0x7e00_0000 == 0x3600_0000 {
@@ -1887,7 +1938,36 @@ mod logical_imm_regressions {
                         other => panic!("frintm d3,d3 -> {other:?}"),
                     }
                     // fmov d6,d0 = 0x1e604006 must still be FmovFp (NOT FpUnary/frintm).
-                    assert!(matches!(decode(0x1e604006), Inst::FmovFp { rd: 6, rn: 0, .. }));
+                            assert!(matches!(decode(0x1e604006), Inst::FmovFp { rd: 6, rn: 0, .. }));
+                            // ucvtf v2.2d, v2.2d = 0x6e61d842 (real libroblox audio mix) => Ucvtf2d.
+                            match decode(0x6e61d842) {
+                                Inst::Ucvtf2d { rd, rn } => {
+                                    assert_eq!(rd, 2);
+                                    assert_eq!(rn, 2);
+                                }
+                                other => panic!("ucvtf v2.2d -> {other:?}"),
+                            }
+                            // ucvtf v31.2d, v31.2d = 0x6e61dbff (compiler-emitted) => Ucvtf2d.
+                            match decode(0x6e61dbff) {
+                                Inst::Ucvtf2d { rd, rn } => {
+                                    assert_eq!(rd, 31);
+                                    assert_eq!(rn, 31);
+                                }
+                                other => panic!("ucvtf v31.2d -> {other:?}"),
+                            }
+                            // scvtf d31,d31 = 0x5e61db9c (signed FP->int) must NOT decode as Ucvtf2d.
+                                    assert!(!matches!(decode(0x5e61db9c), Inst::Ucvtf2d { .. }));
+                                    // dup v4.2d, v2.d[1] = 0x4e180444 (real libroblox audio mix) => SimdDupD.
+                                    match decode(0x4e180444) {
+                                        Inst::SimdDupD { rd, rn, index } => {
+                                            assert_eq!(rd, 4);
+                                            assert_eq!(rn, 2);
+                                            assert_eq!(index, 1);
+                                        }
+                                        other => panic!("dup v4.2d,v2.d[1] -> {other:?}"),
+                                    }
+                                    // ins v2.d[1], v0.d[0] = 0x6e180402 (real) must stay InsD1D0 (not SimdDupD).
+                                    assert!(matches!(decode(0x6e180402), Inst::InsD1D0 { .. }));
         match decode(0x1e6c1001) {
             Inst::FmovImm {
                 rd,
