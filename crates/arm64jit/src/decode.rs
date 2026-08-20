@@ -261,6 +261,10 @@ pub enum Inst {
     // op 0=fdiv,1=fmul,2=fadd,3=fsub. Gate mask 0xffe0_fc00 gives the
     // per-op constants {0x6e60fc00,0x6e60dc00,0x4e60d400,0x4ee0d400}.
     Simd2dFp { rd: u8, rn: u8, rm: u8, op: u8 },
+    // ---- SIMD dup from a GPR: dup Vd.4S, Wn (broadcast Wn into 4x32-bit lanes) ----
+    // Gate `(insn & 0xffff_fc00) == 0x4e040c00` (the 4S GPR-source dup; distinct
+    // from the vector-lane dup 0x4e180400 / 0x4e040400). rn (W source) bits 5-9.
+    SimdDupSReg { rd: u8, rn: u8 },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -1147,6 +1151,12 @@ pub fn decode(insn: u32) -> Inst {
                                                     let index = ((insn >> 20) & 1) as u8;
                                                                                                             return Inst::SimdDupD { rd, rn, index };
                                                                                                         }
+                                                                                                        // ---- SIMD dup from GPR: dup Vd.4S, Wn ----
+                                                                                                        if (insn & 0xffff_fc00) == 0x4e040c00 {
+                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                            return Inst::SimdDupSReg { rd, rn };
+                                                                                                        }
                                                                                                         // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {
@@ -1992,6 +2002,15 @@ mod logical_imm_regressions {
         }
         // fabd d0,d0,d1 = 0x7ee1d400 (compiler) => Fabd.
         assert!(matches!(decode(0x7ee1d400), Inst::Fabd { rd: 0, rn: 0, rm: 1 }));
+        // dup v[truncated]
+        // dup v1.4s, w10 = 0x4e040d41 (real libroblox audio mix channel loop) => SimdDupSReg.
+        match decode(0x4e040d41) {
+            Inst::SimdDupSReg { rd, rn } => {
+                assert_eq!(rd, 1);
+                assert_eq!(rn, 10);
+            }
+            other => panic!("dup v1.4s,w10 -> {other:?}"),
+        }
         match decode(0x1e6c1001) {
             Inst::FmovImm {
                 rd,

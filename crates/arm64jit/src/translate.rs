@@ -1121,6 +1121,16 @@ pub fn translate(
                             }
                             Ok(())
                         }
+                        Inst::SimdDupSReg { rd, rn } => {
+                            // dup Vd.4S, Wn: broadcast Wn (32-bit) into all 4 S-lanes of Vd.
+                            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                            ldg(buf, RAX, rn as u32); // Wn read (zero-extended into RAX's low 32)
+                            buf.and_ri64(RAX, 0xffff_ffff);
+                            for i in 0..4u32 {
+                                buf.mov_store32(RBX, slot(rd) + (i * 4) as i32, RAX);
+                            }
+                            Ok(())
+                        }
                         Inst::LdStPair {
             rt,
             rt2,
