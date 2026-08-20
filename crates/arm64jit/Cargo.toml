@@ -8,6 +8,9 @@ description = "In-process ARM64 -> x86-64 JIT translator for open-sober (drops t
 [dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+libloader = { path = "../libloader" }
+
 [lib]
 name = "arm64jit"
 path = "src/lib.rs"

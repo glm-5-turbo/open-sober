@@ -16,7 +16,7 @@
 // implementation is entirely fresh.
 
 mod sandbox;
-mod elf;
+pub mod elf;
 mod android;
 mod ipc;
 
