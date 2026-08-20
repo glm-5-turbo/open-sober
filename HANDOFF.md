@@ -1058,3 +1058,82 @@ guest address == host address when segments are mapped at their ELF vaddr.
   feed `compile_image(image=mapped_host_slice, base=guest_text_vaddr, entry=host-of-entry)`, and report
   the *first unsupported instruction's guest address* as an honest diagnostic target for the next
   decoder slice (start with SVC syscall routing + TLS, then SP, then BL/ADR linkage).
+
+## Session 19d - WHAT STILL NEEDS TO BE DONE to get the JIT path fully working
+
+Current state: arm64jit executes a real AArch64 subset on x86-64 with no QEMU
+(26 tests green, all verified against objdump ground-truth). It is wired into
+the product end-to-end (libloader -> compile_image -> run) and can run the
+entry of a *non-PIE static* aarch64 ELF (elfjit example returns 42). Running
+the real `libroblox.so` (a PIE ET_DYN) currently SIGSEGVs.
+
+### 1. PIE / shared-object mapping (unblocks the real .so immediately)
+- **Problem:** the elfjit/`--jit` path feeds `compile_image(image, entry, entry)`
+  assuming host-addr == guest-vaddr. That holds only for non-PIE statically
+  linked ELFs. libroblox.so is ET_DYN/PIE: libloader maps PT_LOAD segments at
+  real host addresses and relocates, so `e_entry` is not a host address.
+- **Fix:** derive the *mapped text range* from `LoadedElf.segments[]` (host
+  vaddr + memsz), slice that range as the compile `image`, pass `base =
+  guest_text_vaddr` and `entry = host(of e_entry)`. Then `ADRP`/`ADR` compute
+  guest addresses that resolve into the mapped segment (guest==host holds
+  again because libloader maps at vaddr).
+- **Diagnostic:** once it loads, report the **guest address of the first
+  instruction the decoder can't translate** (add a `resolve` that returns
+  `Err((pc, Inst::Unsupported))`). That gives the exact next decoder slice.
+
+### 2. Decoder/translator gaps that WILL appear (in rough order of priority)
+- `SVC` syscall routing (Roblox makes many host syscalls; must map to host or
+  the bionic shim) - and the `--jit` path must link against the shim.
+- TLS slot access (`mrs`/`msr` TPIDR_EL0, `ldr`/`str` via TPIDR), threads
+  (host pthreads vs guest threads).
+- Atomics (`ldaxr/stlxr`/CAS loops) - used heavily in Roblox.
+- FP/SIMD (NEON: a LOT in graphics/sound; `ldr q`, `add v0.4s,..`, etc.)
+- 32-bit register semantics: Ws must zero-extend and flag-setting compares
+  must be 32-bit-aware (currently traced as 64-bit for small values only).
+- XZR vs SP as x31 depending on context (currently one sp slot, no read-xzr
+  suppression for arithmetic stores - add rn/rd==31 handling per class).
+- Multiply/AES/other (`mul`, `mneg`, `sdiv`/`udiv`, `csel` (flags-dependent
+  select - completes flag model), bitfield ops `ubfm/sbfm/bfi/extr`).
+- LD/ST variants: `ldr x,[x,#imm]` are done; `ldr` non-scaled, `ldrsw`,
+  `ldrb/h`, `strb/h`, `ldp/stp` SIMD (128-bit D0-D31 pairs).
+- Branch: `b.eq/ne/...` (B.cond already done), `br`/`blr` (indirect call),
+  `cbz`/`cbnz` done, `tbz`/`tbnz`, return-less tail calls.
+- `MOVZ/MOVK` (done) but `MOVN` and imm build-up across block - fine.
+
+### 3. Guest runtime environment (required to actually run Roblox)
+- **A guest stack** (`sp`/x31) pointing into a large mmap'd region; `mrs
+  SP_EL0` etc.
+- **Thread-local storage:** TShell set `TPIDR_EL0`, guard-and-init; Roblox
+  spawns threads.
+- **Syscall service** (`svc #0`): at minimum `exit`, `write`, `mmap`,
+  `munmap`, `brk`, `clone`, `open`, `read`, `futex`, `timer`, `getuid`,
+  `sysinfo`. Either route to the bionic shim or implement host-facing.
+- **Signal handling / the JNI setjmp-longjmp** that the native glue expects.
+- **Linking the bionic** sysroot libs (libbionic_shim.so + guest stubs) -
+  the existing QEMU build work (jni_shim, elf_disco) is REUSABLE for symbols
+  resolution; the JIT needs a PLT/GOT resolver so `bl` to relocated functions
+  dispatches to the right guest/host thunk.
+
+### 4. Correctness hardening (before trusting any real run)
+- **Frame pointer / unwind** - not needed for execution but for debugging the
+  unmistakable first crash.
+- **Trap on unsupported instead of UB:** currently any translated block that
+  hits an untranslated instruction returns Err gracefully (good); but a guest
+  `ret`/`br` to an address outside any compiled block must be caught, not
+  fall through (add a `state->pc` write + a trampoline back into the
+  interpreter/compile loop for un-compiled blocks).
+- **PC-relative fixups are buffer-relative (already done);** ensure they are
+  correct for code that spans two images/ELF segments.
+
+### The real realistic path to a Roblox window (multi-session)
+1. PIE mapping + first-unsupported diagnostic (do this next).
+2. Wire `svc` + TLS + a stack + GOT/PLT resolution so `JNI_OnLoad` can run
+   far enough to print something.
+3. Add cross-version coverage (the standing "multi-version" goal) by diffing
+   the decoder against several `libroblox.so` builds.
+4. Only after those load + JNI init: FP/NEON + atomics + threads to get
+   actual frames; then the GUI/computer-vision inspection step becomes
+   meaningful.
+
+Everything above was updated to account for the current committed state at
+`5496852`. The single highest-leverage next step is **#1 (PIE mapping)**.
