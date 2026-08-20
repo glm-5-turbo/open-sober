@@ -1171,10 +1171,28 @@ pub fn translate(
                                                                                                                             buf.mov_ri64(RDX, 0);
                                                                                                                             buf.cmov_rr64(0x47, RDI, RDX); // cmova: RDI=ones if Vn>Vm else 0
                                                                                                                             buf.mov_store32(RBX, slot(rd) + off, RDI);
-                                                                                                                        }
-                                                                                                                        Ok(())
-                                                                                                                    }
-                                                                                                                    Inst::LdStPair {
+                                                                                                                                                                                    }
+                                                                                                                                                                                    Ok(())
+                                                                                                                                                                                }
+                                                                                                                                                                                // bit Vd.16B, Vn.16B, Vm.16B: bitwise insert.
+                                                                                                                                                                                // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
+                                                                                                                                                                                // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
+                                                                                                                                                                                Inst::SimdBit { rd, rn, rm } => {
+                                                                                                                                                                                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                                                                                    for off in [0i32, 8] {
+                                                                                                                                                                                        buf.mov_load64(RAX, RBX, slot(rn) + off); // RAX = Vn
+                                                                                                                                                                                        buf.mov_load64(RCX, RBX, slot(rm) + off); // RCX = Vm
+                                                                                                                                                                                        buf.and_rr64(RAX, RCX); // RAX = Vn & Vm
+                                                                                                                                                                                        buf.mov_load64(RDX, RBX, slot(rd) + off); // RDX = old Vd
+                                                                                                                                                                                        buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
+                                                                                                                                                                                        buf.xor_rr64(RCX, RDI); // RCX = ~Vm
+                                                                                                                                                                                        buf.and_rr64(RDX, RCX); // RDX = Vd & ~Vm
+                                                                                                                                                                                        buf.or_rr64(RAX, RDX); // (Vn&Vm)|(Vd&~Vm)
+                                                                                                                                                                                        buf.mov_store64(RBX, slot(rd) + off, RAX);
+                                                                                                                                                                                    }
+                                                                                                                                                                                    Ok(())
+                                                                                                                                                                                }
+                                                                                                                                                                                Inst::LdStPair {
             rt,
             rt2,
             rn,

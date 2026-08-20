@@ -276,6 +276,10 @@ pub enum Inst {
     // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
     // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
+    // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B bit-select, real 0x6ea11c40;
+    // distinct from orr16 0x4ea01c00 by bit31). Out = (Vn & Vm) | (Vd & ~Vm).
+    SimdBit { rd: u8, rn: u8, rm: u8 },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -1197,7 +1201,16 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                     let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                     let rd = (insn & 0x1f) as u8;
                                                                                                                                     return Inst::SimdCmhi { rd, rn, rm, lanes: clanes };
-                                                                                                                                }
+                                                                                                                                        }
+                                                                                                                                        // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
+                                                                                                                                        // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B; real 0x6ea11c40). Disjoint
+                                                                                                                                        // from orr16 (0x4ea01c00, bit31) and cmhi (0x6ea03400). Out=(Vn&Vm)|(Vd&~Vm).
+                                                                                                                                        if (insn & 0xffe0_fc00) == 0x6ea0_1c00 {
+                                                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                                                            return Inst::SimdBit { rd, rn, rm };
+                                                                                                                                        }
                                                                                                         // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {
@@ -2060,6 +2073,15 @@ mod logical_imm_regressions {
                 assert_eq!(lanes, 4);
             }
             other => panic!("cmhi v1.4s,v3.4s,v1.4s -> {other:?}"),
+        }
+        // bit v0.16b, v2.16b, v1.16b = 0x6ea11c40 (real libroblox audio mix) => SimdBit.
+        match decode(0x6ea11c40) {
+            Inst::SimdBit { rd, rn, rm } => {
+                assert_eq!(rd, 0);
+                assert_eq!(rn, 2);
+                assert_eq!(rm, 1);
+            }
+            other => panic!("bit v0.16b,v2.16b,v1.16b -> {other:?}"),
         }
         match decode(0x1e6c1001) {
             Inst::FmovImm {
