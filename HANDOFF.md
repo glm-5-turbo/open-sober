@@ -1000,6 +1000,6 @@ emulated second thread.
 a432acf, 09699e5 (control flow).
 
 **Next slice** (task 3b): B.cond + NZCV flags (subs/cmp set flags; materialize
-into guest NZCV so any interleavspread works) then BL function calls with a
+into guest NZCV so any interleaving works) then BL function calls with a
 guest call stack. After flags, real `.c` compiled aarch64 (if/else, loops)
 can run.
