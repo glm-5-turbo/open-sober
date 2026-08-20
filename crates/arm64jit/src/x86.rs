@@ -15,7 +15,9 @@ pub struct CodeBuf {
 
 impl CodeBuf {
     pub fn new() -> Self {
-        Self { bytes: Vec::with_capacity(256) }
+        Self {
+            bytes: Vec::with_capacity(256),
+        }
     }
     #[inline]
     pub fn len(&self) -> usize {
@@ -63,12 +65,7 @@ pub const R15: u8 = 15;
 
 /// REX prefix. `w`=64-bit operand, `r`=extended modrm.reg reg, `x`,`b`=extended.
 fn rex(w: bool, r: u8, x: u8, b: u8) -> u8 {
-    0x40
-        | ((w as u8) << 3)
-        | (((r & 8) as u8) << 1)
-        | (((x & 8) as u8) << 2)
-        | (b & 8)
-        >> 0
+    0x40 | ((w as u8) << 3) | (((r & 8) as u8) << 1) | (((x & 8) as u8) << 2) | (b & 8) >> 0
 }
 
 fn modrm(mod_: u8, reg: u8, rm: u8) -> u8 {
@@ -77,19 +74,33 @@ fn modrm(mod_: u8, reg: u8, rm: u8) -> u8 {
 
 /// ModRM displacement-size selection.
 fn disp_mod(disp: i32) -> u8 {
-    if disp == 0 { 0 } else if (-128..128).contains(&disp) { 1 } else { 2 }
+    if disp == 0 {
+        0
+    } else if (-128..128).contains(&disp) {
+        1
+    } else {
+        2
+    }
 }
 
 impl CodeBuf {
     /// mov r64, imm64
     pub fn mov_ri64(&mut self, rd: u8, imm: u64) {
-        if rd >= 8 { self.b(0x49); } else { self.b(0x48); }
+        if rd >= 8 {
+            self.b(0x49);
+        } else {
+            self.b(0x48);
+        }
         self.b(0xB8 + (rd & 7));
         self.u64(imm);
     }
     /// mov r64, imm32 sign-extended
     pub fn mov_ri32(&mut self, rd: u8, imm: u32) {
-        if rd >= 8 { self.b(0x49); } else { self.b(0x48); }
+        if rd >= 8 {
+            self.b(0x49);
+        } else {
+            self.b(0x48);
+        }
         self.b(0xC7);
         self.b(modrm(3, 0, rd & 7));
         self.u32(imm);
@@ -102,7 +113,9 @@ impl CodeBuf {
     }
     /// mov r64, r64
     pub fn mov_rr64(&mut self, rd: u8, rs: u8) {
-        if rd == rs { return; }
+        if rd == rs {
+            return;
+        }
         if rd >= 8 || rs >= 8 {
             self.b(rex(true, rs, 0, rd));
         } else {
