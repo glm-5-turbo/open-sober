@@ -1439,3 +1439,51 @@ immediate TSL system-register (MRS/MSR tpidr_el0) is the next concrete wall.
 `cargo test -p arm64jit` → **32 pass** (fp_scalar_double_ieee, plus more).
 Workspace green (the libloader android idempotency test passed this session —
 it is host/env flaky; unrelated). Committed, tree clean at `a03b143`.
+
+## Session 24 — TLS crossed; JIT now runs real StartApp code
+
+### Roblox boot progress (libroblox.so, 117MB ARM64)
+```
+past (this session, in order):  mrs x19,tpidr_el0 (TLS) → BIC  → ror (shifted-op)
+      → mov x11,#0x3ffffffff (logical-imm) → ldxr/stxr (exclusive) → csinv
+      → udiv/sdiv → madd/msub → bfi/bfc → fmov d0,x8 → SIMD cnt v0.8b
+      → uaddlv h0,v0.8b (popcount) → fcvt s0,d0 → str s0,[x22,x23,lsl#2]
+      → b.ne → mov v0.d[1],v0.d[0] → str q0 → … ror w23,w22,#0x14 (SBFM/EXTR)
+stopped (honest Unsupported): ror #imm  (in a SHA/compression mixing loop)
+```
+- The JIT now executes real **`nativeAppBridgeV2StartAppWithParams@@LIBROBLOX`**
+  startup code (and an FMOD audio-init region), including a full SIMD bit-popcount
+  idiom (`cnt v0.8b + uaddlv h0`), FP width conversion, TLS reads, exclusive
+  atomic emulation, integer mul/div, and BFM inserts. Big-vs-previous milestone.
+
+### New instructions implemented & verified this session
+- **MRS/MSR tpidr_el0** (`Inst::SysReg`) — decode `0xd53bd053` tpidr, read/write the
+  per-state TLS pointer `CpuState.tpidr` (new field after `v`, `TPIDR_OFF=784`).
+- **BIC/ORN/EON** (LogicReg op 4/5/6) — the bit-invert second-operand family.
+- **add/sub/logic shift ROT**: `ror` via `ror_cl64` for shifted-register operands,
+  plus `ror_ri8` (48 C1 /1).
+- **Logical (immediate)** `Inst::LogicImm` — AND/ORR/EOR/ANDS with the AArch64
+  bitmask immediate (`decode_logical_mask` from N/immr/imms); covers `mov xD,#imm`
+  (ORR xzr,#mask) and `tst`/`ands` imm.
+- **Exclusive** `ldxr/stxr/ldaxr/stlxr` (`Inst::LdExr`) — single-threaded: ldxr =
+  plain load, stxr = plain store + status=0. Thread-safe enough for a lone guest.
+- **CSINV/CSNEG/CSINC** — widened the CSel decode to tops `0x5a/0xda` (was 0x1a/0xda).
+- **UDIV/SDIV/MADD/MSUB** (`Inst::MulDiv`) — via `div/idiv/imul` + `cqo`/`movsxd`.
+- **BFM/BFI/BFC** — the bitfield-insert alias of BitField (`immr > imms`).
+- **FMOV core↔FP** (`Inst::FmovGp`) — Xd<->Dn, Wd<->Sn.
+- **FCVT s<->d** (`Inst::Fcvt`) — `cvtsd2ss`/`cvtss2sd`+movd.
+- **NEON SIMD** (first SIMD in the JIT): `cnt v.8b` (`Inst::SimdPopcnt`, SWAR
+  byte-popcount) and `uaddlv h,v.8b` (`Inst::SimdSum8`) — verified against the
+  real binary's popcount chain reaching an `fmov w10,s0`.
+- **`mov v{rd}.d[1], v{rn}.d[0]`** (`Inst::InsD1D0`) — dup low 64 into high lane.
+
+### ⚠️ OPEN WALL — `ror rd, rn, #imm` (EXTR rotate) still not decoded
+The standalone `ror` is the rotate alias of **EXTR** (`EXTR Rd,Rn,Rn,#lsb`), NOT
+a UOFM — the current `BitField` decode + `is_valid` mis-reads/mis-rejects the word
+(`ror w23,#0x = 0x139652d7`: immr=22, imms=20; second sample 0x138f51eb immr=15,
+imms=20 — both rotate `to ROR(Rn, imms)` but the generic UBF/rot encode mapping is
+ambiguous against bfi/extracts and is NOT resolved. The JIT stops on `ror`
+with a clean `Unsupported` (no silent wrong result). **Required**: decode the
+`ror`/EXTR rotate as its own op (class `0x1 0x1 `... `N`, Rm==Rn) and emit
+`ROR(Rn, lsb)`; add a unit test seeded with known operands. Also still open:
+guest sp/`svc` routing for full boot.
