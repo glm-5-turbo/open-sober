@@ -1223,6 +1223,12 @@ The NEXT blocker is the **floating-point NEON** instruction `0x6F00E400`
 integer `movi` `.4s` which decodes as `0x4F...`). That's the immediate next
 decoder slice.
 
+> **Session 21 CORRECTION:** `0x6F00E400` is **NOT** floating-point. Verified
+> against `aarch64-linux-gnu-objdump` ground truth, it is `movi v0.2d, #0x0`
+> — an **integer** vector move-immediate (the "clear a 128-bit vector to
+> zero" idiom at the top of a stack-zeroing loop). It was handled in Session
+> 21 (below), not deferred. The 20's "0x6F=FP" guess was wrong.
+
 ### 5. Next steps (updated, ordered)
 
 1. **Add the float-NEON / FP layer** starting with `0x6F00E400` specifically,
@@ -1239,3 +1245,75 @@ decoder slice.
 `git log`: `194d5d8` (PIE load_elf_image fix), `029e36f` (one contiguous
 guest==host image, runs deeper into libroblox.so), `da16a76` (SIMD vector
 regs + 128-bit ld/st + register-offset ld/st), then the HANDOFF update.
+
+## Session 21 (Aug 20, 2026) — Architected the PC-driven dispatcher; JIT now *executes* real libroblox.so through blr chains
+
+Commit: `6618c5e` (dev). **The JIT crossed from "translate-then-stop" to
+"actually follow call/return control flow".** Five more instruction walls
+pushed + the VECTOR_BASE bug fixed.
+
+### 1. What was previously-unsupported, now decoded+translated (all objdump-verified)
+
+1. **`movi` vector-immediate** (`.8B/.16B/.4S/.2D`) — and in doing so,
+   corrected 20's mislabel: real blocker `0x6F00E400` is `movi v0.2d,#0x0`
+   (integer), verified by `objdump -d`. Decoder reconstructs the lane and
+   replicates it across the 32-bit/8-bit/64-bit lanes; unit-tests
+   `movi_ground_truth` covers all 6 specimens.
+2. **`stp`/`ldp q` 128-bit SIMD load/store pair** (`0xAD000000`),
+   scale=16. Init function zeros 64 bytes via `movi; stp q,q; stp q,q`.
+3. **HINT / PAC pseudos**: `nop`, `esb`, `csdb`, `paciasp`/`autiasp` (the
+   `-msign-return-address` prologue), `bti`. Nominally the `0xd5032xxx`
+   family, mask `(insn&0xfffff01f)==0xd503201f`; executed as no-ops (PAC
+   is ignored in the guest).
+4. **`br`/`blr`** — indirect branch/call. **The decode RN bug:** the source
+   register is bits[9:5], *not* [4:0]; was decoding `blr x1` as `blr x0`,
+   which sent the dispatcher to address 0 → instant halt with wrong value.
+   Fixed; unit-tested.
+5. **`tbz`/`tbnz`** test-bit-and-branch — `b24`=op (1→tbnz), `bit=b[23:19]|b31`,
+   imm14×4. Verified `tbnz w0,#31` target.
+
+### 2. The dispatcher (`jit::jit_run`) — the enabler
+
+`br`/`blr`/`ret` can't be inlined (target is in a register). Added
+`jit_run(image, base, entry, state)`: loop { compile reachable region from
+`state.pc` via `compile_image`; run; re-enter at `state.pc` }. Terminal
+`br`/`blr`/`ret` set `pc = (16/8-lanes)`, x30 link on blr, return to the
+host loop. `ret` now sets `pc = x30` so returns chain to the caller.
+
+`elfjit` switched to `jit_run`. Verified with a hand-assembled aarch64
+program (adrp/add `x1=&callee`; `blr x1`; `mov x30,xzr; add x0,#1; ret`
+/ callee `mov x0,#42; ret`) → **returns 43** through the dispatcher. This
+is the first real indirect-call round trip.
+
+### 3. Critical correctness bug: VECTOR_BASE overlapped `CpuState.pc`
+
+`CpuState{ x[32]@0..256, pc@256 }`, but `VECTOR_BASE` was **256** — so every
+vector `movi`/vector ld/st wrote into `pc`/`nzcv`, corrupting instruction
+streams once SIMD ran. Moved the vector file to **272** (`VECTOR_BASE=272`,
+`PC_OFF=256`). This was latent since Session 16 (vector regs added) and only
+surfaced now that SIMD + the pc-driven loop share a state.
+
+### 4. Honest current state on real libroblox.so
+
+```
+$ elfjit .../libroblox.so 0x1c34480
+running entry guest=0x101c34480
+arm64jit run_loop stopped: translate: unhandled Unsupported(445973185) at guest pc 0x1026938d0
+```
+`0x1A9502C1` = `csel w1, w22, w21, eq` right after `cmp x9, x10`. So the JIT
+now *executes* through: `movi`→`stp q`→`paciasp/autiasp`→`blr` chains→`tbnz`,
+and blocks on the first **NZCV-flags consumer** (CSEL).
+
+### 5. Next step (the 21st wall): NZCV flags + the CSEL/CSET family
+
+`csel x,w, cond` and `cset/csinc/csinv/csneg` need N/Z/C/**V** live from the
+preceding `cmp/subt/cmp nzcv`-setter. NZCV is currently a placeholder
+(written but not consumed); `b.cond` also must read *stored* flags, not live
+x86 flags. This is a self-contained subsystem:
+1. store N=bit31, Z=bit30, C=bit29, V=bit28 to `CpuState.nzcv:u32` from each
+   `S`-flag setter (cmp/subs/adds/...),
+2. read cond→x86 flag and `csel/cset/...` branch on it,
+3. retire the "NZCV is a placeholder" comment in translate.rs.
+
+`git log` since 20: `6618c5e` — "arm64jit: PC-driven dispatcher (blr/br/ret)
++ push 5 more decoder walls". Working tree clean.
