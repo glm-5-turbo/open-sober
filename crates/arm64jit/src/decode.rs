@@ -261,6 +261,8 @@ pub enum Inst {
     // (0x6e60_d800, bit23 differs), Fabd (0x7ee0_d400) and fmov (0x1e604000).
     // Reads Dn's low 64 bits as an unsigned integer, writes the double to Dd.
     ScalarUcvtf { rd: u8, rn: u8 },
+    // ---- scalar signed int64->double from a vector sub-reg: scvtf Dd, Dn ----
+    ScalarScvtf { rd: u8, rn: u8 },
     // Both 64-bit lanes of Vd get Vn's selected lane. Gate
     // (insn & 0xffff_fc00)==0x4e180400 (the Q=1 vector dup-d; distinct from the
     // 0x6e18:0x4e18 ins-variant). index in bit 16 (`[.../inst]` D[0] vs D[1]).
@@ -374,6 +376,8 @@ pub enum Inst {
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
     Hint,
+    // ---- memory/DMB/DSB/ISB barrier (no-op in the single-threaded JIT) ----
+    WaitBarrier,
     // ---- return (ret x30) ----
     Ret,
     // ---- indirect branch (br Xn) and register call (blr Xn) ----
@@ -1287,10 +1291,18 @@ pub fn decode(insn: u32) -> Inst {
                                             // Gate (insn & 0xffe0_fc00) == 0x7e60_d800 (scalar, disjoint from
                                             // vector Ucvtf2d 0x6e60_d800 by bit23). Reads Dn low 64 as u64 -> double.
                                             if (insn & 0xffe0_fc00) == 0x7e60_d800 {
-                                                let rn = ((insn >> 5) & 0x1f) as u8;
-                                                let rd = (insn & 0x1f) as u8;
-                                                return Inst::ScalarUcvtf { rd, rn };
-                                            }
+                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                            let rd = (insn & 0x1f) as u8;
+                                            return Inst::ScalarUcvtf { rd, rn };
+                                        }
+                                        // ---- scalar Ssigned int64->double: scvtf Dd, Dn ----
+                                        // Gate (insn & 0xffe0_fc00) == 0x5e60_d800. Sibling of the
+                                        // 0x7e60_d800 (unsigned) form; bit23 distinguishes them.
+                                        if (insn & 0xffe0_fc00) == 0x5e60_d800 {
+                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                            let rd = (insn & 0x1f) as u8;
+                                            return Inst::ScalarScvtf { rd, rn };
+                                        }
                                             // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
                                                 // Gate `(insn & 0xffff_fc00)==0x4e180400`: the Q=1 vector `dup` (element from
                                                 // the same vector), distinguished from the GPR-source `dup Vd.2D,Xn`
@@ -1467,6 +1479,13 @@ pub fn decode(insn: u32) -> Inst {
     // (mrs/msr/dmb/tlbi share 0xd503 but have nonzero register fields).
     if (insn & 0xffff_f01f) == 0xd503_201f {
         return Inst::Hint;
+    }
+    // ---- memory/DMB/DSB/ISB barriers: no-op for a single-threaded JIT ----
+    // Gate (insn & 0xfffff01f) == 0xd503_301f catches dmb/dsb/isb (which share
+    // 0xd503_301f, differing only in the barrier opt field). Distinct from the
+    // Hint gate above (0x20) and from real mrs/msr/tlb (nonzero rt / other fields).
+    if (insn & 0xffff_f01f) == 0xd503_301f {
+        return Inst::WaitBarrier;
     }
 
     // ---- supervisor call: svc #imm (0xd4000001 | imm<<5) -> host syscall ----

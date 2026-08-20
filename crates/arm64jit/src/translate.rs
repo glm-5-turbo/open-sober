@@ -1328,6 +1328,15 @@ pub fn translate(
                             buf.movq_store(RBX, slot(rd), 0);
                             Ok(())
                         }
+                        Inst::ScalarScvtf { rd, rn } => {
+                            // scvtf Dd, Dn : read Dn's low 64 bits as a SIGNED integer
+                            // and write the double to Dd (two's-complement -> f64, signed).
+                            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                            buf.mov_load64(RDX, RBX, slot(rn));
+                            buf.cvtsi2sd(0, true, RDX); // signed i64 -> f64
+                            buf.movq_store(RBX, slot(rd), 0);
+                            Ok(())
+                        }
                         Inst::Simd2dFp { rd, rn, rm, op } => {
                             // 2xdouble lanewise FP: op Vd.2D, Vn.2D, Vm.2D. For each 64-bit lane:
                             //   xmm0 = Vn lane; xmm1 = Vm lane; xmm0 op xmm1; store to Vd lane.
@@ -1755,6 +1764,11 @@ pub fn translate(
         }
         Inst::Hint => {
             // Hint / PAC NOP — execute as a no-op (PAC is ignored in the guest).
+            Ok(())
+        }
+        Inst::WaitBarrier => {
+            // dmb/dsb/isb — memory/cache ordering barrier; the JIT is
+            // single-threaded so ordering and cache flush are irrelevant.
             Ok(())
         }
         Inst::Br { rn } => {
