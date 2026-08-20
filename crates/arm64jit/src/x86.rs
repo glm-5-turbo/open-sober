@@ -317,8 +317,27 @@ impl CodeBuf {
     pub fn subsd(&mut self, dst: u8, src: u8) {
         self.sd(0x5C, dst, src);
     }
+    /// DIVSD (SSE2): `F2 0F 5E /r` — dst /= src (scalar double).
     pub fn divsd(&mut self, dst: u8, src: u8) {
         self.sd(0x5E, dst, src);
+    }
+    /// SQRTSD (SSE2): `F2 0F 51 /r` — dst = sqrt(src) (scalar double).
+    pub fn sqrtsd(&mut self, dst: u8, src: u8) {
+        self.sd(0x51, dst, src);
+    }
+    /// ROUNDSD (SSE4.1): `66 0F 3A 0B /r ib` — dst = round(src) with mode imm[1:0]:
+    /// 00=nearest-even, 01=floor(-inf), 10=ceil(+inf), 11=trunc-toward-zero.
+    /// Matches AArch64 `frintm` (toward -inf, mode 1) / `frintp` (2) / `frintz` (3).
+    pub fn roundsd(&mut self, dst: u8, src: u8, mode: u8) {
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0x3A);
+        self.b(0x0B);
+        self.b(modrm(3, dst & 7, src & 7));
+        self.b(mode & 0x0f);
     }
     // ---- integer multiply / divide (data-processing register) ----
 

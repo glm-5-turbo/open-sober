@@ -1650,3 +1650,21 @@ incl. `fcvtzu w/x`, `mov_21`, fmov-imm value, cntvct, `fcmp` high-rmd, `fcsel`).
 1. `ucvtf v2.2d` (SIMD u64→f64) + scalar `ucvtf`/`ucvtf d,xn` — must be honest u64→double.
 2. `fdiv d1,d1,d3` (scalar FP divide).
 3. `svc` real AArch64→x86-64 syscall table (mmap/futex/mprotect…) — still `-ENOSYS` (exit-only).
+
+## Session 29 (Aug 20, 2026) — scalar FP unary adds; confirmed FpScalar covers fadd/fmul/fdiv
+
+Added `Inst::FpUnary` (`fsqrt`/`frintm`) since the FMOD audio-mix block (`0x5dfe...`)
+uses them, and **verified the scalar `fadd`/`fmul`/`fdiv` in that block are already
+handled by `FpScalar`** (mask `0xffe0_fc00` → `0x1e602800`/`0x1e600800`/`0x1e601800`).
+
+- `x86.rs`: `sqrtsd` (`F2 0F 51`) and `roundsd` (`66 0F 3A 0B /r ib`, mode imm[1:0],
+  01=floor/-inf, 02=ceil/+inf, 03=trunc).
+- `decode.rs`: `FpUnary{rd,rn,op,sz}`; gate `(insn & 0xffff_fc00)` — **keeps bits 16-23
+  distinguishing the frint/fsqrt byte** — `fsqrt=0x1e61_c000`, `frintm=0x1e65_4000`.
+  **Bug fixed en route**: an earlier `0xfff0_fc00` mask collapsed `fsqrt` to
+  `0x1e60c000` (wrong) and an `0xffff_fbff` mask didn't mask register bits at all;
+  the `0xffff_fc00` mask is correct and *disambiguates* `fsqrt`/`frintm` from the
+  `fmov d,d` base (`0x1e604000`) so it stays `FmovFp`. Regression + collision guard.
+- `translate.rs`: `FpUnary` arm → `sqrtsd`/`roundsd` on the FP slot.
+- 38 tests pass; real binary still stops at `ucvtf v2.2d` (0x105dfe180) — the SIMD
+  unsigned-int→double in this identical block, next on the agenda.

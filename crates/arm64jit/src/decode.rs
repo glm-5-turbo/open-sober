@@ -162,6 +162,13 @@ pub enum Inst {
         op: u8, // 4=mul,5=add,6=sub,7=div
         sz: bool, // true = double
     },
+    // ---- scalar 1-source FP (no rn/rm): d-dst<-f(d-src) ----
+    FpUnary {
+        rd: u8,
+        rn: u8,
+        op: u8, // 0=fsqrt, 1=frintm(toward -inf), 2=frintp(+inf), 3=frintz(toward 0)
+        sz: bool, // true = double
+    },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
             rd: u8,
@@ -851,6 +858,23 @@ pub fn decode(insn: u32) -> Inst {
         };
         if let Some(op) = op {
             return Inst::FpScalar { rd, rn, rm, op, sz };
+        }
+        // 1-source scalar FP in the same 0x1e00_0000 class: fsqrt=0x1e61c000,
+        // frintm(toward -inf)=0x1e654000, frintp(+inf)=0x1e648000, frintz=0x1e65c000.
+        // fmov/fneg/fabs are separate (FmovFp / not yet modelled).
+        // 1-source scalar FP in the same 0x1e00_0000 class. Gate `0xffff_fc00` masks
+        // rn(5-9)+rd(0-4) only and keeps bits 16-31, which DISTINGUISHES the
+        // frint/fsqrt bytes (bits16-23): fsqrt=0x1e61_c000, frintm=0x1e65_4000.
+        // `fmov d,d` (=0x1e60_4000, bits16-19=0) is NOT matched, staying FmovFp.
+        let unary = match insn & 0xffff_fc00 {
+            0x1e61_c000 => Some(0), // fsqrt d{rd}, d{rn}
+            0x1e65_4000 => Some(1), // frintm (round toward -inf) = floor
+            _ => None,
+        };
+        if let Some(op) = unary {
+            let rd = (insn & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            return Inst::FpUnary { rd, rn, op, sz };
         }
     }
 
@@ -1841,8 +1865,29 @@ mod logical_imm_regressions {
                 assert!(sz);
             }
             other => panic!("fcsel d6,d16,d6,mi -> {other:?}"),
-        }
-        // fmov d1, #0.5 (0x1e6c1001, real libroblox audio path) => FmovImm f64.
+                    }
+                    // fsqrt d1, d1 = 0x1e61c021 (real libroblox audio mix) => FpUnary op0.
+                    match decode(0x1e61c021) {
+                        Inst::FpUnary { rd, rn, op, sz } => {
+                            assert_eq!(rd, 1);
+                            assert_eq!(rn, 1);
+                            assert_eq!(op, 0); // fsqrt
+                            assert!(sz);
+                        }
+                        other => panic!("fsqrt d1,d1 -> {other:?}"),
+                    }
+                    // frintm d3, d3 = 0x1e654063 (round toward -inf) => FpUnary op1.
+                    match decode(0x1e654063) {
+                        Inst::FpUnary { rd, rn, op, sz } => {
+                            assert_eq!(rd, 3);
+                            assert_eq!(rn, 3);
+                            assert_eq!(op, 1); // frintm
+                            assert!(sz);
+                        }
+                        other => panic!("frintm d3,d3 -> {other:?}"),
+                    }
+                    // fmov d6,d0 = 0x1e604006 must still be FmovFp (NOT FpUnary/frintm).
+                    assert!(matches!(decode(0x1e604006), Inst::FmovFp { rd: 6, rn: 0, .. }));
         match decode(0x1e6c1001) {
             Inst::FmovImm {
                 rd,

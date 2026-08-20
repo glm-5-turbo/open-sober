@@ -821,6 +821,23 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::FpUnary { rd, rn, op, sz } => {
+            // scalar 1-source FP: fsqrt / frint{mpz}. d-reg = low 8B of CpuState.v[reg].
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            if !sz {
+                return Err(format!("FpUnary single-precision (sz=0) not implemented (op {op})"));
+            }
+            buf.movq_load(0, RBX, vslot(rn));
+            match op {
+                0 => buf.sqrtsd(0, 0),  // fsqrt  d{rd}, d{rn}
+                1 => buf.roundsd(0, 0, 0x01), // frintm: round toward -inf (floor)
+                2 => buf.roundsd(0, 0, 0x02), // frintp: round toward +inf (ceil)
+                4 => buf.roundsd(0, 0, 0x03), // (frintz: toward zero) — reserved mapping
+                _ => return Err(format!("FpUnary op {op} not implemented")),
+            }
+            buf.movq_store(RBX, vslot(rd), 0);
+            Ok(())
+        }
         Inst::FcvtToInt {
             rd,
             rn,
