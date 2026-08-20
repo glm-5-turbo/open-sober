@@ -714,3 +714,72 @@ A. **Identify the busy-spin target.** qemu `-d in_asm` shows a GOT-indirect
   `interrupt`, or a raw `\x03` on the socket; the `alarm_sa_handler` timer does
   NOT fire under qemu). Then implement the missing guest-stub/trampoline for
   whatever function Roblox dispatches.
+
+## Session 15 — SPIN ROOT-CAUSED AND FIXED; now a real OOM-sourced abort (committed 0a081ac)
+
+### The spin was NOT a condvar loop — it was unresolvable PLT GOT slots => busy-spin to garbage
+- qemu `-d exec`/`-d in_asm`: the "spin" was a GOT-indirect thunk
+  `adrp/ldr x16;[x16+off]; ldr x17; cbz; br x17` looping with guest PC at
+  `base+0x15X014e4/14f4` (X varied run-to-run). Those offsets are past-file
+  and past `.text`, i.e. garbage-as-code. The `base+0x15...` jumps into
+  anonymous memory.
+- Reality: **every PLT JUMP_SLOT GOT slot held a bad value** because glibc's
+  lazy binding under qemu user-mode + the bionic shim never resolved them.
+  libro's `pthread_mutex_lock@plt` → `br [GOT]` → rodata/anon ⇒ busy-spin.
+
+### Fix (committed): pre-resolve ALL PLT GOT entries
+1. `robo_open()` default path was `"libroblox.so"` (CWD) — failed in-app, so
+   `g_robo.have=0` and no ELF functionality worked. Now defaults to
+   `/system/lib64/libroblox.so`. This is what made everything downstream work.
+2. `patch_condvar_plt_got()` installs REAL glibc pthread_mutex_lock/cond_wait/
+   cond_timedwait (from direct libc handle `g_real_libc`, not RTLD_DEFAULT which
+   returns the shim's shadowed/corrupt address) — the old stubbed shim+wrap
+   approach kept the spin.
+3. `patch_condvar_plt_got()` now called AFTER the direct-glibc block so
+   `g_real_*` are populated.
+4. **`patch_all_jumpslots(base)`**: iterate `.DJMPREL`, resolve each symbol via
+   `g_real_libc`/RTLD_DEFAULT, write base+r_offset GOT slot with the real fn.
+   Result: `patched 532 PLT GOT slots (3 unresolved, of 537)`. The 3 are
+   bionic/Android-only (`Java_..._Android*_FinishPaymentsProtocol`,
+   `__gcov_dump`, `__gcov_flush`) — harmless.
+- **Effect**: JNI_OnLoad now executes REAL Roblox code (clock_gettime, sysinfo,
+  /proc over-com/read, getrandom, gettid, getpid) and reaches a real
+  **malloc-NULL → abort()** instead of spinning forever. EXIT 14 (hang) →
+  EXIT 134 (SIGABRT). Huge milestone.
+
+### Current blocker: `abort` at `Java_..._initializeNativeCode` + 0x343e44 —
+  per-thread TLS alloc fast-path returns NULL
+- qemu `-d exec` last real .text PC = `base+0x2692d8c...` (`0x2692dcc`: `bl abort@plt`).
+- Sequence: pthread_once → mutex_lock/unlock → pthread_getspecific → then
+  `bl 0x1c35480` (Roblox per-thread TLS block allocator, small-size fast-path
+  from a TLS free-list) → `cbz x0 → 0x2692dcc abort`. It aborts when the small
+  alloc falls to the big path and that returns NULL, or the TLS free-list is NULL.
+- It aborts EVEN THO we already forge sysinfo => 256 GiB free and
+  `/proc/sys/vm/overcommit_memory` => 1 (also tried 0 and 2). So it is NOT a
+  real low-memory abort: rather a **bypassed-early-alloc-init / tls-arena-not-
+  seeded** condition (we NOP a lot of init). Host has only ~4 GiB avail and
+  Committed_AS > CommitLimit, but the allocator never even `mmap`s before
+  aborting (strace shows 0 mmaps after JNI_OnLoad).
+
+### Diagnostics added this session
+- `wrap_android_set_abort_message()` + `wrap_android_log_print()` print the
+  (otherwise logcat-lost) abort reason to stderr — so far no `[android-abort]`
+  line appears, meaning the abort is a silent bare `abort()`.
+- gdb walk shows the abort caller's return addr is in a data region
+  (`base+0x?ba710`), consistent with a JNI/trampoline callback chain.
+
+### Next steps (ordered) — unblock the TLS-alloc NULL
+A. Make the TLS free-path never NULL: the small alloc `0x1c35480` `cbz`es on an
+   empty free-list and falls to the big-allocator; ensure the big allocator
+   (`0x1c3639c`) returns from a real glibc `malloc`. If that tail-call resolves
+   via a JUMP_SLOT the loader left bad, patch it. Check whether
+   `0x1c3635c` (`b` target) calls real malloc.
+B. OR force `abort@plt` (GOT) to `wrap_abort` that logs the caller PC from
+   `(_RETURN_ADDRESS)` and returns (unwind the quadruple-abort) so the call
+   chain continues and the next OOBorn diagnostic (or SIGSEGV handled by our
+   segv handler) reveals the real issue.
+C. OR run Roblox's real allocator init (don't bypass it) by removing the NOP
+   clock/init bypasses in `JNI_OnLoad` progressive patching / the guard
+   override, letting the arena seed normally. This is likely the correct fix.
+D. After JNI_OnLoad returns (registers 3 methods), boot the GUI on `:0` and
+   start the vision phase (cua-driver, Step 5 on the task list).
