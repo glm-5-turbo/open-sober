@@ -1706,3 +1706,32 @@ Committed 3 milestones (ad5001c, ac8e622); tree clean; 38 tests pass.
 
 ### Status: real Roblox still does NOT boot; boot path is inside an FMOD
  output-audio "loop over channels when energy/limits" DSP routine.
+
+## Session 30b (Aug 20, 2026) — SIMD 4S mix loop: orr/mul/cmhi/bit; boot advances 0x2c
+
+Cleared the "channel-count round-up" SIMD 4S loop through `bit`. 4 commits:
+
+- 1ceb00a — `Inst::SimdOrr16` (16B OR, gate (0x4ea01c00, Q=1; also the `mov Vd.16B` copy
+  rm==rn alias). Also `Inst::SimdMul` (4S/2S gate 0x4ea09c00/0x0ea09c00) — per-32-bit-lane
+  low-32 product via 64-bit imul+low store (mod-2^32, correct for signed/unsigned wrap).
+- cda1619 — `Inst::SimdCmhi` (4S/2S unsigned compare-higher, gate 0x6ea03400, real
+  0x6ea13461). NOTE: the earlier fabricated word 0x6ea4c1c1 was WRONG — the real cmhi is
+  0x6ea13461 (rd=1 rn=3 rm=1). Gate verified against the real word (0x6ea03400).
+  Per-lane => all-ones if Vn[i]>Vm[i] via cmp + cmova.
+- f05ac60 — `Inst::SimdBit` (16B bitwise-insert, gate 0x6ea01c00, real 0x6ea11c40).
+  Vd=(Vn&Vm)|(Vd&~Vm) over both 64-bit halves (xor all-ones for ~Vm).
+
+All 3 verified (real libroblox word → decode + translate), 38 tests pass, tree clean.
+Boot wall history this session: 0x105dfe230 (mov v2.16b) -> …234 (mul v0.4s) -> …258
+(cmhi v1.4s) -> …25c (bit v0.16b) CLEAR -> STOPPED at 0x105dfe260: `ext v1.16b, v0.16b,
+v0.16b, #8` (0x6e004001) — SIMD byte-shift/immediate, NEXT ON AGENDA.
+
+### Next up (ordered)
+ 1. ext Vd.16B, Vn, Vm, #imm (0x6e004001, imm in bits11-15). General form is a 128-bit
+    rotate/insert: R = (Vn>>sh)|(Vm<<(128-sh)), sh=imm*8; real case imm=8 is just a
+    u64 half-swap (Vm==Vn). Implement general imm via 4×64-bit shift ops, verify vs ground
+    truth before committing.
+ 2. `mov w8, v0.s[1]` (0x0e0c3c08) SIMD lane->GPR, and any remaining movi/lane ops.
+ 3. Then `svc` real AArch64->x86_64 syscall table (mmap/futex/mprotect; host x86 numbers
+    differ: mmap 222->9, futex 95->202, mprotect 226->10) — the big-ticket remaining item
+    before real Roblox boot.
