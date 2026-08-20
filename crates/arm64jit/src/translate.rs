@@ -15,7 +15,7 @@
 // the flags result is only written back as a placeholder.
 
 use crate::decode::{Inst, ShiftKind};
-use crate::x86::{CodeBuf, RAX, RBX, RCX, RDX};
+use crate::x86::{CodeBuf, RAX, RBX, RCX, RDX, RDI, R10};
 
 /// Byte offset of guest register g inside CpuState (x[g] at 8*g).
 #[inline]
@@ -32,6 +32,93 @@ fn ldg(buf: &mut CodeBuf, x: u8, g: u32) {
 #[inline]
 fn stg(buf: &mut CodeBuf, g: u32, x: u8) {
     buf.mov_store64(RBX, slot(g), x);
+}
+
+/// Byte offset of `CpuState.nzcv` (after pc@256: nzcv u32 at 264).
+const NZCV_OFF: i32 = 8 * 32 + 8; // 264
+/// Byte offset of `CpuState.pad`.
+#[allow(dead_code)]
+const PAD_OFF: i32 = 8 * 32 + 12; // 268
+
+/// Convert the *live* x86 status flags (CF/ZF/SF/OF set by the last arithmetic
+/// instruction) into a packed AArch64 NZCV u32 (N=31,Z=30,C=29,V=28) and store
+/// it at `CpuState.nzcv`. Uses RAX/RCX/RDX as scratch. Must be called right
+/// after the flag-setting op, before any flag-clobbering instruction.
+fn store_nzcv(buf: &mut CodeBuf) {
+    // push rax, rcx, rdx then snapshot eflags via pushfq.
+    buf.push(RAX);
+    buf.push(RCX);
+    buf.push(RDX);
+    buf.pushfq();
+    buf.pop(RAX); // eax = rflags: CF0, PF2, AF4, ZF6, SF7, OF11
+    // Build nzcv into RDX.
+    buf.xor_rr64(RDX, RDX);
+    // C = CF(eax bit0) -> nzcv bit29
+    buf.mov_rr64(RCX, RAX);
+    buf.and_ri64(RCX, 1);
+    buf.shl_ri8(RCX, 29);
+    buf.or_rr64(RDX, RCX);
+    // V = OF(eax bit 11) -> nzcv bit 28
+    buf.mov_rr64(RCX, RAX);
+    buf.shr_ri8(RCX, 11);
+    buf.and_ri64(RCX, 1);
+    buf.shl_ri8(RCX, 28);
+    buf.or_rr64(RDX, RCX);
+    // Z = ZF(eax bit 6) -> nzcv bit 30
+    buf.mov_rr64(RCX, RAX);
+    buf.shr_ri8(RCX, 6);
+    buf.and_ri64(RCX, 1);
+    buf.shl_ri8(RCX, 30);
+    buf.or_rr64(RDX, RCX);
+    // N = SF(eax bit 7) -> nzcv bit 31
+    buf.mov_rr64(RCX, RAX);
+    buf.shr_ri8(RCX, 7);
+    buf.and_ri64(RCX, 1);
+    buf.shl_ri8(RCX, 31);
+    buf.or_rr64(RDX, RCX);
+    buf.mov_store32(RBX, NZCV_OFF, RDX);
+    buf.pop(RDX);
+    buf.pop(RCX);
+    buf.pop(RAX);
+}
+
+/// Load the *stored* `CpuState.nzcv` into the real x86 rflags (CF/ZF/SF/OF) so
+/// a following native `jcc`/`cmovcc` (via `x86_cc_for_cond`) evaluates the
+/// AArch64 condition correctly, even when the immediately preceding op did not
+/// set the flags (the dispatcher reloads operands, clobbering them).
+///
+/// Restores RAX/RCX, then sets flags via popfq as the LAST flag-clobbering op;
+/// the consuming `jcc`/`cmovcc` MUST run immediately after. RDX is clobbered.
+fn load_nzcv_to_eflags(buf: &mut CodeBuf) {
+    buf.push(RAX);
+    buf.push(RCX);
+    buf.mov_load32(RCX, RBX, NZCV_OFF); // RCX = packed nzcv
+    // RDX accumulates the eflags image; RAX is scratch. Build
+    // eflags = { CF:nzcv.29, ZF:nzcv.30, SF:nzcv.31, OF:nzcv.28 }.
+    buf.mov_ri64(RDX, 0x202); // reserved rflags bit1
+    // C -> CF(bit0)
+    buf.mov_rr64(RAX, RCX);
+    buf.shr_ri8(RAX, 29);
+    buf.and_ri64(RAX, 1);
+    buf.or_rr64(RDX, RAX);
+    // V -> OF(bit11)
+    buf.mov_rr64(RAX, RCX);
+    buf.shr_ri8(RAX, 28);
+    buf.and_ri64(RAX, 1);
+    buf.shl_ri8(RAX, 11);
+    buf.or_rr64(RDX, RAX);
+    // Z -> ZF(bit6), N -> SF(bit7) via one shift by 24 (nzcv bits 30,31 -> 6,7)
+    buf.mov_rr64(RAX, RCX);
+    buf.shr_ri8(RAX, 24);
+    buf.and_ri64(RAX, 0xc0); // bits 6,7
+    buf.or_rr64(RDX, RAX);
+    // RDX holds the final eflags value. Restore saved RAX/RCX (pops do not use
+    // RDX), then push the eflags and pop them into rflags. The popfq is the last
+    // flag-clobbering op; the calling jcc/cmovcc must follow immediately.
+    buf.pop(RCX);
+    buf.pop(RAX);
+    buf.push(RDX);
+    buf.popfq();
 }
 
 /// Constant `val` into guest reg `rd`.
@@ -128,6 +215,7 @@ pub fn translate(
             imm12,
             shift12,
             sub,
+            s,
             ..
         } => {
             let imm: u64 = (imm12 as u64) << if shift12 { 12 } else { 0 };
@@ -136,6 +224,9 @@ pub fn translate(
                 buf.sub_ri64(RAX, imm as u32);
             } else {
                 buf.add_ri64(RAX, imm as u32);
+            }
+            if s {
+                store_nzcv(buf); // N/Z/C/V -> CpuState.nzcv
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
@@ -147,6 +238,7 @@ pub fn translate(
             rn,
             rm,
             sub,
+            s,
             shift,
             sh_amt,
             ..
@@ -158,6 +250,9 @@ pub fn translate(
                 buf.sub_rr64(RAX, RCX);
             } else {
                 buf.add_rr64(RAX, RCX);
+            }
+            if s {
+                store_nzcv(buf);
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
@@ -193,6 +288,53 @@ pub fn translate(
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
+        Inst::CSel {
+            rd,
+            rn,
+            rm,
+            cond,
+            op,
+            sf,
+        } => {
+            // `csel rd, rn, rm, c`: rd = c ? rn : f(rm), where f applies the
+            // csinc/csinv/csneg transform to rm (op 0=identity,1=+1,2=~,3=-).
+            // then-branch value = rn (RDI), else-branch = f(rm) (R10). Compute
+            // both before restoring the flags from NZCV (load_nzcv_to_eflags
+            // sets them last, and cmovcc reads them immediately after).
+            let _ = sf;
+            ldg(buf, RDI, rn as u32); // then: rn
+            ldg(buf, R10, rm as u32); // else: f(rm)
+            match op {
+                0 => {}
+                1 => buf.add_ri64(R10, 1),   // csinc / cset / cinc
+                2 => buf.not_r64(R10),       // csinv
+                3 => buf.neg_r64(R10),       // csneg
+                _ => return Err(format!("CSel op {} not implemented", op)),
+            }
+            if cond == 0xE {
+                // AL: unconditional — just rn
+                if rd != 31 {
+                    stg(buf, rd as u32, RDI);
+                }
+                return Ok(());
+            }
+            if cond == 0xF {
+                // NV: never — just f(rm)
+                if rd != 31 {
+                    stg(buf, rd as u32, R10);
+                }
+                return Ok(());
+            }
+            let cc = (x86_cc_for_cond(cond)
+                .ok_or_else(|| format!("CSel: bad cond {cond:#x}"))?
+                - 0x40); // jcc 0x8X -> cmovcc 0x4X (subtract the 0x80 top byte)
+            load_nzcv_to_eflags(buf);
+            buf.cmov_rr64(cc, R10, RDI); // R10 = cond ? RDI(rn) : R10(f(rm))
+            if rd != 31 {
+                stg(buf, rd as u32, R10);
             }
             Ok(())
         }
@@ -246,6 +388,47 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::AcqRel { size, ld, rt, rn } => {
+            // LDAR/STLR ordering is a no-op in a single-threaded JIT; act as a
+            // plain load/store of `size` bytes at [Rn].
+            ldg(buf, RDX, rn as u32);
+            match (size, ld) {
+                (3, true) => {
+                    buf.mov_load64(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (3, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store64(RDX, 0, RAX);
+                }
+                (2, true) => {
+                    buf.mov_load32(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (2, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store32(RDX, 0, RAX);
+                }
+                (1, true) => {
+                    buf.movzx_word_mem(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (1, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store16(RDX, 0, RAX);
+                }
+                (0, true) => {
+                    buf.movzx_byte_mem(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (0, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store8(RDX, 0, RAX);
+                }
+                (s, _) => return Err(format!("AcqRel size {} not implemented", s)),
+            }
+            Ok(())
+        }
         Inst::LdStPair {
             rt,
             rt2,
@@ -256,9 +439,12 @@ pub fn translate(
             preidx,
             size_64,
             q128,
+            fp_d,
         } => {
             let esize = if q128 {
                 16i32
+            } else if fp_d {
+                8i32
             } else if size_64 {
                 8i32
             } else {
@@ -273,6 +459,27 @@ pub fn translate(
             } else {
                 (0i32, if writeback { imm32 } else { 0 }) // access at rn, wb adds imm
             };
+            if fp_d {
+                // 64-bit FP/vector d-pair: each reg is one u64 in CpuState.v
+                // at VECTOR_BASE + rt*8; transfer via RAX.
+                let v0 = crate::jit::VECTOR_BASE + (rt as i32) * 8;
+                let v1 = crate::jit::VECTOR_BASE + (rt2 as i32) * 8;
+                for (reg_off, mem_off) in [(v0, access_off), (v1, access_off + esize)] {
+                    if ld {
+                        buf.mov_load64(RAX, RDX, mem_off); // rax <- [addr]
+                        buf.mov_store64(RBX, reg_off, RAX); // v <- rax
+                    } else {
+                        buf.mov_load64(RAX, RBX, reg_off); // rax <- v
+                        buf.mov_store64(RDX, mem_off, RAX); // [addr] <- rax
+                    }
+                }
+                if writeback {
+                    ldg(buf, RAX, rn as u32);
+                    buf.add_ri64(RAX, wb_off as u32);
+                    stg(buf, rn as u32, RAX);
+                }
+                return Ok(());
+            }
             if q128 {
                 // 128-bit SIMD pair: transfer 16 bytes per register between the
                 // guest v-slots (CpuState.v, VECTOR_BASE+16*reg) and memory via XMM0.
@@ -544,6 +751,12 @@ pub fn translate(
                 c => {
                     let cc = x86_cc_for_cond(c)
                         .ok_or_else(|| format!("B.cond unsupported cond {:x}", c))?;
+                    // Evaluate the condition from the stored NZCV (the dispatcher
+                    // may clobber live x86 flags with operand reloads; NZCV is
+                    // the authoritative copy). load_nzcv_to_eflags sets the flags
+                    // via popfq as the last clobbering op, so the jcc that
+                    // follows reads exactly the guest condition.
+                    load_nzcv_to_eflags(buf);
                     let disp = buf.jcc_rel32(cc);
                     fixups.push(Fixup {
                         target_pc: target,

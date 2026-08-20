@@ -65,7 +65,8 @@ pub const R15: u8 = 15;
 
 /// REX prefix. `w`=64-bit operand, `r`=extended modrm.reg reg, `x`,`b`=extended.
 fn rex(w: bool, r: u8, x: u8, b: u8) -> u8 {
-    0x40 | ((w as u8) << 3) | (((r & 8) as u8) << 1) | (((x & 8) as u8) << 2) | (b & 8) >> 0
+    0x40 | ((w as u8) << 3) | (if r & 8 != 0 { 0x04 } else { 0 }) | (if x & 8 != 0 { 0x02 } else { 0 })
+        | (if b & 8 != 0 { 0x01 } else { 0 })
 }
 
 fn modrm(mod_: u8, reg: u8, rm: u8) -> u8 {
@@ -350,6 +351,18 @@ impl CodeBuf {
     pub fn sub_ri64(&mut self, rd: u8, imm: u32) {
         self.ari_imm(5, rd, imm);
     }
+    /// neg r64 (0x48 F7 /3) — sets flags (CF/OF), fine before load_nzcv
+    pub fn neg_r64(&mut self, rd: u8) {
+        self.b(0x48);
+        self.b(0xF7);
+        self.b(modrm(3, 3, rd & 7));
+    }
+    /// not r64 (0x48 F7 /2) — sets flags
+    pub fn not_r64(&mut self, rd: u8) {
+        self.b(0x48);
+        self.b(0xF7);
+        self.b(modrm(3, 2, rd & 7));
+    }
     /// and r64, imm32
     pub fn and_ri64(&mut self, rd: u8, imm: u32) {
         self.ari_imm(4, rd, imm);
@@ -400,6 +413,21 @@ impl CodeBuf {
         self.b(modrm(3, op, rd & 7));
     }
 
+    /// shl r64, imm8  (encoding 48 C1 /4 ib)
+    pub fn shl_ri8(&mut self, rd: u8, imm: u8) {
+        self.b(0x48);
+        self.b(0xC1);
+        self.b(modrm(3, 4, rd & 7));
+        self.b(imm);
+    }
+    /// shr r64, imm8  (encoding 48 C1 /5 ib)
+    pub fn shr_ri8(&mut self, rd: u8, imm: u8) {
+        self.b(0x48);
+        self.b(0xC1);
+        self.b(modrm(3, 5, rd & 7));
+        self.b(imm);
+    }
+
     // ---- control flow ----
     /// jmp rel32; returns patch offset for disp
     pub fn jmp_rel32(&mut self) -> usize {
@@ -411,6 +439,19 @@ impl CodeBuf {
         self.b(0x0F);
         self.b(cc);
         self.patch_here()
+    }
+    /// cmovcc r64, r/m64  (0F 40+cc), `cc` = cmov-ccode 2nd byte *after* jcc-0x40
+/// (e.g. 0x45 = cmovne). ModRM reg=rd(dst), rm=rs(src). Caller passes
+/// `x86_cc_for_cond(cond) - 0x40`.
+    pub fn cmov_rr64(&mut self, cc: u8, rd: u8, rs: u8) {
+        if rd >= 8 || rs >= 8 {
+            self.b(rex(true, rd, 0, rs));
+        } else {
+            self.b(0x48);
+        }
+        self.b(0x0F);
+        self.b(cc);
+        self.b(modrm(3, rd & 7, rs & 7));
     }
     /// call r64
     pub fn call_r64(&mut self, rd: u8) {
@@ -436,12 +477,20 @@ impl CodeBuf {
         }
         self.b(0x50 + (r & 7));
     }
+    /// pushfq  (0x9C): push rflags
+    pub fn pushfq(&mut self) {
+        self.b(0x9C);
+    }
     /// pop r64
     pub fn pop(&mut self, r: u8) {
         if r >= 8 {
             self.b(0x41);
         }
         self.b(0x58 + (r & 7));
+    }
+    /// popfq  (0x9D): pop rflags
+    pub fn popfq(&mut self) {
+        self.b(0x9D);
     }
     /// pad with NOPs to a specified alignment
     pub fn align_to(&mut self, n: usize) {

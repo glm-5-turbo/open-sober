@@ -206,6 +206,18 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             ));
         }
         let block = compile_image(image, base, pc, state)?;
+        #[cfg(debug_assertions)]
+        if std::env::var_os("JIT_DUMP").is_some() {
+            let raw = block.dump();
+            eprintln!("-- block@0x{pc:x} host bytes ({}):", raw.len());
+            for (i, byte) in raw.iter().enumerate() {
+                eprint!("{:02x} ", byte);
+                if (i + 1) % 16 == 0 {
+                    eprintln!();
+                }
+            }
+            eprintln!();
+        }
         unsafe { run(&block, state) };
         if std::env::var_os("JIT_TRACE").is_some() {
             println!(

@@ -77,6 +77,15 @@ pub enum Inst {
         shift: ShiftKind,
         sh_amt: u8,
     },
+    // ---- conditional select (CSEL/CSINC/CSINV/CSNEG: incl. CSET/CINC)
+    CSel {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        cond: u8,
+        op: u8, // 0=csel,1=csinc,2=csinv,3=csneg
+        sf: bool,
+    },
     // ---- load/store (unsigned immediate offset) ----
     LdStrImm {
         rt: u8,
@@ -105,6 +114,7 @@ pub enum Inst {
         preidx: bool,
         size_64: bool, // false => 32-bit W pair
         q128: bool,    // true => 128-bit SIMD pair (ldp/stp q)
+        fp_d: bool,    // true => 64-bit FP/vector d-pair (ldp/stp d)
     },
     // ---- SIMD/NEON 128-bit vector load/store (ldr q0,[xN,#imm] / str q) ----
     VecLdStImm {
@@ -131,10 +141,18 @@ pub enum Inst {
     // ---- test-bit-and-branch (tbz/tbnz Xt,#bit,label) ----
     Tbz {
         rt: u8,
-        bit: u32, // bit position to test (0..63)
-        imm: i64, // branch offset from pc
+        bit: u32,      // bit position to test (0..63)
+        imm: i64,      // branch offset from pc
         nonzero: bool, // true = tbnz
         sf: bool,
+    },
+    // ---- load-acquire / store-release (LDAR/STLR) ----
+    // Single-threaded JIT: ordering is irrelevant, treated as a plain load/store.
+    AcqRel {
+        size: u32, // 0=byte,1=half,2=word,3=x
+        ld: bool,  // true = ldar (load), false = stlr (store)
+        rt: u8,
+        rn: u8,
     },
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
@@ -322,6 +340,21 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
+    // ---- conditional select (CSEL/CSINC/CSINV/CSNEG): mask (insn&0x7fe00000)==0x1a800000 ----
+    // MUST precede the logic/add-sub shifted-register decoders: csel X-variants
+    // share top byte 0x9a/0xda with the ORR/EOR/BIC families. The 0x1a800000
+    // fixed-bit pattern uniquely identifies csel/csinc/csinv/csneg.
+    if insn & 0x7fe0_0000 == 0x1a80_0000 {
+        let sf = (insn >> 31) & 1 == 1;
+        let cond = b(insn, 12, 15) as u8;
+        let rm = b(insn, 16, 20) as u8;
+        let rn = b(insn, 5, 9) as u8;
+        let rd = b(insn, 0, 4) as u8;
+        // op = bits[11:10]: 00=csel,01=csinc,10=csinv,11=csneg
+        let op = b(insn, 10, 11) as u8;
+        return Inst::CSel { rd, rn, rm, cond, op, sf };
+    }
+
     // ---- logical (shifted register): AND/ORR/EOR/BIC/ORN/EON ----
     // top byte: 0x0a xx-family; opc = bits[30:29], N = bit21
     if matches!(
@@ -482,6 +515,17 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
+    // ---- load-acquire / store-release (LDAR/STLR family): single-threaded => plain load/store ----
+    // size[31:30], L=bit22, Rt[0:4], Rn[5:9]. mask 0x3fe00000 -> 0x08800000 (stlr) / 0x08c00000 (ldar)
+    let acquire = insn & 0x3fe0_0000;
+    if acquire == 0x0880_0000 || acquire == 0x08c0_0000 {
+        let size = (insn >> 30) & 3; // 0=byte,1=half,2=word,3=x
+        let ld = (insn >> 22) & 1 == 1; // 1=ldar load, 0=stlr store
+        let rt = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        return Inst::AcqRel { size, ld, rt, rn };
+    }
+
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
     if insn & 0x7e00_0000 == 0x3600_0000 {
         let sf = (insn >> 31) & 1 == 1;
@@ -507,15 +551,18 @@ pub fn decode(insn: u32) -> Inst {
         return Inst::Hint;
     }
 
-    // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD) ----
-    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xad) {
+    // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
+    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xad | 0x6d | 0x2d) {
         let q128 = (insn >> 24) & 0xff == 0xad; // 128-bit SIMD pair (ldp/stp q)
+        let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x2d; // FP/vec d pair
         let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
         let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
         let preidx = indexed && (insn >> 24) & 1 == 1; // pre if bit24=1 within indexed
         let scale = if q128 {
             16
+        } else if fp_d {
+            8 // d-pairs are 64-bit FP/vector registers
         } else if size_64 {
             8
         } else {
@@ -533,6 +580,7 @@ pub fn decode(insn: u32) -> Inst {
             preidx,
             size_64,
             q128,
+            fp_d,
         };
     }
 
@@ -614,6 +662,7 @@ mod tests {
                 preidx,
                 size_64,
                 q128,
+                fp_d,
             } => {
                 assert_eq!(rt, 0);
                 assert_eq!(rt2, 1);
@@ -622,6 +671,7 @@ mod tests {
                 assert!(!ld);
                 assert!(!writeback);
                 assert!(size_64);
+                assert!(!fp_d);
             }
             other => panic!("expected LdStPair, got {:?}", other),
         }
@@ -636,6 +686,7 @@ mod tests {
                 preidx,
                 size_64,
                 q128,
+                fp_d,
             } => {
                 assert_eq!(rt, 29);
                 assert_eq!(rt2, 30);
@@ -644,6 +695,7 @@ mod tests {
                 assert!(ld);
                 assert!(writeback);
                 assert!(!preidx);
+                assert!(!fp_d);
             }
             other => panic!("expected LdStPair post, got {:?}", other),
         }
@@ -970,6 +1022,76 @@ mod tests {
                 }
                 other => panic!("{label}: expected VecMovi, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn csel_family_ground_truth() {
+        // csel x22,x8,x10,hi = 0x9a8a8116 ; csinc x1,x9,xr... ; ldc set X1.. etc
+        // Our decode sets rd=r8? — assert on well-known words:
+        let csel = decode(0x9a8a8116); // from actual libroblox disasm: csel x22,x8,x10,hi
+        match csel {
+            Inst::CSel {
+                rd, rn, rm, cond, op, sf,
+            } => {
+                assert_eq!(rd, 22);
+                assert_eq!(rn, 8);
+                assert_eq!(rm, 10);
+                assert_eq!(cond, 0x8); // hi
+                assert_eq!(op, 0); // csel
+                assert!(sf);
+            }
+            other => panic!("0x9a8a8116: expected CSel, got {other:?}"),
+        }
+        // cset w0, eq via csinc in 32-bit: 0x1a9f17e0 (W cset)
+        match decode(0x1a9f17e0) {
+            Inst::CSel { op, sf, rd, .. } => {
+                assert!(!sf);
+                assert_eq!(op, 1); // csinc
+                assert_eq!(rd, 0);
+            }
+            other => panic!("cset: expected CSel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stp_d_zero() {
+        // stp d0,d1,[x0,#272] = 0x6d110400 (fp/vec 64-bit pair)
+        match decode(0x6d110400) {
+            Inst::LdStPair {
+                rt, rt2, rn, imm, ld, fp_d, q128, ..
+            } => {
+                assert!(fp_d);
+                assert!(!q128);
+                assert!(!ld); // 0x6d... = stp (store); L bit22=0
+                assert_eq!(imm, 272);
+                assert_eq!(rt, 0);
+                assert_eq!(rt2, 1);
+                assert_eq!(rn, 0);
+            }
+            other => panic!("expected LdStPair d, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ldar_stlr_plain() {
+        // ldar x0, [x8] = 0xc8dffd00 ; stlr x9,[x10] = 0xc89ffd49
+        match decode(0xc8dffd00) {
+            Inst::AcqRel { size, ld, rt, rn } => {
+                assert_eq!(size, 3);
+                assert!(ld);
+                assert_eq!(rt, 0);
+                assert_eq!(rn, 8);
+            }
+            other => panic!("expected AcqRel ldar, got {other:?}"),
+        }
+        match decode(0xc89ffd49) {
+            Inst::AcqRel { ld, rt, rn, .. } => {
+                assert!(!ld);
+                assert_eq!(rt, 9);
+                assert_eq!(rn, 10);
+            }
+            other => panic!("expected AcqRel stlr, got {other:?}"),
         }
     }
 }
