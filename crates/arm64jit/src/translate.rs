@@ -953,10 +953,27 @@ pub fn translate(
             Ok(())
         }
         Inst::FpUnary { rd, rn, op, sz } => {
-            // scalar 1-source FP: fsqrt / frint{mpz}. d-reg = low 8B of CpuState.v[reg].
+            // scalar 1-source FP: fsqrt / frint{mpz} / fabs / fneg.
+            // d-reg = low 8B of yate.v[reg]; s-reg = low 4B.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             if !sz {
-                return Err(format!("FpUnary single-precision (sz=0) not implemented (op {op})"));
+                // single-precision: operate on the low 32 bits.
+                buf.mov_load32(RAX, RBX, vslot(rn));
+                match op {
+                    5 => { // fabs s: clear sign bit
+                        buf.mov_ri64(RCX, 0x7fff_ffff);
+                        buf.and_rr64(RAX, RCX);
+                    }
+                    6 => { // fneg s: flip sign bit
+                        buf.mov_ri64(RCX, 0x8000_0000);
+                        buf.xor_rr64(RAX, RCX);
+                    }
+                    _ => {
+                        return Err(format!("FpUnary single ilp-{op} not implemented"));
+                    }
+                }
+                buf.mov_store32(RBX, vslot(rd), RAX);
+                return Ok(());
             }
             buf.movq_load(0, RBX, vslot(rn));
             match op {
@@ -1259,14 +1276,23 @@ pub fn translate(
             Ok(())
         }
         Inst::Simd4s { rd, rn, rm, op: 0 } => {
-            // add Vd.4s, Vn.4s, Vm.4s : 4x32-bit lane add via paddd.
-            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            buf.movdqu_load(0, RBX, slot(rn)); // xmm0 = Vn (128-bit)
-            buf.movdqu_load(1, RBX, slot(rm)); // xmm1 = Vm
-            buf.paddd(0, 1); // xmm0 = Vn + Vm (4x32)
-            buf.movdqu_store(RBX, slot(rd), 0); // Vd = result
-            Ok(())
-        }
+                    // add Vd.4s, Vn.4s, Vm.4s : 4x32-bit lane add via paddd.
+                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    buf.movdqu_load(0, RBX, slot(rn)); // xmm0 = Vn (128-bit)
+                    buf.movdqu_load(1, RBX, slot(rm)); // xmm1 = Vm
+                    buf.paddd(0, 1); // xmm0 = Vn + Vm (4x32)
+                    buf.movdqu_store(RBX, slot(rd), 0); // Vd = result
+                    Ok(())
+                }
+                Inst::Simd4s { rd, rn, rm, op: 1 } => {
+                    // sub Vd.4s, Vn.4s, Vm.4s : 4x32-bit lane subtract via psubd.
+                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    buf.movdqu_load(0, RBX, slot(rn));
+                    buf.movdqu_load(1, RBX, slot(rm));
+                    buf.psubd(0, 1); // xmm0 = Vn - Vm (4x32)
+                    buf.movdqu_store(RBX, slot(rd), 0);
+                    Ok(())
+                }
         Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
         Inst::SimdDupD { rd, rn, index } => {
             // dup Vd.2D, Vn.D[index]: broadcast the selected 64-bit lane of Vn
@@ -1449,6 +1475,18 @@ Inst::SimdUz1 { rd, rn, rm, esize, q } => {
                                     2 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store16(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
                                     _ => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store8(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
                 }
+            }
+            Ok(())
+}
+Inst::SimdAddD { rd, rn, rm, sub } => {
+            // add/sub Vd.2D, Vn.2D, Vm.2D: two 64-bit lanes.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            for i in 0..2i32 {
+                let off = i * 8;
+                buf.mov_load64(RAX, RBX, slot(rn) + off);
+                buf.mov_load64(RCX, RBX, slot(rm) + off);
+                if sub { buf.sub_rr64(RAX, RCX); } else { buf.add_rr64(RAX, RCX); }
+                buf.mov_store64(RBX, slot(rd) + off, RAX);
             }
             Ok(())
 }

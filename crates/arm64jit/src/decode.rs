@@ -306,6 +306,8 @@ pub enum Inst {
     SimdUz1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD element extract to GPR: umov/smov Rd, Vn.bits[idx] ----
     SimdMovEl { rd: u8, rn: u8, esize: u8, index: u8, signed: bool, is_x: bool },
+    // ---- SIMD integer add/sub 2D (64-bit lanes): add Vd.2D, Vn.2D, Vm.2D ----
+    SimdAddD { rd: u8, rn: u8, rm: u8, sub: bool },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
     // ---- SIMD narrowing extract: xtn Vd.T, Vn.U (low halves) ----
@@ -1063,11 +1065,17 @@ pub fn decode(insn: u32) -> Inst {
         // `fmov d,d` (=0x1e60_4000, bits16-19=0) is NOT matched, staying FmovFp.
         let unary = match insn & 0xffff_fc00 {
             0x1e61_c000 => Some(0), // fsqrt d{rd}, d{rn}
+            0x1e21_c000 => Some(0), // fsqrt s{rd}, s{rn} (single)
             0x1e65_4000 => Some(1), // frintm (round toward -inf) = floor
+            0x1e25_4000 => Some(1), // frintm s (floor)
             0x1e64_8000 => Some(2), // frintp (round toward +inf) = ceil
+            0x1e24_8000 => Some(2), // frintp s (ceil)
             0x1e65_c000 => Some(3), // frintz (round toward zero)
+            0x1e25_c000 => Some(3), // frintz s (trunc)
             0x1e60_c000 => Some(5), // fabs d{rd}, d{rn} (clear sign)
+            0x1e20_c000 => Some(5), // fabs s{rd}, s{rn} (clear sign)
             0x1e61_4000 => Some(6), // fneg d{rd}, d{rn} (flip sign)
+            0x1e21_4000 => Some(6), // fneg s{rd}, s{rn} (flip sign)
             _ => None,
         };
         if let Some(op) = unary {
@@ -1343,13 +1351,26 @@ pub fn decode(insn: u32) -> Inst {
                                         return Inst::InsD1D0 { rd, rn };
                                     }
 
-                                    // ---- NEON int add (4x32 lanes): add Vd.4s, Vn.4s, Vm.4s ----
-                                        // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01).
-                                        if (insn & 0x2f20_0c00) == 0x0e20_0400 && (insn & 0x3) != 3 {
+                                    // ---- NEON int add/sub (4x32 lanes): add Vd.4s, Vn.4s, Vm.4s | sub Vd.4s,... ----
+                                        // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01);
+                                        // sub is the same class with bit29 set (0x2e20_0400 vs 0x0e20_0400).
+                                        let addclass = insn & 0x2f20_0c00;
+                                        if (addclass == 0x0e20_0400 || addclass == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && (insn & 0x3) != 3 {
                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
-                                            return Inst::Simd4s { rd, rn, rm, op: 0 };
+                                            let op = if addclass == 0x2e20_0400 { 1 } else { 0 };
+                                            return Inst::Simd4s { rd, rn, rm, op };
+                                        }
+                                        // ---- SIMD int add/sub 2D (64-bit lanes): add Vd.2D, Vn.2D, Vm.2D ----
+                                        // Same walk as Simd4s but size-field == 3 (D lanes), Q=0/1.
+                                        // sub = 0x6e.. vs add 0x4e.. (bit29). Disjoint: Simd4s above only when size!=3.
+                                        if (insn & 0x2f20_0c00) == 0x0e20_0400 && ((insn >> 22) & 3) == 3 {
+                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                            let rd = (insn & 0x1f) as u8;
+                                            let sub = (insn >> 29) & 1 == 1;
+                                            return Inst::SimdAddD { rd, rn, rm, sub };
                                         }
                                         // ---- NEON vector u64->f64: ucvtf Vd.2D, Vn.2D (2 unsigned lanes) ----
                                         // Gate `(insn & 0xffe0_fc00) == 0x6e60d800`: masks rn/rd (bits 0-9, 16-20 via
@@ -1670,9 +1691,10 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
-    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d) {
+    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d | 0x6c | 0x2c) {
         let q128 = (insn >> 24) & 0xff == 0xad || (insn >> 24) & 0xff == 0xac; // 128-bit SIMD pair (ldp/stp q)
-        let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x2d; // FP/vec d pair
+        let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x2d
+            || (insn >> 24) & 0xff == 0x6c || (insn >> 24) & 0xff == 0x2c; // FP/vec d pair (offset+indexed)
         let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
         let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)

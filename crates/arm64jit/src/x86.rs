@@ -298,6 +298,17 @@ impl CodeBuf {
         self.b(0xFE);
         self.b(modrm(3, dst & 7, src & 7));
     }
+    // PSUBD xmm, xmm/m128 (4x32-bit subtract): 66 0F FA /r.
+    #[allow(dead_code)]
+    pub fn psubd(&mut self, dst: u8, src: u8) {
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0xFA);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
     // (Intel: ModRM.reg = DST, r/m = SRC) — so mulsd(0,1) => F2 0F 59 C1 => xmm0 = xmm0*xmm1.
         fn sd(&mut self, op: u8, dst: u8, src: u8) {
             self.b(0xF2);
