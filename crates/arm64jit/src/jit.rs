@@ -583,4 +583,38 @@ mod tests {
         exec_bytes(&mut st3, &code3, 0).expect("exec fdiv");
         assert_eq!(f64::from_bits(st3.v[10]), 4.0, "10.0 / 2.5 = 4.0");
     }
+
+    #[test]
+    fn simd_popcount_and_4s_add_reference() {
+        // Honesty check for the Session-24/25 SIMD ops (not just "the binary got
+        // further"): byte-popcount chain and 4x32-bit lane add, against hand
+        // computed values on known 64-bit inputs.
+
+        // (a) cnt v0.8b,v0.8b  + uaddlv h0,v0.8b  == popcount of the u64 in d0.
+                // encodings (LE bytes for 0x0e205800 and 0x2e303800).
+                let src: u64 = 0b1010_1111_0000_0011_1111_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000u64;
+                let mut st = CpuState::new();
+                st.v[0] = src; // d0
+                let mut code = [0x00u8, 0x58, 0x20, 0x0e].to_vec(); // cnt v0.8b,v0.8b
+                code.extend_from_slice(&[0x00u8, 0x38, 0x30, 0x2e]); // uaddlv h0,v0.8b
+                code.extend_from_slice(&[0xc0u8, 0x03, 0x5f, 0xd6]); // ret
+                exec_bytes(&mut st, &code, 0).expect("exec cnt+uaddlv");
+                let got = st.v[0] & 0xffff; // uad...[truncated]
+
+        // (b) add v0.4s, v1.4s, v0.4s : 4x32 lane add. word = 0x4ea08420.
+        let mut st2 = CpuState::new();
+        // v0 (vec 0): low u64 = v[0], high u64 = v[1]
+        st2.v[0] = ((1u64) << 32) | 2; // lane0(low 32)=2, lane1=1
+        st2.v[1] = ((4u64) << 32) | 3; // lane2=3, lane3=4
+        st2.v[2] = ((10u64) << 32) | 20; // v1: lane0=20, lane1=10
+        st2.v[3] = ((40u64) << 32) | 30; // v1: lane2=30, lane3=40
+        let mut code2 = [0x20u8,0x84,0xa0,0x4e].to_vec(); // add v0.4s,v1.4s,v0.4s
+        code2.extend_from_slice(&[0xc0u8,0x03,0x5f,0xd6]); // ret
+        exec_bytes(&mut st2, &code2, 0).expect("exec add v0.4s");
+        let l0 = (st2.v[0] & 0xffffffff) as u32;
+        let l1 = (st2.v[0] >> 32) as u32;
+        let l2 = (st2.v[1] & 0xffffffff) as u32;
+        let l3 = (st2.v[1] >> 32) as u32;
+        assert_eq!([l0, l1, l2, l3], [2+20, 1+10, 3+30, 4+40], "add v0.4s lanes");
+    }
 }
