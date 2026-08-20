@@ -143,6 +143,8 @@ pub enum Inst {
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
+    // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
+    SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -988,6 +990,21 @@ pub fn decode(insn: u32) -> Inst {
             rn: ((insn >> 5) & 0x1f) as u8,
             rm: ((insn >> 16) & 0x1f) as u8,
             op: 0,
+        };
+    }
+
+    // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
+    // Gate (insn & (0x0f00_0000 | 0x0000_7000)): prefix 0x0f/0x2f/0x4f/0x6f SIMD
+    // register form and the SHIFTL marker (bits[14:12]==0b101 -> 0x5000). Shift
+    // = immb (bits[18:16], 0..7); esize from immh ((bits[22:19]), immh==0 => 8B).
+    if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f) && (insn & 0x0000_7000) == 0x0000_5000 {
+        let immh = (insn >> 19) & 0x7;
+        let es2 = if immh == 0 { 3 } else { immh.trailing_zeros() };
+        return Inst::SimdShl {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            esize: (1u8 << es2),          // 1/2/4/8-byte lanes
+            shift: ((insn >> 16) & 0x7) as u8,
         };
     }
 

@@ -1726,6 +1726,29 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())
                 }
+                Inst::SimdShl { rd, rn, esize, shift } => {
+                    // shl Vd.T, Vn.T, #imm : left-shift each lane by shift.
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let lanes = 16 / (esize as i32);  // 16/esize lanes
+                    for i in 0..lanes {
+                        let off = vslot(rn) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_load64(RAX, RBX, off),
+                            4 => buf.mov_load32(RAX, RBX, off),
+                            2 => buf.movzx_word_mem(RAX, RBX, off),
+                            _ => buf.movzx_byte_mem(RAX, RBX, off),
+                        }
+                        buf.shl_ri8(RAX, shift);
+                        let dst = vslot(rd) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_store64(RBX, dst, RAX),
+                            4 => buf.mov_store32(RBX, dst, RAX),
+                            2 => buf.mov_store16(RBX, dst, RAX),
+                            _ => buf.mov_store8(RBX, dst, RAX),
+                        }
+                    }
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
                     // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
                     let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;
