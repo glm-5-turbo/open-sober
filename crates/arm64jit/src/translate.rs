@@ -1436,6 +1436,36 @@ pub fn translate(
             }
             Ok(())
         }
+                Inst::SimdXtn { rd, rn, dst_esize } => {
+                    // xtn Vd.8b/4h/2s, Vn.<wider>: take the LOW `dst_esize` bytes of each
+                    // source element (source element esize = 2*dst_esize) and pack them
+                    // into dest lanes. Q=0 => 64-bit dest result (high lane of Vd zeroed).
+                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let src_esize = 2 * (dst_esize as i32);
+                    let lanes = 8 / (dst_esize as i32);
+                    for i in 0..lanes {
+                        let src_off = (i as i32) * src_esize;
+                        let dst_off = (i as i32) * (dst_esize as i32);
+                        // load the low `dst_esize` bytes of source element into RAX
+                                        // (mov_load32 over-reads past the element for 1/2-byte lanes, but
+                                        //  the extra bytes are masked out before store)
+                                        buf.mov_load32(RAX, RBX, slot(rn) + src_off);
+                                        match dst_esize {
+                                            2 => buf.and_ri64(RAX, 0xffff),
+                                            _ => buf.and_ri64(RAX, 0xff),
+                                        }
+                                        // store into dest lane
+                                        match dst_esize {
+                                            4 => buf.mov_store32(RBX, slot(rd) + dst_off, RAX),
+                                            2 => buf.mov_store16(RBX, slot(rd) + dst_off, RAX),
+                                            _ => buf.mov_store8(RBX, slot(rd) + dst_off, RAX),
+                                        }
+                    }
+                    // zero the high 64 bits of Vd
+                    buf.mov_ri64(RAX, 0);
+                    buf.mov_store64(RBX, slot(rd) + 8, RAX);
+                    Ok(())
+                }
                 // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
                 // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
                                                                                                                                                                                 Inst::SimdBit { rd, rn, rm } => {
