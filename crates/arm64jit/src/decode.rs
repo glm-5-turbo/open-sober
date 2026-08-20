@@ -105,6 +105,8 @@ pub enum Inst {
         preidx: bool,
         size_64: bool, // false => 32-bit W pair
     },
+    // ---- compare-and-branch ----
+    Cbz { rt: u8, imm: i64, nonzero: bool, sf: bool },
     // ---- return (ret x30) ----
     Ret,
     // ---- fallback ----
@@ -134,6 +136,7 @@ impl ShiftKind {
 fn b(insn: u32, lo: u32, hi: u32) -> u32 {
     (insn >> lo) & ((1u32 << (hi - lo + 1)) - 1)
 }
+/// Sign-extend a `bits`-wide value.
 #[inline]
 fn sext(v: u64, bits: u32) -> i64 {
     ((v << (64 - bits)) as i64) >> (64 - bits)
@@ -143,6 +146,7 @@ fn rd(insn: u32) -> u8 {
     (insn & 0x1F) as u8
 }
 #[inline]
+#[allow(dead_code)]
 fn rn(insn: u32) -> u8 {
     b(insn, 5, 9) as u8
 }
@@ -341,14 +345,22 @@ pub fn decode(insn: u32) -> Inst {
             return Inst::Ret;
         }
 
+        // ---- compare-and-branch (CBZ/CBNZ): cbz w=0x34 cbnz=0x35 cbzx=0xb4 cbnzx=0xb5 ----
+        if matches!(insn >> 24, 0x34 | 0x35 | 0xb4 | 0xb5) {
+            let sf = insn >> 31 == 1;
+            let nonzero = (insn >> 24) & 1 == 1;
+            let rt = (insn & 0x1f) as u8;
+            let imm19 = ((insn >> 5) & 0x7ffff) as u64;
+            let imm = sext(imm19, 19) * 4;
+            return Inst::Cbz { rt, imm, nonzero, sf };
+        }
+
         Inst::Unsupported(insn)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn helper() {}
 
     #[test]
     fn bl_opens_space_for_more() {
@@ -377,7 +389,21 @@ mod tests {
     }
 
     #[test]
-    fn ret_decodes() {
+        fn cbz_ground_truth() {
+            // "cbz x2, 0x10" = 0xb4000082 ; "cbnz x3" = 0xb5000083 ; "b" = 0x14000004
+            match decode(0xb4000082) {
+                Inst::Cbz { rt, imm, nonzero, sf } => {
+                    assert_eq!(rt, 2);
+                    assert_eq!(imm, 16); // target 0x10 from pc 0
+                    assert!(!nonzero);
+                    assert!(sf);
+                }
+                other => panic!("expected Cbz, got {:?}", other),
+            }
+            assert_eq!(decode(0x14000004), Inst::B { imm: 16, link: false });
+        }
+        #[test]
+        fn ret_decodes() {
             let i = decode(0xd65f03c0); // RET
             assert_eq!(i, Inst::Ret, "ret x30 should decode to Ret");
         }

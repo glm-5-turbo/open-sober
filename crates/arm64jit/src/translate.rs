@@ -64,8 +64,27 @@ fn apply_shift_const(buf: &mut CodeBuf, x: u8, kind: ShiftKind, amt: u8) {
     }
 }
 
-/// Translate a single instruction (writes to `buf`, no control flow yet).
-pub fn translate(buf: &mut CodeBuf, _pc: u64, inst: Inst) -> Result<(), String> {
+/// A branch/jump fixup: the guest target PC and the byte offset within the
+/// emitted buffer where the rel32 displacement field lives. Resolved once the
+/// buffer is laid out (jit.rs patches it to the host offset of the target).
+#[derive(Debug, Clone, Copy)]
+pub struct Fixup {
+    pub target_pc: u64,
+    pub disp_off: usize,
+    /// encoded x86 jcc condition (0x84=JZ) or 0 for an unconditional jmp,
+    /// `0xff` means unconditional-jump fixup (E9).
+    pub cc: u8,
+}
+
+/// Translate a single instruction (writes to `buf`). `pc` is the guest PC of
+/// this instruction (needed for PC-relative branch targets). Branch
+/// instructions append a `Fixup` to `out` so the JIT can patch their target.
+pub fn translate(
+    buf: &mut CodeBuf,
+    pc: u64,
+    inst: Inst,
+    fixups: &mut Vec<Fixup>,
+) -> Result<(), String> {
     match inst {
         Inst::MoveWide { rd, imm16, hw, opc, .. } => {
             let val = (imm16 as u64) << ((hw as u64) * 16);
@@ -134,6 +153,24 @@ pub fn translate(buf: &mut CodeBuf, _pc: u64, inst: Inst) -> Result<(), String> 
             // epilogue also uses). $[x0] at RBX+0.
             buf.mov_load64(RAX, RBX, 0);
             buf.ret();
+            Ok(())
+        }
+        Inst::B { imm, link } => {
+            if link {
+                return Err("BL not yet implemented".into());
+            }
+            let target = pc.wrapping_add(imm as u64);
+            let disp = buf.jmp_rel32();
+            fixups.push(Fixup { target_pc: target, disp_off: disp, cc: 0xff });
+            Ok(())
+        }
+        Inst::Cbz { rt, imm, nonzero, .. } => {
+            let target = pc.wrapping_add(imm as u64);
+            ldg(buf, RAX, rt as u32); // test rt
+            buf.test_rr64(RAX, RAX);
+            let cc = if nonzero { 0x85 } else { 0x84 }; // jnz / jz
+            let disp = buf.jcc_rel32(cc);
+            fixups.push(Fixup { target_pc: target, disp_off: disp, cc });
             Ok(())
         }
         _ => Err(format!("translate: unhandled {:?}", inst)),

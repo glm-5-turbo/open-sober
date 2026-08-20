@@ -90,23 +90,46 @@ fn map_exec(code: &[u8]) -> *mut u8 {
 
 /// Compile a translation of `insts` (already decoded) for a state at
 /// `state_addr`, return an executable JitBlock whose entry is a C function
-/// `fn(*mut CpuState)`.
+/// `fn(*mut CpuState)`. Guest instructions are assumed to be packed at 4 bytes
+/// each starting at a base of 0; branch targets are resolved to the host
+/// offset of the corresponding instruction's translation.
 pub fn compile(insts: &[Inst], state: *mut CpuState) -> Result<JitBlock, String> {
+    // guest offset of each inst (index*4) -> host buffer offset where its
+    // translation starts (covers the epilogue marker at the end).
+    // prologue emits first; map is relative to buffer start (address 0).
     let mut buf = CodeBuf::new();
+    let mut fixups: Vec<crate::translate::Fixup> = Vec::new();
 
     // prologue: RBX = state
     buf.mov_ri64(RBX, state as usize as u64);
 
-    // translate each instruction
-    for inst in insts {
-        translate::translate(&mut buf, 0, *inst)?;
+    // translate each instruction at its guest offset, recording offsets.
+    // Because guest start pc = 0 and each inst is 4 bytes, guest "address" of
+    // inst[i] = i*4.
+    let mut host_of_guest: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::new();
+    for (i, &inst) in insts.iter().enumerate() {
+        let guest_pc = (i as u64) * 4;
+        host_of_guest.insert(guest_pc, buf.len());
+        translate::translate(&mut buf, guest_pc, inst, &mut fixups)?;
     }
 
-    // epilogue: return x0 in RAX (SysV callee convention), ret
-    buf.mov_load64(RAX, RBX, 0); // state->x[0]
+    // epilogue: return x0 in RAX, ret (fallback for straight-line bodies)
+    buf.mov_load64(RAX, RBX, 0);
     buf.ret();
 
-    let _len = buf.len();
+    // Resolve fixups now (buffer-relative). The rel32 displacement at
+        // fx.disp_off is relative to (disp_off + 4), the address immediately
+        // after the displacement field. target is host offset of the target.
+        for fx in &fixups {
+            let target = *host_of_guest
+                .get(&fx.target_pc)
+                .ok_or_else(|| format!("branch to untranslated pc {:x}", fx.target_pc))?;
+            let disp = target as i64 - (fx.disp_off as i64 + 4);
+            let bytes = (disp as u32).to_le_bytes();
+            buf.bytes[fx.disp_off..fx.disp_off + 4].copy_from_slice(&bytes);
+        }
+
     let code = buf.as_slice().to_vec();
     let ptr = map_exec(&code);
     Ok(JitBlock { ptr, len: code.len() })
@@ -162,7 +185,31 @@ mod tests {
         let mut st = CpuState::new();
         st.x[0] = buf.as_ptr() as u64; // x0 = &buf[0]
         let r = exec_bytes(&mut st, &code, 0).expect("exec");
-        println!("ldr got r={:#x} expected={:#x} st.x0={:#x} x16base={:#x}", r, buf[2], st.get(0), buf.as_ptr() as u64);
-        assert_eq!(r, buf[2]);
+        assert_eq!(r, buf[2], "ldr x0,[x0,#16] should load buf[2]");
+    }
+
+    #[test]
+    fn cbz_controls_branch() {
+        // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
+        //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;
+        //  d2800280 mov x0,#20 ; d65f03c0 ret ;
+        //  d2800140 mov x0,#10 ; d65f03c0 ret
+        let code = [
+            0x81u8, 0x02, 0x80, 0xd2, // mov x1,#20
+            0x60, 0x00, 0x00, 0xb4, // cbz x0, +0x10
+            0x80, 0x02, 0x80, 0xd2, // mov x0,#20
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+            0x40, 0x01, 0x80, 0xd2, // mov x0,#10
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        // x0 == 0 -> cbz taken -> x0 = 10
+        let mut st_take = CpuState::new();
+        let r = exec_bytes(&mut st_take, &code, 0).expect("exec-take");
+        assert_eq!(r, 10, "x0==0 should take cbz branch");
+        // x0 != 0 -> fall through -> x0 = 20
+        let mut st_no = CpuState::new();
+        st_no.x[0] = 99;
+        let r = exec_bytes(&mut st_no, &code, 0).expect("exec-no");
+        assert_eq!(r, 20, "x0!=0 should fall through");
     }
 }
