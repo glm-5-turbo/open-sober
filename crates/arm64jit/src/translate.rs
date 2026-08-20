@@ -1703,6 +1703,29 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())
                 }
+                Inst::SimdSel { rd, rn, rm, op } => {
+                    // bsl/bit/bif bitwise select between three 128-bit vectors.
+                    // BSL: Vd = (Vn & Vd) | (~Vd & Vm).  (op stored as op).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    buf.movdqu_load(RAX, RBX, vslot(rn));
+                    buf.movdqu_load(RCX, RBX, vslot(rm));
+                    buf.movdqu_load(R10, RBX, vslot(rd));
+                    // RAX = Rn & Rd ; R10 = ~Rd & Rm ; OR them
+                    match op {
+                        0 => {
+                            buf.pand(RAX, R10);      // Rn & Rd
+                            buf.pandn(R10, RCX);     // ~Rd & Rm
+                            buf.por(RAX, R10);       // final
+                        }
+                        _ => {
+                            buf.pandn(RAX, RCX);     // ~Vm & Rn
+                            buf.pand(R10, RCX);      // Vd & Vm
+                            buf.por(RAX, R10);
+                        }
+                    }
+                    buf.movdqu_store(RBX, vslot(rd), RAX);
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
                     // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
                     let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;

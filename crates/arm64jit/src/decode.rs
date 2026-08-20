@@ -141,6 +141,8 @@ pub enum Inst {
     SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8 },
     // ---- SIMD vector bitwise AND/ORR/EOR/BIC (128b lanes) ----
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
+    // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
+    SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -976,6 +978,16 @@ pub fn decode(insn: u32) -> Inst {
             rn: ((insn >> 5) & 0x1f) as u8,
             rm: ((insn >> 16) & 0x1f) as u8,
             op,
+        };
+    }
+
+    // ---- SIMD bitwise select BSL only (Vd = (Vd&Vn)|(~Vd&Vm)); bit/bif handled by SimdBit ----
+    if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e) && (insn & 0x0000_1c00) == 0x1c00 && (insn & 0x0040_0000) != 0 {
+        return Inst::SimdSel {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            op: 0,
         };
     }
 
