@@ -1688,6 +1688,21 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdVLog { rd, rn, rm, op } => {
+                    // and/orr/eor/bic Vd.128 = Vn.128 op Vm.128 (Q selects 8/16B,
+                    // translate always on the full 16-byte slot).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    buf.movdqu_load(RAX, RBX, vslot(rn));
+                    buf.movdqu_load(RCX, RDX, vslot(rm));
+                    match op {
+                        0 => buf.pand(RAX, RCX),       // AND
+                        1 => buf.pxor_xmm(RAX, RCX),   // EOR
+                        2 => buf.por(RAX, RCX),        // ORR
+                        _ => buf.pandn(RAX, RCX),      // BIC
+                    }
+                    buf.movdqu_store(RBX, vslot(rd), RAX);
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
                     // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
                     let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;

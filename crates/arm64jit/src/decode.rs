@@ -139,6 +139,8 @@ pub enum Inst {
     SimdXtl { rd: u8, rn: u8, sign: bool, esrc: u8 },
     // ---- SIMD add/sub-wide: uaddw/saddw Vd.T, Vn.T, Vm.T/2 ----
     SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8 },
+    // ---- SIMD vector bitwise AND/ORR/EOR/BIC (128b lanes) ----
+    SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -958,6 +960,22 @@ pub fn decode(insn: u32) -> Inst {
             rm: ((insn >> 16) & 0x1f) as u8,
             sign: ((insn >> 29) & 1) == 0,
             esrc,
+        };
+    }
+
+    // ---- SIMD vector bitwise AND/ORR/BIC (Vd.T = Vn.T op Vm.T) ----
+    // Gate: prefix byte {0x0e,0x4e} (bit29=0 → and/orr/bic, NOT bit/bif/bsl which
+    // are 0x6e-prefixed, and NOT eor which is 0x2e). `&0x0000_1c00==0x1c00`.
+    // op = bit23(orr) | bit22(bic) | else and. Verified vs 16 asm forms.
+    if matches!((insn >> 24) & 0x3f, 0x0e | 0x4e) && (insn & 0x0000_1c00) == 0x1c00 {
+        let op = if (insn >> 23) & 1 == 1 { 2 } // ORR
+        else if (insn >> 22) & 1 == 1 { 3 } // BIC
+        else { 0 };                          // AND
+        return Inst::SimdVLog {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            op,
         };
     }
 
