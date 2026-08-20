@@ -1735,3 +1735,12 @@ v0.16b, #8` (0x6e004001) — SIMD byte-shift/immediate, NEXT ON AGENDA.
  3. Then `svc` real AArch64->x86_64 syscall table (mmap/futex/mprotect; host x86 numbers
     differ: mmap 222->9, futex 95->202, mprotect 226->10) — the big-ticket remaining item
     before real Roblox boot.
+
+### ✅ VERIFIED state (2026-08-20) — hand off to next agent as-is
+- HEAD: `c3f7f92` (Session 30b), tree clean, 38 tests pass.
+- Fresh ad-hoc /tmp/hermes-verify-s30.sh: 17/17 PASS, temp script removed, tree clean.
+- Run line: `timeout 20 ./target/debug/examples/elfjit ~/.cache/open-sober/libs/libroblox.so 0x1c34480`
+- Boot is STOPPED at `0x105dfe260` = `ext v1.16b, v0.16b, v0.16b, #8` (0x6e004001), the next wall.
+- Real Roblox STILL does NOT boot. Remaining path: ext v.16B -> lane->GPR -> svc syscall table.
+- Edit caveat: patches to decode.rs/translate.rs surface massive pre-existing rustfmt
+  churn in the lint output — edits are correct; build/tests/boot are the real gate.
