@@ -302,6 +302,9 @@ static mutex_fn g_real_unlock = NULL;
 static mutex_init_fn g_real_mutex_init = NULL;
 static cond_wait_fn g_real_cond_wait = NULL;
 static cond_timedwait_fn g_real_cond_timedwait = NULL;
+/* Direct handle to the real guest glibc, opened early; used to resolve true
+ * glibc pthread functions instead of the shim's shadowed LIBC aliases. */
+static void *g_real_libc = NULL;
 
 #define BIONIC_PTHREAD_MUTEX_ROBUST_NORMAL  0x10
 #define BIONIC_PTHREAD_MUTEX_ROBUST_RECURSIVE 0x11
@@ -359,6 +362,138 @@ __attribute__((noinline))
 static int wrap_cond_timedwait(void *cond, void *mutex, const void *abstime) {
     sanitize_mutex(mutex);
     return g_real_cond_timedwait(cond, mutex, abstime);
+}
+
+// Wrap prctl so the allocator's THP/no-new-privs calls succeed. Roblox's
+// memory allocator calls prctl(41=PR_SET_THP_DISABLE) and prctl(42=PR_GET...)
+// during JNI_OnLoad; QEMU user-mode returns EINVAL, which the allocator treats
+// as fatal and aborts. We return success for those so init proceeds.
+typedef long (*prctl_fn)(int, unsigned long, unsigned long, unsigned long, unsigned long);
+static prctl_fn g_real_prctl = NULL;
+
+#define PR_SET_THP_DISABLE_41 41
+#define PR_GET_THP_DISABLE_42 42
+
+__attribute__((noinline))
+static int wrap_prctl(int option, unsigned long a2, unsigned long a3,
+                      unsigned long a4, unsigned long a5) {
+    /* These are hints the allocator uses to tune THP; QEMU run-time lacks the
+     * kernel support, so treat them as success rather than aborting. */
+    if (option == PR_SET_THP_DISABLE_41) return 0;             /* enable (disable THP) = ok */
+    if (option == PR_GET_THP_DISABLE_42) return 0;             /* report THP disabled = ok */
+    if (g_real_prctl) return g_real_prctl(option, a2, a3, a4, a5);
+    return 0;
+}
+
+// ============================================================
+// Forge favourable procfs values for Roblox's memory allocator.
+// It reads /proc/sys/vm/overcommit_memory and /proc/meminfo and aborts if the
+// host appears over-committed (Committed_AS > CommitLimit). We intercept the
+// read of /proc/sys/vm/overcommit_memory to report "1" (always overcommit),
+// and /proc/meminfo to report plenty of MemAvailable.
+// ============================================================
+typedef int   (*open_fn)(const char*, int, ...);
+typedef int   (*openat_fn)(int, const char*, int, ...);
+typedef ssize_t (*read_fn)(int, void*, size_t);
+typedef ssize_t (*pread_fn)(int, void*, size_t, off_t);
+static open_fn  g_real_open  = NULL;
+static openat_fn g_real_openat = NULL;
+static read_fn  g_real_read  = NULL;
+static pread_fn g_real_pread = NULL;
+
+static int g_ovc_fd = -1;   /* fd of forged overcommit_memory */
+static int g_mem_fd = -1;   /* fd of forged meminfo          */
+
+// Forge sysinfo so Roblox's allocator sees a huge amount of free memory. The
+// allocator reads sysinfo + overcommit_memory and aborts if the host appears
+// too memory-constrained. We report 256 GB free / 512 GB total.
+#include <sys/sysinfo.h>
+typedef int (*sysinfo_fn)(struct sysinfo*);
+static sysinfo_fn g_real_sysinfo = NULL;
+
+__attribute__((noinline))
+static int wrap_sysinfo(struct sysinfo *si) {
+    int r = g_real_sysinfo ? g_real_sysinfo(si) : -1;
+    if (r == 0 && si) {
+        si->freeram   = 256ULL * 1024ULL * 1024ULL * 1024ULL / si->mem_unit; /* 256 GiB free */
+        si->totalram  = 512ULL * 1024ULL * 1024ULL * 1024ULL / si->mem_unit; /* 512 GiB tot */
+        si->sharedram = 0;
+        si->freeswap  = 128ULL * 1024ULL * 1024ULL * 1024ULL; /* 128 GiB swap */
+        si->totalswap = 128ULL * 1024ULL * 1024ULL * 1024ULL;
+        si->bufferram = 0;
+        jlog("[jni_shim] sysinfo forge: freeram=%lu unit=%u\n",
+             (unsigned long)si->freeram, si->mem_unit);
+    }
+    return r;
+}
+
+__attribute__((noinline))
+static int wrap_open(const char *path, int flags, ...) {
+    va_list ap; va_start(ap, flags); int mode = va_arg(ap, int); va_end(ap);
+    int (*real)(const char*, int, ...) =
+        (int(*)(const char*,int,...))g_real_open;
+    int fd = real(path, flags, mode);
+    if (fd >= 0 && path) {
+        if (strstr(path, "overcommit_memory")) g_ovc_fd = fd;
+        else if (strstr(path, "vm/meminfo") || strstr(path, "/meminfo")) g_mem_fd = fd;
+    }
+    return fd;
+}
+
+__attribute__((noinline))
+static int wrap_openat(int dirfd, const char *path, int flags, ...) {
+    (void)dirfd;
+    va_list ap; va_start(ap, flags); int mode = va_arg(ap, int); va_end(ap);
+    int (*real)(int, const char*, int, ...) = g_real_openat;
+    int fd = real(dirfd, path, flags, mode);
+    if (fd >= 0 && path) {
+        if (strstr(path, "overcommit_memory")) g_ovc_fd = fd;
+        else if (strstr(path, "vm/meminfo") || strstr(path, "/meminfo")) g_mem_fd = fd;
+    }
+    return fd;
+}
+
+__attribute__((noinline))
+static ssize_t wrap_read(int fd, void *buf, size_t count) {
+    if (fd == g_ovc_fd) {
+        /* report overcommit_memory; the allocator uses this to decide how far
+         * it can over-commit its arena. The real host is "0" (heuristic); try
+         * reporting "2" (never overcommit) below so it doesn't attempt a huge
+         * always-overcommit reserve that then trips an internal sanity check.
+         * REVIEW: try "2\n" then "0\n" then "1\n" to find which the allocator
+         * accepts without aborting. */
+        const char *r = "2\n";
+        size_t n = strlen(r); if (n > count) n = count;
+        memcpy(buf, r, n); return (ssize_t)n;
+    }
+    if (fd == g_mem_fd && buf && count >= 128) {
+        /* fake meminfo: plenty of available memory */
+        const char *r = "MemTotal:        16000000 kB\nMemFree:         15000000 kB\nMemAvailable:    14900000 kB\n";
+        size_t n = strlen(r); if (n > count) n = count;
+        memcpy(buf, r, n); return (ssize_t)n;
+    }
+    return g_real_read(fd, buf, count);
+}
+
+// Surface the real abort reason. Roblox calls android_set_abort_message(msg)
+// just before abort(); we print that msg to stderr via jlog so the fatal
+// diagnostics become visible. __android_log_* print to the (absent) Android
+// log; we forward them to stderr too.
+__attribute__((noinline))
+static void wrap_android_set_abort_message(const char *msg) {
+    if (msg && *msg) jlog("[android-abort] %s\n", msg);
+    /* don't call the real bionic one (would crash); leaving it out is fine */
+}
+__attribute__((noinline))
+static int wrap_android_log_print(int prio, const char *tag, const char *fmt, ...) {
+    (void)prio;
+    char buf[512]; char *p = buf;
+    if (tag) { int n = snprintf(p, sizeof(buf), "[%s] ", tag); p += (n<0?0:n); }
+    va_list ap; va_start(ap, fmt); vsnprintf(p, sizeof(buf)-(size_t)(p-buf)-1, fmt, ap); va_end(ap);
+    /* truncate trailing newline going to jlog (jlog adds one) */
+    size_t L = strlen(buf); while (L && (buf[L-1]=='\n')) buf[--L]=0;
+    jlog("%s\n", buf);
+    return 1;
 }
 
 // ============== SIGSEGV handler ==============
@@ -565,40 +700,98 @@ static void disable_mcount_profiling(void) {
 // Patching condvar PLT GOT entries to our shim
 // Must happen AFTER cond_shim is allocated
 static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
-    uintptr_t cond_wait_got = 0, cond_timedwait_got = 0;
+    uintptr_t cond_wait_got = 0, cond_timedwait_got = 0, mutex_lock_got = 0;
 
     // Version-agnostic path: resolve the exact GOT slot for each imported
     // symbol from the ELF relocations. Works for any Roblox build.
     if (g_robo.have) {
         cond_wait_got       = robo_got(&g_robo.e, base, "pthread_cond_wait");
         cond_timedwait_got  = robo_got(&g_robo.e, base, "pthread_cond_timedwait");
+        mutex_lock_got      = robo_got(&g_robo.e, base, "pthread_mutex_lock");
     }
 
-    // Fallback to the known-good offsets for the reference build.
-    if (!cond_wait_got || !cond_timedwait_got) {
-        uintptr_t got_page = base + PLT_GOT_ADRP_PAGE;
-        cond_wait_got       = got_page + 0x628;
-        cond_timedwait_got  = got_page + 0x630;
-        jlog( "[jni_shim] condvar GOT fallback (hardcoded)\n");
+    // Verified (readelf -r --use-dynamic) on the INSTALLED 2.726.1142 CONVERTED lib:
+    //   pthread_mutex_lock      JUMP_SLOT @ 0x631ac18
+    //   pthread_cond_wait       JUMP_SLOT @ 0x631ac20
+    //   pthread_cond_timedwait  JUMP_SLOT @ 0x631ae70
+    if (!cond_wait_got)       cond_wait_got      = base + 0x631ac20;
+    if (!cond_timedwait_got)  cond_timedwait_got = base + 0x631ae70;
+    if (!mutex_lock_got)      mutex_lock_got     = base + 0x631ac18;
+
+    // Make the GOT page(s) writable
+    uintptr_t got_base = (cond_wait_got < mutex_lock_got) ? cond_wait_got : mutex_lock_got;
+    got_base &= ~0xfffULL;
+    mprotect((void*)got_base, 0x4000, PROT_READ|PROT_WRITE);
+
+    // Install REAL guest glibc functions into the PLT GOT slots. The prior
+    // bogus value (a shim-returned address for pthread_mutex_lock) made libro's
+    // `br x17` jump into rodata/anonymous memory = the busy-spin. Writing the
+    // true glibc fn addresses here fixes the spin AND avoids the wrapper-blr
+    // TCG crash (we write raw glibc guest addresses, no trampolines).
+    *(volatile uintptr_t*)mutex_lock_got      = (uintptr_t)g_real_lock;
+    *(volatile uintptr_t*)cond_wait_got       = (uintptr_t)g_real_cond_wait;
+    *(volatile uintptr_t*)cond_timedwait_got  = (uintptr_t)g_real_cond_timedwait;
+
+    jlog( "[jni_shim] patched PLT GOT mutex=0x%lx cond=0x%lx,0x%lx -> lock=%p condwait=%p condtw=%p\n",
+            (unsigned long)mutex_lock_got, (unsigned long)cond_wait_got,
+            (unsigned long)cond_timedwait_got, (void*)g_real_lock,
+            (void*)g_real_cond_wait, (void*)g_real_cond_timedwait);
+
+    jlog( "[jni_shim] mutex GOT verify: %p\n",
+            (void*)*(volatile uintptr_t*)mutex_lock_got);
+}
+
+// ============================================================
+// Pre-resolve and rewrite EVERY PLT JUMP_SLOT GOT entry to the real glibc
+// function address. Under QEMU user-mode, glibc's lazy binding leaves PLT GOT
+// slots pointing at non-code (rodata/anon), so libro's PLT `br x17` jumps into
+// garbage -> the observed busy-spin. Fix it wholesale.
+// ============================================================
+static void patch_all_jumpslots(uint64_t base) {
+    if (!g_robo.have) { jlog("[jni_shim] all_jumpslots skipped (no ELF)\n"); return; }
+    const RoboELF *e = &g_robo.e;
+    int n = (int)e->pltrel_num, done = 0, nres = 0;
+    if (n>0 && e->pltrel) {
+        uintptr_t first = (uintptr_t)(base + e->pltrel[0].r_offset);
+        mprotect((void*)(first & ~0xfffULL), 0x10000, PROT_READ|PROT_WRITE);
     }
-
-    // Make the page(s) writable
-    uintptr_t got_base = cond_wait_got & ~0xfffULL;
-    mprotect((void*)got_base, 0x2000, PROT_READ|PROT_WRITE);
-
-    // Write our condvar shim into the GOT entries
-    *(volatile uintptr_t*)cond_wait_got = (uintptr_t)cond_shim;
-    *(volatile uintptr_t*)cond_timedwait_got = (uintptr_t)cond_shim;
-
-    jlog( "[jni_shim] patched PLT GOT condvar at 0x%lx, 0x%lx -> shim=%p\n",
-            (unsigned long)cond_wait_got, (unsigned long)cond_timedwait_got, cond_shim);
-
-    // Verify the patch
-    {
-        uintptr_t readback = *(volatile uintptr_t*)cond_wait_got;
-        jlog( "[jni_shim] cond_wait GOT verify: %p (expect %p)\n",
-                (void*)readback, cond_shim);
+    for (int i = 0; i < n && e->pltrel && e->dynsym && e->dynstr; i++) {
+        Elf64_Word sym = ELF64_R_SYM(e->pltrel[i].r_info);
+        if (sym == 0) continue;
+        const Elf64_Sym *s = &e->dynsym[sym];
+        if (!s || s->st_name == 0) continue;
+        const char *nm = e->dynstr + s->st_name;
+        char buf[80]; int len = 0;
+        for (; len < 79 && nm[len] && nm[len] != '@'; len++) buf[len] = nm[len];
+        buf[len] = 0;
+        if (len == 0) continue;
+        /* keep cond_wait/timedwait for patch_condvar_plt_got's shim; patch all else */
+        if (!strcmp(buf,"pthread_cond_wait") || !strcmp(buf,"pthread_cond_timedwait")) continue;
+        void *fn = NULL;
+        if (!strcmp(buf,"prctl")) {                 /* allocator THP probe -> succeed */
+            fn = (void*)wrap_prctl;
+        } else if (!strcmp(buf,"open") || !strcmp(buf,"open64")) {   /* forge procfs */
+            fn = (void*)wrap_open;
+        } else if (!strcmp(buf,"openat") || !strcmp(buf,"openat64")) {   /* forge procfs */
+            fn = (void*)wrap_openat;
+        } else if (!strcmp(buf,"read")) {   /* forge procfs */
+                   fn = (void*)wrap_read;
+               } else if (!strcmp(buf,"sysinfo")) {   /* allocator memory probe -> big */
+                           fn = (void*)wrap_sysinfo;
+                       } else if (!strcmp(buf,"android_set_abort_message")) {   /* reveal abort reason */
+                           fn = (void*)wrap_android_set_abort_message;
+                       } else if (!strcmp(buf,"__android_log_print")) {   /* reveal fatal logs */
+                           fn = (void*)wrap_android_log_print;
+                       } else {
+            fn = g_real_libc ? dlsym(g_real_libc, buf) : NULL;
+            if (!fn) fn = dlsym(RTLD_DEFAULT, buf);
+        }
+        if (!fn) { jlog("[jni_shim] GOT unresolvable: %s\n", buf); nres++; continue; }
+        uintptr_t got = base + e->pltrel[i].r_offset;
+        *(volatile uintptr_t*)got = (uintptr_t)fn;
+        done++;
     }
+    jlog("[jni_shim] patched %d PLT GOT slots (%d unresolved, of %d total)\n", done, nres, n);
 }
 
 // ============== JNI_OnLoad progressive patches ==============
@@ -688,6 +881,7 @@ static void patch_jni_onload_phase1(uintptr_t base) {
 static void early_repair_shim(void) {
     void *shim = dlopen("libbionic_shim.so", RTLD_LAZY | RTLD_GLOBAL);
     void *glcs = dlopen("/system/lib64/libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+    g_real_libc = glcs;
     if (!shim) return;
     /* 1) Point the shim's FILE/environ data slots at the real glibc objects. */
     {
@@ -717,7 +911,7 @@ static void early_repair_shim(void) {
 
 int main(int argc, char** argv) {
     const char* lib_path = getenv("ROBLOX_LIB");
-    if (!lib_path) lib_path = "libroblox.so";
+    if (!lib_path) lib_path = "/system/lib64/libroblox.so";
 
     /* Rip apart the bionic shim's I/O shadow as the VERY FIRST thing: repoint
      * its stderr/stdout/stdin data slots and its write/fprintf/open/etc.
@@ -1756,11 +1950,17 @@ int main(int argc, char** argv) {
             // The wrappers are now __attribute__((noinline)) to prevent
             // TCG cross-TB linking, and we call the glibc functions via
             // saved function pointers (not through the trampoline table).
-            g_real_lock = (mutex_fn)dlsym(RTLD_DEFAULT, "pthread_mutex_lock");
-            g_real_unlock = (mutex_fn)dlsym(RTLD_DEFAULT, "pthread_mutex_unlock");
-            g_real_mutex_init = (mutex_init_fn)dlsym(RTLD_DEFAULT, "pthread_mutex_init");
-            g_real_cond_wait = (cond_wait_fn)dlsym(RTLD_DEFAULT, "pthread_cond_wait");
-            g_real_cond_timedwait = (cond_timedwait_fn)dlsym(RTLD_DEFAULT, "pthread_cond_timedwait");
+            g_real_lock = (mutex_fn)(g_real_libc ? dlsym(g_real_libc, "pthread_mutex_lock") : dlsym(RTLD_DEFAULT, "pthread_mutex_lock"));
+            g_real_unlock = (mutex_fn)(g_real_libc ? dlsym(g_real_libc, "pthread_mutex_unlock") : dlsym(RTLD_DEFAULT, "pthread_mutex_unlock"));
+            g_real_mutex_init = (mutex_init_fn)(g_real_libc ? dlsym(g_real_libc, "pthread_mutex_init") : dlsym(RTLD_DEFAULT, "pthread_mutex_init"));
+            g_real_cond_wait = (cond_wait_fn)(g_real_libc ? dlsym(g_real_libc, "pthread_cond_wait") : dlsym(RTLD_DEFAULT, "pthread_cond_wait"));
+            g_real_cond_timedwait = (cond_timedwait_fn)(g_real_libc ? dlsym(g_real_libc, "pthread_cond_timedwait") : dlsym(RTLD_DEFAULT, "pthread_cond_timedwait"));
+            g_real_prctl = (prctl_fn)(g_real_libc ? dlsym(g_real_libc, "prctl") : dlsym(RTLD_DEFAULT, "prctl"));
+            g_real_open  = (open_fn)(g_real_libc ? dlsym(g_real_libc, "open")  : dlsym(RTLD_DEFAULT, "open"));
+            g_real_openat = (openat_fn)(g_real_libc ? dlsym(g_real_libc, "openat")  : dlsym(RTLD_DEFAULT, "openat"));
+            g_real_read  = (read_fn)(g_real_libc ? dlsym(g_real_libc, "read")  : dlsym(RTLD_DEFAULT, "read"));
+            g_real_pread = (pread_fn)(g_real_libc ? dlsym(g_real_libc, "pread")  : dlsym(RTLD_DEFAULT, "pread"));
+            g_real_sysinfo = (sysinfo_fn)(g_real_libc ? dlsym(g_real_libc, "sysinfo")  : dlsym(RTLD_DEFAULT, "sysinfo"));
             // Revert to direct glibc calls — the wrapper approach causes QEMU
             // JIT crash (SIGSEGV) because the wrapper's blr to a host-side
             // function pointer triggers a TCG goto_tb issue.
@@ -1804,6 +2004,12 @@ int main(int argc, char** argv) {
     // this patch, it waits forever on a condition variable that no one signals.
     if (g_libroblox_base && g_cond_shim != MAP_FAILED) {
         patch_condvar_plt_got(g_libroblox_base, g_cond_shim);
+    }
+
+    // Pre-resolve ALL remaining PLT JUMP_SLOT GOT slots to real functions so
+    // libro's PLT `br x17` never jumps into non-code (the busy-spin cause).
+    if (g_libroblox_base && g_robo.have) {
+        patch_all_jumpslots(g_libroblox_base);
     }
 
 
