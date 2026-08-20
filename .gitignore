@@ -12,3 +12,6 @@ stub_gen.sh
 # Claude Code worktrees
 .claude/worktrees/
 *.core
+
+# QEMU build artifacts (reproducible via qemu/build.sh)
+qemu/out/
