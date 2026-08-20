@@ -849,3 +849,51 @@ B. Or patch 0x2692ce8 (the cbz-abort on the TLS-alloc NULL) to fall back to
    real glibc malloc so the book gets a block and can proceed through later
    ctors -- a stepping-stone, not a final fix.
 C. After JNI_OnLoad returns (registers methods), GUI on :0 + vision phase.
+## Session 17 — direction reset: stable loaded state via Session-9 full bypass (committed)
+
+### Direction confirmed with user
+End goal is the OPEN-SOBER CUSTOM RUNTIME (sober-style native run: QEMU is the
+ARM64/x86-64 bridge, not a whole-VM product). Re-adopted the Session-9 loaded
+-state approach: JNI_OnLoad returns 0x10006 immediately so the binary bootstraps
+under the bridge and we can then raise/observe a window on :0. Fighting Roblox's
+internal MemoryPool inside progressive init is parked (documented below).
+
+### Why the old full bypass was silently broken
+- There are TWO entry shapes: the EXPORTED JNI_OnLoad at base+0x1f0db20 (what
+  dlsym/lib host calls) and 0x1f64e58 (an internal init at a shifted offset).
+  The prior bypass patched 0x1f64e58 -> real JNI_OnLoad still ran the
+  MemoryPool-reaching init and aborted.
+- Fix: bypass base+0x1f0db20 (entry = mov w0,#6; movk w0,#1,lsl#16; ret).
+
+### Disabled for bypass path
+- run_libroblox_init_array(...) call is commented out. Its ctor[3] (MemoryPool
+  TLS alloc at 0x1c34480 -> 0x5d9ce10 -> body 0x2678068) aborts on the internal
+  pool; with abort suppressed it spins and blocks. Skipping ctors gives the
+  clean baseline. The init_array + RELATIVE machinery is kept in the tree
+  (real-engine-init path) but not run by default.
+
+### VERIFIED (fresh run)
+  FULL BYPASS: JNI_OnLoad@<base+0x1f0db20> returns 0x10006
+  entering JNI_OnLoad...
+  JNI_OnLoad call at <base+0x1f0db20> ...
+  JNI_OnLoad -> 0x10006
+  Entering sleep loop
+No abort, no fault; process stable until watchdog timeout (RUN EXIT 14).
+
+### MemoryPool blocker (parked, for real engine init later)
+- libroblox imports NO allocator (only free, munmap); its MemoryPool is fully
+  self-contained. Big-allocator 0x1c3635c returns NULL regardless of forged
+  614MB vs 256GB sysinfo, with zero mmap after JNI_OnLoad. One-time init body
+  0x2678068 aborts on its own first TLS alloc. Fork/banc of memory, ctors,
+  malloc fallback all unavailable. To boot the real engine, must resolve the
+  TLS block free-list seed (0x6308dc0 struct) or run fuller Android/JAVA app
+  bootstrap.
+
+### Next (ordered, per user direction)
+A. NOW: run jni_shim with DISPLAY=:0, keep sleep-loop stable, and use
+   computer vision on the X11/EGL surface to observe any window/black frame,
+   or confirm none yet. Check whether book opens a GL context or needs the
+   engine run loop.
+B. Then: re-enable init_array/progressive init in stages ONCE the pool seed is
+   understood, so a real window can render.
+C. Multiple-version compatibility after a working baseline.
