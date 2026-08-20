@@ -941,3 +941,27 @@ QEMU). Options: (a) trace the exact spin site (heartbeat) and force/fake the
 awaited flag; (b) pre-seed the pool's real arena (static default TLS block free
 -list) so the block path never blocks. Much more tractable than the previous
 NULL/OOM abort.
+## Session 17c — blocker refinement (committed 381d088)
+
+Current state: the MemoryPool empty-pool abort (fixed Session 17b by a thunk that
+routes libro's small-allocator empty-list to real glibc malloc) is gone. ctor[3]
+(book 0x1c34480, MemoryPool one-time init) now runs, performs its allocation
+syscalls (sysinfo/overcommit/getrandom), then spins in pure user-space code with
+NO further syscalls — a single-threaded wait for a condition/flag that only a
+second thread would set (QEMU user-mode runs one vCPU).
+
+Attempts this turn:
+- SIGALRM heartbeat sampler from the host-signal route: QEMU user-mode does not
+  deliver SIGALRM into the guest handler; 0 samples (kept, harmless).
+- pthread_cond_timedwait slot return now ETIMEDOUT (110) instead of 0 (kept).
+- A dedicated bump-allocator thunk target (host shim function) caused SIGILL —
+  calling a host/ELF function from the guest through the ARM thunk crosses a
+  translation context QEMU cannot handle. Reverted to the dlsym'd glibc malloc
+  thunk, which is safe and stable.
+
+Stable, committed, no crash: ctor[0..2] run, allocation succeeds, ctor[3] waits/
+spins, no abort/SIGILL/segv.
+
+Next: identify the awaited flag in ctor body 0x2678068 and pre-set it (Session
+11-style guard fix); or pre-warm the static TLS block free-list; or spawn an
+emulated second thread.
