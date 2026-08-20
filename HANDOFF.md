@@ -700,3 +700,17 @@ A. **Identify the busy-spin target.** qemu `-d in_asm` shows a GOT-indirect
 - `setitimer`/itimers ARM OK under qemu but the SIGALRM is NOT delivered to the
   guest handler (`-strace` shows no heartbeat `write`). Don't rely on it for
   hang PC; use `-d exec`/`-d in_asm` tracing instead.
+
+## Follow-up session (same day) — spin forensics + NX experiment (committed)
+- qemu `-d exec`: JNI_OnLoad spins on a 2-address loop in the ~`base+0x764c000->0x7704000`
+  band, which was HEAD-first assumed to be the appended RELA PT_LOAD. **Tested it**:
+  jni_shim `mprotect(PROT_NONE)` on the RELA PT_LOAD (base+0x6988000, 0xc34ea8)
+  SUCCEEDED (rc=0) with NO behavior change — so the spin is **NOT** in the RELA
+  data. The base from `dladdr`/`dlinfo` appears ~2MB off for high vaddrs, so
+  offset attribution is unreliable; the executions band may be real libro code.
+- Net: shutdown; commit `0e3c53a`. Real fix next session = capture the spin's
+  **call stack** (needs a working qemu-gdbstub interrupt — gdb `interrupt` over
+  the stub didn't take; try `gdb` `set mi-async on` BEFORE `continue&` then
+  `interrupt`, or a raw `\x03` on the socket; the `alarm_sa_handler` timer does
+  NOT fire under qemu). Then implement the missing guest-stub/trampoline for
+  whatever function Roblox dispatches.
