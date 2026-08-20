@@ -1411,6 +1411,18 @@ pub fn decode(insn: u32) -> Inst {
                         value_bits,
                     };
                 }
+                // ---- FMOV scalar immediate single (fmov Sd, #imm) ----
+                if (insn & 0xffe0_0000) == 0x1e20_0000 && (insn & 0x1000) != 0 {
+                    let rd = (insn & 0x1f) as u8;
+                    let imm8 = ((insn >> 13) & 0xff) as u32;
+                    let f64bits = decode_fmov_imm(imm8, true);
+                    let v = f64::from_bits(f64bits) as f32;
+                    return Inst::FmovImm {
+                        rd,
+                        f64: false,
+                        value_bits: v.to_bits() as u64,
+                    };
+                }
                 // ---- scalar FP register-to-register move: fmov Dd,Dn / fmov Sd,Sn ----
                     // Double form = 0x1e60_4000, single form = 0x1e20_4000 (sz bit22 selects).
                     if (insn & 0xffff_f000) == 0x1e60_4000 || (insn & 0xffff_f000) == 0x1e20_4000 {
