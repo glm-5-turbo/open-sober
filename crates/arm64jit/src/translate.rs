@@ -931,6 +931,18 @@ pub fn translate(
             }
             if mode == 2 {
                 buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
+            } else if mode == 3 || mode == 4 {
+                // fcvtpu/ps (+inf) and fcvtmu/ms (-inf): round the double to an
+                // integer-valued double first (roundsd 0x01=floor, 0x02=ceil), then
+                // trunc-convert. Matches qemu ground truth (fcvtpu: 1.5->2, 0.5->1,
+                // negative/NaN->0, +inf->0xFFFF... via x86 cvttsd2si saturation).
+                buf.roundsd(0, 0, if mode == 3 { 0x02 } else { 0x01 });
+                buf.cvttsd2si(RAX, 0);
+                if unsigned {
+                    buf.xor_rr64(RCX, RCX);
+                    buf.test_rr64(RAX, RAX);
+                    buf.cmov_rr64(0x48, RAX, RCX); // cmovs RAX, RCX (neg -> 0)
+                }
             } else if unsigned {
                 // fcvtzu: truncate toward zero (fcvtzs) but to an UNSIGNED value.
                 // `cvttsd2si` is exact for d in [0,2^63); negatives are clamped to 0
