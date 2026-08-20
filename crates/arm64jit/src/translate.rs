@@ -184,11 +184,26 @@ pub fn translate(
         }
         Inst::B { imm, link } => {
             if link {
-                return Err("BL not yet implemented".into());
+                // BL: save guest LR = pc+4, then host `call` to the target block.
+                // LR is stored so any guest read of x30 stays correct.
+                let ra = pc.wrapping_add(4);
+                buf.mov_ri64(RAX, ra);
+                stg(buf, 30, RAX);
+                let disp = buf.call_rel32();
+                fixups.push(Fixup {
+                    target_pc: pc.wrapping_add(imm as u64),
+                    disp_off: disp,
+                    cc: 0xfe, // call fixup
+                });
+            } else {
+                let target = pc.wrapping_add(imm as u64);
+                let disp = buf.jmp_rel32();
+                fixups.push(Fixup {
+                    target_pc: target,
+                    disp_off: disp,
+                    cc: 0xff,
+                });
             }
-            let target = pc.wrapping_add(imm as u64);
-            let disp = buf.jmp_rel32();
-            fixups.push(Fixup { target_pc: target, disp_off: disp, cc: 0xff });
             Ok(())
         }
         Inst::Cbz { rt, imm, nonzero, .. } => {

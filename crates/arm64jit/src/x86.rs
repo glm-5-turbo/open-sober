@@ -326,6 +326,11 @@ impl CodeBuf {
         self.b(0xFF);
         self.b(modrm(3, 2, rd & 7)); // call r/m64
     }
+    /// call rel32; returns patch offset for the displacement (like jmp_rel32)
+    pub fn call_rel32(&mut self) -> usize {
+        self.b(0xE8);
+        self.patch_here()
+    }
     /// ret
     pub fn ret(&mut self) {
         self.b(0xC3);

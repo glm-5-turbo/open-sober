@@ -153,6 +153,92 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
     Ok(r)
 }
 
+/// Translate every instruction of the guest image `image` (a full program
+/// whose AArch64 bytes start at guest address `base`) into a single host
+/// function, following branches and BL calls so any reachable code is
+/// present. `entry` is the guest address to start from. Instructions reached
+/// only via branch/call (not just linear fallthrough) are included.
+pub fn compile_image(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Result<JitBlock, String> {
+    // Protect against nonsense sizes.
+    if entry < base || entry - base >= image.len() as u64 {
+        return Err(format!("entry {:x} outside image [{:x}, {:x})", entry, base, base + image.len() as u64));
+    }
+
+    let mut buf = CodeBuf::new();
+    let mut fixups: Vec<crate::translate::Fixup> = Vec::new();
+    buf.mov_ri64(RBX, state as usize as u64);
+
+    // Walk the image: emit fall-through linearly, following branch/call targets.
+    let mut host_of_guest: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut frontier: Vec<u64> = vec![entry];
+    // Invariant: every addresses in frontier is a candidate block start.
+    while let Some(addr) = frontier.pop() {
+        if host_of_guest.contains_key(&addr) {
+            continue; // already emitted
+        }
+        let mut cur = addr;
+        loop {
+            if cur < base || cur - base + 4 > image.len() as u64 {
+                break; // out of bounds; translate.rs will error if truly needed
+            }
+            if host_of_guest.contains_key(&cur) {
+                break; // reached already-emitted code (loop back-edge)
+            }
+            let off = (cur - base) as usize;
+            let word = u32::from_le_bytes([image[off], image[off + 1], image[off + 2], image[off + 3]]);
+            let inst = decode::decode(word);
+            // record a host label for this guest pc *before* constraining the
+            // shape of the block (branches patch to it).
+            host_of_guest.insert(cur, buf.len());
+            match &inst {
+                Inst::B { imm, link } => {
+                    let target = cur.wrapping_add(*imm as u64);
+                    if *link {
+                        frontier.push(cur /* continue after call (fall-through) */ + 4);
+                        frontier.push(target);
+                    } else {
+                        frontier.push(target);
+                    }
+                }
+                Inst::BCond { imm, .. } | Inst::Cbz { imm, .. } => {
+                    let target = cur.wrapping_add(*imm as u64);
+                    frontier.push(target); // conditional: also fall through below
+                }
+                Inst::Ret | Inst::Unsupported(_) => {
+                    // terminal; do not continue fall-through
+                }
+                _ => {
+                    // default: continue linearly
+                }
+            }
+            translate::translate(&mut buf, cur, inst, &mut fixups)?;
+            // Ret is terminal: stop this block.
+            if matches!(inst, Inst::Ret | Inst::Unsupported(_)) {
+                break;
+            }
+            cur += 4;
+        }
+    }
+
+    // epilogue: return x0, ret (only reached if entry falls off the end)
+    buf.mov_load64(RAX, RBX, 0);
+    buf.ret();
+
+    // Resolve fixups (buffer-relative).
+    for fx in &fixups {
+        let target = *host_of_guest
+            .get(&fx.target_pc)
+            .ok_or_else(|| format!("branch/call to untranslated pc {:x}", fx.target_pc))?;
+        let disp = target as i64 - (fx.disp_off as i64 + 4);
+        let bytes = (disp as u32).to_le_bytes();
+        buf.bytes[fx.disp_off..fx.disp_off + 4].copy_from_slice(&bytes);
+    }
+
+    let code = buf.as_slice().to_vec();
+    let ptr = map_exec(&code);
+    Ok(JitBlock { ptr, len: code.len() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,7 +300,7 @@ mod tests {
         }
 
         #[test]
-        fn cmp_ble_branch() {
+            fn cmp_ble_branch() {
             // Real aarch64 from objdump (g): return w0>3 ? 1 : 0
             // 71000c1f cmp w0,#3 ; 5400006d b.le 0x10 ; 52800020 mov w0,#1 ;
             //  d65f03c0 ret ; 52800000 mov w0,#0 ; d65f03c0 ret
@@ -236,5 +322,25 @@ mod tests {
             st_gt.x[0] = 5;
             let r = exec_bytes(&mut st_gt, &code, 0).expect("exec-gt");
             assert_eq!(r, 1, "x0=5 (>3) should fall through -> 1");
+        }
+
+        #[test]
+        fn bl_compiles_and_calls_leaf() {
+            // caller = (x0+5)*2, via `bl h` then `add w0,w0,w0`.
+            // 94000003 bl 0xc ; 0b000000 add w0,w0,w0 ; d65f03c0 ret
+            // 11001400 add w0,w0,#5 ; d65f03c0 ret
+            let image = [
+                0x03u8, 0x00, 0x00, 0x94, // bl 0xc
+                0x00, 0x00, 0x00, 0x0b, // add w0, w0, w0
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+                0x00, 0x14, 0x00, 0x11, // add w0, w0, #5
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            // caller(5) = (5+5)*2 = 20 ; caller(0) = 10
+            let mut st = CpuState::new();
+            st.x[0] = 5;
+            let blk = compile_image(&image, 0, 0, &mut st as *mut CpuState).expect("compile");
+            let r = unsafe { run(&blk, &mut st as *mut CpuState) };
+            assert_eq!(r, 20, "caller(5) should be 20");
         }
     }
