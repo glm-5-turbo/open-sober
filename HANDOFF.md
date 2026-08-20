@@ -1668,3 +1668,41 @@ handled by `FpScalar`** (mask `0xffe0_fc00` → `0x1e602800`/`0x1e600800`/`0x1e6
 - `translate.rs`: `FpUnary` arm → `sqrtsd`/`roundsd` on the FP slot.
 - 38 tests pass; real binary still stops at `ucvtf v2.2d` (0x105dfe180) — the SIMD
   unsigned-int→double in this identical block, next on the agenda.
+
+## Session 29 (Aug 20, 2026) — FMOD audio block: SIMD .2D ops, fabd; boot advances 0x18
+
+Targeted "continue" run to clear the FMOD DSP block after Session 28's ucvtv wall.
+Committed 3 milestones (ad5001c, ac8e622); tree clean; 38 tests pass.
+
+### New decoder + translate (all verified vs real libroblox words + compiler ground-truth)
+- `Inst::FpUnary` fsqrt/frintm (scalar double): sqrtsd + roundsd(mode). Gates
+  `(insn & 0xffff_fc00) == 0x1e61c000` (fsqrt d1,d1=0x1e61c021) and 0x1e654000
+  (frintm d3,d3=0x1e654063). Distinguish from fmov d,d (0x1e604000) by keeping bits16-31.
+- `Inst::Ucvtf2d` ucvtf Vd.2D: gate `(insn & 0xffe0_fc00) == 0x6e60d800` (real
+  0x6e61d842, compiler 0x6e61dbff). Honest u64->f64 per lane: `cvtsi2sd` +
+  sign-corrected `add 2^64` (JNS rel32 patch in-buffer; exact over full u64).
+- `Inst::SimdDupD` dup Vd.2D,Vn.D[i]: gate `(insn & 0xffff_fc00)==0x4e180400`;
+  index is BIT20 (0=d[0],1=d[1]), not bit12 (learned via asm ground truth).
+- `Inst::Simd2dFp` 2xdouble lanewise fdiv/fmul/fadd/fsub: gate 0xffe0_fc00 ->
+  0x6e60fc00/0x6e60dc00/0x4e60d400/0x4ee0d400.
+- `Inst::Fabd` fabd Dd,Dn,Dm=|dn-dm|: gate `(insn & 0xffe0_fc00)==0x7ee0d400`
+  (real 0x7ee1d503, compiler 0x7ee1d400). translate via subsd + movq_r64_xmm
+  round-trip + sign-bit clear (new x86 helper `movq r64,xmm` = 66 48 0F 7E).
+
+### Boot path / wall history (this session)
+ 0x105dfe108 (fmov) -> ...d14c (fcmp) -> ...d180 (ucvtf v2.2d, WAS blocked)
+ -> ...d194 (dup v4.2d) -> ...d198 (fdiv v2.2d) -> ...d1d4 (fabRd) -> CLEAR
+ Now STOPPED at 0x105dfe224: `dup v1.4s, w10` (0x4f2_0d41) = GPR-source 4S dup.
+ After it: movi v0.4s/#1, movi v3.4s/#0xa, dup v1.4s,w10 dup v3.4s,w8,
+  mov v2.16b, mul v0.4s, orr v3.16b, cmhi v1.4s, bit v0.16b, ldr q4, ...
+ (a "channel-count round-up to multiple of 4" SIMD loop).
+
+### Next up (ordered)
+1. dup Vd.4S, Wn (GPR-source, 0x4e040c00/0x4e0d.. ) — current wall.
+2. mul v0.4s (0x4ea39c00), movi vD.4s,#imm (0x4f000420/#1/#a), cmhi v.4s,
+   orr/bit v.16b, ldr q (128-bit). Then the whole FMOD audio-out block clears.
+3. After the audio loop: likely `svc` syscall table (mmap/futex/mprotect;
+   host x86 numbers differ) — big-ticket remaining item.
+
+### Status: real Roblox still does NOT boot; boot path is inside an FMOD
+ output-audio "loop over channels when energy/limits" DSP routine.
