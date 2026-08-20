@@ -376,4 +376,35 @@ mod tests {
             assert_eq!(st.x[31], sp as u64, "sp restored after post-index load");
             unsafe { libc::munmap(base, 0x4000) };
         }
+
+        #[test]
+        fn logic_ops_execute_real_code() {
+            // 2a0003e1 mov w1,w0 ; 2a010000 orr w0,w0,w1 ;
+            // 4a010000 eor w0,w0,w1 ; 0a010000 and w0,w0,w1 ; ret
+            // (w0|w1)^w1 & w1   with w1==w0 => consistent result.
+            let code = [
+                0xe1, 0x03, 0x00, 0x2a, // mov w1, w0  (orr wzr,w0)
+                0x00, 0x00, 0x01, 0x2a, // orr w0, w0, w1
+                0x00, 0x00, 0x01, 0x4a, // eor w0, w0, w1
+                0x00, 0x00, 0x01, 0x0a, // and w0, w0, w1
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut st = CpuState::new();
+            st.x[0] = 123u64;
+            let r = exec_bytes(&mut st, &code, 0).expect("exec logic");
+            assert_eq!(r, 0, "logical chain should reduce to 0");
+        }
+
+        #[test]
+        fn mov_reg_alias_jit() {
+            // mov x0, x1  =  orr x0, xzr, x1  (0xaa0103e0) ; ret
+            let code = [
+                0xe0, 0x03, 0x01, 0xaa, // mov x0, x1
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut st = CpuState::new();
+            st.x[1] = 0xfeed_face_cafe_0000;
+            let r = exec_bytes(&mut st, &code, 0).expect("exec mov reg");
+            assert_eq!(r, 0xfeed_face_cafe_0000, "mov x0,x1 copies register");
+        }
     }

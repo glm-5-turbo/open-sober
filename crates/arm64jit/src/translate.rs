@@ -147,7 +147,45 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::LdStrImm { rt, rn, imm, size, ld } => {
+        Inst::LogicReg {
+            rd,
+            rn,
+            rm,
+            op,
+            s,
+            shift,
+            sh_amt,
+            sf,
+        } => {
+            let _ = s; // ANDS/ORRS/EORS also clear flags; reused via x86 flags if needed
+            let _ = sf;
+            // rn == 31 (XZR) reads as zero (common for the `mov xd, xm` alias
+            // `orr xd, xzr, xm`); otherwise load rn.
+            if rn == 31 {
+                buf.mov_ri64(RAX, 0);
+            } else {
+                ldg(buf, RAX, rn as u32);
+            }
+            ldg(buf, RCX, rm as u32);
+            apply_shift_const(buf, RCX, shift, sh_amt);
+            match op {
+                0 => buf.and_rr64(RAX, RCX), // AND
+                1 => buf.or_rr64(RAX, RCX),  // ORR
+                2 => buf.xor_rr64(RAX, RCX), // EOR
+                _ => return Err(format!("LogicReg op {} not implemented", op)),
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
+        Inst::LdStrImm {
+            rt,
+            rn,
+            imm,
+            size,
+            ld,
+        } => {
             // address = rn + imm*size (scaled byte offset)
             ldg(buf, RDX, rn as u32); // pointer operand into RDX
             let off = (imm as i32).checked_mul(size as i32).unwrap_or(0);
