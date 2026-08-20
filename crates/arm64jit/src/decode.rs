@@ -272,6 +272,10 @@ pub enum Inst {
     // ---- SIMD 32-bit lane multiply: mul Vd.4S/Vd.2S, Vn., Vm. ----
     // 4S gate (Q=1) 0x4ea09c00 ; 2S gate (Q=0) 0x0ea09c00. Per-lane low-32 product.
     SimdMul { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD unsigned compare-higher: cmhi Vd.4S, Vn.4S, Vm.4S ----
+    // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
+    // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
+    SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -1182,7 +1186,18 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                         let rd = (insn & 0x1f) as u8;
                                                                                                                         return Inst::SimdMul { rd, rn, rm, lanes };
-                                                                                                                    }
+                                                                                                                            }
+                                                                                                                            // ---- SIMD unsigned compare-higher: cmhi Vd.4S/Vd.2S, Vn., Vm. ----
+                                                                                                                                // Gate &0xffe0_fc00: 0x6ea03400 (4S, Q=1, real 0x6ea13461) / 0x2ea03400 (2S).
+                                                                                                                                // Each 32-bit lane = all-ones if Vn[i] > Vm[i] (unsigned), else 0.
+                                                                                                                                let scm = insn & 0xffe0_fc00;
+                                                                                                                                let cm_lanes = if scm == 0x6ea0_3400 { Some(4) } else if scm == 0x2ea0_3400 { Some(2) } else { None };
+                                                                                                                                if let Some(clanes) = cm_lanes {
+                                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                    let rd = (insn & 0x1f) as u8;
+                                                                                                                                    return Inst::SimdCmhi { rd, rn, rm, lanes: clanes };
+                                                                                                                                }
                                                                                                         // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {
@@ -2035,6 +2050,16 @@ mod logical_imm_regressions {
                 assert_eq!(rn, 10);
             }
             other => panic!("dup v1.4s,w10 -> {other:?}"),
+        }
+        // cmhi v1.4s, v3.4s, v1.4s = 0x6ea4c1c1 (real libroblox audio mix) => SimdCmhi.
+        match decode(0x6ea13461) {
+            Inst::SimdCmhi { rd, rn, rm, lanes } => {
+                assert_eq!(rd, 1);
+                assert_eq!(rn, 3);
+                assert_eq!(rm, 1);
+                assert_eq!(lanes, 4);
+            }
+            other => panic!("cmhi v1.4s,v3.4s,v1.4s -> {other:?}"),
         }
         match decode(0x1e6c1001) {
             Inst::FmovImm {

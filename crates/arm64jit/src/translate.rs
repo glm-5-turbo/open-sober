@@ -1154,10 +1154,27 @@ pub fn translate(
                                                                                             buf.mov_load32(RCX, RBX, slot(rm) + off);
                                                                                             buf.imul_rr64(RAX, RCX); // low 32 = (a*b) mod 2^32
                                                                                             buf.mov_store32(RBX, slot(rd) + off, RAX);
-                                                                                        }
-                                                                                        Ok(())
-                                                                                    }
-                                                                                    Inst::LdStPair {
+                                                                                                                        }
+                                                                                                                        Ok(())
+                                                                                                                    }
+                                                                                                                    Inst::SimdCmhi { rd, rn, rm, lanes } => {
+                                                                                                                        // cmhi Vd.4S/Vd.2S, Vn., Vm.: per 32-bit lane, all-ones
+                                                                                                                        // if Vn[i] > Vm[i] (unsigned), else 0. Compare unsigned
+                                                                                                                        // then cmov (cmova) an all-ones mask vs 0.
+                                                                                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                        for i in 0..lanes {
+                                                                                                                            let off = (i as i32) * 4;
+                                                                                                                            buf.mov_load32(RAX, RBX, slot(rn) + off);
+                                                                                                                            buf.mov_load32(RCX, RBX, slot(rm) + off);
+                                                                                                                            buf.cmp_rr64(RAX, RCX); // unsigned: CF=1 if Vn<Vm
+                                                                                                                            buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
+                                                                                                                            buf.mov_ri64(RDX, 0);
+                                                                                                                            buf.cmov_rr64(0x47, RDI, RDX); // cmova: RDI=ones if Vn>Vm else 0
+                                                                                                                            buf.mov_store32(RBX, slot(rd) + off, RDI);
+                                                                                                                        }
+                                                                                                                        Ok(())
+                                                                                                                    }
+                                                                                                                    Inst::LdStPair {
             rt,
             rt2,
             rn,
