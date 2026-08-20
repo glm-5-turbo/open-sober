@@ -145,6 +145,8 @@ pub enum Inst {
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
+    // ---- SIMD ld2 (load two vectors, deinterleaved) ----
+    Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1005,6 +1007,19 @@ pub fn decode(insn: u32) -> Inst {
             rn: ((insn >> 5) & 0x1f) as u8,
             esize: (1u8 << es2),          // 1/2/4/8-byte lanes
             shift: ((insn >> 16) & 0x7) as u8,
+        };
+    }
+
+    // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----
+    // Prefix 0x0c40 (Q=0) / 0x4c40 (Q=1); st2 is 0x0c00/0x4c00. post-index when
+    // bit23=1 (the load is `[Xn], #imm`). Deinterleave: Vt[i]=m[2i], Vt1[i]=m[2i+1].
+    if (insn & 0xffc0_0000) == 0x0c40_0000 || (insn & 0xffc0_0000) == 0x4c40_0000 {
+        let q = (insn & 0x4000_0000) != 0;
+        return Inst::Ld2 {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            q,
+            post: if (insn >> 23) & 1 == 1 { 32 } else { 0 },
         };
     }
 

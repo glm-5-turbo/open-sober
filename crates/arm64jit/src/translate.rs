@@ -1726,6 +1726,25 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())
                 }
+                Inst::Ld2 { rd, rn, q, post } => {
+                    // ld2 {Vt, Vt1}, [Xn]: load 2*q elements, deinterleave bytes.
+                    // Vt[i] = mem[2i], Vt1[i] = mem[2i+1], i in 0..n (n = q?16:8).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let n = if q { 16 } else { 8 };
+                    ldg(buf, RDX, rn as u32); // RDX = base (host ptr)
+                    for i in 0..n {
+                        buf.movzx_byte_mem(RAX, RDX, 2 * i);   // mem[2i]  -> Vt[i]
+                        buf.mov_store8(RBX, vslot(rd) + i, RAX);
+                        buf.movzx_byte_mem(RAX, RDX, 2 * i + 1); // mem[2i+1] -> Vt1[i]
+                        buf.mov_store8(RBX, vslot(rd + 1) + i, RAX);
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
                 Inst::SimdShl { rd, rn, esize, shift } => {
                     // shl Vd.T, Vn.T, #imm : left-shift each lane by shift.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
