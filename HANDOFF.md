@@ -1487,3 +1487,46 @@ with a clean `Unsupported` (no silent wrong result). **Required**: decode the
 `ror`/EXTR rotate as its own op (class `0x1 0x1 `... `N`, Rm==Rn) and emit
 `ROR(Rn, lsb)`; add a unit test seeded with known operands. Also still open:
 guest sp/`svc` routing for full boot.
+
+## Session 25 — ror/EXTR decoded; SIMD lane add; JIT reaches MessageBus code
+
+### ror now works (was the Session-24 open wall)
+- Root cause: the standalone `ror Rd,Rn,#imm` is the **EXTR rotate** alias
+  (`EXTR Rd,Rn,Rn,#lsb`), NOT a UOFM. Ground truth (`ror x0,x1,#12=0x93c13020`,
+  `ror w0,w1,#4=0x13811020`): the EXTR class is `(insn & 0x1fe00000)` in
+  `{0x13800000, 0x13c00000}` (disjoint from UBFM's 0x130/0x136), and the rotate
+  amount is `imms` (bits[10:15]); `rm == rn`. `Inst::Ror` → `ror_ri8` (48 C1 /1).
+  New decode test `ror_exclusive` (part of suite).
+
+### SIMD lane arithmetic — first real SIMD math
+- `add Vd.4s, Vn.4s, Vm.4s` (`Inst::Simd4s`, op 0) via x86 `paddd`
+  (66 0F FE /r) + existing `movdqu_load/store`. FMOD `OutputAAudioHeadphones`
+  audio-mix loop (the XOR/ROR/ADD lanes) now executes fully.
+
+### Real libroblox.so progress this session
+```
+past: ror w mix-loop → ldr q1 → cmp x9,#0x40 → add v0.4s,v1,v0  (SIMD)
+      → str q0,[x11,#64] → b.ne loop → ... → ldr x19,[sp,#16]
+      → ldp x29,x30,[sp],#32 → b 5df5d9c  (branch into audio code)
+stopped: Unsupported(0x00000000) at guest pc 0x1026a1584  (zero-fill pad)
+```
+- The JIT followed `nativeAppBridgeV2StartAppWithParams` → resolved a `b` into
+  the `MessageBus_getLastRaw` / `FMOD_OutputAAudio` regions, executing real
+  audio mixing. `0x00000000` is ELF `.text` alignment zero-fill: the guest
+  branched into a **data/padding hole**, i.e. execution control-flow has started
+  to diverge (a previous arithmetic/SIMD result feeding a branch is *slightly*
+  off, or a branch table/`bti` landing addresses). Verify the SIMD `add v.4s`,
+  the byte-popcount chain, and `fcvt` against a self-contained reference before
+  trusting deeper control flow; the unit tests only cover deltas of decode.
+- `cargo test -p arm64jit` → **34 pass**. Workspace `cargo check --workspace`
+  green (1 pre-existing sober-core warning). Commits `73c907e`(TLS→fmov),
+  `5c4e86d`(BFM/FMOV/SIMD-popcount), `18054d3`(fcvt/ins/simd), `1f6cde3`(ror/SIMD-4s).
+
+### ⚠️ next wall (per the honest-debug path)
+The `0x00000000` pad means a guest branch went somewhere unexpected. Most likely
+a) an SIMD or FP op above is subtly wrong (verify popcount `cnt`+`uaddlv`, `fcvt`,
+`add v.4s`, and the ror with seeded JIT tests), and/or b) we still lack guest
+`sp`/`svc` routing so functions that rely on the guest stack/tls diverge. The
+immediate next step: add guest `sp` (map a real stack) + route `svc` syscalls,
+then verify the arithmetic blocks against normal host x86 expectations.  Also
+open: `bti`/PAC `ic`/`dc` hints beyond the existing NOP mask.
