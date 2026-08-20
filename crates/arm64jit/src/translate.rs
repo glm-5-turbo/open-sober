@@ -969,8 +969,20 @@ pub fn translate(
                         buf.xor_rr64(RAX, RCX);
                     }
                     _ => {
-                        return Err(format!("FpUnary single ilp-{op} not implemented"));
-                    }
+                // frintm/p/z (floor/ceil/trunc) and fsqrt via double round-trip.
+                buf.cvtss2sd(0, 0);              // xmm0 = (double)RAX31 (cvtss reads xmm0 low32)
+                match op {
+                    0 => buf.sqrtsd(0, 0),       // fsqrt s
+                    1 => buf.roundsd(0, 0, 0b01), // frintm s: floor
+                    2 => buf.roundsd(0, 0, 0b10), // frintp s: ceil
+                    3 => buf.roundsd(0, 0, 0b00), // frintz s: trunc
+                    _ => return Err(format!("FpUnary single ilp-{op} not implemented")),
+                }
+                buf.cvtsd2ss(0, 0);              // back to single (xmm0 low 32)
+                buf.movd_r32_xmm(RAX, 0);          // xmm0 low32 -> RAX
+                buf.mov_store32(RBX, vslot(rd), RAX); // store s-reg
+                return Ok(());
+            }
                 }
                 buf.mov_store32(RBX, vslot(rd), RAX);
                 return Ok(());
