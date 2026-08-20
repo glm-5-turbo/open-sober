@@ -15,7 +15,7 @@
 // the flags result is only written back as a placeholder.
 
 use crate::decode::{Inst, ShiftKind};
-use crate::x86::{CodeBuf, RAX, RCX, RBX};
+use crate::x86::{CodeBuf, RAX, RBX, RCX, RDX};
 
 /// Byte offset of guest register g inside CpuState (x[g] at 8*g).
 #[inline]
@@ -99,6 +99,41 @@ pub fn translate(buf: &mut CodeBuf, _pc: u64, inst: Inst) -> Result<(), String> 
                 buf.add_rr64(RAX, RCX);
             }
             stg(buf, rd as u32, RAX);
+            Ok(())
+        }
+        Inst::LdStrImm { rt, rn, imm, size, ld } => {
+            // address = rn + imm*size (scaled byte offset)
+            ldg(buf, RDX, rn as u32); // pointer operand into RDX
+            let off = (imm as i32).checked_mul(size as i32).unwrap_or(0);
+            if off != 0 {
+                buf.lea64(RDX, RDX, off);
+            }
+            match (size, ld) {
+                (8, true) => {
+                    buf.mov_load64(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (4, true) => {
+                    buf.mov_load32(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (8, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store64(RDX, 0, RAX);
+                }
+                (4, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store32(RDX, 0, RAX);
+                }
+                (s, _) => return Err(format!("LdStrImm size {} not implemented", s)),
+            }
+            Ok(())
+        }
+        Inst::Ret => {
+            // return x0 in RAX, then ret (matches the JIT fn convention that the
+            // epilogue also uses). $[x0] at RBX+0.
+            buf.mov_load64(RAX, RBX, 0);
+            buf.ret();
             Ok(())
         }
         _ => Err(format!("translate: unhandled {:?}", inst)),

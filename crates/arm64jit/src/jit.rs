@@ -134,10 +134,6 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
 mod tests {
     use super::*;
 
-    fn u32le(bytes: [u8; 4]) -> u32 {
-        u32::from_le_bytes(bytes)
-    }
-
     #[test]
     fn mov_add_executes_to_7() {
         // aarch64: mov x0,#3 ; add x0,x0,#4  =>  x0 = 7
@@ -150,10 +146,23 @@ mod tests {
 
     #[test]
     fn real_arm64_objdump_sequence() {
-        // From objdump: mov x0,#3 = d2800060 ; show x0 again
         let code = [0x60u8, 0x00, 0x80, 0xd2];
         let mut st = CpuState::new();
         let r = exec_bytes(&mut st, &code, 0).expect("exec");
         assert_eq!(r, 3);
+    }
+
+    #[test]
+    fn ldr_imm_loads_memory() {
+        // Real aarch64: "ldr x0, [x0, #16]" = 0xf9400800 ; ret = 0xd65f03c0
+        // (from `ldi_unsigned` in sample.c). Loads the u64 at x0+16 into x0.
+        let code = [0x00u8, 0x08, 0x40, 0xf9, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut buf = [0u64; 4]; // buffer; buf[2] at byte 16
+        buf[2] = 0x1234_5678_9abc_def0;
+        let mut st = CpuState::new();
+        st.x[0] = buf.as_ptr() as u64; // x0 = &buf[0]
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        println!("ldr got r={:#x} expected={:#x} st.x0={:#x} x16base={:#x}", r, buf[2], st.get(0), buf.as_ptr() as u64);
+        assert_eq!(r, buf[2]);
     }
 }

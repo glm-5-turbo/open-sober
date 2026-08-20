@@ -105,6 +105,8 @@ pub enum Inst {
         preidx: bool,
         size_64: bool, // false => 32-bit W pair
     },
+    // ---- return (ret x30) ----
+    Ret,
     // ---- fallback ----
     Unsupported(u32),
 }
@@ -334,7 +336,12 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
-    Inst::Unsupported(insn)
+    // ---- return (ret x30): 0xd65f03c0 ----
+        if insn & 0xffff_fc1f == 0xd65f_0000 {
+            return Inst::Ret;
+        }
+
+        Inst::Unsupported(insn)
 }
 
 #[cfg(test)]
@@ -370,13 +377,10 @@ mod tests {
     }
 
     #[test]
-    fn ret_is_unsupported_skeleton() {
-        let i = decode(0xd65f03c0); // RET (not yet full impl)
-        match i {
-            Inst::Unsupported(_) => {}
-            other => panic!("ret currently unsupported, but got {:?}", other),
+    fn ret_decodes() {
+            let i = decode(0xd65f03c0); // RET
+            assert_eq!(i, Inst::Ret, "ret x30 should decode to Ret");
         }
-    }
 
     #[test]
     fn movz_64_ground_truth() {
