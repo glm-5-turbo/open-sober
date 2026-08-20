@@ -1137,3 +1137,105 @@ the real `libroblox.so` (a PIE ET_DYN) currently SIGSEGVs.
 
 Everything above was updated to account for the current committed state at
 `5496852`. The single highest-leverage next step is **#1 (PIE mapping)**.
+
+---
+
+## Session 20 (Aug 20, 2026) — PIE mapping FIXED; JIT now decodes real libroblox.so code
+
+Goal (from 19d #1): fix the PIE/ET_DYN mapping so `elfjit`/`--jit` no longer
+SIGSEGVs on the real 117MB `libroblox.so`, then push the honest
+first-unsupported diagnostic forward. **This was achieved and verified end to
+end.** Commits: `194d5d8`, `029e36f`, `da16a76` (on `dev`).
+
+### 1. PIE / ET_DYN mapping — FIXED (the 19d #1 blocker is done)
+
+**Root cause of the old SIGSEGV:** the per-segment `MAP_FIXED` in `load_elf`
+lets a later PT_LOAD of a *packed* ET_DYN target an address that still overlaps
+the previous huge (`~99MB` r-x) text mapping. Under gdb the fault was
+`__mmap64` crashing on a `MAP_FIXED` address inside the earlier mapping — i.e.
+`0x78f05998000 + 0x5e6b000` landed *inside* the text range.
+
+**Fix:** added `libloader::elf::load_elf_image(path) -> LoadedElf` (a fresh API,
+the old `load_elf` is untouched for the QEMU path). It maps ONE contiguous
+anonymous region at a fixed `JIT_BASE` (`0x100000000`), lays every PT_LOAD into
+it at `base + (p_vaddr - min_vaddr)`, zero-fills `.bss`, and applies per-segment
+mprotect. Critically it sets **guest vaddr == host address** (`guest_of(link) =
+base_addr + (link - base_load_addr)`), the exact property arm64jit's ADRP/ADR +
+direct-dereference model requires. No more overlap, no more SIGSEGV.
+
+`elfjit` and `sober-core --jit` now:
+- load the real `libroblox.so` cleanly (4 segments, guest==host at
+  `0x100000000`, e.g. text `[0x100000000, 0x105e67390)`),
+- translate the requested guest entry (a link-time address via `guest_of`),
+- report an **honest diagnostic**: `arm64jit stopped on unsupported instr
+  at/near guest 0x101c34480: translate: unhandled Unsupported(0x...)`.
+
+### 2. Decoder/translator walls pushed through (5 in this session)
+
+1. **ADRP/ADR mask bug FIXED.** The decoder tested `insn>>24==0x90`, missing
+   real ADRP encodings whose top byte is `0xD0` (varies with `imm[1:0]`).
+   Changed to the canonical `(insn & 0x9F000000)==0x90000000` (ADRP) /
+   `==0x10000000` (ADR); confirmed `0x90026516` (top 0x90) and `0xd0026a93`
+   (top 0xD0) both match. Without this, the very first decoded real-world
+   Roblox ADRP `0xd0026a93` returned `Unsupported`.
+2. **LDR/STR unsigned-imm sizes 1,2,4,8** (was 8/4 only). Added halfword/byte
+   zero-extend loads (`movzx_word_mem`, `movzx_byte_mem`) and 8/16-bit stores
+   (`mov_store8/16`) to the x86 emitter; wired into `LdStrImm`.
+3. **LDR/STR register offset** (`ldr x9,[x8,x1,lsl #3]`, class `0x38`) — new
+   `LdStrReg` translate arm (index `rm`, shift by `log2(size)`).
+4. **128-bit SIMD vector load/store** (`ldr q6,[x0,#16]`=`0x3dc00406`,
+   `str q7,[x0,#32]`=`0x3d800807`) — `CpuState` now carries a **32×128-bit
+   vector register file** `v:[u64;64]` at `VECTOR_BASE=256` (with `set_v`/`get_v`),
+   x86 XMM helpers (`movdqu_load/store`, `movdqa_xmm`, `pxor_xmm`), new decode
+   class `VecLdStImm` (`0x3D8`/`0x3DC`), and a translate arm that moves 16 bytes
+   between the guest v-slot and guest memory through XMM0.
+   *(`movi`/float NEON immediate was deliberately NOT bolted on — the imm
+   reconstruction is fiddly and a wrong float result would be worse than the
+   honest "unsupported" stop. Do it with a proper NEON decoder next.)*
+
+### 3. Verification
+
+- `cargo test --workspace` all green (arm64jit 26 → still 26, no regressions).
+- Static non-PIE `stat.elf` entry returns `42` (unchanged, still passes).
+- PIE `libpie.so` maps at `0x100000000`; entry `0x588` translated to guest and
+  stopped *honestly* at `lsl x0,x0,#1` (`0xd37ff800`, a UBFM bitfield op — see
+  task list below; not yet added).
+- 128-bit vector round-trip: hand-assembled aarch64
+  `ldr q6,[x0,#16]; str q6,[x1,#32]; mov x0,#99; ret` runs through elfjit
+  (giving it a guest==host buffer via the new `buf` arg) and **returns 99**,
+  no QEMU, no crash.
+
+### 4. Current honest state on the real binary
+
+```
+$ ./target/debug/examples/elfjit ~/.cache/open-sober/libs/libroblox.so 0x1c34480
+loaded '...libroblox.so': is_pie=true base_load_vaddr=0x0 e_entry=0x100000000
+  segment guest=[0x100000000,0x105e67390) prot=r-x   (89MB text)
+  segment guest=[0x105e6b3c0,0x10631c000) prot=rw-
+  segment guest=[0x10631fb40,0x106987130) prot=rw-
+  segment guest=[0x106988000,0x1075bcea8) prot=r--
+running entry guest=0x101c34480
+arm64jit stopped: translate: unhandled Unsupported(1862329344)  // == 0x6F00E400
+```
+
+The NEXT blocker is the **floating-point NEON** instruction `0x6F00E400`
+(top-byte `0x6F`, the floating-point 3m-add / scalar-fp class — NOT the
+integer `movi` `.4s` which decodes as `0x4F...`). That's the immediate next
+decoder slice.
+
+### 5. Next steps (updated, ordered)
+
+1. **Add the float-NEON / FP layer** starting with `0x6F00E400` specifically,
+   plus `fmov/fadd/fsub/fmul/fdiv`, `fcvt/fcvtl`, `fcmp/fcsel` and the
+   `0x4F` `movi.4s` immediate (with unit tests). This is now the gate between
+   "decodes" and "boots" — a 3D engine is dense with FP.
+2. **`lsl/lsr/asr x,#imm`** (`UBFM/SBFM`, e.g. `0xd37ff800`) — trivial and hit
+   by any real code; add the bitfield ops `ubfm/sbfm/bfi/bfx`.
+3. Guest stack + `sp`/`mrs TPIDR_EL0` TLS + `svc` routing → then the `B/BL`
+   call-graph can actually *run* ("compare" the boot log) rather than just
+   translate.
+4. Cross-version coverage; verify against multiple `libroblox.so` builds.
+
+`git log`: `194d5d8` (PIE load_elf_image fix), `029e36f` (one contiguous
+guest==host image, runs deeper into libroblox.so), `da16a76` (SIMD vector
+regs + 128-bit ld/st + register-offset ld/st), then the HANDOFF update.
