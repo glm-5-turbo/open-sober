@@ -529,3 +529,95 @@ So the resolver hardening fixes late faults but not the load-time ABI
 crash of the bundled shim against gcc-15 glibc. That load-time crash is
 the binding blocker on a fresh box; a follow-up is the shim's `__bf_init_*`
 constructor + `__bf_data_*` referencing against the actual gcc-15 ABI.
+
+---
+
+# SESSION 14 HANDOFF — from-fresh-box rebuild + first real runtime runs
+
+## TL;DR
+This session went from a completely empty environment to a working,
+reproducible runtime stack that boots the **real Roblox 2.726.1142 ARM64
+`libroblox.so` (104 MB, NDK r28c, Android 26)** under a rebuilt SMC-patched
+QEMU, resolves all 576 of the game's imports, and reaches `dlopen()`. The one
+remaining blocker is precise and isolated. `dev` has 6 new commits.
+
+## Committed this session (all in `dev`, all tests green: `cargo test --workspace`)
+- `06442d0` **qemu port** — reproducible SMC-patched QEMU 10.2.1 (`qemu/`, patches + `build.sh`)
+- `787e300` **elf_disco** — version-agnostic ELF discovery (GOT/RELRO), with integration test
+- `f2bc7d9` **early SIGSEGV + LR logging** around `dlopen`
+- `993380d` **NULL-safe bionic resolver** (`bionic_init.c`)
+- `8f4ef8a` `62c9a7b` docs/HANDOFF
+
+## Environment state (all preserved under `~/.cache/open-sober/`)
+| Artifact | Path |
+|---|---|
+| Patched QEMU 10.2.1 | `~/.cache/open-sober/qemu-patched` |
+| JNI shim binary | `~/.cache/open-sober/android-env/jni_shim` |
+| Real game lib (104,208,904 B) | `~/.cache/open-sober/libs/libroblox.so` |
+| android system/lib64 (25 libs) | `~/.cache/open-sober/android-env/system/lib64/` |
+| Bridges libc/libm/libdl | above (LIBC version tags built from `/usr/aarch64-linux-gnu`) |
+| bionic shim | `.../libbionic_shim.so` |
+| guest stubs | `.../libguest_stubs.so` |
+
+GUI is AVAILABLE: KDE X11 on `:0` (plasmashell + Brave visible via
+cua-driver). This is critical — the moment the shim loads, Roblox will
+need a display/window, and `cua-driver` + Playwright MCP are in-session.
+
+## Run command (reproduces the stack)
+```bash
+~/.cache/open-sober/qemu-patched \
+  -L ~/.cache/open-sober/android-env \
+  -E LD_LIBRARY_PATH=/system/lib64 \
+  -E LD_PRELOAD=/system/lib64/libbionic_shim.so:/system/lib64/libguest_stubs.so \
+  -E DISPLAY=:0 \
+  ~/.cache/open-sober/android-env/jni_shim
+```
+Expected output (before blocker): `Disabling _dl_mcount... → noped →
+Loading bionic shim → Loading libroblox.so →` then **SIGSEGV**.
+`QEMU base sanity` check: run an ARM64 `hello` (link with
+`aarch64-linux-gnu-gcc`) to confirm QEMU+loader work.
+
+## THE BLOCKER (exact, isolated)
+Two distinct facts (both proven):
+1. **bionic-shim load-time crash**: `LD_PRELOAD=<...>/libbionic_shim.so`
+   segfaults even a trivial ARM64 `printf("hello")` at `si_addr=0x0000...1`
+   right after `brk()`+1MB anonymous mmap on the main thread's init — i.e.
+   in the shim's **constructor** (`__bf_data_*` dlsym fill /
+   `__bf_install_mutex_wrappers`) against gcc-15 glibc. This is the bind
+   blocker. It is a small, scoped ABI fix (audit the shim constructor /
+   `__bf_data_*` / `__bf_install_mutex_wrappers` against gcc-15).
+2. NULL-safe resolver (`__bf_noop`) now prevents late trampoline NULL-
+   calls; it does NOT help #1.
+
+With #1 fixed, the next phase is dlopen → JNI_OnLoad → (bounded code +
+disasm already in HANDOFF), then **graphics/login** — where
+**vision/desktop (cua-driver) is REQUIRED** to drive the window, EGL/GLES→
+Vulkan zink, and verify the login screen appears.
+
+## Ordered path for next agent
+A. **Fix bionic-shim load-time crash** (pure code; unblocks everything).
+   - Reproduce `hello` preload test; debug `__bf_init_*`/`__bf_data_*`/
+     `__bf_install_mutex_wrappers` against gcc-15; ensure the shim's
+     constructor doesn't deref 0/1.
+B. Get `dlopen(libroblox.so)` + `JNI_OnLoad` to return (`elf_disco`
+   already handles GOT/RELRO; re-discover JNI_OnLoad patch offsets for
+   2.726.1142 — `nativeSetAssetPath` bl at `0x26f384c` inside JNI_OnLoad,
+   from the disasm in this HANDOFF).
+C. **Now vision is REQUIRED**: launch on the live KDE :0 desktop, use
+   cua-driver `get_desktop_state`/screenshots + Playwright to observe the
+   window, feed Mesa zink/GLES, and confirm login UI. This is the FIRST
+   point the game "boots".
+
+## Facts recorded for next agent
+- `JNI_OnLoad` is exported (dynsym) at **offset `0x1f0db20`** in this
+  2.726.1142 libroblox.so (the old hardcoded `0x1f64e58` is for a different
+  build). Use `dlsym`/`elf_disco` to locate it; do NOT trust old hardcoded.
+- 408 `@LIBC` + 4 `@LIBC_N` + 1 `@LIBC_O` versioned imports; bridge
+  provides LIBC_* tags; the non-LIBC UND symbols (146 NDK: AAsset*,
+  ALooper*, AMediaCodec*, egl*, gl*, etc.) are no-op stubs in
+  `libguest_stubs.so`.
+- The guest stub generator is inline in this session's bash history
+  (`/tmp/gs*.c`); reconstruct via the python snippet that reads
+  `readelf -sW` UND FUNC/OBJECT and emits weak no-op/`_stor` objects.
+- The `"JDK"`/GSI rumored in the handoff is NOT needed to reach
+  JNI_OnLoad; it only matters later for login/token.
