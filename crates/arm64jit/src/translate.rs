@@ -1851,6 +1851,36 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             stg(buf, rd as u32, RAX);        // quotient -> Rd
             Ok(())
         }
+        Inst::SimdVShift { rd, rn, rm, esize, signed_ } => {
+            // ushl/sshl Vd.T, Vn.T, Vm.T : per-lane variable shift. Vn[i] << Vm[i].
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes = 16 / (esize as i32);
+            for i in 0..lanes {
+                let src = vslot(rn) + (i as i32) * (esize as i32);
+                let cnt = vslot(rm) + (i as i32) * (esize as i32);
+                match esize {
+                    8 => buf.mov_load64(RAX, RBX, src),
+                    4 => buf.mov_load32(RAX, RBX, src),
+                    2 => buf.movzx_word_mem(RAX, RBX, src),
+                    _ => buf.movzx_byte_mem(RAX, RBX, src),
+                }
+                match esize {
+                    8 => buf.mov_load64(RCX, RBX, cnt),
+                    4 => buf.mov_load32(RCX, RBX, cnt),
+                    2 => buf.movzx_word_mem(RCX, RBX, cnt),
+                    _ => buf.movzx_byte_mem(RCX, RBX, cnt),
+                }
+                buf.shl_cl64(RAX);            // R<<...: shl by CL (low byte of RCX)
+                let dst = vslot(rd) + (i as i32) * (esize as i32);
+                match esize {
+                    8 => buf.mov_store64(RBX, dst, RAX),
+                    4 => buf.mov_store32(RBX, dst, RAX),
+                    2 => buf.mov_store16(RBX, dst, RAX),
+                    _ => buf.mov_store8(RBX, dst, RAX),
+                }
+            }
+            Ok(())
+        }
         Inst::SimdFpUnary { rd, rn, op, esize, q } => {
             // fneg/fabs/fsqrt Vd.T, Vn.T: per-lane unary FP on the vector slot.
             // fneg/fabs flip/clear the sign bit on the FP bit-pattern via GPRs;

@@ -149,6 +149,8 @@ pub enum Inst {
     Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
     // ---- scalar udiv/sdiv Wd/Wd/Wm ----
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
+    // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
+    SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1096,10 +1098,24 @@ pub fn decode(insn: u32) -> Inst {
                     rd: (insn & 0x1f) as u8,
                     rn: ((insn >> 5) & 0x1f) as u8,
                     rm: ((insn >> 16) & 0x1f) as u8,
-                    signed: (insn >> 10) & 1 == 1,
-                    is_x: (insn >> 30) & 1 == 1,
-                };
-            }
+                                signed: (insn >> 10) & 1 == 1,
+                                is_x: (insn >> 30) & 1 == 1,
+                            };
+                        }
+
+                        // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
+                        // Gate &0x3f00_0c00 in {0x2e00_0400 (ushl Q=0), 0x4e00_0400 (sshl), 0x6e00_0400 (ushl Q1)}.
+                        // sign = bit29. Per-lane shifts by the count in the matching Vm lane.
+                        let vsh = insn & 0x3f00_0c00;
+                            if (vsh == 0x2e00_0400 || vsh == 0x4e00_0400 || vsh == 0x6e00_0400) && (insn & 0x0000_4000) != 0 {
+                            return Inst::SimdVShift {
+                                rd: (insn & 0x1f) as u8,
+                                rn: ((insn >> 5) & 0x1f) as u8,
+                                rm: ((insn >> 16) & 0x1f) as u8,
+                                esize: (1u8 << ((insn >> 22) & 0x3)),
+                                signed_: (insn >> 29) & 1 == 1,
+                            };
+                        }
 
     // ---- load/store (register offset) ----
     // class: (top & 0x3b) == 0x38
