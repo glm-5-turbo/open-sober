@@ -1384,3 +1384,58 @@ by this session).
 
 `git log` since 20: `6618c5e` (Session-21 dispatcher), `6dceb47` (this session).
 Working tree clean (commit `6dceb47`).
+
+## Session 23 (Aug 20, 2026) — FP arithmetic (verified), FP→int, UBFM, ANDS/TST
+
+Commits `a03b143` (dev). **The FP-arithmetic wall is crossed and verified; the
+real JIT now executes real double-precision multiplies inside Roblox's
+`Java_com_roblox_engine_jni_NativeGLInterface_shouldDisplayOpenGLUnsupportedMessage`
+and walks past it deep into the GameActivity init. New hardware: TLS.**
+
+### 1. Scalar double FP arithmetic (the "fmul" wall) — IEEE-verified
+
+- `Inst::FpScalar` ditched `movq_load`/`movq_store` + `mulsd`/`addsd`/`subsd`/
+  `divsd`; `d_k` = low 8 bytes of `CpuState.v[k*2]` at `VECTOR_BASE + 16k`.
+- DECODE BUGS FIXED (verified via masked opcode — the opcode is `insn` with
+  Rm/Rn/Rd masked, since the early `(insn>>15)&0x7f` field **overlapped `Rm`**):
+  `fmul=0x1e600800 fadd=0x1e602800 fsub=0x1e603800 fdiv=0x1e601800` (+`sz` bit22).
+- New emitter `movq_load`/`movq_store` (64-bit XMM↔mem) and `mulsd`/`addsd`/
+  `subsd`/`divsd`; **x86 SSE-operand order** fixed: `F2 0F 59 /r` uses
+  `ModRM.reg=DST, r/m=SRC` (opposite of integer).
+- New `fp_scalar_double_ieee` unit test: `2.5*4.0=10`, `10+2.5=12.5`, `10/2.5=4`
+  — passes against `from_bits` IEEE ground truth. (Also fixed the test to address
+  the `v`-array layout: `d_k` ↔ Rust `v[2k]`, not `v[k]`.)
+
+### 2. FP→int + UBFM round of the register file
+
+- `Inst::FcvtToInt`: class `(insn&0x5f20fc00)==0x1e200000`, op `(insn>>17)&7`
+  (0=fcvtzs truncate, 2=fcvtas), via `cvtsd2si` (nearest-even; **note**: ARM
+  `fcvtas` is ties-away — the tie-only difference is a documented approximation)
+  and `cvttsd2si` (fcvtzs exact). New emitters.
+- `Inst::BitField`: full `UBFM/SBFM` — `lsr`(imms==last), `asr`(arith), `lsl`
+  (immr==(imms+1)%bits), plus the *general extract* `(Rn>>immr)&low(width)` with
+  sign-extend (`sbfx/sxtb/ughl `sar/shl round-trip) for ubfx/sbfx/uxb/sxtb/sxth.
+  This covers `sxtb/uxth/...` which appear throughout the tree.
+
+### 3. ANDS/ORRS/EORS/TST now actually set flags
+
+- `LogicReg opc==3` was *also* treated as a no-op (`let _ = s`). Now the base op
+  is computed for opc==3 (`ANDS`/`BICS`), and `if s` calls `store_nzcv` — `x86
+  and/or/xor` already produce CF=0,OF=0,ZF/SF-from-result, exactly AArch64 NZCV.
+  Also added the missing top-bytes `0x3a/0x7a/0xea/0xfa` so `tst x_,x_`=ANDS decodes.
+
+### 4. Real libroblox.so: what the JIT executes now (JIT_TRACE-past)
+
+```
+past: csel/cset(NZCV) → stp d/ldp d → ldarb/stlrl → fmul→fmul→fcvtas→lsr
+      → uxtb (UBFM) → csel→ … → tst x23,x8 → b.ne → … → cmp x0,#0 → b.ne
+stopped: mrs x19, tpidr_el0  (0xD53BD053)  <-- TLS thread-pointer system register
+```
+This is the **guest TLS/sp boot-essentials** wall the session list flagged. To
+boot Roblox we must answer `mrs tpidr_el0` (and `msr`/`tlbi`/`isb`) with a real
+or forwarded TLS base, map sp, and route `svc`. FP is done and verified; the
+immediate TSL system-register (MRS/MSR tpidr_el0) is the next concrete wall.
+
+`cargo test -p arm64jit` → **32 pass** (fp_scalar_double_ieee, plus more).
+Workspace green (the libloader android idempotency test passed this session —
+it is host/env flaky; unrelated). Committed, tree clean at `a03b143`.
