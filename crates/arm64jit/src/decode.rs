@@ -133,6 +133,8 @@ pub enum Inst {
     },
     // ---- SIMD load-and-replicate: ld1r {Vt.T}, [Xn] ----
     Ld1 { rd: u8, rn: u8, esize: u8, q: bool }, // lanes = (q?16:8)/esize
+    // ---- SIMD lane load: ld1 {Vt.T}[idx], [Xn] ----
+    Ld1L { rd: u8, rn: u8, esize: u8, index: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1536,8 +1538,8 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                                                                                                                                                                                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
                                                                                                                                                                                                                                                                                                                                                                         return Inst::Ld1 { rd, rn, esize, q };
-                                                                                                                                                                                                                                                                                                                                                                        }
-                                                                                                                                                                                                                                                                                                                                                                        // ---- SIMD copy 64-bit lane (INS vector): mov Vd.d[dst], Vn.d[src] ----
+                                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                                // ---- SIMD copy 64-bit lane (INS vector): mov Vd.d[dst], Vn.d[src] ----
                                                                                                                                                                                                                                                                                                                                                                         // Gate (insn & 0xffe0_0c00)==0x6e00_0400 (Q=1 INS element-from-element).
                                                                                                                                                                                                                                                                                                                                                                         // d-lane: imm5 field (insn>>16)&0x1f lowest set bit == 0x8 (esize 8).
                                                                                                                                                                                                                                                                                                                                                                         // dst index = bit20, src index = bit14 (verified vs aarch64 assembler).
@@ -1731,6 +1733,20 @@ pub fn decode(insn: u32) -> Inst {
             size_64,
             q128,
             fp_d,
+        };
+    }
+
+    // ---- SIMD lane load: ld1 {Vt.T}[idx], [Xn] (single-element, byte) ----
+    // Verified vs 25 asm ground-truth encodings (fixed-base index sweep + varied base):
+    // prefix 0x0d (idx 0-7) / 0x4d (idx 8-15), size bits 11:10 nonzero, index = bits[14:10]
+    // plus +8 when the prefix is 0x4d. Branch-table-indexed lane loads in rblx use this.
+    if matches!((insn >> 24) & 0xff, 0x0d | 0x4d) {
+        let hi8 = ((insn >> 24) & 0xff) == 0x4d;
+        return Inst::Ld1L {
+            rd: (insn & 0x1f) as u8,
+            rn: b(insn, 5, 9) as u8,
+            esize: 1,
+            index: (((insn >> 10) & 0x1f) + if hi8 { 8 } else { 0 }) as u8,
         };
     }
 

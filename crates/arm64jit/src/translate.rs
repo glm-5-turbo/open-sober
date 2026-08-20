@@ -1603,6 +1603,26 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::Ld1L { rd, rn, esize, index } => {
+                    // ld1 {Vt.T}[idx], [Xn]: load `esize` bytes from [x[rn]]
+                    // into lane `index` of Vd (byte offset index*esize).
+                    let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                    ldg(buf, RDX, rn as u32); // RDX = base address (host ptr)
+                    match esize {
+                        8 => buf.mov_load64(RAX, RDX, 0),
+                        4 => buf.mov_load32(RAX, RDX, 0),
+                        2 => buf.movzx_word_mem(RAX, RDX, 0),
+                        _ => buf.movzx_byte_mem(RAX, RDX, 0),
+                    }
+                    let off = slot + (index as i32) * (esize as i32);
+                    match esize {
+                        8 => buf.mov_store64(RBX, off, RAX),
+                        4 => buf.mov_store32(RBX, off, RAX),
+                        2 => buf.mov_store16(RBX, off, RAX),
+                        _ => buf.mov_store8(RBX, off, RAX),
+                    }
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
                     // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
                     let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;
