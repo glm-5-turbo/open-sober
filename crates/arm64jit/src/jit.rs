@@ -175,6 +175,32 @@ pub unsafe fn run(blk: &JitBlock, state: *mut CpuState) -> u64 {
     }
 }
 
+/// Supervisor-call dispatcher. AArch64 uses x8 as the syscall number and x0-x5
+/// as args (like the iOS ARM64 kernel asvp); the AArch64 syscall ABI is
+/// x8=number, x0..x5 args, return in x0 (negative = -errno). We forward the
+/// handful the guest needs early on to real host syscalls via `libc` (the
+/// kernel numbers match Linux AArch64 == x86-64 for the common set, so libc's
+/// `syscall` with the same number works for mmap/open/futex/exit_group/...).
+pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
+    let s = unsafe { &mut *st };
+    let nr = s.x[8];
+    let a = [s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5]];
+    if std::env::var("JIT_TRACE_SVC").is_ok() {
+        eprintln!("guest svc {:x} ({}) a0={:#x} a1={:#x} a2={:#x}",
+            nr, nr, a[0], a[1], a[2]);
+    }
+    // exit(93) / exit_group(94) end the process cleanly.
+    if nr == 93 || nr == 94 {
+        eprintln!("guest_svc: syscall({nr}) status {}", a[0] as i32);
+        std::process::exit(a[0] as i32);
+    }
+    eprintln!(
+        "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (args {:#x},{:#x},{:#x})",
+        a[0], a[1], a[2]
+    );
+    (-38i64) as u64 // -ENOSYS
+}
+
 /// Convenience: translate+call a slice of raw guest bytes (AArch64) reached at
 /// the given initial PC, executing them against `state`. Returns the final x0.
 pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<u64, String> {

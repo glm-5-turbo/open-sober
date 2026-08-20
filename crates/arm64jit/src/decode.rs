@@ -192,6 +192,8 @@ pub enum Inst {
                            InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
                            // ---- EXTR / ROR rotate: rm==rn in the EXTR base ----
                            Ror { rd: u8, rn: u8, rot: u32, sf: bool }, // ror rd,rn,#rot
+                           // ---- supervisor call (svc #imm) -> host syscall routing ----
+                           Svc { imm: u16 },
                            // ---- NEON lane add: add Vd.4s, Vn.4s, Vm.4s ---------
                            Simd4s {
                                                rd: u8,
@@ -906,6 +908,12 @@ pub fn decode(insn: u32) -> Inst {
         return Inst::Hint;
     }
 
+    // ---- supervisor call: svc #imm (0xd4000001 | imm<<5) -> host syscall ----
+    if (insn & 0xffe0_001f) == 0xd400_0001 {
+        let imm = ((insn >> 5) & 0xffff) as u16;
+        return Inst::Svc { imm };
+    }
+
     // ---- system register read/write (mrs xN, <sysreg> / msr <sysreg>, xN) ----
     // AArch64 system-access op base: `1101_0101_0 xxxx` (0xD5000000..0xD57FFFFF).
     // L bit (bit 20) selects MRS(1) vs MSR(0); op1<16:18> CRn<12:15> CRm<8:11>
@@ -1513,6 +1521,19 @@ mod tests {
                     other => panic!("expected Ror, got {other:?}"),
                 }
                 // A real UBFM extract (lsl) must NOT be mis-decodded as Ror.
-                assert!(!matches!(decode(0xbbf13c69), Inst::Ror { .. }));
-            }
-        }
+                                assert!(!matches!(decode(0xbbf13c69), Inst::Ror { .. }));
+                            }
+
+                            #[test]
+                            fn svc_decode() {
+                                // svc #0 = 0xd4000001 ; svc #0x7a = 0xd4000f41
+                                match decode(0xd4000001) {
+                                    Inst::Svc { imm } => assert_eq!(imm, 0),
+                                    other => panic!("expected Svc#0, got {other:?}"),
+                                }
+                                match decode(0xd4000f41) {
+                                    Inst::Svc { imm } => assert_eq!(imm, 0x7a),
+                                    other => panic!("expected Svc#7a, got {other:?}"),
+                                }
+                            }
+}

@@ -582,14 +582,23 @@ pub fn translate(
             Ok(())
         }
         Inst::Ror { rd, rn, rot, sf } => {
-            // Extend to 64-bit, rotate right by rot, then store (W-mask for !sf).
-            ldg(buf, RAX, rn as u32);
+                    // Extend to 64-bit, rotate right by rot, then mask for W.
+                    ldg(buf, RAX, rn as u32);
             let r = (rot & (if sf { 63u32 } else { 31u32 })) as u8;
             buf.ror_ri8(RAX, r);
             if !sf {
                 buf.and_ri64(RAX, 0xffff_ffff);
             }
             stg(buf, rd as u32, RAX);
+            Ok(())
+        }
+        Inst::Svc { imm: _ } => {
+            // Route the supervisor call to the host `guest_svc` dispatcher (this
+            // is the hookpoint for real AArch64->host syscall routing).
+            let addr = crate::jit::guest_svc as usize as u64;
+            buf.mov_ri64(RAX, addr);
+            buf.call_r64(RAX); // guest_svc(st); returns the syscall result in RAX
+            stg(buf, 0, RAX); // system value -> guest x0 (AArch64 return reg)
             Ok(())
         }
         Inst::BitField { rd, rn, immr, imms, sf, arith } => {
