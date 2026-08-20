@@ -185,7 +185,12 @@ pub struct ElfInfo {
 #[allow(unused)]
 #[derive(Debug)]
 pub struct LoadedSegment {
-    /// Virtual address where this segment was mapped.
+    /// Guest virtual address from the ELF program header (p_vaddr), i.e. the
+    /// address the *guest* program believes this segment lives at. For a static
+    /// non-PIE this equals `vaddr`/`host`; for a PIE it is the offset (usually
+    /// 0-based) the code was linked at.
+    pub guest_vaddr: u64,
+    /// Host virtual address where this segment was actually mapped.
     pub vaddr: u64,
     /// Size of the segment in memory.
     pub memsz: u64,
@@ -205,6 +210,40 @@ pub struct LoadedElf {
     pub info: ElfInfo,
     /// The individual loaded segments.
     pub segments: Vec<LoadedSegment>,
+}
+
+impl LoadedElf {
+    /// Map a *guest* virtual address (an address in the ELF's own address
+    /// space, e.g. `e_entry` for a PIE/ET_DYN) to the *host* address where that
+    /// byte actually lives after `load_elf` mapped the segments.
+    ///
+    /// For a static non-PIE the guest vaddr == the host address (the loader
+    /// maps segments at their link-time vaddr); for a PIE the loader maps at a
+    /// kernel-chosen address, and this is where guest and host diverge.
+    /// Returns `None` if `guest` does not fall inside any loaded segment.
+    #[allow(unused)]
+    pub fn host_addr_of(&self, guest: u64) -> Option<u64> {
+        for seg in &self.segments {
+            let gstart = seg.guest_vaddr;
+            let gend = gstart.checked_add(seg.memsz)?;
+            if guest >= gstart && guest < gend {
+                // Same byte offset within the segment, translated to host.
+                return Some(seg.vaddr + (guest - gstart));
+            }
+        }
+        None
+    }
+
+    /// The first PT_LOAD segment whose protection allows execution (`r-x`),
+    /// and the host range `[start, end)` it occupies. This is the "text"
+    /// segment the JIT should translate code out of.
+    #[allow(unused)]
+    pub fn text_segment(&self) -> Option<(u64 /*host start*/, u64 /*host end*/)> {
+        self.segments
+            .iter()
+            .find(|s| s.prot.execute)
+            .map(|s| (s.vaddr, s.vaddr + s.memsz))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +429,7 @@ pub unsafe fn load_elf(path: &Path) -> Result<LoadedElf> {
         }
 
         segments.push(LoadedSegment {
+            guest_vaddr: phdr.p_vaddr,
             vaddr: map_addr as u64 + adjust as u64,
             memsz: phdr.p_memsz,
             fd,
