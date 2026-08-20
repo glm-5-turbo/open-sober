@@ -515,3 +515,17 @@ Suggested next-agent fixes (in order of leverage):
 This is the concrete path to the first "JNI_OnLoad" print with the real
 2.726.1142 libroblox.so — the bionic shim's trampoline resolution is the
 binding blocker on this box.
+
+### Session-13c: NULL-safe resolver committed; load-time shim crash isolated
+Committed the NULL-safe bionic trampoline resolver (bionic_init.c): every
+`dlsym(RTLD_NEXT,…)` in `__bf_c_resolve` now falls back to `__bf_noop()`
+instead of leaving a NULL slot (which branched to 0). Good hygiene, but
+isolating the real blocker confirmed the crash is EARLIER and separate:
+**LD_PRELOAD=libbionic_shim.so segfaults a trivial ARM64 `hello` with
+`si_addr=0x1` right after brk()+anonymous-mmap on the main thread's init —
+i.e. in the shim's load-time constructor (`__bf_data_*` dlsym fill /
+`__bf_install_mutex_wrappers`), not in the trampoline table.**
+So the resolver hardening fixes late faults but not the load-time ABI
+crash of the bundled shim against gcc-15 glibc. That load-time crash is
+the binding blocker on a fresh box; a follow-up is the shim's `__bf_init_*`
+constructor + `__bf_data_*` referencing against the actual gcc-15 ABI.
