@@ -1797,5 +1797,14 @@ translate.rs / x86.rs + HANDOFF.
 
 ### Next (ordered)
 1. `fcvtpu Xd, Sn` (0x9e290009, FP→unsigned-int round-toward-+inf) + siblings (`fcvtps/ns/ms…`) — have qemu truth.
+   **GATE CAVEAT (learned this session):** the fcvt-round family shares the scalar-FP byte with `fcmp`
+   (`fcmp d6,d16 = 0x1e7020c0` gives byte 0x70→(..>>3)&7=6, bit17=0) so a loose `(insn&0x20000)==0 &&
+   (byte>>3)&7 in {5,6}` gate will *invert-decode fcmp to FcvtToInt* (regression, was reverted). The
+   translate for round mode 3/4 (roundsd+trunc) is already committed & correct; only a *verified*,
+   tight fcvt-vs-fcmp discriminator is missing. Do NOT re-add the loose gate.
+   Hint: fcvt-round src is single `0x..2x`/double `0x..6x` (bit22) and the real forms were
+   `9e280009/9e690009(ps) 0x9e300009(ms) 0x9e200009(ns)` — pin opcode bits[22:17] + the fcmp-off axis.
 2. Then continue grind; eventually the `svc` real AArch64→x86-64 syscall table (mmap/futex/mprotect; numbers
    differ: mmap 222->9, futex 95->202, mprotect 226->10) — the big-ticket item before real Roblox boot.
+- Commits this session: `b80ed31` (10+ walls), `1b16fc9` (FcvtToInt round-mode translate, dead-code-y wiring).
+  Tree clean, `cargo test -p arm64jit` = 39 pass. Boot stalls honestly at `fcvtpu x9,s0` (0x9e290009) pc 0x101f69cec.
