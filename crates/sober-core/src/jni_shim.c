@@ -106,6 +106,7 @@ static struct {
 
 /* Condvar shim — allocated once, used to patch both bionic tramp table and PLT GOT */
 static void *g_cond_shim = MAP_FAILED;
+static void *g_cond_tw   = MAP_FAILED;
 
 // ============== Tracking stub helpers ==============
 
@@ -932,7 +933,7 @@ static void run_libroblox_init_array(uint64_t base) {
 //   thunk[7..8]: .quad  <real malloc>            ; literal, pc+16 from [1]
 static void patch_mempool_malloc_fallback(uint64_t base) {
     void *rm = dlsym(RTLD_DEFAULT, "malloc");
-    if (!rm) { jlog("[jni_shim] malloc fallback: real malloc missing\n"); return; }
+    if (!rm) { jlog("[jni_shim] malloc fallback: real glibc malloc missing\n"); return; }
 
     /* dedicated RWX page for the thunk (do NOT reuse g_cond_shim, which holds
      * the condvar "mov w0,#0; ret" trampoline) */
@@ -2126,12 +2127,24 @@ int main(int argc, char** argv) {
                                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
             }
             if (g_cond_shim != MAP_FAILED) {
-                ((uint32_t*)g_cond_shim)[0] = 0x52800000;  // mov w0, #0
+                ((uint32_t*)g_cond_shim)[0] = 0x52800000;  // mov w0, #0 (spurious wakeup)
                 ((uint32_t*)g_cond_shim)[1] = 0xd65f03c0;  // ret
                 __builtin___clear_cache(g_cond_shim, (void*)((uintptr_t)g_cond_shim + 8));
-                tramp[39] = g_cond_shim;
-                tramp[96] = g_cond_shim;
-                jlog( "[jni_shim] condvar shim %p -> tramp[39,96]\n", g_cond_shim);
+                tramp[39] = g_cond_shim;   // pthread_cond_wait -> return 0 (spurious)
+
+                // pthread_cond_timedwait: return ETIMEDOUT(110) so a caller
+                // doing a bounded wait with a deadline takes the timeout path
+                // and gives up, instead of re-looping forever on a flag that
+                // (single-threaded under QEMU) will never be set.
+                g_cond_tw = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
+                                 MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+                if (g_cond_tw != MAP_FAILED) {
+                    ((uint32_t*)g_cond_tw)[0] = 0x52800dc0;  // mov w0, #110 (ETIMEDOUT)
+                    ((uint32_t*)g_cond_tw)[1] = 0xd65f03c0;  // ret
+                    __builtin___clear_cache(g_cond_tw, (void*)((uintptr_t)g_cond_tw + 8));
+                }
+                tramp[96] = (g_cond_tw != MAP_FAILED) ? g_cond_tw : g_cond_shim;
+                jlog( "[jni_shim] condvar shim %p -> tramp[39,96] (timedwait ETIMEDOUT)\n", g_cond_shim);
             } else {
                 jlog( "[jni_shim] WARNING: condvar shim mmap failed\n");
             }
