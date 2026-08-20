@@ -982,3 +982,24 @@ emulated second thread.
 **Current scope/limits (honest):** translator handles MoveWide/AddSubImm/AddSubReg(shamt 0) only so far; no loads/stores, no branches/control-flow, no BL/host-call dispatch, no FP/NEON/TLS/atomics yet. Roblox's libroblox.so is far beyond this until loads/stores + branches + a host-call (syscall/bionic-shim) dispatch land.
 
 **Next (Session 19+):** broaden decoder+translator to LDR/STR (have decode) + B/B.cond/CBZ + a host-call trampoline; validate on a real multi-instruction aarch64 .so function; then wire into libloader `--no-qemu`. Cleaned /tmp of ~5G stale QEMU core dumps.
+
+## Session 18b — arm64jit executes load/store + control flow (no QEMU)
+
+**Verified this session** (all through the from-scratch JIT, no QEMU):
+- LDR/STR (unsigned 16-bit immediate offset), size 8/4, via RDX addr + lea — real
+  `ldr x0,[x0,#16]` loads host memory correctly (17→19 tests).
+- RET decodes + translates to host `ret`.
+- **Control flow**: B (jmp), CBZ/CBNZ (test+jnz/jz) + flow-aware `jit::compile`
+  that builds a guest_pc→host_offset map and patches rel32 fixups
+  (disp = target − (disp_off+4)). Fixed a bad `start` calc → SIGSEGV.
+  Real `cbz x0` function returns 20 (fall-through) / 10 (taken) ✓.
+
+**State**: 19 tests green, workspace clean, committed at `09699e5`.
+
+**Commits this session**: eb11d66 (LDR/STR+ret), 7c25747 (first exec),
+a432acf, 09699e5 (control flow).
+
+**Next slice** (task 3b): B.cond + NZCV flags (subs/cmp set flags; materialize
+into guest NZCV so any interleavspread works) then BL function calls with a
+guest call stack. After flags, real `.c` compiled aarch64 (if/else, loops)
+can run.
