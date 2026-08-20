@@ -899,6 +899,76 @@ static void run_libroblox_init_array(uint64_t base) {
     }
 }
 
+// ---- MemoryPool malloc-fallback (Session 17b) ----
+// Roblox's small TLS allocator at 0x1c35480 uses a per-thread free-list; when
+// empty it falls through to the big-allocator 0x1c3635c, which returns NULL
+// with zero mmap syscalls (libroblox.so imports NO malloc/calloc/realloc).
+// That NULL reaches the TLS-bootstrap block alloc in JNI_OnLoad (0x2692ce8)
+// and aborts. Redirect: when the fast-path free-list is empty, call REAL
+// glibc malloc so the allocator always returns usable memory.
+//
+// Patch site: the 20-byte empty-list continuation at 0x1c354fc:
+//   1c354fc  mov x1,x19 ; mov w2,wzr ; mov x3,xzr ; ldp epilogue ; b 0x1c3635c
+// We replace it with an ADRP+BR into a tiny thunk living on the RWX shim page
+// (g_cond_shim). The thunk calls real glibc malloc(size) and returns through
+// the frame 0x1c35480 established (x29 = sp; saved x19 at [sp+16], saved
+// x29/x30 at [sp+0]).
+//
+//   thunk[0]: mov  x0, x19                       ; size  (x19==size)
+//   thunk[1]: ldr  x17, [pc, #16]                ; literal 4 instrs ahead
+//   thunk[2]: blr  x17                           ; x0 = malloc(size)
+//   thunk[3]: ldr  x19, [x29, #16]              ; restore saved x19
+//   thunk[4]: ldp  x2,  x30, [x29], #32         ; restore (x2=[x29],x30=[x29+8])
+//   thunk[5]: mov  x29, x2                       ; x29 = saved x29
+//   thunk[6]: ret
+//   thunk[7..8]: .quad  <real malloc>            ; literal, pc+16 from [1]
+static void patch_mempool_malloc_fallback(uint64_t base) {
+    void *rm = dlsym(RTLD_DEFAULT, "malloc");
+    if (!rm) { jlog("[jni_shim] malloc fallback: real malloc missing\n"); return; }
+
+    /* dedicated RWX page for the thunk (do NOT reuse g_cond_shim, which holds
+     * the condvar "mov w0,#0; ret" trampoline) */
+    void *pg = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC,
+                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (pg == MAP_FAILED) { jlog("[jni_shim] malloc fallback: mmap fail\n"); return; }
+    volatile uint32_t *t = (volatile uint32_t*)pg;
+    t[0] = 0xaa1303e0u;              /* mov  x0, x19            */
+    t[1] = 0x580000d1u;              /* ldr  x17, [pc, #24]     -> literal at t[7] */
+    t[2] = 0xd63f0220u;              /* blr  x17  (malloc)       */
+    t[3] = 0xf9400bb3u;              /* ldr  x19, [x29, #16]     */
+    t[4] = 0xa8c27ba9u;              /* ldp  x9, x30, [x29], #32 */
+    t[5] = 0xaa0903fdu;              /* mov  x29, x9             */
+    t[6] = 0xd65f03c0u;              /* ret                      */
+    *(volatile uint64_t*)&t[7] = (uintptr_t)rm;  /* literal: real malloc */
+    __builtin___clear_cache((void*)t, (void*)&t[9]);
+
+    /* Patch the book's empty-list continuation at 0x1c354fc (24 bytes) to
+     *  adrp x16, TUPLPAGE; br x16 ; (nop...)        -> enter the thunk. */
+    const uint64_t addr = base + 0x1c354fc;
+    int32_t adrp_imm = (int32_t)(((uint64_t)pg >> 12) - ((addr & ~0xfffULL) >> 12));
+    uint32_t adrp = 0x90000000u
+                  | (((uint32_t)(adrp_imm & 3)) << 29)          /* imm[1:0]->[30:29] */
+                  | (((uint32_t)(adrp_imm >> 2) & 0x7FFFFu) << 5)/* total 21 bits */
+                  | 0x10u;                                        /* adrp x16 = Rd */
+    uint32_t brxn16 = 0xd61f0200u;                    /* br x16 */
+    volatile uint32_t *s = (volatile uint32_t*)addr;
+    uintptr_t pgA = addr & ~0xfffULL;
+    if (mprotect((void*)pgA, 0x1000, PROT_READ|PROT_WRITE|PROT_EXEC) == 0) {
+        s[0] = adrp;
+        s[1] = brxn16;
+        s[2] = 0xd503201fu;                          /* nop */
+        s[3] = 0xd503201fu;
+        s[4] = 0xd503201fu;
+        s[5] = 0xd503201fu;
+        __builtin___clear_cache((void*)addr, (void*)(addr+24));
+        mprotect((void*)pgA, 0x1000, PROT_READ|PROT_EXEC);
+        jlog("[jni_shim] MemoryPool malloc-fallback @0x%lx (thunk page) -> book 0x%lx\n",
+             (unsigned long)pg, (unsigned long)addr);
+    } else {
+        jlog("[jni_shim] malloc fallback: cannot RW book .text page\n");
+    }
+}
+
 // Phase 1a patch: NOP only the clock/time init call at binary offset 0x1f64e9c.
 // nativeSetAssetPath at 0x1f64eb8 is NOT modified.
 static void patch_jni_onload_phase1(uintptr_t base) {
@@ -2078,20 +2148,24 @@ int main(int argc, char** argv) {
         patch_all_jumpslots(g_libroblox_base);
     }
 
+    // MemoryPool malloc-fallback: redirect libro's small-alloc empty-list path
+    // to real glibc malloc so the TLS-block bootstrap never aborts on a NULL
+    // allocation. Runs before the FULL BYPASS so the pool is live for any init.
+    if (g_libroblox_base) {
+        patch_mempool_malloc_fallback(g_libroblox_base);
+    }
+
     // Run Roblox's real .init_array static constructors (they seed the
     // MemoryPool/TLS arena globals the allocator needs; DT_INIT_ARRAYSZ is 0 in
     // the unpacked lib so glibc never runs them). Do this AFTER jumpslot patch
     // so constructors that call out through the PLT hit real functions.
     //
-    // DISABLED (Session 17 revert to Session-9 stable state): ctor[0..3] run,
-    // but ctor[3] (0x1c34480 -> MemoryPool TLS alloc) aborts and spins
-    // (blocker = Roblox internal pool bootstrap). To reach a stable loaded
-    // state under the bridge we skip the ctors entirely, matching the Session 9
-    // full-bypass that returns 0x10006 cleanly. Re-enable once the MemoryPool
-    // bootstrap is understood.
-    // if (g_libroblox_base && g_robo.have) {
-    //     run_libroblox_init_array(g_libroblox_base);
-    // }
+    // DISABLED (Session 17 revert): ctor[0..3] run but ctor[3] aborts/spins
+    // before the malloc-fallback. With patch_mempool_malloc_fallback active,
+    // re-enable: the empty TLS pool now falls back to real glibc malloc.
+    if (g_libroblox_base && g_robo.have) {
+        run_libroblox_init_array(g_libroblox_base);
+    }
 
 
     // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
