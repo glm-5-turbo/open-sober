@@ -897,3 +897,47 @@ A. NOW: run jni_shim with DISPLAY=:0, keep sleep-loop stable, and use
 B. Then: re-enable init_array/progressive init in stages ONCE the pool seed is
    understood, so a real window can render.
 C. Multiple-version compatibility after a working baseline.
+## Session 17b — MemoryPool malloc-fallback thunk: empty-pool abort DEFEATED (committed 313aa7b)
+
+### Probe: libroblox imports NO allocator functions
+readelf -r --use-dynamic shows libroblox.so imports only `free`/`munmap` from the
+allocator family (no malloc/calloc/realloc/mmap). Its MemoryPool is fully
+internal; the big-allocator returns NULL on unseeded arena state regardless of
+host free RAM. Forging sysinfo/meminfo is irrelevant.
+
+### Fix: redirect small-allocator empty-list to real glibc malloc
+- Site: libro offset 0x1c354fc — the "empty per-thread free-list" continuation
+  that tail-calls the big-allocator 0x1c3635c (which returns NULL).
+- Thunk on a fresh MAP_ANONYMOUS RWX page (NOT the cond_shim page, which is the
+  condvar "mov w0,#0; ret" trampoline):
+      mov  x0, x19           ; size (0x1c35490 mov x19=x0; x19==size)
+      ldr  x17, [pc, #24]    ; pc-literal loads real glibc malloc
+      blr  x17               ; x0 = malloc(size)
+      ldr  x19, [x29, #16]   ; restore saved x19
+      ldp  x9, x30, [x29], #32 ; restore (x9=[x29], x30=[x29+8]), sp+=32
+      mov  x29, x9
+      ret
+  Encodings verified against aarch64-linux-gnu-gcc-assembled .S.
+- Book patch (24 bytes at 0x1c354fc): `adrp x16, thunkpage; br x16; nop x4`.
+  ADRP encoding that VERIFIED (mine was wrong first try):
+      imm = (thunk_page - site_page)  ; in 0x1000 units, signed
+      adrp = 0x90000000
+           | ((imm & 3) << 29)                  ; low 2 bits -> bits[30:29]
+           | (((imm >> 2) & 0x7ffff) << 5)      ; high 19 bits -> bits[23:5]
+           | Rd                                  ; Rd = x16 = 0x10
+  My first form `((imm&0x7ffff)<<5)` put the raw (non->>2) delta at the wrong
+  bit offset -> jumped to a wrong page and SIGSEGV'd. Correct form verified
+  against the cross-cc (same-page `adrp x16` disassembles to 0x90000010).
+
+### Result
+- BEFORE: ctor[3] aborts 4x (empty-pool NULL) and spins.
+- AFTER: ctor[3] runs, calls sysinfo (pool doing real allocation), NO abort,
+  NO segfault. The hang is now a single-threaded CONDITION wait-loop (classic
+  QEMU user-mode one-thread behavior), not an OOM abort.
+
+### Next
+Post-ctor[3] hang = wait on an event/flag that never arrives (one thread under
+QEMU). Options: (a) trace the exact spin site (heartbeat) and force/fake the
+awaited flag; (b) pre-seed the pool's real arena (static default TLS block free
+-list) so the block path never blocks. Much more tractable than the previous
+NULL/OOM abort.
