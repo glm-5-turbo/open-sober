@@ -369,6 +369,25 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::VecLdStImm { vt, rn, imm, ld } => {
+            // addr = rn + imm*16 ; transfer a full 128-bit vector between the
+            // guest vector slot (CpuState.v, 16 bytes at VECTOR_BASE+16*vt) and
+            // the guest pointer, via x86 XMM0.
+            ldg(buf, RAX, rn as u32); // base address
+            let off = (imm as i32).wrapping_mul(16);
+            if off != 0 {
+                buf.lea64(RAX, RAX, off);
+            }
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            if ld {
+                buf.movdqu_load(0, RAX, 0); // xmm0 <- [addr]
+                buf.movdqu_store(RBX, vslot, 0); // cmp-state v <- xmm0
+            } else {
+                buf.movdqu_load(0, RBX, vslot); // xmm0 <- [vslot]
+                buf.movdqu_store(RAX, 0, 0); // [addr] <- xmm0
+            }
+            Ok(())
+        }
         Inst::Ret => {
             // return x0 in RAX, then ret (matches the JIT fn convention that the
             // epilogue also uses). $[x0] at RBX+0.

@@ -219,6 +219,51 @@ impl CodeBuf {
         self.emit_mem(src, base, disp);
     }
 
+    // ---- SIMD / NEON (128-bit XMM) ----
+    /// movdqu xmm <- [mem (base+disp)]  ; 128-bit unaligned load
+    pub fn movdqu_load(&mut self, xmm: u8, base: u8, disp: i32) {
+        self.b(0xF3);
+        if xmm >= 8 || base >= 8 {
+            self.b(rex(false, xmm, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0x6F);
+        self.emit_mem(xmm, base, disp);
+    }
+    /// movdqu [mem (base+disp)] <- xmm ; 128-bit unaligned store
+    pub fn movdqu_store(&mut self, base: u8, disp: i32, xmm: u8) {
+        self.b(0xF3);
+        if base >= 8 || xmm >= 8 {
+            self.b(rex(false, xmm, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0x7F);
+        self.emit_mem(xmm, base, disp);
+    }
+    /// movdqa xmm, xmm (copy register)
+    pub fn movdqa_xmm(&mut self, dst: u8, src: u8) {
+        if dst == src {
+            return;
+        }
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, src, 0, dst));
+        }
+        self.b(0x0F);
+        self.b(0x6F);
+        self.b(modrm(3, src & 7, dst & 7));
+    }
+    /// pxor xmm, xmm (zero or XOR; for CLEARING use pxor x,x)
+    pub fn pxor_xmm(&mut self, dst: u8, src: u8) {
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, src, 0, dst));
+        }
+        self.b(0x0F);
+        self.b(0xEF);
+        self.b(modrm(3, src & 7, dst & 7));
+    }
+
     /// lea r64, [base + disp]
     pub fn lea64(&mut self, rd: u8, base: u8, disp: i32) {
         if rd >= 8 || base >= 8 {

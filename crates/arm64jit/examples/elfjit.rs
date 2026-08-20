@@ -83,6 +83,26 @@ fn main() {
             std::process::exit(1);
         }
         Ok(blk) => {
+            // Optional x0/x1/x2 init. Pass `buf` in position 3 to allocate a
+            // writable 256-byte host buffer (guest==host, so its address is a
+            // valid guest pointer) and put its address in x0; also x1=x0+32.
+            for (i, arg) in std::env::args().skip(3).take(3).enumerate() {
+                let v = if arg == "buf" {
+                    let b = Box::leak(vec![0x7fu8; 256].into_boxed_slice());
+                    if i == 0 {
+                        let base = b.as_ptr() as u64;
+                        st.set(0, base);
+                        st.set(1, base + 32);
+                    }
+                    b.as_ptr() as u64
+                } else {
+                    u64::from_str_radix(arg.trim_start_matches("0x"), 16)
+                        .unwrap_or_else(|e| panic!("bad x{i} hex: {e}"))
+                };
+                if !(arg == "buf" && i == 0) {
+                    st.set(i, v);
+                }
+            }
             let r = unsafe { run(&blk, &mut st as *mut CpuState) };
             println!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r);
         }

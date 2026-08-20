@@ -105,6 +105,13 @@ pub enum Inst {
         preidx: bool,
         size_64: bool, // false => 32-bit W pair
     },
+    // ---- SIMD/NEON 128-bit vector load/store (ldr q0,[xN,#imm] / str q) ----
+    VecLdStImm {
+        vt: u8, // vector register
+        rn: u8,
+        imm: u32, // scaled-by-16 byte offset
+        ld: bool,
+    },
     // ---- compare-and-branch ----
     Cbz {
         rt: u8,
@@ -324,6 +331,16 @@ pub fn decode(insn: u32) -> Inst {
             size,
             ld,
         };
+    }
+
+    // ---- SIMD/NEON 128-bit vector load/store (ldr q / str q) ----
+    // Encoding 0x3D8xxxxx (str q) / 0x3DCxxxxx (ldr q), imm12 scaled by 16.
+    if (insn & 0xffc0_0000) == 0x3d80_0000 || (insn & 0xffc0_0000) == 0x3dc0_0000 {
+        let ld = (insn & 0x40_0000) != 0;
+        let imm = (insn >> 10) & 0xfff; // scaled by 16 bytes
+        let rn = b(insn, 5, 9) as u8;
+        let vt = b(insn, 0, 4) as u8;
+        return Inst::VecLdStImm { vt, rn, imm, ld };
     }
 
     // ---- load/store (register offset) ----

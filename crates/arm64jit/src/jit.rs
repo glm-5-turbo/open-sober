@@ -22,7 +22,14 @@ pub struct CpuState {
     pub pc: u64,
     pub nzcv: u32,
     pub pad: u32,
+    /// 32 SIMD/NEON 128-bit vector registers. Each 128-bit vector v[i] is
+    /// stored as two little-endian u64 lanes: lane0 = low u64 at [256 + 16*i],
+    /// lane1 = high u64 at [256 + 16*i + 8]. Vector slot base = 256.
+    pub v: [u64; 64],
 }
+
+/// Base byte offset of the SIMD vector register file inside CpuState.
+pub const VECTOR_BASE: i32 = 256;
 
 impl CpuState {
     pub fn new() -> Self {
@@ -31,6 +38,7 @@ impl CpuState {
             pc: 0,
             nzcv: 0,
             pad: 0,
+            v: [0; 64],
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {
@@ -38,6 +46,13 @@ impl CpuState {
     }
     pub fn get(&self, reg: usize) -> u64 {
         self.x[reg]
+    }
+    pub fn set_v(&mut self, vreg: usize, low: u64, high: u64) {
+        self.v[vreg * 2] = low;
+        self.v[vreg * 2 + 1] = high;
+    }
+    pub fn get_v(&self, vreg: usize) -> (u64, u64) {
+        (self.v[vreg * 2], self.v[vreg * 2 + 1])
     }
 }
 
