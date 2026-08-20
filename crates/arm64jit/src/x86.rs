@@ -366,6 +366,22 @@ impl CodeBuf {
             self.b(0x63);
             self.b(modrm(3, rd & 7, rs & 7));
         }
+        /// movq xmm, r64  (66 48 0F 6E /r) — move a GPR's bits into the low 8B of an XMM.
+        pub fn movq_xmm_r64(&mut self, xmm: u8, r64: u8) {
+            self.b(0x66);
+            self.b(rex(true, xmm, 0, r64)); // W=1 (64-bit), r=xmm ext, b=r64 exts
+            self.b(0x0F);
+            self.b(0x6E);
+            self.b(modrm(3, xmm & 7, r64 & 7));
+        }
+        /// comisd xmm_a, xmm_b  (66 0F 2F /r) — signed compare; sets CF/ZF (CF=1 if a<b).
+        pub fn comisd(&mut self, a: u8, b: u8) {
+            self.b(0x66);
+            self.b(rex(false, a, 0, b)); // r=a (high xmm), b=b (high xmm)
+            self.b(0x0F);
+            self.b(0x2F);
+            self.b(modrm(3, a & 7, b & 7));
+        }
         /// cvttsd2si r64, xmm  (F2 48 0F 2C /r) — truncate toward zero
     pub fn cvttsd2si(&mut self, rd: u8, xmm: u8) {
         self.b(0xF2);

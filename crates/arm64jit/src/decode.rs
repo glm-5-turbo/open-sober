@@ -165,9 +165,10 @@ pub enum Inst {
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
             rd: u8,
-            rn: u8,   // source fp reg
-            mode: u8, // 0=fcvtzs, 2=fcvtas
-            sf: bool, // 64-bit dest
+            rn: u8,        // source fp reg
+            mode: u8,      // 0=fcvtzs, 2=fcvtas, 1=fcvtzu, 3=fcvtzu(nearest? unused)
+            sf: bool,      // 64-bit dest
+            unsigned: bool, // fcvtzu: convert to unsigned int (clamp/-to-0 semantics)
         },
         // ---- FP convert from signed integer (scvtf: Wn|Xn -> Sd|Dd) ----
         Scvtf {
@@ -186,6 +187,20 @@ pub enum Inst {
                rd: u8,
                rn: u8,
            },
+           // ---- FMOV scalar immediate (fmov Dd, #imm / fmov Sd, #imm) ----
+           // Encodes an 8-bit vfp-immediate (imm3:imm5) into a concrete IEEE-754
+           // value (`value_bits` already decoded by decode_fmov_imm). `f64` => Dd.
+           FmovImm {
+               rd: u8,          // destination 64-bit (d) or 32-bit (s) FP reg
+               f64: bool,       // true => double (8B) result, false => single (4B)
+               value_bits: u64, // IEEE-754 bits (f64 `value` for f64, low 32 for f32)
+       },
+       // ---- scalar FP register-to-register move (fmov Dd,Dn / fmov Sd,Sn) ----
+       FmovFp {
+           rd: u8,          // destination FP reg
+           rn: u8,          // source FP reg
+           sz: bool,        // true = double (8B move), false = single (4B)
+       },
            // ---- NEON: cnt V.8b (per-byte popcount) and uaddlv H, V.8b (byte sum) ----
            SimdPopcnt { rd: u8, rn: u8 }, // cnt v{d}.8b, v{m}.8b
            SimdSum8 { rd: u8, rn: u8 },   // uaddlv h{rd}, v{rn}.8b
@@ -195,7 +210,20 @@ pub enum Inst {
                                rd: u8,
                                rn: u8,
                            },
-                           // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
+                           // ---- scalar FP compare to NZCV (fcmp Dn, Dm / fcmp Dn, #0.0) ----
+                           Fcmp {
+                               rn: u8, // first operand (source fp reg / d-reg)
+                               rm: u8, // second fp reg (0 for the #0.0 form)
+                           },
+    // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
+        FcsSel {
+            rd: u8,   // destination FP reg
+            rn: u8,   // "if-true" FP reg
+            rm: u8,   // "else" FP reg
+            cond: u8, // AArch64 condition code (0-14)
+            sz: bool, // true = double (8B), false = single (4B)
+        },
+        // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
                            InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
                            // ---- EXTR / ROR rotate: rm==rn in the EXTR base ----
                            Ror { rd: u8, rn: u8, rot: u32, sf: bool }, // ror rd,rn,#rot
@@ -302,9 +330,37 @@ fn b(insn: u32, lo: u32, hi: u32) -> u32 {
 /// Logical instructions" / immediately-encoded uses). Returns the `datasize`-bit
 /// operand mask, or `None` if the encoding is architecturally invalid.
 ///
+/// Decode the 8-bit AArch64 FP-immediate (fmov Dd, #imm) into IEEE-754 bits.
+///
+/// The 8-bit `imm8` (from the instruction at bits[13:20]) packs
+///   bit7 sign, bits[6:4] exponent (3-bit), bits[3:0] 4-bit mantissa.
+/// The value is `(+/-1) * (1 + m/16) * 2^ex` where `ex = (e + 1) mod 8`
+/// interpreted as a signed 3-bit exponent. Verified against 12 compiler-emitted
+/// `fmov d,#imm` encodings (0.5, 1, 2, 3, 4, -2, 0.75, 1.5, 2.5, 5, 6, 10).
+fn decode_fmov_imm(imm8: u32, f64: bool) -> u64 {
+    let sign = (imm8 >> 7) & 1 == 1;
+    let e = (imm8 >> 4) & 7;
+    let m = imm8 & 0xf;
+    let mut ex = ((e + 1) & 7) as i32; // exponent in one 3-bit 2's-complement
+    if ex >= 4 {
+        ex -= 8;
+    }
+    // value = (1 + m/16) * 2^ex, composed as IEEE-754 bits directly.
+    if f64 {
+        // value = (1 + m/16) * 2^ex as double: field = <sign> <ex+1023> <m-then-zeros>.
+        let e_bits = (ex as u64).wrapping_add(1023); // biased exponent field
+        let mant = (m as u64) << 48; // 4-bit mantissa in the top of the fraction
+        (if sign { 1u64 } else { 0u64 } << 63) | (e_bits << 52) | mant
+    } else {
+        // single: value = 1.m/16 * 2^ex, bias 127, mantissa low 23 bits
+        let e_bits = ((ex as u64).wrapping_add(127)) & 0xff;
+        let mant = (m as u64) << 19; // 4 mantissa bits at [22..19]
+        ((if sign { 1u64 } else { 0u64 } << 31) | (e_bits << 23) | mant) & 0xffff_ffff
+    }
+}
 /// This handles every element size (64/32/16/8) and the N=0 case where `imms`
-/// carries a leading run of 1s that my earlier N==1/N==0 split rejected — that
-/// edge is what made a real `mov x8,#0xcccccccccccccccc` (imm = alternating bits)
+/// carries a leading run of 1s that simpler N==1/N==0 splits reject — that edge
+/// is what made a real `mov x8,#0xcccccccccccccccc` (imm = alternating bits)
 /// wrongly fall through to `Unsupported`.
 fn decode_logical_mask(n: u32, immr: u32, imms: u32, datasize: u64) -> Option<u64> {
     // DecodeBitMasks (ARM ARM DDI0487): len = HighestSetBit( immN : NOT(imms) ).
@@ -848,17 +904,52 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- FP convert to signed integer (fcvtzs/fcvtas): Dn|Sn -> Rd ----
-    // class (insn & 0x5f20fc00)==0x1e200000 ; opc = bits[17:19] (2=fcvtas,0=fcvtzs)
-    if insn & 0x5f20_fc00 == 0x1e20_0000 {
-        let mode = ((insn >> 17) & 7) as u8; // 0=fcvtzs(toward-zero), 2=fcvtas(nearest-away)
-        if mode == 0 || mode == 2 {
+    // Real encodings (verified): fcvtzs Wd,Dn = 0x1e78_0000 / Xd = 0x9e78_0000
+    // (truncate); fcvtas Wd,Dn = 0x1e7a_0000 / Xd = 0x9e7a_0000 (nearest-away).
+    // Rounding drives `mode`: 0=truncate (fcvtzs), 2=nearest-away (fcvtas).
+    {
+        let b = insn & 0xffff_f800;
+        let (mode, ok) = if b == 0x1e78_0000 || b == 0x9e78_0000 {
+            (0, true) // fcvtzs: truncate
+        } else if b == 0x1e7a_0000 || b == 0x9e7a_0000 {
+            (2, true) // fcvtas: round nearest-away
+        } else {
+            (0, false)
+        };
+        if ok {
             let sf = (insn >> 31) & 1 == 1;
             let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
             if sz {
                 let rn = ((insn >> 5) & 0x1f) as u8;
                 let rd = (insn & 0x1f) as u8;
-                return Inst::FcvtToInt { rd, rn, mode, sf };
+                return Inst::FcvtToInt {
+                    rd,
+                    rn,
+                    mode,
+                    sf,
+                    unsigned: false,
+                };
             }
+            return Inst::Unsupported(insn); // single (s) source not modelled yet
+        }
+    }
+
+    // ---- FP convert to UNSIGNED integer (fcvtzu): Dn -> Rd (unsigned int) ----
+    // bases 0x1e79_0000 (W dest) / 0x9e79_0000 (X dest). Distinct from signed
+    // fcvtzs at 0x1e78_0000/0x9e78_0000 (bit16 of the nibble: 0x79 vs 0x78).
+    if (insn & 0xffff_f800) == 0x1e79_0000 || (insn & 0xffff_f800) == 0x9e79_0000 {
+        let sf = (insn >> 31) & 1 == 1; // 1 => 64-bit (X) destination
+        let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
+        if sz {
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            return Inst::FcvtToInt {
+                rd,
+                rn,
+                mode: 0, // truncate-toward-zero (fcvtzu always truncates)
+                sf,
+                unsigned: true,
+            };
         }
     }
 
@@ -880,7 +971,54 @@ pub fn decode(insn: u32) -> Inst {
             };
         }
 
-                // ---- FMOV between core and scalar FP register ----
+                // ---- FMOV scalar immediate (fmov Dd, #imm) / (fmov Sd, #imm) ----
+                // Double imm family `0x1e_XX_1...` (imm8 in bits 13:20, `0x1000`
+                // lane anchor). Gate `(insn&0xffe0_0000)==0x1e60_0000` (masks out
+                // the imm byte at bits 16:23) selects the double-scalar base; a
+                // distinct class from scvtf/ffcvt (handled above, need bit17/other)
+                // and from fcvtzs/fcvtzu (their 0x1e78/0x1e79 bases differ). The
+                // `0x1000` bit anchors the double-imm form vs `0x0_0000` shares.
+                if (insn & 0xffe0_0000) == 0x1e60_0000 && (insn & 0x1000) != 0 {
+                    let rd = (insn & 0x1f) as u8;
+                    let imm8 = ((insn >> 13) & 0xff) as u32;
+                    let value_bits = decode_fmov_imm(imm8, /* f64 */ true);
+                    return Inst::FmovImm {
+                        rd,
+                        f64: true,
+                        value_bits,
+                    };
+                }
+                // ---- scalar FP register-to-register move: fmov Dd,Dn / fmov Sd,Sn ----
+                // Double form = 0x1e60_4000, single form = 0x1e20_4000 (sz bit selects).
+                if (insn & 0xffff_f000) == 0x1e60_4000 {
+                    let sz = (insn >> 22) & 1 == 1; // 1 => double (d), 0 => single (s)
+                    let rn = ((insn >> 5) & 0x1f) as u8;
+                    let rd = (insn & 0x1f) as u8;
+                    return Inst::FmovFp { rd, rn, sz };
+                }
+                // ---- scalar FP compare to NZCV: fcmp Dn, Dm (dbl) / fcmp Dn, #0.0 ----
+                    // Gate `(insn & 0xffe0_fc00) == 0x1e602000` masks out rn(5-9)/rm(16-20)/rd(0-4)
+                    // and keeps the fixed `0x...20...` + top bytes, so high rm registers (bit16-20
+                    // feeding into the base nibble, e.g. fcmp d6,d16 = 0x1e7020c0) still resolve.
+                    // rm==0 covers the `fcmp Dn, #0.0` form (ignored operand => compare with 0.0).
+                    if (insn & 0xffe0_fc00) == 0x1e602000 {
+                        let rn = ((insn >> 5) & 0x1f) as u8;
+                        let rm = ((insn >> 16) & 0x1f) as u8;
+                        return Inst::Fcmp { rn, rm };
+                            }
+                            // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
+                                // Structural mask `(insn & 0x1f20_0c00) == 0x1e20_0c00` separates
+                                // fp-select (the 0x800/0x400 in 0x..c00) from fcmp/fcmpe/fmov/fcvt
+                                // (which mask to 0x1e200000/0x1e200400). cond in bits 12-15 is
+                                // cleared by the 0x0c00 mask; rn/rm/rd are the low fields.
+                                if (insn & 0x1f20_0c00) == 0x1e20_0c00 {
+                                    let sz = (insn >> 22) & 1 == 1; // double if bit22 set
+                                    let cond = ((insn >> 12) & 0xf) as u8;
+                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                    let rm = ((insn >> 16) & 0x1f) as u8;
+                                    let rd = (insn & 0x1f) as u8;
+                                    return Inst::FcsSel { rd, rn, rm, cond, sz };
+                                }
                 // Bases: FMOV Xd,Dn 0x9E660000 ; FMOV Dd,Xn 0x9E670000
                 //        FMOV Wd,Sn 0x1E260000 ; FMOV Sd,Wn 0x1E270000  (mask clears rn/rt)
                 let base = insn & 0xffff_f800;
@@ -982,6 +1120,20 @@ pub fn decode(insn: u32) -> Inst {
         if op1 == 3 && crn == 13 && crm == 0 && op2 == 2 {
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 0, rt, read };
+        }
+        // mrs xN, cntfrq_el0 = 0xd53be000: the cnt* group is op1=11 (bits 19:16),
+        // CRn=14, CRm=0. op1 needs the full 4-bit field (the 3-bit
+        // `op1` above only suffices for tpidr_el0's op1==3). Counters share the
+        // same op1/crn/crm and differ by op2: cntfrq_el0=0 (rate Hz), cntpct_el0
+        // =1 (physical time), cntvct_el0=2 (virtual time, live counter).
+        if b(insn, 16, 19) == 11 && crn == 14 && crm == 0 && read {
+            let rt = (insn & 0x1f) as u8;
+            let sysreg = match op2 {
+                0 => 1, // cntfrq_el0
+                2 => 3, // cntvct_el0
+                _ => return Inst::Unsupported(insn),
+            };
+            return Inst::SysReg { sysreg, rt, read };
         }
     }
 
@@ -1612,5 +1764,111 @@ mod logical_imm_regressions {
         assert!(matches!(w3, Inst::Scvtf { rd: 0, rn: 0, to_double: true, sf: false , ..}), "scvtf -> {w3:?}");
         // fcvtns w0, d0 = 0x1e600000 must NOT decode as Scvtf (bit17=0).
         assert!(!matches!(decode(0x1e600000), Inst::Scvtf { .. }));
+        // fcvtzu x19, d0 = 0x9e790013 (real libroblox) => unsigned FP->u64.
+        match decode(0x9e790013) {
+            Inst::FcvtToInt { rd, rn, mode, sf, unsigned } => {
+                assert_eq!(rd, 19);
+                assert_eq!(rn, 0);
+                assert!(sf); // X dest
+                assert!(unsigned); // fcvtzu (not the signed fcvtzs)
+                assert_eq!(mode, 0); // truncate
+            }
+            other => panic!("fcvtzu x19,d0 -> {other:?}"),
+        }
+        // fcvtzu w0, d0 = 0x1e7903e0 => W dest.
+        match decode(0x1e7903e0) {
+            Inst::FcvtToInt { sf, unsigned, .. } => {
+                assert!(!sf);
+                assert!(unsigned);
+            }
+            other => panic!("fcvtzu w0,d0 -> {other:?}"),
+        }
+        // signed fcvtzs must NOT be flagged unsigned: 0x1e7803e0 = fcvtzs w0,d0.
+        match decode(0x1e7803e0) {
+            Inst::FcvtToInt { unsigned, .. } => assert!(!unsigned),
+            other => panic!("fcvtzs w0,d0 -> {other:?}"),
+        }
+        // mrs x19, cntfrq_el0 (real libroblox) => SysReg cntfrq (sysreg==1).
+        match decode(0xd53be013) {
+            Inst::SysReg { sysreg, rt, read } => {
+                assert_eq!(sysreg, 1);
+                assert_eq!(rt, 19);
+                assert!(read);
+            }
+            other => panic!("mrs cntfrq_el0 -> {other:?}"),
+        }
+        // mrs x25, cntvct_el0 (0xd53be059) => SysReg cntvct (sysreg==3).
+        match decode(0xd53be059) {
+            Inst::SysReg { sysreg, read, .. } => {
+                assert_eq!(sysreg, 3);
+                assert!(read);
+            }
+            other => panic!("mrs cntvct_el0 -> {other:?}"),
+        }
+        // fmov d6, d0 = 0x1e604006 (real libroblox) => register FP copy.
+        match decode(0x1e604006) {
+            Inst::FmovFp { rd, rn, sz } => {
+                assert_eq!(rd, 6);
+                assert_eq!(rn, 0);
+                assert!(sz); // double
+            }
+            other => panic!("fmov d6,d0 -> {other:?}"),
+        }
+        // fcmp d7, d6 = 0x1e6620e0 (real libroblox audio loop) => Fcmp sets NZCV.
+        match decode(0x1e6620e0) {
+            Inst::Fcmp { rn, rm } => {
+                assert_eq!(rn, 7);
+                assert_eq!(rm, 6);
+            }
+            other => panic!("fcmp d7,d6 -> {other:?}"),
+        }
+        // fcmp d6, d16 = 0x1e7020c0 (real libroblox; high rm reg folded into the
+        // base nibble) → must still decode as Fcmp with rm=16.
+        match decode(0x1e7020c0) {
+            Inst::Fcmp { rn, rm } => {
+                assert_eq!(rn, 6);
+                assert_eq!(rm, 16);
+            }
+            other => panic!("fcmp d6,d16 -> {other:?}"),
+        }
+        // fcsel d6, d16, d6, mi = 0x1e664e06 (real libroblox) => conditional FP select.
+        match decode(0x1e664e06) {
+            Inst::FcsSel { rd, rn, rm, cond, sz } => {
+                assert_eq!(rd, 6);
+                assert_eq!(rn, 16);
+                assert_eq!(rm, 6);
+                assert_eq!(cond, 0x4); // mi
+                assert!(sz);
+            }
+            other => panic!("fcsel d6,d16,d6,mi -> {other:?}"),
+        }
+        // fmov d1, #0.5 (0x1e6c1001, real libroblox audio path) => FmovImm f64.
+        match decode(0x1e6c1001) {
+            Inst::FmovImm {
+                rd,
+                f64,
+                value_bits,
+            } => {
+                assert_eq!(rd, 1);
+                assert!(f64);
+                assert_eq!(value_bits, 0x3fe0_0000_0000_0000); // 0.5 double
+            }
+            other => panic!("fmov d1,#0.5 -> {other:?}"),
+        }
+        // fmov d0, #2.0 (0x1e601000) => f64 2.0
+        match decode(0x1e601000) {
+            Inst::FmovImm { value_bits, .. } => {
+                assert_eq!(value_bits, 0x4000_0000_0000_0000); // 2.0 double
+            }
+            other => panic!("fmov d0,#2.0 -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mov_single_f64_bits() {
+        // decode_fmov_imm: 0.5 -> 0x3fe0...  , 1.0 -> 0x3ff0...,  -2.0 -> 0xc000...
+        assert_eq!(decode_fmov_imm(0x60, true), 0x3fe0_0000_0000_0000); // 0.5
+        assert_eq!(decode_fmov_imm(0x70, true), 0x3ff0_0000_0000_0000); // 1.0
+        assert_eq!(decode_fmov_imm(0x80, true), 0xc000_0000_0000_0000); // -2.0
     }
 }

@@ -84,10 +84,54 @@ fn store_nzcv(buf: &mut CodeBuf) {
     buf.shl_ri8(RCX, 31);
     buf.or_rr64(RDX, RCX);
     buf.mov_store32(RBX, NZCV_OFF, RDX);
-    buf.pop(RDX);
-    buf.pop(RCX);
-    buf.pop(RAX);
-}
+        buf.pop(RDX);
+        buf.pop(RCX);
+        buf.pop(RAX);
+    }
+
+    /// Pack a FP-comparison result (x86 flags from a prior `comisd`/`ucomisd`) into
+    /// the guest NZCV (bit 31=N, 30=Z, 29=C, 28=V). AArch64 `fcmp` semantics from
+    /// the x86 flags set by comisd:
+    ///   A<B (ord): CF=1,PF=0,ZF=0 -> N0 Z0 C0 V0
+    ///   A>B (ord): CF=0,ZF=0,PF=0 -> N0 Z0 C1 V0
+    ///   A==B:       CF=0,PF=0,ZF=1 -> N0 Z1 C1 V0   (C=1 for ge)
+    ///   unordered:  CF=1,PF=1,ZF=1 -> N0 Z1 C1 V1
+    /// so  Z=ZF, V=PF, C=(!CF)|PF, N=0. Clobbers RAX/RCX/RDX.
+    fn store_nzcv_fp(buf: &mut CodeBuf) {
+        buf.push(RAX);
+        buf.push(RCX);
+        buf.push(RDX);
+        buf.pushfq();
+        buf.pop(RAX); // eax = rflags (CF0, PF2, ZF6)
+        buf.xor_rr64(RDX, RDX);
+        // V = PF(bit2) -> bit28
+        buf.mov_rr64(RCX, RAX);
+        buf.shr_ri8(RCX, 2);
+        buf.and_ri64(RCX, 1);
+        buf.shl_ri8(RCX, 28);
+        buf.or_rr64(RDX, RCX);
+        // C = (!CF) | PF -> bit29
+        buf.mov_rr64(RCX, RAX);
+        buf.and_ri64(RCX, 1); // CF
+        buf.xor_ri64(RCX, 1); // !CF
+        buf.mov_rr64(RDI, RAX);
+        buf.shr_ri8(RDI, 2);
+        buf.and_ri64(RDI, 1); // PF
+        buf.or_rr64(RCX, RDI);
+        buf.shl_ri8(RCX, 29);
+        buf.or_rr64(RDX, RCX);
+        // Z = ZF(bit6) -> bit30
+        buf.mov_rr64(RCX, RAX);
+        buf.shr_ri8(RCX, 6);
+        buf.and_ri64(RCX, 1);
+        buf.shl_ri8(RCX, 30);
+        buf.or_rr64(RDX, RCX);
+        // N = 0 (never set for a valid FP compare in these cases)
+        buf.mov_store32(RBX, NZCV_OFF, RDX);
+        buf.pop(RDX);
+        buf.pop(RCX);
+        buf.pop(RAX);
+    }
 
 /// Load the *stored* `CpuState.nzcv` into the real x86 rflags (CF/ZF/SF/OF) so
 /// a following native `jcc`/`cmovcc` (via `x86_cc_for_cond`) evaluates the
@@ -444,6 +488,37 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::FcsSel { rd, rn, rm, cond, sz } => {
+            // fcsel d{rd}, d{rn}, d{rm}, <cond>: rd = cond ? rn : rm on the FP
+            // slots. FP values are selected by their bit pattern (cmov on the
+            // integer ref of the double/single), so the same register-select
+            // machinery as the integer CSel applies.
+            let true_slot = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let else_slot = crate::jit::VECTOR_BASE + (rm as i32) * 16;
+            let dst_slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            if sz {
+                buf.mov_load64(RDI, RBX, true_slot);
+                buf.mov_load64(R10, RBX, else_slot);
+            } else {
+                buf.mov_load32(RDI, RBX, true_slot);
+                buf.mov_load32(R10, RBX, else_slot);
+            }
+            if cond == 0xE {
+                buf.mov_store64(RBX, dst_slot, RDI); // AL -> rn
+                return Ok(());
+            }
+            if cond == 0xF {
+                buf.mov_store64(RBX, dst_slot, R10); // NV -> rm
+                return Ok(());
+            }
+            let cc = (x86_cc_for_cond(cond)
+                .ok_or_else(|| format!("FcSel: bad cond {cond:#x}"))?
+                - 0x40); // jcc 0x8X -> cmovcc 0x4X
+            load_nzcv_to_eflags(buf);
+            buf.cmov_rr64(cc, R10, RDI); // R10 = cond ? rn : rm
+            buf.mov_store64(RBX, dst_slot, R10);
+            Ok(())
+        }
         Inst::LdStrImm {
             rt,
             rn,
@@ -670,9 +745,26 @@ pub fn translate(
             Ok(())
         }
         Inst::SysReg { sysreg, rt, read } => {
-            // Only tpidr_el0 is modelled (sysreg==0). MRS read: Rt = CpuState.tpidr.
-            // MSR write: CpuState.tpidr = Rt. Other sysregs should not decode here.
-            debug_assert_eq!(sysreg, 0, "unhandled SysReg in translate");
+            // sysreg==0: tpidr_el0 (CpuState.tpidr). sysreg==1: cntfrq_el0
+            // (counter tick rate in Hz) read as a fixed constant. Decode only
+            // produces these two; write to cntfrq is not generated.
+            if sysreg == 1 {
+                // mrs xN, cntfrq_el0  ->  xN = 100_000_000 (100 MHz counter).
+                // Constant Hz: the guest divides/downscales counter deltas with
+                // this, so a fixed, self-consistent rate is honest for boot.
+                if read && rt != 31 {
+                    buf.mov_ri64(rt, 100_000_000);
+                }
+                return Ok(());
+            }
+            if sysreg == 3 {
+                // mrs xN, cntvct_el0  ->  xN = CpuState.cntvct (live monotonic
+                // counter, stamped by the run loop between guest blocks).
+                if read && rt != 31 {
+                    buf.mov_load64(rt, RBX, crate::jit::CNTVCT_OFF);
+                }
+                return Ok(());
+            }
             if read {
                 // Rt = [RBX + TPIDR_OFF]
                 if rt != 31 {
@@ -729,11 +821,27 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::FcvtToInt { rd, rn, mode, sf } => {
+        Inst::FcvtToInt {
+            rd,
+            rn,
+            mode,
+            sf,
+            unsigned,
+        } => {
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             buf.movq_load(0, RBX, vslot(rn)); // d-source (low 8B) -> xmm0
             if mode == 2 {
                 buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
+            } else if unsigned {
+                // fcvtzu: truncate toward zero (fcvtzs) but to an UNSIGNED value.
+                // `cvttsd2si` is exact for d in [0,2^63); negatives are clamped to 0
+                // below. (d >= 2^63 is architecturally out-of-range; x86 clamps —
+                // an explicitly-documented limitation, NOT silent corruption.)
+                buf.cvttsd2si(RAX, 0);
+                // if RAX < 0 (d was negative) => result 0
+                buf.xor_rr64(RCX, RCX);
+                buf.test_rr64(RAX, RAX);
+                buf.cmov_rr64(0x48, RAX, RCX); // cmovs RAX, RCX (RAX<0 -> 0)
             } else {
                 buf.cvttsd2si(RAX, 0); // fcvtzs: truncate toward zero
             }
@@ -785,6 +893,44 @@ pub fn translate(
                 buf.movd_r32_xmm(RAX, 0); // RAX = low 32 bits of the single
                 buf.mov_store32(RBX, vslot, RAX); // low 4B = single value
             }
+            Ok(())
+        }
+        Inst::FmovImm { rd, f64, value_bits } => {
+            // fmov Dd,#imm / fmov Sd,#imm: write the decoded IEEE-754 value into
+            // the destination FP slot (low 8B for double, low 4B for single).
+            let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            if f64 {
+                buf.mov_ri64(RAX, value_bits);
+                buf.mov_store64(RBX, slot, RAX); // low 8B of slot = double bits
+            } else {
+                buf.mov_ri32(RAX, value_bits as u32);
+                buf.mov_store32(RBX, slot, RAX); // low 4B of slot = single bits
+            }
+            Ok(())
+        }
+        Inst::FmovFp { rd, rn, sz } => {
+            // fmov Dd,Dn / fmov Sd,Sn: register-to-register FP copy (no conversion).
+            let sslot = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            if sz {
+                buf.mov_load64(RAX, RBX, sslot);
+                buf.mov_store64(RBX, dslot, RAX); // double: copy low 8B
+            } else {
+                buf.mov_load32(RAX, RBX, sslot);
+                buf.mov_store32(RBX, dslot, RAX); // single: copy low 4B
+            }
+            Ok(())
+        }
+        Inst::Fcmp { rn, rm } => {
+            // fcmp d{rn}, d{rm}: compare and set guest NZCV from the FP relation.
+            // Use comisd (CF=1 if a<b, ZF=1 if equal/unordered, PF=1 if unordered);
+            // store_nzcv_fp maps those to the AArch64 NZCV exactly (Z=ZF, V=PF,
+            // C=(!CF)|PF, N=0) so the branch/select that follows sees the right bits.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.movq_load(0, RBX, vslot(rn)); // xmm0 = d{rn}
+            buf.movq_load(1, RBX, vslot(rm)); // xmm1 = d{rm}
+            buf.comisd(0, 1); // flags: a vs b  (a=xmm0=rn, b=xmm1=rm)
+            store_nzcv_fp(buf);
             Ok(())
         }
         Inst::SimdPopcnt { rd, rn } => {

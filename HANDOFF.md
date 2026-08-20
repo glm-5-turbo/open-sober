@@ -1615,3 +1615,38 @@ FP→u64 instruction, so it needs a careful honest sequence (NOT a silently-wron
 1. `fcvtzu`/`ucvt*` — unsigned FP↔int with verified x86-64 u64 handling.
 2. guest `svc` → real AArch64→x86-64 syscall table (mmap/futex/mprotect/…) — still
    `-ENOSYS` (exit-only) per the honesty rule.
+
+## Session 28 (Aug 20, 2026) — FP-to-int correctness + FMOV/fcmp/fcsel; 5 ISA walls crossed
+
+Picked up Session 27's wall. In one sitting the guest advanced through **six** new,
+distinct instructions (all verified against ground truth + the real libroblox binary):
+
+| wall | word | what | how |
+|---|---|---|---|
+| `fcvtzu` | `0x9e790013` (x19,d0) | unsigned double→u64 | `FcvtToInt{unsigned}` — `cvttsd2si` (exact for `[0,2^63)`) + sign-clamp-to-0 via `cmovs`. **Fixed a pre-existing latent bug**: the old signed `fcvtzs` gate (`0x1e200000`/mode∈{0,2}) never matched the real `0x1e78` encodings — the honesty regression caught it; rewrote signed gate to `0x1e78`/`0x1e7a` (real `fcvtzs`/`fcvtas`). |
+| `mrs/msr cntfrq_el0` | `0xd53be000` | counter-freq sysreg | `SysReg{sysreg:1}` returns fixed 100 MHz (`cntfrq` = 100_000_000 Hz), documented. Used op1=11 (4-bit field), CRn=14, CRm=0, op2=0. |
+| `mrs/msr cntvct_el0` | `0xd53be059` | counter-value sysreg | `SysReg{sysreg:3}` reads `CpuState.cntvct` — a **live monotonic counter stamped by the run_loop** before each block (`elapsed` host clock scaled to 100 MHz ticks), so guest time deltas actually advance. |
+| `fmov d1,#0.5` | `0x1e6c1001` | FP immediate | `Inst::FmovImm` + `decode_fmov_imm()` — ARM 8-bit FP imm → IEEE-754 bits, **verified against 12 real compiler vectors** (`ex = ((e+1)&7)`, sign bit7, `(1+m/16)·2^ex`). |
+| `fmov d6,d0` | `0x1e604006` | scalar fp-reg copy | `FmovFp` (`0x1e60_4000`/`0x1e20_4000`) — bit copy of the FP slot. |
+| `fcmp d7,d6` / `d6,d16` | `0x1e6620e0`/`0x1e7020c0` | FP compare → NZCV | `Fcmp` + `store_nzcv_fp()`: `comisd` flags → guest NZCV via `Z=ZF, V=PF, C=(!CF)|PF, N=0` (handles A<B/A>B/eq/unordered exactly). Gate `(insn&0xffe0_fc00)==0x1e602000` also catches `fcmpe` and the high-rm forms (bit16-20 feed into the base nibble). |
+| `fcsel d6,d16,d6,mi` | `0x1e664e06` | FP cond select | `FcsSel` — mirrors integer `CSel` on the FP slots (load both, `load_nzcv_to_eflags`, `cmovcc`, store). Structural gate `(insn&0x1f20_0c00)==0x1e20_0c00` separates select from fcmp/fmov/fcvt. |
+
+### Current wall running real libroblox.so
+```
+stopped: Unsupported(0x6e61d842) at guest pc 0x105dfe180
+   ucvtf v2.2d, v2.2d  (SIMD unsigned-int→double, 2-lane) — next FP conversion.
+   (next in line: `fdiv d1, d1, d3` = 0x1e631821, and a new adrp/ldr load.)
+```
+The audio/headphones path now runs through `fcmp`/`b.gt`/`fcsel` correctly. `ucvtf` needs an
+honest **u64→f64** (the `≥2^63` case has no scalar `cvtsi2sd`; needs a split or `+2^63`
+correction, same honesty class as `fcvtzu`).
+
+### Verification
+`cargo test -p arm64jit` → **38 passed** (37 + fcsel/fcmp-be fixed; every decode regression
+incl. `fcvtzu w/x`, `mov_21`, fmov-imm value, cntvct, `fcmp` high-rmd, `fcsel`). Workspace
+`cargo build --workspace` clean (verified). Tree has the 4 source files + HANDOFF (above).
+
+### Open (next concrete)
+1. `ucvtf v2.2d` (SIMD u64→f64) + scalar `ucvtf`/`ucvtf d,xn` — must be honest u64→double.
+2. `fdiv d1,d1,d3` (scalar FP divide).
+3. `svc` real AArch64→x86-64 syscall table (mmap/futex/mprotect…) — still `-ENOSYS` (exit-only).

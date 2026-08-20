@@ -8,6 +8,8 @@
 // The prologue loads it into RBX (the base the translator reads/writes).
 
 use std::ptr;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::decode::{self, Inst};
 use crate::translate;
@@ -30,6 +32,12 @@ pub struct CpuState {
     /// A JIT-emulated `mrs xN, tpidr_el0` / `msr tpidr_el0, xN` reads/writes this
     /// slot. Kept *after* `v` so VECTOR_BASE (272) is unchanged.
     pub tpidr: u64,
+    /// Monotonic readout backing `mrs xN, cntvct_el0` / `cntpct_el0`. The host
+    /// stamps this immediately before each executed guest block (see run_loop)
+    /// with elapsed-since-boot scaled to the declared counter frequency
+    /// (CNTFRQ_EL0 = 100 MHz). Reads by the guest see time advance between
+    /// blocks so cnt-delta arithmetic is monotonic and self-consistent.
+    pub cntvct: u64,
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
@@ -44,6 +52,8 @@ pub const PC_OFF: i32 = 8 * 32; // 256
 /// Byte offset of `CpuState.tpidr` — right after the 64-null v array (v[64] at
 /// VECTOR_BASE 272 .. 272+512=784). 272 + 64*8 = 784.
 pub const TPIDR_OFF: i32 = VECTOR_BASE + 64 * 8; // 784
+/// Byte offset of `CpuState.cntvct` — right after `tpidr` (784..792).
+pub const CNTVCT_OFF: i32 = TPIDR_OFF + 8; // 792
 
 impl CpuState {
     pub fn new() -> Self {
@@ -54,6 +64,7 @@ impl CpuState {
             pad: 0,
             v: [0; 64],
             tpidr: 0,
+            cntvct: 0,
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {
@@ -222,6 +233,16 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
 /// an indirect/return transfer, `state.pc` holds the next address, so the
 /// dispatcher compiles & re-enters there. Halts when `pc == 0`.
 pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Result<u64, String> {
+    // Epoch for the CNTVCT_EL0 readout. The guest reads cntfrq_el0 (100 MHz)
+    // and cntvct_el0 to compute time deltas; stamp the per-block counter once so
+    // it stays monotonic and agrees with the declared frequency.
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    let stamp_cntvct = |st: *mut CpuState| {
+        let ns = epoch.elapsed().as_nanos() as u64; // ns since guest start
+        let ticks = ns / 10; // /10 ns == 100 MHz ticks
+        unsafe { (*st).cntvct = ticks };
+    };
     unsafe { (*state).pc = entry }
     let mut guard: u64 = 0;
     const MAX_STEPS: u64 = 20_000_000; // safety net against an infinite guest loop
@@ -253,6 +274,7 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             }
             eprintln!();
         }
+        stamp_cntvct(state);
         unsafe { run(&block, state) };
         if std::env::var_os("JIT_TRACE").is_some() {
             println!(
