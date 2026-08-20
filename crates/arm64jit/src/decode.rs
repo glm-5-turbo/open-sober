@@ -284,6 +284,8 @@ pub enum Inst {
     // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
     // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
+    SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
     // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
     // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B bit-select, real 0x6ea11c40;
     // distinct from orr16 0x4ea01c00 by bit31). Out = (Vn & Vm) | (Vd & ~Vm).
@@ -1334,8 +1336,29 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                     let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                     let rd = (insn & 0x1f) as u8;
                                                                                                                                     return Inst::SimdCmhi { rd, rn, rm, lanes: clanes };
-                                                                                                                                        }
-                                                                                                                                        // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
+                                                                                                                                                                                                        }
+                                                                                                                                                                                                        // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
+                                                                                                                                                                                                        // Each element is all-ones if Vn[i]==Vm[i], else 0.
+                                                                                                                                                                                                        // Gate &0xffe0_fc00 residues: 2d=0x6ee08c00, 4s=0x6ea08c00,
+                                                                                                                                                                                                        // 2s=0x2ea08c00, 16b=0x6e208c00, 8b=0x2e208c00, 8h=0x6e608c00,
+                                                                                                                                                                                                        // 4h=0x2e608c00. Disjoint from cmhi (0x3/0x34), bit (0x1c), etc.
+                                                                                                                                                                                                        let ce = insn & 0xffe0_fc00;
+                                                                                                                                                                                                        if let Some((lanes, esize)) = match ce {
+                                                                                                                                                                                                            0x6ee0_8c00 => Some((2u8, 8u8)),  // 2d
+                                                                                                                                                                                                            0x6ea0_8c00 => Some((4u8, 4u8)),  // 4s
+                                                                                                                                                                                                            0x2ea0_8c00 => Some((2u8, 4u8)),  // 2s
+                                                                                                                                                                                                            0x6e20_8c00 => Some((16u8, 1u8)), // 16b
+                                                                                                                                                                                                            0x2e20_8c00 => Some((8u8, 1u8)),  // 8b
+                                                                                                                                                                                                            0x6e60_8c00 => Some((8u8, 2u8)),  // 8h
+                                                                                                                                                                                                            0x2e60_8c00 => Some((4u8, 2u8)),  // 4h
+                                                                                                                                                                                                            _ => None,
+                                                                                                                                                                                                        } {
+                                                                                                                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                            return Inst::SimdCmEq { rd, rn, rm, lanes, esize };
+                                                                                                                                                                                                        }
+                                                                                                                                                                                                        // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
                                                                                                                                         // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B; real 0x6ea11c40). Disjoint
                                                                                                                                         // from orr16 (0x4ea01c00, bit31) and cmhi (0x6ea03400). Out=(Vn&Vm)|(Vd&~Vm).
                                                                                                                                         if (insn & 0xffe0_fc00) == 0x6ea0_1c00 {

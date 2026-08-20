@@ -1402,9 +1402,42 @@ pub fn translate(
                                                                                                                                                                                     }
                                                                                                                                                                                     Ok(())
                                                                                                                                                                                 }
-                                                                                                                                                                                // bit Vd.16B, Vn.16B, Vm.16B: bitwise insert.
-                                                                                                                                                                                // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
-                                                                                                                                                                                // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
+                                                                                                                                                                                Inst::SimdCmEq { rd, rn, rm, lanes, esize } => {
+            // cmeq Vd.T, Vn.T, Vm.T: each element is all-ones if Vn[i]==Vm[i]
+            // else 0. Compare the esize-byte element (zero-extended via the
+            // widest load that fits), then cmov all-ones vs 0, store esize bytes.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            for i in 0..lanes {
+                let off = (i as i32) * (esize as i32);
+                if esize == 8 {
+                    buf.mov_load64(RAX, RBX, slot(rn) + off);
+                    buf.mov_load64(RCX, RBX, slot(rm) + off);
+                } else {
+                    buf.mov_load32(RAX, RBX, slot(rn) + off);
+                    buf.mov_load32(RCX, RBX, slot(rm) + off);
+                    let imm = match esize {
+                        4 => 0xffff_ffffu32,
+                        2 => 0xffffu32,
+                        _ => 0xffu32,
+                    };
+                    buf.and_ri64(RAX, imm);
+                    buf.and_ri64(RCX, imm);
+                }
+                buf.cmp_rr64(RAX, RCX); // ZF=1 if equal
+                buf.mov_ri64(RDI, 0);
+                buf.mov_ri64(RDX, 0xffff_ffff_ffff_ffff);
+                buf.cmov_rr64(0x44, RDI, RDX); // 0x44=cmove: RDI=ones if equal
+                match esize {
+                    8 => buf.mov_store64(RBX, slot(rd) + off, RDI),
+                    4 => buf.mov_store32(RBX, slot(rd) + off, RDI),
+                    2 => buf.mov_store16(RBX, slot(rd) + off, RDI),
+                    _ => buf.mov_store8(RBX, slot(rd) + off, RDI),
+                }
+            }
+            Ok(())
+        }
+                // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
+                // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
                                                                                                                                                                                 Inst::SimdBit { rd, rn, rm } => {
                                                                                                                                                                                     let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                                                                                                                                                                                     for off in [0i32, 8] {
