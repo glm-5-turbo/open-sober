@@ -189,27 +189,52 @@ mod tests {
     }
 
     #[test]
-    fn cbz_controls_branch() {
-        // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
-        //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;
-        //  d2800280 mov x0,#20 ; d65f03c0 ret ;
-        //  d2800140 mov x0,#10 ; d65f03c0 ret
-        let code = [
-            0x81u8, 0x02, 0x80, 0xd2, // mov x1,#20
-            0x60, 0x00, 0x00, 0xb4, // cbz x0, +0x10
-            0x80, 0x02, 0x80, 0xd2, // mov x0,#20
-            0xc0, 0x03, 0x5f, 0xd6, // ret
-            0x40, 0x01, 0x80, 0xd2, // mov x0,#10
-            0xc0, 0x03, 0x5f, 0xd6, // ret
-        ];
-        // x0 == 0 -> cbz taken -> x0 = 10
-        let mut st_take = CpuState::new();
-        let r = exec_bytes(&mut st_take, &code, 0).expect("exec-take");
-        assert_eq!(r, 10, "x0==0 should take cbz branch");
-        // x0 != 0 -> fall through -> x0 = 20
-        let mut st_no = CpuState::new();
-        st_no.x[0] = 99;
-        let r = exec_bytes(&mut st_no, &code, 0).expect("exec-no");
-        assert_eq!(r, 20, "x0!=0 should fall through");
+        fn cbz_controls_branch() {
+            // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
+            //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;
+            //  d2800280 mov x0,#20 ; d65f03c0 ret ;
+            //  d2800140 mov x0,#10 ; d65f03c0 ret
+            let code = [
+                0x81u8, 0x02, 0x80, 0xd2, // mov x1,#20
+                0x60, 0x00, 0x00, 0xb4, // cbz x0, +0x10
+                0x80, 0x02, 0x80, 0xd2, // mov x0,#20
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+                0x40, 0x01, 0x80, 0xd2, // mov x0,#10
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            // x0 == 0 -> cbz taken -> x0 = 10
+            let mut st_take = CpuState::new();
+            let r = exec_bytes(&mut st_take, &code, 0).expect("exec-take");
+            assert_eq!(r, 10, "x0==0 should take cbz branch");
+            // x0 != 0 -> fall through -> x0 = 20
+            let mut st_no = CpuState::new();
+            st_no.x[0] = 99;
+            let r = exec_bytes(&mut st_no, &code, 0).expect("exec-no");
+            assert_eq!(r, 20, "x0!=0 should fall through");
+        }
+
+        #[test]
+        fn cmp_ble_branch() {
+            // Real aarch64 from objdump (g): return w0>3 ? 1 : 0
+            // 71000c1f cmp w0,#3 ; 5400006d b.le 0x10 ; 52800020 mov w0,#1 ;
+            //  d65f03c0 ret ; 52800000 mov w0,#0 ; d65f03c0 ret
+            let code = [
+                0x1fu8, 0x0c, 0x00, 0x71, // cmp w0, #3
+                0x6d, 0x00, 0x00, 0x54, // b.le 0x10
+                0x20, 0x00, 0x00, 0x52, // mov w0, #1
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+                0x00, 0x00, 0x80, 0x52, // mov w0, #0
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            // w0=2 -> <=3 -> branch taken -> return 0
+            let mut st_le = CpuState::new();
+            st_le.x[0] = 2;
+            let r = exec_bytes(&mut st_le, &code, 0).expect("exec-le");
+            assert_eq!(r, 0, "x0=2 (<=3) should take b.le -> 0");
+            // w0=5 -> >3 -> fall through -> return 1
+            let mut st_gt = CpuState::new();
+            st_gt.x[0] = 5;
+            let r = exec_bytes(&mut st_gt, &code, 0).expect("exec-gt");
+            assert_eq!(r, 1, "x0=5 (>3) should fall through -> 1");
+        }
     }
-}

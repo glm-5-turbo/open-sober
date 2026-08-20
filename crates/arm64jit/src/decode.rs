@@ -219,8 +219,9 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- add/subtract immediate ----
-    // signature top byte: 0x11(add32) 0x51(sub32) 0x91(add64) 0xD1(sub64)
-    if top == 0x11 || top == 0x51 || top == 0x91 || top == 0xD1 {
+    // add w=0x11 sub=0x51 ; adds/sub w(=s flag) =0x31/0x71; x: 0x91/0xD1, 0xB1/0xF1
+    //   (0x71 is `cmp w,#imm` = SUBS w, xzr, #-imm; 0xF1 is cmp x,#imm)
+    if matches!(top, 0x11 | 0x51 | 0x31 | 0x71 | 0x91 | 0xD1 | 0xB1 | 0xF1) {
         let sub = (insn >> 30) & 1 == 1;
         let s = (insn >> 29) & 1 == 1;
         let shift12 = (insn >> 22) & 1 == 1;

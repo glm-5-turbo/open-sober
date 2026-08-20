@@ -47,6 +47,29 @@ fn mov_guest_imm(buf: &mut CodeBuf, rd: u32, val: u64) {
     stg(buf, rd, RAX);
 }
 
+/// Map an ARM condition code (0..15) to the x86-64 `0F 8x` jcc opcode, on the
+/// assumption that the immediately preceding instruction set the x86 flags in
+/// the ARM flow (SUB yields borrow semantics, so ARM carry == x86 C-free).
+fn x86_cc_for_cond(cond: u8) -> Option<u8> {
+    Some(match cond {
+        0x0 => 0x84, // EQ  (ZF)
+        0x1 => 0x85, // NE  (!ZF)
+        0x2 => 0x83, // HS  (C set; unsigned >= -> !CF, JAE)
+        0x3 => 0x82, // LO  (C clear; unsigned <  -> sub CF, JB)
+        0x4 => 0x88, // MI  (N)
+        0x5 => 0x89, // PL  (!N)
+        0x6 => 0x8a, // VS  (V)
+        0x7 => 0x8b, // VC  (!V)
+        0x8 => 0x87, // HI  (C && !Z -> JAE && !ZF, i.e. JA)
+        0x9 => 0x86, // LS  (!HI  -> JBE)
+        0xA => 0x8d, // GE  (signed >=, JGE)
+        0xB => 0x8c, // LT  (signed <, JL)
+        0xC => 0x8f, // GT  (signed >, JG)
+        0xD => 0x8e, // LE  (signed <=, JLE)
+        _ => return None,
+    })
+}
+
 /// Apply AArch64 shift `kind` by `amt` to the value currently in x86 reg `x`
 /// (uses RCX for the count). Only constant shifts are handled (guest encodes
 /// the amount as an immediate in ADD/SUB shifted-register).
@@ -105,7 +128,9 @@ pub fn translate(
             } else {
                 buf.add_ri64(RAX, imm as u32);
             }
-            stg(buf, rd as u32, RAX);
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
             Ok(())
         }
         Inst::AddSubReg { rd, rn, rm, sub, shift, sh_amt, .. } => {
@@ -117,7 +142,9 @@ pub fn translate(
             } else {
                 buf.add_rr64(RAX, RCX);
             }
-            stg(buf, rd as u32, RAX);
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
             Ok(())
         }
         Inst::LdStrImm { rt, rn, imm, size, ld } => {
@@ -171,6 +198,26 @@ pub fn translate(
             let cc = if nonzero { 0x85 } else { 0x84 }; // jnz / jz
             let disp = buf.jcc_rel32(cc);
             fixups.push(Fixup { target_pc: target, disp_off: disp, cc });
+            Ok(())
+        }
+        Inst::BCond { cond, imm } => {
+            let target = pc.wrapping_add(imm as u64);
+            match cond {
+                0xE => {
+                    // AL: unconditional branch via jmp
+                    let disp = buf.jmp_rel32();
+                    fixups.push(Fixup { target_pc: target, disp_off: disp, cc: 0xff });
+                }
+                0xF => {
+                    // NV: never executed -> nothing to emit
+                }
+                c => {
+                    let cc = x86_cc_for_cond(c)
+                        .ok_or_else(|| format!("B.cond unsupported cond {:x}", c))?;
+                    let disp = buf.jcc_rel32(cc);
+                    fixups.push(Fixup { target_pc: target, disp_off: disp, cc });
+                }
+            }
             Ok(())
         }
         _ => Err(format!("translate: unhandled {:?}", inst)),
