@@ -342,6 +342,26 @@ impl CodeBuf {
         self.b(0xFA);
         self.b(modrm(3, dst & 7, src & 7));
     }
+    // PADDB xmm, xmm/m128 : 16x8-bit lane add
+    pub fn paddb(&mut self, dst: u8, src: u8) {
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0xFC);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
+    // PSUBB xmm, xmm/m128 : 16x8-bit lane sub
+    pub fn psubb(&mut self, dst: u8, src: u8) {
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0xF8);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
     // (Intel: ModRM.reg = DST, r/m = SRC) — so mulsd(0,1) => F2 0F 59 C1 => xmm0 = xmm0*xmm1.
         fn sd(&mut self, op: u8, dst: u8, src: u8) {
             self.b(0xF2);

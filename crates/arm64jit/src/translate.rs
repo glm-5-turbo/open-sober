@@ -1490,6 +1490,15 @@ Inst::SimdAddD { rd, rn, rm, sub } => {
             }
             Ok(())
 }
+Inst::SimdAddB { rd, rn, rm, sub, q } => {
+            // add/sub Vd.16b, Vn.16b, Vm.16b (or 8b): byte-lane via paddb/psubb.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.movdqu_load(RAX, RBX, vslot(rn));
+            buf.movdqu_load(RCX, RDX, vslot(rm));
+            if sub { buf.psubb(RAX, RCX); } else { buf.paddb(RAX, RCX); }
+            buf.movdqu_store(RBX, vslot(rd), RAX);
+            Ok(())
+}
 Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             // umov/smov Rd, Vn.bits[idx]: load esize-byte element at offset
             // index*esize, extend zero (umov) or sign (smov) into GPR rd.

@@ -322,6 +322,8 @@ pub enum Inst {
     SimdMovEl { rd: u8, rn: u8, esize: u8, index: u8, signed: bool, is_x: bool },
     // ---- SIMD integer add/sub 2D (64-bit lanes): add Vd.2D, Vn.2D, Vm.2D ----
     SimdAddD { rd: u8, rn: u8, rm: u8, sub: bool },
+    // ---- SIMD int add/sub byte lanes 16B/8B: add Vd.16b, Vn.16b, Vm.16b ----
+    SimdAddB { rd: u8, rn: u8, rm: u8, sub: bool, q: bool },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
     // ---- SIMD narrowing extract: xtn Vd.T, Vn.U (low halves) ----
@@ -1480,11 +1482,23 @@ pub fn decode(insn: u32) -> Inst {
                                             let sub = (insn >> 29) & 1 == 1;
                                             return Inst::SimdAddD { rd, rn, rm, sub };
                                         }
-                                        // ---- NEON vector u64->f64: ucvtf Vd.2D, Vn.2D (2 unsigned lanes) ----
-                                        // Gate `(insn & 0xffe0_fc00) == 0x6e60d800`: masks rn/rd (bits 0-9, 16-20 via
-                                        // 0xffe0/fc00) and keeps the top+convert bits. Verified against real
-                                        // 0x6e61d842 (ucvtf v2.2d,v2.2d) and compiler 0x6e61dbff (ucvtf v31.2d,v31.2d);
-                                        // excludes scvtf (0x4e60d800), scalar d,d (0x7e60d800), and compare/fmov forms.
+                                        // ---- SIMD int add/sub byte lanes 16b/8b: add Vd.16b, Vn.16b, Vm.16b ----
+                                                                                // size field bits[23:22] == 0 (byte). Same walk residue as Simd4s but byte lane.
+                                                                                {
+                                                                                    let bc = insn & 0x2f20_0c00;
+                                                                                    if (bc == 0x0e20_0400 || bc == 0x2e20_0400) && ((insn >> 22) & 3) == 0 {
+                                                                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                        let rd = (insn & 0x1f) as u8;
+                                                                                        let sub = (insn >> 29) & 1 == 1;
+                                                                                        let q = (insn >> 30) & 1 == 1;
+                                                                                        return Inst::SimdAddB { rd, rn, rm, sub, q };
+                                                                                    }
+                                                                                }
+                                                                                // Gate `(insn & 0xffe0_fc00) == 0x6e60d800`: masks rn/rd (bits 0-9, 16-20 via
+                                                                                // 0xffe0/fc00) and keeps the top+convert bits. Verified against real
+                                                                                // 0x6e61d842 (ucvtf v2.2d,v2.2d) and compiler 0x6e61dbff (ucvtf v31.2d,v31.2d);
+                                                                                // excludes scvtf (0x4e60d800), scalar d,d (0x7e60d800), and compare/fmov forms.
                                         if (insn & 0xffe0_fc00) == 0x6e60_d800 {
                                                 let rn = ((insn >> 5) & 0x1f) as u8;
                                                 let rd = (insn & 0x1f) as u8;
@@ -1564,7 +1578,7 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                                                                                     // ---- SIMD unzip even: uzp1 Vd.T, Vn.T, Vm.T ----
                                                                                                                                                                                                     // opcode bits[13:8] = 0x18 (verified non-colliding vs uzp2/zip1/zip2/trn1/trn2).
                                                                                                                                                                                                     // esize = 1 << bits[23:22]; q = bit30. Vd[i] = Vn[2i], Vd[n+i] = Vm[2i].
-                                                                                                                                                                                                    if (insn & 0x3f00) == 0x1800 {
+                                                                                                                                                                                                    if matches!((insn & 0x3f00), 0x1800 | 0x1a00) {
                                                                                                                                                                                                          let esize = (1 << ((insn >> 22) & 0x3)) as u8;
                                                                                                                                                                                                          let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                                                                                                                                          let rn = ((insn >> 5) & 0x1f) as u8;
