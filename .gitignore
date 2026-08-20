@@ -15,3 +15,6 @@ stub_gen.sh
 
 # QEMU build artifacts (reproducible via qemu/build.sh)
 qemu/out/
+
+# Per-crate cargo targets (tests build fixtures into crates/*/target)
+crates/*/target/

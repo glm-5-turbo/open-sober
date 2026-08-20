@@ -106,27 +106,53 @@ pub fn launch_roblox(
 fn setup_jni_shim(env: &AndroidEnv) -> Result<()> {
     let shim_out = env.root.join("jni_shim");
 
-    // Check if already installed and up to date
+    // Check if already installed and up to date (also watch elf_disco).
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let shim_src = crate_dir.join("jni_shim.c");
+    let elf_disco_src = crate_dir.join("elf_disco.c");
+    let elf_disco_hdr = crate_dir.join("elf_disco.h");
     if shim_out.exists() {
-        if let (Ok(s_meta), Ok(b_meta)) = (
-            std::fs::metadata(&shim_src),
-            std::fs::metadata(&shim_out),
-        ) {
-            if s_meta.modified().ok() <= b_meta.modified().ok() {
-                info!("JNI shim already installed and up-to-date");
-                return Ok(());
+        let bin_time = std::fs::metadata(&shim_out)
+            .and_then(|m| m.modified())
+            .ok();
+        let fresh = |path: &std::path::Path| -> bool {
+            match bin_time {
+                Some(t) => std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .map(|src_t| src_t <= t)
+                    .unwrap_or(false),
+                None => false,
             }
+        };
+        if fresh(&shim_src) && fresh(&elf_disco_src) && fresh(&elf_disco_hdr) {
+            info!("JNI shim already installed and up-to-date");
+            return Ok(());
         }
     }
 
     info!("Building ARM64 JNI shim...");
 
+    // The JNI shim links the version-agnostic ELF discovery module, which
+    // re-derives GOT/relro/BSS offsets from the loaded library instead of
+    // hardcoding one Roblox build's addresses. Cross-compile it to
+    // `elf_disco.o` then link both into the shim.
+    let elf_disco_src = crate_dir.join("elf_disco.c");
+    let elf_disco_out = env.root.join("elf_disco.o");
+    let status = std::process::Command::new("aarch64-linux-gnu-gcc")
+        .arg("-c").arg("-O2").arg("-fPIC")
+        .arg("-o").arg(&elf_disco_out)
+        .arg(&elf_disco_src)
+        .status()
+        .context("Failed to compile elf_disco.c (aarch64-linux-gnu-gcc required)")?;
+    if !status.success() {
+        anyhow::bail!("elf_disco.c compilation failed");
+    }
+
     let status = std::process::Command::new("aarch64-linux-gnu-gcc")
         .arg("-o")
         .arg(&shim_out)
         .arg(&shim_src)
+        .arg(&elf_disco_out)
         .arg("-ldl")
         .status()
         .context("Failed to compile JNI shim (aarch64-linux-gnu-gcc required)")?;

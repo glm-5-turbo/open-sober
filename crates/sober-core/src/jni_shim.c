@@ -16,6 +16,10 @@
 #include <link.h>
 #include <time.h>
 
+// Version-agnostic ELF discovery: re-derive GOT/relro/BSS offsets from the
+// loaded Roblox .so instead of hardcoding one build's addresses.
+#include "elf_disco.h"
+
 // Minimal JNI types
 typedef int jint;
 typedef unsigned char jboolean;
@@ -48,6 +52,12 @@ typedef struct { const char* name; const char* signature; void* fnPtr; } JNINati
 /* Global canary value */
 static uintptr_t g_canary = 0x0A0B0C0D0E0F1011ULL;
 static uintptr_t g_libroblox_base = 0;
+
+// Roblox .so discovered offsets (from elf_disco). Base-relative vaddrs.
+static struct {
+    int    have;                       // 1 once robo_open succeeded
+    RoboELF e;
+} g_robo;
 
 /* Condvar shim — allocated once, used to patch both bionic tramp table and PLT GOT */
 static void *g_cond_shim = MAP_FAILED;
@@ -510,13 +520,24 @@ static void disable_mcount_profiling(void) {
 // Patching condvar PLT GOT entries to our shim
 // Must happen AFTER cond_shim is allocated
 static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
-    uintptr_t got_page = base + PLT_GOT_ADRP_PAGE;
-    // pthread_cond_wait GOT entry: got_page + 0x628
-    // pthread_cond_timedwait GOT entry: got_page + 0x630
-    uintptr_t cond_wait_got = got_page + 0x628;
-    uintptr_t cond_timedwait_got = got_page + 0x630;
+    uintptr_t cond_wait_got = 0, cond_timedwait_got = 0;
 
-    // Make the page writable
+    // Version-agnostic path: resolve the exact GOT slot for each imported
+    // symbol from the ELF relocations. Works for any Roblox build.
+    if (g_robo.have) {
+        cond_wait_got       = robo_got(&g_robo.e, base, "pthread_cond_wait");
+        cond_timedwait_got  = robo_got(&g_robo.e, base, "pthread_cond_timedwait");
+    }
+
+    // Fallback to the known-good offsets for the reference build.
+    if (!cond_wait_got || !cond_timedwait_got) {
+        uintptr_t got_page = base + PLT_GOT_ADRP_PAGE;
+        cond_wait_got       = got_page + 0x628;
+        cond_timedwait_got  = got_page + 0x630;
+        fprintf(stderr, "[jni_shim] condvar GOT fallback (hardcoded)\n");
+    }
+
+    // Make the page(s) writable
     uintptr_t got_base = cond_wait_got & ~0xfffULL;
     mprotect((void*)got_base, 0x2000, PROT_READ|PROT_WRITE);
 
@@ -630,17 +651,43 @@ int main(int argc, char** argv) {
     Dl_info dl_info;
     if (dladdr((void*)dlsym(handle, "JNI_OnLoad"), &dl_info)) {
         uintptr_t base = (uintptr_t)dl_info.dli_fbase;
-        // Pre-mprotect the entire GOT section to avoid RELRO faults
-        // .got: VA 0x646B7E8, size 0x7C58; .got.plt: VA 0x6473440, size 0x10E8
-        // Combined range: 0x646B000 to 0x6475000 should cover both
-        uintptr_t got_start = base + 0x646B000;
-        uintptr_t got_end = base + 0x6475000;
-        mprotect((void*)got_start, got_end - got_start, PROT_READ|PROT_WRITE);
-        // Also mprotect the init_array section which may contain relocations
-        mprotect((void*)(base + 0x6464000), 0x8000, PROT_READ|PROT_WRITE);
+        g_libroblox_base = base;
 
-        // The canary GOT entry at base + 0x6473438 (adrp target 0x6473000 + ldr offset 0x438)
-        uintptr_t guard_ptr_addr = base + 0x6473438;
+        // Open the ELF from disk for version-agnostic offset discovery.
+        // ROBLOX_LIB is the same path we dlopen'd, so reopening it is safe.
+        if (robo_open(&g_robo.e, lib_path) == 0) {
+            g_robo.have = 1;
+            uint64_t rs=0, re=0;
+            if (robo_relro_range(&g_robo.e, base, &rs, &re) == 0) {
+                // Pre-mprotect the discovered RELRO to avoid SEGV faults.
+                mprotect((void*)rs, (size_t)(re - rs), PROT_READ|PROT_WRITE);
+                fprintf(stderr, "[jni_shim] elf_disco RELRO 0x%lx-0x%lx -> RW\n",
+                        (unsigned long)rs, (unsigned long)re);
+            }
+            fprintf(stderr, "[jni_shim] elf_disco loaded from %s\n", lib_path);
+        }
+
+        // Pre-mprotect the entire GOT section to avoid RELRO faults.
+        // Use the discovered writable range when available, else the
+        // known-good hardcoded range for the reference build.
+        uint64_t ds=0, de=0;
+        if (robo_relro_range(&g_robo.e, base, &ds, &de) == 0 && de > ds) {
+            mprotect((void*)ds, (size_t)(de - ds), PROT_READ|PROT_WRITE);
+        } else {
+            uintptr_t got_start = base + 0x646B000;
+            uintptr_t got_end   = base + 0x6475000;
+            mprotect((void*)got_start, got_end - got_start, PROT_READ|PROT_WRITE);
+            mprotect((void*)(base + 0x6464000), 0x8000, PROT_READ|PROT_WRITE);
+        }
+
+        // The canary GOT entry holds the __stack_chk_guard pointer.
+        // Discover from the ELF relocations if possible, else fall back to
+        // the known-good offset for the reference build.
+        uintptr_t guard_ptr_addr = 0;
+        if (g_robo.have)
+            guard_ptr_addr = robo_got(&g_robo.e, base, "__stack_chk_guard");
+        if (!guard_ptr_addr)
+            guard_ptr_addr = base + 0x6473438;   // fallback (reference build)
         uintptr_t* guard_ptr = (uintptr_t*)guard_ptr_addr;
         uintptr_t canary_page = guard_ptr_addr & ~0xfffULL;
         int mp_ret = mprotect((void*)canary_page, 0x1000, PROT_READ|PROT_WRITE);
@@ -653,7 +700,6 @@ int main(int argc, char** argv) {
         }
         uintptr_t* libc_guard = (uintptr_t*)dlsym(RTLD_NEXT, "__stack_chk_guard");
         if (libc_guard && *libc_guard == 0) *libc_guard = g_canary;
-        g_libroblox_base = base;
     }
 
     // Install SIGSEGV handler
