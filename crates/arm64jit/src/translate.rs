@@ -1623,6 +1623,35 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdXtl { rd, rn, sign, esrc } => {
+                    // uxtl/sxtl Vd.<long>, Vn.<short>: widen each esrc-byte lane
+                    // to a (esrc*2)-byte lane (zero/sign extend). Lanes = 8/esrc,
+                    // the dest occupies the full 16-byte vector (Q=1 long form).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let lanes = 8usize >> esrc.trailing_zeros() as usize;
+                    for i in 0..lanes {
+                        let src = vslot(rn) + (i as i32) * (esrc as i32);
+                        let dst = vslot(rd) + (i as i32) * (esrc as i32) * 2;
+                        match (esrc, sign) {
+                            (1, false) => buf.movzx_byte_mem(RAX, RBX, src),
+                            (1, true) => buf.movsx_byte_mem(RAX, RBX, src),
+                            (2, false) => buf.movzx_word_mem(RAX, RBX, src),
+                            (2, true) => buf.movsx_word_mem(RAX, RBX, src),
+                            (4, false) => buf.mov_load32(RAX, RBX, src),
+                            (4, true) => buf.mov_load32(RAX, RBX, src),
+                            _ => unreachable!(),
+                        }
+                        if esrc == 4 && sign {
+                            buf.movsxd_r64_r32(RAX, RAX);
+                        }
+                        match (esrc as i32) * 2 {
+                            4 => { buf.mov_store32(RBX, dst, RAX); }
+                            8 => { buf.mov_store64(RBX, dst, RAX); }
+                            _ => { buf.mov_store16(RBX, dst, RAX); }
+                        }
+                    }
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
                     // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
                     let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;

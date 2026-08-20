@@ -135,6 +135,8 @@ pub enum Inst {
     Ld1 { rd: u8, rn: u8, esize: u8, q: bool }, // lanes = (q?16:8)/esize
     // ---- SIMD lane load: ld1 {Vt.T}[idx], [Xn] ----
     Ld1L { rd: u8, rn: u8, esize: u8, index: u8 },
+    // ---- SIMD widen/long load: uxtl/sxtl Vd.TL, Vn.T (sign/zero extend) ----
+    SimdXtl { rd: u8, rn: u8, sign: bool, esrc: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -925,6 +927,21 @@ pub fn decode(insn: u32) -> Inst {
         let rn = b(insn, 5, 9) as u8;
         let vt = b(insn, 0, 4) as u8;
         return Inst::VecLdStImm { vt, rn, imm, ld };
+    }
+
+    // ---- SIMD widen/long (sxtl/uxtl): Vd.TL, Vn.T ----
+    // Gate &0x3f80_0c00 in {0x0f00_0400 (sxtl), 0x2f00_0400 (uxtl)}. Wider
+    // result element = 2x source; esrc = 1<<(bits[13:11]) bytes. MUST precede the
+    // broad MOVI gate (0x2f/0x0f prefix) or it's swallowed as Unsupported.
+    let xt = insn & 0x3f80_0c00;
+    if (xt == 0x0f00_0400 || xt == 0x2f00_0400) && ((insn >> 12) & 0xf) == 0xa {
+        let esrc = 1u8 << ((insn >> 20) & 0x7); // 1/2/4-byte source lanes (B/H/..)
+        return Inst::SimdXtl {
+            rd: (insn & 0x1f) as u8,
+            rn: b(insn, 5, 9) as u8,
+            sign: xt == 0x0f00_0400,
+            esrc,
+        };
     }
 
     // ---- SIMD/NEON movi vector-immediate ----
