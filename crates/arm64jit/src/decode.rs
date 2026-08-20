@@ -141,6 +141,10 @@ pub enum Inst {
     SimdFmovImm { rd: u8, esize: u8, value_bits: u64, q: bool },
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T ----
     FcvVec { rd: u8, rn: u8, signed: bool, esize: u8, q: bool },
+    // ---- variable shift by register (LSLV/LSRV/ASRV/RORV) ----
+    VarShiftVar { rd: u8, rn: u8, rm: u8, op: u8, sf: bool },
+    // ---- SIMD FP unary: fneg/fabs/fsqrt Vd.T, Vn.T - op 0=neg 1=abs 2=sqrt ----
+    SimdFpUnary { rd: u8, rn: u8, op: u8, esize: u8, q: bool },
     // ---- compare-and-branch ----
     Cbz {
         rt: u8,
@@ -296,6 +300,8 @@ pub enum Inst {
     // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
     // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD unsigned compare-higher 2D: cmhi Vd.2D, Vn.2D, Vm.2D ----
+    SimdCmhiD { rd: u8, rn: u8, rm: u8 },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
     // ---- SIMD narrowing extract: xtn Vd.T, Vn.U (low halves) ----
@@ -562,6 +568,37 @@ pub fn decode(insn: u32) -> Inst {
         let signed = (insn >> 29) & 1 == 0;
         let q = (insn >> 30) & 1 == 1;
         return Inst::FcvVec { rd, rn, signed, esize: e, q };
+    }
+    // ---- variable shift by register: lslv/lsrv/asrv/rorv Wd|Xd, Wn|Xn, Wm|Xm ----
+    // Gate (insn & 0xffe0_2000) in {0x1ac0_2000, 0x9ac0_2000}; distinct from MulDiv
+    // (0x1ac0_0000). op = bits[12:10]: 0=lsl, 1=lsr, 2=asr, 3=ror.
+    if (insn & 0xffe0_2000) == 0x1ac0_2000 || (insn & 0xffe0_2000) == 0x9ac0_2000 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        let op = ((insn >> 10) & 3) as u8;
+        let sf = (insn >> 31) & 1 == 1;
+        return Inst::VarShiftVar { rd, rn, rm, op, sf };
+    }
+    // ---- SIMD FP unary: fneg/fabs/fsqrt Vd.T, Vn.T (2D/4S/2S) ----
+    // Gate (insn & 0xffe0_f800) in {0x2ea0,0x4ea0,0x4ee0,0x6ea0,0x6ee0}_f800.
+    // op: abs (bit29==0), else sqrt if bit16 else neg. esize = 8 iff bit22.
+    if (insn & 0xffe0_f800) == 0x2ea0_f800 || (insn & 0xffe0_f800) == 0x4ea0_f800
+        || (insn & 0xffe0_f800) == 0x4ee0_f800 || (insn & 0xffe0_f800) == 0x6ea0_f800
+        || (insn & 0xffe0_f800) == 0x6ee0_f800
+    {
+        let op = if (insn >> 29) & 1 == 0 {
+            1 // fabs
+        } else if (insn >> 16) & 1 == 1 {
+            2 // fsqrt
+        } else {
+            0 // fneg
+        };
+        let esize = if (insn >> 22) & 1 == 1 { 8u8 } else { 4u8 };
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let q = (insn >> 30) & 1 == 1;
+        return Inst::SimdFpUnary { rd, rn, op, esize, q };
     }
     // ---- unconditional branch: bits[30:26] = 0b00101, bit31=link ----
     if b(insn, 26, 30) == 0b00101 {
@@ -1154,6 +1191,7 @@ pub fn decode(insn: u32) -> Inst {
             let mode = match fam {
                 0x9e28_0000 | 0x9e29_0000 | 0x9e68_0000 | 0x9e69_0000 => 3, // +inf
                 0x9e30_0000 | 0x9e31_0000 | 0x9e70_0000 | 0x9e71_0000 => 4, // -inf
+                0x9e24_0000 | 0x9e25_0000 | 0x9e64_0000 | 0x9e65_0000 | 0x9e60_0000 | 0x9e61_0000 => 2, // nearest (fcvtas/au, fcvtns/nu)
                 _ => 255,
             };
             if mode != 255 {
@@ -1382,7 +1420,14 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                     let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                     let rd = (insn & 0x1f) as u8;
                                                                                                                                     return Inst::SimdCmhi { rd, rn, rm, lanes: clanes };
-                                                                                                                                                                                                        }
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    // 2D (64-bit lanes): 0x6ee0_3400 (Q=1). Per 8-byte lane all-ones if Vn>Vm.
+                                                                                                                                                                                                    if scm == 0x6ee0_3400 {
+                                                                                                                                                                                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                        let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                        return Inst::SimdCmhiD { rd, rn, rm };
+                                                                                                                                                                                                    }
                                                                                                                                                                                                         // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
                                                                                                                                                                                                         // Each element is all-ones if Vn[i]==Vm[i], else 0.
                                                                                                                                                                                                         // Gate &0xffe0_fc00 residues: 2d=0x6ee08c00, 4s=0x6ea08c00,

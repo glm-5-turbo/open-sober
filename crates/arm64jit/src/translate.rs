@@ -1399,18 +1399,34 @@ pub fn translate(
                                                                                                                         // if Vn[i] > Vm[i] (unsigned), else 0. Compare unsigned
                                                                                                                         // then cmov (cmova) an all-ones mask vs 0.
                                                                                                                         let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                                                                                                                        for i in 0..lanes {
-                                                                                                                            let off = (i as i32) * 4;
-                                                                                                                            buf.mov_load32(RAX, RBX, slot(rn) + off);
-                                                                                                                            buf.mov_load32(RCX, RBX, slot(rm) + off);
-                                                                                                                            buf.cmp_rr64(RAX, RCX); // unsigned: CF=1 if Vn<Vm
-                                                                                                                            buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
-                                                                                                                            buf.mov_ri64(RDX, 0);
-                                                                                                                            buf.cmov_rr64(0x47, RDI, RDX); // cmova: RDI=ones if Vn>Vm else 0
-                                                                                                                            buf.mov_store32(RBX, slot(rd) + off, RDI);
-                                                                                                                                                                                    }
-                                                                                                                                                                                    Ok(())
-                                                                                                                                                                                }
+                                                                                                                                                                                                                                                for i in 0..lanes {
+                                                                                                                                                                                                                                                    let off = (i as i32) * 4;
+                                                                                                                                                                                                                                                    buf.mov_load32(RAX, RBX, slot(rn) + off);
+                                                                                                                                                                                                                                                    buf.mov_load32(RCX, RBX, slot(rm) + off);
+                                                                                                                                                                                                                                                    buf.cmp_rr64(RAX, RCX); // unsigned: CF=1 if Vn<Vm
+                                                                                                                                                                                                                                                    buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
+                                                                                                                                                                                                                                                    buf.mov_ri64(RDX, 0);
+                                                                                                                                                                                                                                                    buf.cmov_rr64(0x47, RDI, RDX); // cmova: RDI=ones if Vn>Vm else 0
+                                                                                                                                                                                                                                                    buf.mov_store32(RBX, slot(rd) + off, RDI);
+                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                Ok(())
+                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                            Inst::SimdCmhiD { rd, rn, rm } => {
+                                                                                                                                                                                                                                                // cmhi Vd.2D, Vn.2D, Vm.2D (Q=1): per 64-bit lane, all-ones
+                                                                                                                                                                                                                                                // if Vn[i] > Vm[i] (unsigned) else 0.
+                                                                                                                                                                                                                                                let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                                                                                                                                                for i in 0..2u32 {
+                                                                                                                                                                                                                                                    let off = (i as i32) * 8;
+                                                                                                                                                                                                                                                    buf.mov_load64(RAX, RBX, slot(rn) + off);
+                                                                                                                                                                                                                                                    buf.mov_load64(RCX, RBX, slot(rm) + off);
+                                                                                                                                                                                                                                                    buf.cmp_rr64(RAX, RCX); // unsigned: CF=0 if Vn>=Vm, CF=1 if Vn<Vm
+                                                                                                                                                                                                                                                    buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
+                                                                                                                                                                                                                                                    buf.mov_ri64(RDX, 0);
+                                                                                                                                                                                                                                                    buf.cmov_rr64(0x47, RDI, RDX); // cmova: RDI=ones if Vn>Vm else 0
+                                                                                                                                                                                                                                                    buf.mov_store64(RBX, slot(rd) + off, RDI);
+                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                Ok(())
+                                                                                                                                                                                                                                            }
                                                                                                                                                                                 Inst::SimdCmEq { rd, rn, rm, lanes, esize } => {
             // cmeq Vd.T, Vn.T, Vm.T: each element is all-ones if Vn[i]==Vm[i]
             // else 0. Compare the esize-byte element (zero-extended via the
@@ -1533,6 +1549,72 @@ pub fn translate(
                     buf.mov_store32(RBX, slot + off, RAX);
                 }
                 off += esize as i32;
+            }
+            Ok(())
+        }
+        Inst::VarShiftVar { rd, rn, rm, op, sf } => {
+            // lslv/lsrv/asrv/rorv Rd, Rn, Rm: variable shift by register. Rn -> RAX,
+            // Rm count -> RCX (low byte CL); shift via the _cl64 helpers. W masks the
+            // count to 0x1f and ASR sign-extends the low 32 before arithmetic shift.
+            ldg(buf, RAX, rn as u32); // value
+            ldg(buf, RCX, rm as u32); // shift count
+            if sf {
+                buf.and_ri64(RCX, 0x3f);
+            } else {
+                buf.and_ri64(RCX, 0x1f);
+                if op == 2 {
+                    // asr (W): sign-extend low 32 before arithmetic shift
+                    buf.movsxd_r64_r32(RAX, RAX);
+                }
+            }
+            match op {
+                0 => buf.shl_cl64(RAX), // lslv
+                1 => buf.shr_cl64(RAX), // lsrv
+                2 => buf.sar_cl64(RAX), // asrv
+                _ => buf.ror_cl64(RAX), // rorv
+            }
+            if !sf {
+                buf.and_ri64(RAX, 0xffff_ffff);
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
+        Inst::SimdFpUnary { rd, rn, op, esize, q } => {
+            // fneg/fabs/fsqrt Vd.T, Vn.T: per-lane unary FP on the vector slot.
+            // fneg/fabs flip/clear the sign bit on the FP bit-pattern via GPRs;
+            // fsqrt uses x86 sqrtsd. esize 8 lanes are full doubles, esize 4
+            // lanes handled the same (sign-bit at bit 31; store low 32 back).
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let m = esize as i32;
+            let sign64: u64 = if esize == 8 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
+            for l in 0..lanes {
+                let off = l * m;
+                buf.movq_load(0, RBX, src + off); // xmm0 <- lane bits
+                if op == 2 {
+                    buf.sqrtsd(0, 0); // fsqrt
+                } else {
+                    // fneg (op 0): xor sign; fabs (op 1): and with ~sign
+                    buf.movq_r64_xmm(RAX, 0);
+                    buf.mov_ri64(RCX, sign64);
+                    if op == 0 {
+                        buf.xor_rr64(RAX, RCX);
+                    } else {
+                        buf.mov_ri64(RDX, sign64);
+                        buf.not_r64(RDX);
+                        buf.and_rr64(RAX, RDX);
+                    }
+                    buf.movq_xmm_r64(0, RAX);
+                }
+                if esize == 8 {
+                    buf.movq_store(RBX, dst + off, 0);
+                } else {
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, dst + off, RAX);
+                }
             }
             Ok(())
         }
