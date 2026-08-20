@@ -801,3 +801,51 @@ D. After JNI_OnLoad returns (registers 3 methods), boot the GUI on `:0` and
   constructor / a `Java_..._initializeGC`/`Memory` JNI or a static init that is
   currently NOP'd or skipped) and either let it run or manually call it to seed
   the per-thread pool chunk-base, so the small allocator's free-list is non-empty.
+
+## Session 16 — libroblox REAL .init_array constructors now RUN (committed); blocker = Roblox MemoryPool bootstrap
+
+### Root-cause advance: DT_INIT_ARRAYSZ == 0, so glibc never runs Roblox's ctors
+- `readelf -d` on installed libroblox.so: `INIT_ARRAY=0x630bfc0` but `INIT_ARRAYSZ=0`
+  (0 bytes) even though `.init_array` section is 0x6ce0 (3484 pointers).
+- The init_array entries are `R_AARCH64_RELATIVE` (base+addend) slots that the
+  loader SKIPS resolving because DT_INIT_ARRAYSZ==0 (it never runs them).
+- So all the static constructors that seed Roblox's MemoryPool / TLS arena
+  globals originally never executed. That is the real antecedent of the old
+  malloc-NULL abort.
+
+### New capability: run_libroblox_init_array(base)
+- mprotect base+[0x5a00000..0x6320000] RWX, apply RELATIVE relocs for
+  init_array-range slots (0x630bfc0..0x6312ca0) -> write base+addend, then call
+  each ctor in address order.
+- VERIFIED RUNNING: log shows ctor[0]@base+0x2692f14 .. ctor[3]@base+0x1c34480
+  with a sysinfo plus abort appearing INSIDE ctor[3]'s execution.
+- ctor[3] (0x1c34480 -> tail `b 0x5d9ce10`) does a thread-local allocation via
+  0x1c35480 (the TLS block fast-alloc) which returns NULL, hit the
+  cbz-to-abort at initializeNativeCode+0x343e44. Same malloc-NULL abort as
+  before, now reached from the constructor path.
+
+### Blocker now precisely: Roblox's per-thread MemoryPool TLS alloc returns NULL
+- 0x1c35484: TLS key from [0x6368000+0x9dc]; if -1 runs init; else
+  pthread_getspecific to default block 0x6308dc0 (csel if empty). size<=0x400
+  fast-path pops [blk+232]+8; on empty -> big-allocator 0x1c3635c.
+- 0x1c3635c (big alloc) returns NULL regardless of reported memory (614MB real
+  OR 256GB forged sysinfo): qemu strace shows NO mmap after JNI_OnLoad, so it is
+  a book-side arena-not-seeded condition, NOT real OOM.
+- wrap abort() logs+returns; without it the process dies SIGABRT.
+
+### de-horned wrong guesses (verified and committed)
+- sysinfo/meminfo/overcommit forgers are NOT the fix and are now set to PASS
+  THROUGH real host values (forging 256GB or overcommit 0/1/2 didn't change the
+  abort). Do not re-add inflation as the primary lever.
+- Applying RELATIVE relocs GLOBALLY double-corrupts .data (loader already does
+  .data/.got/.data.rel.ro; only .init_array is skipped). Keep the apply
+  init_array-scoped.
+
+### Next (ordered)
+A. Find and call the MemoryPool init directly (seek the fn that initializes the
+   block region 0x6308dc0 / the arena global ~0x6367000+0x600), or identify a
+   later ctor that seeds the pool and run it before ctor[3].
+B. Or patch 0x2692ce8 (the cbz-abort on the TLS-alloc NULL) to fall back to
+   real glibc malloc so the book gets a block and can proceed through later
+   ctors -- a stepping-stone, not a final fix.
+C. After JNI_OnLoad returns (registers methods), GUI on :0 + vision phase.
