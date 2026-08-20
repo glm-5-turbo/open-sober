@@ -364,7 +364,9 @@ static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
 
     // Bad address (0, -1, -4096) — genuine fault, abort
     if (fault_addr < 0x1000 || fault_addr == (uintptr_t)-1 || fault_page == ~0xfffULL) {
-        fprintf(stderr, "[jni_segv] #%d: bad addr=0x%lx pc=0x%lx\n", jni_segv_count, fault_addr, pc);
+        fprintf(stderr, "[jni_segv] #%d: bad addr=0x%lx pc=0x%lx lr=0x%lx\n",
+                jni_segv_count, fault_addr, pc,
+                (unsigned long)u->uc_mcontext.regs[30]);
         sigaction(SIGSEGV, &jni_old_sa, NULL); return;
     }
 
@@ -643,6 +645,14 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[jni_shim] WARNING: libbionic_shim.so not found: %s\n", dlerror());
 
     fprintf(stderr, "[jni_shim] Loading %s...\n", lib_path);
+    // Install SIGSEGV handler early so dlopen-time faults (e.g. a NULL GOT
+    // entry during relocation) report the guest PC instead of trapping out.
+    {
+        struct sigaction esa; memset(&esa, 0, sizeof(esa));
+        esa.sa_sigaction = jni_segv_handler; esa.sa_flags = SA_SIGINFO | SA_NODEFER;
+        sigemptyset(&esa.sa_mask);
+        sigaction(SIGSEGV, &esa, &jni_old_sa);
+    }
     void* handle = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
     if (!handle) { fprintf(stderr, "[jni_shim] Failed: %s\n", dlerror()); return 1; }
     fprintf(stderr, "[jni_shim] Loaded successfully\n");
