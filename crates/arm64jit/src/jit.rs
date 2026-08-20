@@ -26,6 +26,10 @@ pub struct CpuState {
     /// stored as two little-endian u64 lanes: lane0 = low u64 at [bb*base +
     /// 16*i], lane1 = high u64 at [.. + 16*i + 8].
     pub v: [u64; 64],
+    /// Placeholder for the AArch64 EL0 thread-pointer / TLS base (tpidr_el0).
+    /// A JIT-emulated `mrs xN, tpidr_el0` / `msr tpidr_el0, xN` reads/writes this
+    /// slot. Kept *after* `v` so VECTOR_BASE (272) is unchanged.
+    pub tpidr: u64,
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
@@ -37,6 +41,10 @@ pub const VECTOR_BASE: i32 = 272;
 /// Byte offset of `CpuState.pc` (after the 32 x-regs).
 pub const PC_OFF: i32 = 8 * 32; // 256
 
+/// Byte offset of `CpuState.tpidr` — right after the 64-null v array (v[64] at
+/// VECTOR_BASE 272 .. 272+512=784). 272 + 64*8 = 784.
+pub const TPIDR_OFF: i32 = VECTOR_BASE + 64 * 8; // 784
+
 impl CpuState {
     pub fn new() -> Self {
         CpuState {
@@ -45,6 +53,7 @@ impl CpuState {
             nzcv: 0,
             pad: 0,
             v: [0; 64],
+            tpidr: 0,
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {

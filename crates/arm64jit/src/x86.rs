@@ -310,7 +310,53 @@ impl CodeBuf {
     pub fn divsd(&mut self, dst: u8, src: u8) {
         self.sd(0x5E, dst, src);
     }
-    /// cvttsd2si r64, xmm  (F2 48 0F 2C /r) — truncate toward zero
+    // ---- integer multiply / divide (data-processing register) ----
+
+    /// cqo — sign-extend RAX into RDX (64-bit), 48 99. pranda.
+    pub fn cqo(&mut self) {
+        self.b(0x48);
+        self.b(0x99);
+    }
+    /// cdq — sign-extend EAX into EDX (32-bit), 99.
+    pub fn cdq(&mut self) {
+        self.b(0x99);
+    }
+    /// div r64 — unsigned divide RDX:RAX by r64; quotient RAX, remainder RDX. 48 F7 /0.
+    pub fn div_r64(&mut self, divr: u8) {
+        self.b(0x48);
+        self.b(0xF7);
+        self.b(modrm(3, 0, divr & 7)); // /0
+    }
+    /// div r32 — unsigned divide EDX:EAX by r32; quotient EAX, remainder EDX. F7 /0.
+    pub fn div_r32(&mut self, divr: u8) {
+        self.b(0xF7);
+        self.b(modrm(3, 0, divr & 7));
+    }
+    /// idiv r64 — signed divide: RDX:RAX / r64; quotient RAX, remainder RDX. 48 F7 /7.
+    pub fn idiv_r64(&mut self, divr: u8) {
+        self.b(0x48);
+        self.b(0xF7);
+        self.b(modrm(3, 7, divr & 7));
+    }
+    /// idiv r32 — signed divide: EDX:EAX / r32; quotient EAX, remainder EDX. F7 /7.
+    pub fn idiv_r32(&mut self, divr: u8) {
+        self.b(0xF7);
+        self.b(modrm(3, 7, divr & 7));
+    }
+    /// imul r64, r/m64 — signed multiply (2-operand): rd = rd * rs. 48 0F AF /r.
+    pub fn imul_rr64(&mut self, rd: u8, rs: u8) {
+        self.b(0x48);
+        self.b(0x0F);
+        self.b(0xAF);
+        self.b(modrm(3, rd & 7, rs & 7)); // Intel: ModRM.reg=dst, rm=src => AF C1 = eax<-eax*ecx
+    }
+    /// movsxd r64, r/m32 — sign-extend a 32-bit operand into r64. 48 63 /r.
+        pub fn movsxd_r64_r32(&mut self, rd: u8, rs: u8) {
+            self.b(0x48);
+            self.b(0x63);
+            self.b(modrm(3, rd & 7, rs & 7));
+        }
+        /// cvttsd2si r64, xmm  (F2 48 0F 2C /r) — truncate toward zero
     pub fn cvttsd2si(&mut self, rd: u8, xmm: u8) {
         self.b(0xF2);
         self.b(0x48);
@@ -470,6 +516,10 @@ impl CodeBuf {
     /// sar r64, cl
     pub fn sar_cl64(&mut self, rd: u8) {
         self.shift_cl(7, rd);
+    }
+    /// ror r64, cl
+    pub fn ror_cl64(&mut self, rd: u8) {
+        self.shift_cl(1, rd);
     }
     fn shift_cl(&mut self, op: u8, rd: u8) {
         if rd >= 8 {

@@ -34,6 +34,13 @@ fn stg(buf: &mut CodeBuf, g: u32, x: u8) {
     buf.mov_store64(RBX, slot(g), x);
 }
 
+/// Write 0 to guest register `g`.
+#[inline]
+fn stg0(buf: &mut CodeBuf, g: u32) {
+    buf.mov_ri64(RAX, 0);
+    buf.mov_store64(RBX, slot(g), RAX);
+}
+
 /// Byte offset of `CpuState.nzcv` (after pc@256: nzcv u32 at 264).
 const NZCV_OFF: i32 = 8 * 32 + 8; // 264
 /// Byte offset of `CpuState.pad`.
@@ -170,7 +177,7 @@ fn apply_shift_const(buf: &mut CodeBuf, x: u8, kind: ShiftKind, amt: u8) {
         ShiftKind::Lsl => buf.shl_cl64(x),
         ShiftKind::Lsr => buf.shr_cl64(x),
         ShiftKind::Asr => buf.sar_cl64(x),
-        ShiftKind::Ror => panic!("ror not implemented"),
+        ShiftKind::Ror => buf.ror_cl64(x),
     }
 }
 
@@ -283,18 +290,113 @@ pub fn translate(
                 0 => buf.and_rr64(RAX, RCX), // AND
                 1 => buf.or_rr64(RAX, RCX),  // ORR
                 2 => buf.xor_rr64(RAX, RCX), // EOR
+                // Inverted (N=1) variants: AND/NOT, OR/NOT, XOR/NOT (BIC/ORN/EON).
+                4 => {
+                    buf.not_r64(RCX);
+                    buf.and_rr64(RAX, RCX); // BIC
+                }
+                5 => {
+                    buf.not_r64(RCX);
+                    buf.or_rr64(RAX, RCX); // ORN
+                }
+                6 => {
+                    buf.not_r64(RCX);
+                    buf.xor_rr64(RAX, RCX); // EON
+                }
                 _ => return Err(format!("LogicReg op {} not implemented", op)),
             }
             if s {
-                // ANDS/ORRS/EORS/TST set NZCV: x86 `and/or/xor` set CF=0,OF=0 and
-                // ZF/SF from the result, which is exactly AArch64's N/Z/C/V here.
-                store_nzcv(buf);
-            }
-            if rd != 31 {
-                stg(buf, rd as u32, RAX);
-            }
-            Ok(())
-        }
+                            // ANDS/ORRS/EORS/TST set NZCV: x86 `and/or/xor` set CF=0,OF=0 and
+                            // ZF/SF from the result, which is exactly AArch64's N/Z/C/V here.
+                            store_nzcv(buf);
+                        }
+                        if rd != 31 {
+                            stg(buf, rd as u32, RAX);
+                        }
+                        Ok(())
+                    }
+                    Inst::LogicImm {
+                        rd,
+                        rn,
+                        mask,
+                        op,
+                        sf,
+                    } => {
+                        // AND/ORR/EOR/ANDS with a bitmask immediate (the `mov xD,#imm` alias
+                        // is ORR xD, xzr, #imm). Load Rn into RAX, materialize `mask` in
+                        // RCX, combine, then (for op==3 / tst) store NZCV.
+                        if rn == 31 {
+                            buf.mov_ri64(RAX, 0); // xzr reads as zero
+                        } else {
+                            ldg(buf, RAX, rn as u32);
+                        }
+                        buf.mov_ri64(RCX, mask);
+                        match op {
+                            0 => buf.and_rr64(RAX, RCX), // AND
+                            1 => buf.or_rr64(RAX, RCX),  // ORR
+                            2 => buf.xor_rr64(RAX, RCX), // EOR
+                            3 => {
+                                buf.and_rr64(RAX, RCX); // ANDS
+                                store_nzcv(buf);
+                            }
+                            _ => return Err(format!("LogicImm op {} not implemented", op)),
+                        }
+                        if !sf {
+                            buf.and_ri64(RAX, 0xffff_ffff);
+                        }
+                        if rd != 31 {
+                            stg(buf, rd as u32, RAX);
+                        }
+                        Ok(())
+                    }
+                    Inst::MulDiv { div, signed, rd, rn, rm, ra, sf } => {
+                        if div {
+                            // UDIV/SDIV: RAX = Rn / Rm (quotient). Dividend in
+                            // RDX:RAX, divisor in RCX.
+                            ldg(buf, RAX, rn as u32); // dividend low half
+                            if signed {
+                                // sign-extend the 32-bit W operand to 64 (for X
+                                // operands already loaded sign-correct; movsxd of a
+                                // 64-bit value's low 32 would corrupt it, so only
+                                // re-extend for W).
+                                if !sf {
+                                    buf.movsxd_r64_r32(RAX, RAX);
+                                }
+                                buf.cqo(); // RAX -> RDX:RAX (signed)
+                            } else {
+                                buf.xor_rr64(RDX, RDX); // unsigned: zero-high half
+                            }
+                            // divisor: sign-extend Rm for SDIV-W too.
+                            ldg(buf, RCX, rm as u32);
+                            if signed && !sf {
+                                buf.movsxd_r64_r32(RCX, RCX);
+                            }
+                            if signed {
+                                buf.idiv_r64(RCX);
+                            } else {
+                                buf.div_r64(RCX);
+                            }
+                            // quotient in RAX. Store (W: low 32 preserved by div if no overflow).
+                        } else {
+                            // MADD/MSUB: RAX = Rn*rm [+/-] ra.
+                            ldg(buf, RAX, rn as u32);
+                            ldg(buf, RCX, rm as u32);
+                            buf.imul_rr64(RAX, RCX); // RAX = Rn*rm (low 64)
+                            ldg(buf, RDI, ra as u32);
+                            if signed {
+                                buf.sub_rr64(RAX, RDI); // Rn*rm - ra
+                            } else {
+                                buf.add_rr64(RAX, RDI); // Rn*rm + ra
+                            }
+                        }
+                        if !sf {
+                            buf.and_ri64(RAX, 0xffff_ffff);
+                        }
+                        if rd != 31 {
+                            stg(buf, rd as u32, RAX);
+                        }
+                        Ok(())
+                    }
         Inst::CSel {
             rd,
             rn,
@@ -433,6 +535,52 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::LdExr { size, ld, rs, rt, rn } => {
+            // Exclusive block in a single-threaded JIT always succeeds: `ldxr` is
+            // a plain load, `stxr` is a plain store with the status register Rs
+            // written 0 (success).
+            ldg(buf, RDX, rn as u32);
+            match (size, ld) {
+                (3, true) => {
+                    buf.mov_load64(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (3, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store64(RDX, 0, RAX);
+                    stg0(buf, rs as u32);
+                }
+                (2, true) => {
+                    buf.mov_load32(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (2, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store32(RDX, 0, RAX);
+                    stg0(buf, rs as u32);
+                }
+                (1, true) => {
+                    buf.movzx_word_mem(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (1, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store16(RDX, 0, RAX);
+                    stg0(buf, rs as u32);
+                }
+                (0, true) => {
+                    buf.movzx_byte_mem(RAX, RDX, 0);
+                    stg(buf, rt as u32, RAX);
+                }
+                (0, false) => {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store8(RDX, 0, RAX);
+                    stg0(buf, rs as u32);
+                }
+                (s, _) => return Err(format!("LdExr size {} not implemented", s)),
+            }
+            Ok(())
+        }
         Inst::BitField { rd, rn, immr, imms, sf, arith } => {
             let bits = if sf { 64u32 } else { 32u32 };
             ldg(buf, RAX, rn as u32); // load Rn
@@ -448,6 +596,20 @@ pub fn translate(
                 // LSL (alias) : shift left by (bits-1-imms)
                 let sh = ((bits - 1 - imms) & (bits - 1)) as u8;
                 buf.shl_ri8(RAX, sh);
+            } else if immr > imms {
+                // BFI/BFC insert: lsb = (bits-immr)&(bits-1); width = imms+1.
+                // rd = (rd & ~mask) | ((Rn << lsb) & mask); mask = ((1<<width)-1)<<lsb
+                let lsb = (bits - immr) & (bits - 1);
+                let width = imms + 1;
+                let mask = ((1u64 << width) - 1) << lsb;
+                ldg(buf, R10, rd as u32); // old Rd
+                buf.shl_ri8(RAX, lsb as u8); // Rn << lsb
+                buf.mov_ri64(RCX, mask);
+                buf.and_rr64(RAX, RCX); // inserted field
+                buf.not_r64(RCX); // ~mask
+                buf.and_rr64(R10, RCX); // rd & ~mask
+                buf.or_rr64(R10, RAX); // (rd & ~mask) | inserted
+                buf.mov_rr64(RAX, R10);
             } else {
                 // general UBFM/SBFM extract: (Rn >> immr) & low(width) bits,
                 // then optionally sign-extend from `width`.
@@ -478,6 +640,24 @@ pub fn translate(
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
+        Inst::SysReg { sysreg, rt, read } => {
+            // Only tpidr_el0 is modelled (sysreg==0). MRS read: Rt = CpuState.tpidr.
+            // MSR write: CpuState.tpidr = Rt. Other sysregs should not decode here.
+            debug_assert_eq!(sysreg, 0, "unhandled SysReg in translate");
+            if read {
+                // Rt = [RBX + TPIDR_OFF]
+                if rt != 31 {
+                    buf.mov_load64(rt, RBX, crate::jit::TPIDR_OFF);
+                }
+            } else {
+                // tpidr_el0 = Rt
+                if rt != 31 {
+                    ldg(buf, RAX, rt as u32);
+                    buf.mov_store64(RBX, crate::jit::TPIDR_OFF, RAX);
+                }
             }
             Ok(())
         }
@@ -533,6 +713,31 @@ pub fn translate(
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
+        Inst::FmovGp { f, sz, rd, rn } => {
+            // FMOV core <-> scalar FP. Double(d/x) uses the low 64 of the slot;
+            // single(s/w) uses the low 32.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            if f {
+                            // FP -> GP
+                            if sz {
+                                buf.mov_load64(RAX, RBX, vslot(rn));
+                            } else {
+                                buf.mov_load32(RAX, RBX, vslot(rn));
+                            }
+                if rd != 31 {
+                    stg(buf, rd as u32, RAX);
+                }
+            } else {
+                // GP -> FP
+                ldg(buf, RAX, rn as u32);
+                if sz {
+                    buf.mov_store64(RBX, vslot(rd), RAX);
+                } else {
+                    buf.mov_store32(RBX, vslot(rd), RAX);
+                }
             }
             Ok(())
         }

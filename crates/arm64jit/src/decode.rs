@@ -164,11 +164,21 @@ pub enum Inst {
     },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
-        rd: u8,
-        rn: u8, // source fp reg
-        mode: u8, // 0=fcvtzs, 2=fcvtas
-        sf: bool, // 64-bit dest
-    },
+           rd: u8,
+           rn: u8,   // source fp reg
+           mode: u8, // 0=fcvtzs, 2=fcvtas
+           sf: bool, // 64-bit dest
+       },
+       // ---- FMOV between a core register and a scalar FP register ----
+       //   FMOV Dd,Xn 0x9E670000 (write GPR to low 64 of Dd, zero hi)
+       //   FMOV Xd,Dn 0x9E660000 (read low 64 of Dn into Xd)
+       //   FMOV Sd,Wn 0x1E270000 / FMOV Wd,Sn 0x1E260000
+       FmovGp {
+           f: bool, // false = GP->FP (X/Sd <- X/Wn), true = FP->GP (Xd/Wd <- D/Sn)
+           sz: bool, // true = double (d/x), false = single (s/w)
+           rd: u8,
+           rn: u8,
+       },
     // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
     BitField {
         rd: u8,
@@ -178,6 +188,46 @@ pub enum Inst {
         sf: bool,   // 64-bit
         arith: bool, // true = arithmetic shift (SBFM/asr) sign-extends
     },
+    // ---- system register access (mrs xN, <sysreg> / msr <sysreg>, xN) ----
+        // Only the thread-pointer registers the JIT models are decoded: tpidr_el0
+        // (op0=3 op1=3 CRn=13 CRm=0 op2=2). Other <sysreg> encodings fall back to
+        // Unsupported.
+        SysReg {
+            sysreg: u32, // packed (op0,op1,CRn,CRm,op2); 0 == tpidr_el0
+            rt: u8,      // read: Rt = tpidr_el0 ; write: tpidr_el0 = Rt
+            read: bool,  // true = MRS (system -> GPR), false = MSR (GPR -> system)
+        },
+        // ---- logical (immediate): AND/ORR/EOR/ANDS with a bitmask immediate ----
+        // Covers the `mov xD, #imm` alias (ORR xD, xzr, #imm) and
+        // tst (ANDS xzr, xN, #imm) and BICS-family AND-immediate. The 64-bit
+        // operand mask is decoded from N/immr/imms by decode_logical_mask.
+        LogicImm {
+            rd: u8,
+            rn: u8,
+            mask: u64,
+            op: u8, // 0=AND,1=ORR,2=EOR,3=ANDS (set-flags)
+            sf: bool, // 64-bit operands
+        },
+        // ---- exclusive load/store (ldxr/stxr/ldaxr/stlxr) ----
+        // Single-threaded: an exclusive block always succeeds, so `ldxr` is a
+        // plain load and `stxr` is a plain store that reports success (Rs==0).
+        LdExr {
+            size: u32, // 0=byte,1=half,2=word,3=x
+            ld: bool,  // true = ldxr/ldaxr (load), false = stxr/stlxr (store)
+            rs: u8,    // store-exclusive status reg (writes 0); unused for ld
+            rt: u8,
+            rn: u8,
+        },
+        // ---- integer multiply/divide register (madd/msub/udiv/sdiv) ----
+        MulDiv {
+            div: bool,    // true = UDIV/SDIV, false = MADD/MSUB
+            signed: bool, // SDIV / MSUB vs UDIV / MADD
+            rd: u8,
+            rn: u8,
+            rm: u8,
+            ra: u8, // MADD/MSUB accumulate reg; 0 for DIV
+            sf: bool,
+        },
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
     Hint,
@@ -216,6 +266,39 @@ impl ShiftKind {
 #[inline]
 fn b(insn: u32, lo: u32, hi: u32) -> u32 {
     (insn >> lo) & ((1u32 << (hi - lo + 1)) - 1)
+}
+
+/// Decode an AArch64 logical-immediate bitmask from `N`/`immr`/`imms`.
+/// Returns the 64-bit operand mask, or None if the encoding is invalid.
+/// Element size: N=1 -> 64-bit element; N=0 -> 32-bit element (replicated twice
+/// to fill the 64-bit register, as used by X-register ANDIMM/ORRIMM etc.).
+fn decode_logical_mask(n: u32, immr: u32, imms: u32) -> Option<u64> {
+    if n == 1 {
+        // 64-bit element.
+        if imms >= 64 {
+            return None;
+        }
+        let ones: u64 = (1u64 << (imms + 1)).wrapping_sub(1);
+        let mask64: u64 = u64::MAX;
+        Some(if immr == 0 {
+            ones
+        } else {
+            (ones.rotate_right(immr)) & mask64
+        })
+    } else {
+        // 32-bit element (N=0): valid only when imms < 32.
+        if imms >= 32 {
+            return None;
+        }
+        let ones: u32 = (1u32 << (imms + 1)).wrapping_sub(1);
+        let e32: u32 = if immr == 0 {
+            ones
+        } else {
+            ones.rotate_right(immr)
+        };
+        // Replicate the 32-bit element twice to form the 64-bit mask.
+        Some((e32 as u64) | ((e32 as u64) << 32))
+    }
 }
 /// Sign-extend a `bits`-wide value.
 #[inline]
@@ -368,7 +451,11 @@ pub fn decode(insn: u32) -> Inst {
     // MUST precede the logic/add-sub shifted-register decoders: csel X-variants
     // share top byte 0x9a/0xda with the ORR/EOR/BIC families. The 0x1a800000
     // fixed-bit pattern uniquely identifies csel/csinc/csinv/csneg.
-    if insn & 0x7fe0_0000 == 0x1a80_0000 {
+    if insn & 0x7fe0_0000 == 0x1a80_0000
+        || insn & 0x7fe0_0000 == 0x5a80_0000
+        || insn & 0x7fe0_0000 == 0x9a80_0000
+        || insn & 0x7fe0_0000 == 0xda80_0000
+    {
         let sf = (insn >> 31) & 1 == 1;
         let cond = b(insn, 12, 15) as u8;
         let rm = b(insn, 16, 20) as u8;
@@ -377,6 +464,32 @@ pub fn decode(insn: u32) -> Inst {
         // op = bits[11:10]: 00=csel,01=csinc,10=csinv,11=csneg
         let op = b(insn, 10, 11) as u8;
         return Inst::CSel { rd, rn, rm, cond, op, sf };
+    }
+
+    // ---- integer multiply/divide register (madd/msub/udiv/sdiv) ----
+    // top 0x1a/0x9a (DIV) or 0x1b/0x9b (MUL). Masked base: 0x1ac00000 (div),
+    // 0x1b000000 (mul). sf = bit31. signed: div bit17 (1=sdiv), mul bit15 (1=msub).
+    if insn & 0x7ff0_0000 == 0x1ac0_0000 || insn & 0x7ff0_0000 == 0x1b00_0000 {
+        let sf = (insn >> 31) & 1 == 1;
+        let div = insn & 0x7ff0_0000 == 0x1ac0_0000;
+        let signed = if div {
+            b(insn, 17, 17) == 1 // SDIV vs UDIV
+        } else {
+            b(insn, 15, 15) == 1 // MSUB vs MADD
+        };
+        let rd = b(insn, 0, 4) as u8;
+        let rn = b(insn, 5, 9) as u8;
+        let rm = b(insn, 16, 20) as u8;
+        let ra = if div { 0 } else { b(insn, 10, 14) as u8 };
+        return Inst::MulDiv {
+            div,
+            signed,
+            rd,
+            rn,
+            rm,
+            ra,
+            sf,
+        };
     }
 
     // ---- logical (shifted register): AND/ORR/EOR/BIC/ORN/EON ----
@@ -410,6 +523,55 @@ pub fn decode(insn: u32) -> Inst {
             sf,
             shift,
             sh_amt,
+        };
+    }
+
+    // ---- logical (immediate): AND/ORR/EOR/ANDS with a bitmask immediate ----
+    // class top bytes: W 0x12/0x32/0x52/0x72 ; X 0x92/0xb2/0xd2/0xf2. The `mov
+    // xD, #imm` alias...[truncated]
+    if matches!(
+        insn >> 24,
+        0x12 | 0x32 | 0x52 | 0x72 | 0x92 | 0xb2 | 0xd2 | 0xf2
+    ) {
+        let sf = (insn >> 31) & 1 == 1;
+        let op = ((insn >> 29) & 0x3) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        let n = (insn >> 22) & 1;
+        let immr = b(insn, 16, 21);
+        let imms = b(insn, 10, 15);
+        if let Some(mask) = decode_logical_mask(n, immr, imms) {
+            return Inst::LogicImm {
+                rd,
+                rn,
+                mask,
+                op,
+                sf,
+            };
+        }
+    }
+
+    // ---- exclusive load/store (ldxr/stxr) ----
+    // class (insn & 0x3f000000) == 0x08000000, but EXCLUDING the acquire/
+    // release LDAR/STLR codes (0x08800000 / 0x08c00000 masked by 0x3fe00000),
+    // which are handled by the AcqRel arm. Single-threaded: ldxr = plain
+    // load, stxr = plain store with status reg Rs written 0 (success).
+    if insn & 0x3f00_0000 == 0x0800_0000
+        && (insn & 0x3fe0_0000) != 0x0880_0000
+        && (insn & 0x3fe0_0000) != 0x08c0_0000
+    {
+        let size = (insn >> 30) & 0x3;
+        let opc = (insn >> 21) & 0x3; // 2,3 = ld ; 0,1 = st
+        let ld = opc == 2 || opc == 3;
+        let rs = ((insn >> 16) & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rt = (insn & 0x1f) as u8;
+        return Inst::LdExr {
+            size,
+            ld,
+            rs,
+            rt,
+            rn,
         };
     }
 
@@ -598,6 +760,23 @@ pub fn decode(insn: u32) -> Inst {
         }
     }
 
+    // ---- bitfield insert (BFM/BFI/BFC): inserts bits of Rn into Rd.
+    // top bytes: X=0xb3, W=0x33. The wrap case immr>imms decodes to the
+    // bfi/bfc aliases (lsb = (bits-immr)&(bits-1), width = imms+1); the
+    // non-wrap (immr<=imms) BFM is the extract-insert and is deferred.
+    if matches!(insn >> 24, 0xb3 | 0x33) {
+        let sf = (insn >> 31) & 1 == 1;
+        let bits = if sf { 64u32 } else { 32u32 };
+        let immr = b(insn, 16, 21);
+        let imms = b(insn, 10, 15);
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        if immr > imms {
+            // BFI/BFC (insert): lsb = (bits-immr)&(bits-1), width = imms+1
+            return Inst::BitField { rd, rn, immr, imms, sf, arith: false };
+        }
+    }
+
     // ---- FP convert to signed integer (fcvtzs/fcvtas): Dn|Sn -> Rd ----
     // class (insn & 0x5f20fc00)==0x1e200000 ; opc = bits[17:19] (2=fcvtas,0=fcvtzs)
     if insn & 0x5f20_fc00 == 0x1e20_0000 {
@@ -606,12 +785,28 @@ pub fn decode(insn: u32) -> Inst {
             let sf = (insn >> 31) & 1 == 1;
             let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
             if sz {
-                let rn = ((insn >> 5) & 0x1f) as u8;
-                let rd = (insn & 0x1f) as u8;
-                return Inst::FcvtToInt { rd, rn, mode, sf };
-            }
-        }
-    }
+                            let rn = ((insn >> 5) & 0x1f) as u8;
+                            let rd = (insn & 0x1f) as u8;
+                            return Inst::FcvtToInt { rd, rn, mode, sf };
+                        }
+                    }
+                }
+
+                // ---- FMOV between core and scalar FP register ----
+                // Bases: FMOV Xd,Dn 0x9E660000 ; FMOV Dd,Xn 0x9E670000
+                //        FMOV Wd,Sn 0x1E260000 ; FMOV Sd,Wn 0x1E270000  (mask clears rn/rt)
+                let base = insn & 0xffff_f800;
+                    let fmov = match base {
+                        0x9e66_0000 | 0x1e26_0000 => Some(true), // FP -> GP
+                        0x9e67_0000 | 0x1e27_0000 => Some(false), // GP -> FP
+                        _ => None,
+                    };
+                    if let Some(f) = fmov {
+                        let sz = matches!(base, 0x9e66_0000 | 0x9e67_0000); // d/x double
+                        let rn = ((insn >> 5) & 0x1f) as u8;
+                        let rd = (insn & 0x1f) as u8;
+                        return Inst::FmovGp { f, sz, rd, rn };
+                    }
 
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
     if insn & 0x7e00_0000 == 0x3600_0000 {
@@ -636,6 +831,23 @@ pub fn decode(insn: u32) -> Inst {
     // (mrs/msr/dmb/tlbi share 0xd503 but have nonzero register fields).
     if (insn & 0xffff_f01f) == 0xd503_201f {
         return Inst::Hint;
+    }
+
+    // ---- system register read/write (mrs xN, <sysreg> / msr <sysreg>, xN) ----
+    // AArch64 system-access op base: `1101_0101_0 xxxx` (0xD5000000..0xD57FFFFF).
+    // L bit (bit 20) selects MRS(1) vs MSR(0); op1<16:18> CRn<12:15> CRm<8:11>
+    // op2<5:7> identify the register. Only tpidr_el0 (op1=3 CRn=13 CRm=0 op2=2)
+    // is modelled as a jitter slot (CpuState.tpidr). Everything else falls back.
+    if insn & 0xff90_0000 == 0xd510_0000 {
+        let op1 = b(insn, 16, 18);
+        let crn = b(insn, 12, 15);
+        let crm = b(insn, 8, 11);
+        let op2 = b(insn, 5, 7);
+        let read = b(insn, 21, 21) == 1; // MRS (L bit): mrs has bit21 set, msr clear.
+        if op1 == 3 && crn == 13 && crm == 0 && op2 == 2 {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 0, rt, read };
+        }
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
@@ -1180,5 +1392,28 @@ mod tests {
             }
             other => panic!("expected AcqRel stlr, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mrs_tpidr_el0() {
+        // mrs x19, tpidr_el0 = 0xd53bd053 (real libroblox.so)
+        match decode(0xd53bd053) {
+            Inst::SysReg { sysreg, rt, read } => {
+                assert_eq!(sysreg, 0); // tpidr_el0
+                assert_eq!(rt, 19);
+                assert!(read); // MRS (system -> GPR)
+            }
+            other => panic!("expected SysReg MRS tpidr_el0, got {other:?}"),
+        }
+        // msr tpidr_el0, x4 = 0xd51bd044
+        match decode(0xd51bd044) {
+            Inst::SysReg { rt, read, .. } => {
+                assert_eq!(rt, 4);
+                assert!(!read); // MSR (GPR -> system)
+            }
+            other => panic!("expected SysReg MSR tpidr_el0, got {other:?}"),
+        }
+        // A non-TLS sysreg (mrs x0, cntfrq_el0) must NOT decode to SysReg.
+        assert!(!matches!(decode(0xd53be020), Inst::SysReg { .. }));
     }
 }
