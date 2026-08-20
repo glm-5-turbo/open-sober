@@ -416,3 +416,102 @@ NDK/JDK so the shim can actually `dlopen(libroblox.so)`. Mirrors were
 bot-blocked / version-mismatched on this box; the acquisition is manual or
 via a browser session. Once an APK is present, the version-agnostic shim
 should load it without re-tuning offsets (subject to the GSI lib tree).
+
+---
+
+## Session 13 update (Aug 20, 2026) — first real runtime run attempts
+
+### Acquired the real Roblox APK via a real (Playwright headless) browser
+Cloudflare-walled mirrors fail via curl; a Playwright headless Chromium (with
+the MCP) passed through and let me download the arm64-v8a APK:
+- Version chosen: **2.726.1142 (arm64-v8a, Android 8.0+/minapi-26)** — the
+  newest arm64-only build on APKMirror, NDK r28c / Android 26 (matches the
+  harness toolchain), June 19 2026.
+- Downloaded as an `.apkm` bundle from
+  `/apk/roblox-corporation/roblox/roblox-2-726-1142-release/...-download/?key=...`
+  → contains `base.apk` + `split_config.arm64_v8a.apk` → extracted
+  `lib/arm64-v8a/libroblox.so` (104,208,904 B ≈ 100 MB).
+- Note: `2.726.1142` **does NOT match** the July 2026 build the CPython hardcoded
+  in the shim (that build has JNI_OnLoad at 0x1f64e58; this build has it at
+  **0x1f0db20**). So the hardcoded JNI_OnLoad/clock/BSS offsets are wrong for
+  this build. `elf_disco` (Session 12) fixes the GOT/RELRO ones; the
+  JNI_OnLoad *patch offsets + BSS pre-inits are still hardcoded* and must be
+  made discovery-driven before this build can run JNI_OnLoad.
+
+### The runtime stack now boots and reaches dlopen(libroblox.so)
+On the fresh box I rebuilt and linked:
+- bridges (`libc.so`, `libm.so`, `libdl.so` — LIBC version tags present)
+- `libbionic_shim.so` (bionic→glibc trampolines, `symbols_aarch64.c`-style)
+- `libguest_stubs.so` — auto-generated no-op stubs for all 146 Android NDK
+  UND symbols of libroblox.so (AAsset*, ALooper*, AMediaCodec*, AMediaFormat*,
+  ANativeWindow*, egl*, gl*, __android_log*, OpenSLES sl*)
+- `jni_shim` (with elf_disco linked)
+- glibc base: ld-linux-aarch64.so.1 + android-env/lib
+Then `~/.cache/open-sober/qemu-patched` boots the whole thing.
+
+Achieved:
+- ✓ `_dl_mcount` nop works (64KB TCG flush) — the Session-8 fix functions
+- ✓ bionic shim loads; `dlopen(libroblox.so)` starts; all 576 UND symbols
+  resolve.
+- ✗ **Blocker: `pc=0x0` NULL-call during dlopen's relocation phase.** With my
+  early-`SIGSEGV` catch: `bad addr=0x0 pc=0x0 lr=0x7678b8034d0c`. A versioned
+  `@LIBC` symbol that computes a static GOT/PLT slot of 0 is being CALLED by
+  the guest dynamic loader during relocation, before JNI_OnLoad. This is the
+  handoff's documented long-tail (each `@LIBC_*` needs a real symbol, not
+  NULL). My SIGSEGV handler now prints LR to pinpoint it.
+
+### Concrete build/run commands (artifact locations)
+```
+ANDROID_ROOT=~/.cache/open-sober/android-env
+SYSROOT=$ANDROID_ROOT/system/lib64
+qemu-patched -L $ANDROID_ROOT \
+  -E LD_LIBRARY_PATH=/system/lib64 \
+  -E LD_PRELOAD=$SYSROOT/libbionic_shim.so:$SYSROOT/libguest_stubs.so \
+  -E DISPLAY=:0 $ANDROID_ROOT/jni_shim
+```
+(Link each lib from `crates/sober-core/src/{elf_disco.c,jni_shim.c,...}`.)
+
+### Next agent session to-do (ordered)
+1. **Make libroblox's JNI_OnLoad patch offsets version-agnostic** (currently
+   hardcoded 0x64e9c/0x64eb8 for the OLD build). Use `elf_disco` + JNI_OnLoad
+   disassembly to find `nativeSetAssetPath` / clock `bl` and NOP the right
+   bytes for `2.726.1142`.
+2. **Resolve the `@LIBC_*` NULL GOT** (the pc=0 lr at relocation). Candidates:
+   the versioned libc symbol that the loader calls at 0 — add a real bionic
+   shim/guest_stubs impl, or ensure the wholearch `libc.so` exports every
+   `@LIBC_*` libroblox uses (readelf -r to list, then provide). See
+   `disable_mcount_profiling` for the established dlsym+patch pattern.
+3. Keep GSI symlinks for the 10 NEEDED libs (libandroid/EGL/GLESv2, etc.) —
+   my empty stubs satisfy the linker but must not return NULL when called
+   (they're no-ops already).
+
+### Key Session-13b diagnostic (isolated)
+The single most useful finding: **`libbionic_shim.so` (built from the repo)
+crashes ANY arm64 binary when LD_PRELOADed under the patched QEMU**, even
+`printf("hello")`:
+```
+hello (no preload)           -> prints "hello"
+LD_PRELOAD=libbionic_shim.so -> SIGSEGV si_addr=0x1 (right after brk()+1MB
+                                anonymous mmap on the main thread's init)
+```
+`si_addr=0x0000000000000001` = the shim's trampoline/init resolves a glibc
+symbol to address 1 (an miscalc'd GOT read) and dereferences it. The shim
+(as bundled in this repo) was built against a *specific* host-glibc ABI; the
+fresh box's glibc from `/usr/aarch64-linux-gnu` (gcc-15) doesn't match, so
+the trampoline's per-symbol `dlsym(RTLD_NEXT, …)` returns garbage for some
+entries during the pre-load resolve loop. This is the base cause of the
+`pc=0x0 ads()` seen inside `dlopen(libroblox.so)`.
+
+Suggested next-agent fixes (in order of leverage):
+1. Make the bionic-shim `__bf_c_resolve` per-symbol `dlsym` tolerant: if it
+   returns NULL, back-fill with a local no-op trampoline instead of leaving
+   the slot at 0/garbage (so no `pc=0` or addr=1 call can occur).
+2. Pre-resolve against `RTLD_DEFAULT` (not just RTLD_NEXT) and validate each
+   entry is a real code address (> 0x10000) before committing the table.
+3. Then re-run the guest; the loader may get past the shim init and into
+   `dlopen(libroblox.so)` cleanly, exposing only the versioned `@LIBC` GOT
+   slots that `elf_disco` already resolves generically.
+
+This is the concrete path to the first "JNI_OnLoad" print with the real
+2.726.1142 libroblox.so — the bionic shim's trampoline resolution is the
+binding blocker on this box.
