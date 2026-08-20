@@ -1475,6 +1475,37 @@ pub fn translate(
                     buf.mov_store64(RBX, slot(rd) + 8, RAX);
                     Ok(())
                 }
+                Inst::Ld1 { rd, rn, esize, q } => {
+                    // ld1r {Vt.T}, [Xn]: load `esize` bytes from [x[rn]] and
+                    // replicate across (q?16:8)/esize lanes of Vd. Guest memory is
+                    // host-addressable in this in-process JIT, so [x[rn]] is a
+                    // direct dereference.
+                    let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                    ldg(buf, RDX, rn as u32); // RDX = base address (host ptr)
+                    match esize {
+                        8 => buf.mov_load64(RAX, RDX, 0),
+                        4 => buf.mov_load32(RAX, RDX, 0),
+                        2 => buf.movzx_word_mem(RAX, RDX, 0),
+                        _ => buf.movzx_byte_mem(RAX, RDX, 0),
+                    }
+                    let total = if q { 16i32 } else { 8i32 };
+                    let mut off = 0i32;
+                    while off < total {
+                        match esize {
+                            8 => buf.mov_store64(RBX, slot + off, RAX),
+                            4 => buf.mov_store32(RBX, slot + off, RAX),
+                            2 => buf.mov_store16(RBX, slot + off, RAX),
+                            _ => buf.mov_store8(RBX, slot + off, RAX),
+                        }
+                        off += esize as i32;
+                    }
+                    // for q=0, zero the high 64 bits
+                    if !q {
+                        buf.mov_ri64(RAX, 0);
+                        buf.mov_store64(RBX, slot + 8, RAX);
+                    }
+                    Ok(())
+                }
                 // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
                 // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
                                                                                                                                                                                 Inst::SimdBit { rd, rn, rm } => {
