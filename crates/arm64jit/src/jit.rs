@@ -47,6 +47,16 @@ pub struct JitBlock {
     len: usize,
 }
 
+impl JitBlock {
+    /// Bytes of the emitted x86-64 machine code (for inspection/dumping).
+    pub fn dump(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
 unsafe impl Send for JitBlock {}
 unsafe impl Sync for JitBlock {}
 
