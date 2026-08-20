@@ -1,0 +1,13 @@
+[package]
+name = "arm64jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-process ARM64 -> x86-64 JIT translator for open-sober (drops the QEMU dependency)"
+
+[dependencies]
+libc = "0.2"
+
+[lib]
+name = "arm64jit"
+path = "src/lib.rs"
