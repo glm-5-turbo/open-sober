@@ -169,6 +169,10 @@ pub enum Inst {
         op: u8, // 0=fsqrt, 1=frintm(toward -inf), 2=frintp(+inf), 3=frintz(toward 0)
         sz: bool, // true = double
     },
+    // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
+    // Gate (insn & 0xffe0_fc00)==0x7ee0_d400 (scalar double; verified vs real
+    // 0x7ee1d503 and compiler 0x7ee1d400). Disjoint from fadd/fmul/fdiv/fcmp.
+    Fabd { rd: u8, rn: u8, rm: u8 },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
             rd: u8,
@@ -1043,6 +1047,15 @@ pub fn decode(insn: u32) -> Inst {
                         let rn = ((insn >> 5) & 0x1f) as u8;
                         let rm = ((insn >> 16) & 0x1f) as u8;
                         return Inst::Fcmp { rn, rm };
+                            }
+                            // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
+                            // Gate (insn & 0xffe0_fc00) == 0x7ee0_d400 (scalar double; disjoint from
+                            // fadd/fmul/fdiv/fcmp/scvtf). rn=bits5-9, rm=bits16-20, rd=bits0-4.
+                            if (insn & 0xffe0_fc00) == 0x7ee0_d400 {
+                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                let rm = ((insn >> 16) & 0x1f) as u8;
+                                let rd = (insn & 0x1f) as u8;
+                                return Inst::Fabd { rd, rn, rm };
                             }
                             // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
                                 // Structural mask `(insn & 0x1f20_0c00) == 0x1e20_0c00` separates
@@ -1966,8 +1979,19 @@ mod logical_imm_regressions {
                                         }
                                         other => panic!("dup v4.2d,v2.d[1] -> {other:?}"),
                                     }
-                                    // ins v2.d[1], v0.d[0] = 0x6e180402 (real) must stay InsD1D0 (not SimdDupD).
-                                    assert!(matches!(decode(0x6e180402), Inst::InsD1D0 { .. }));
+                                    // // ins v2.d[1], v0.d[0] = 0x6e180402 (real) must stay InsD1D0 (not SimdDupD).
+        assert!(matches!(decode(0x6e180402), Inst::InsD1D0 { .. }));
+        // fabd d3, d8, d1 = 0x7ee1d503 (real libroblox audio mix) => Fabd |d8-d1|.
+        match decode(0x7ee1d503) {
+            Inst::Fabd { rd, rn, rm } => {
+                assert_eq!(rd, 3);
+                assert_eq!(rn, 8);
+                assert_eq!(rm, 1);
+            }
+            other => panic!("fabd d3,d8,d1 -> {other:?}"),
+        }
+        // fabd d0,d0,d1 = 0x7ee1d400 (compiler) => Fabd.
+        assert!(matches!(decode(0x7ee1d400), Inst::Fabd { rd: 0, rn: 0, rm: 1 }));
         match decode(0x1e6c1001) {
             Inst::FmovImm {
                 rd,

@@ -838,6 +838,21 @@ pub fn translate(
             buf.movq_store(RBX, vslot(rd), 0);
             Ok(())
         }
+        Inst::Fabd { rd, rn, rm } => {
+            // fabd Dd, Dn, Dm = |dn - dm| (scalar double). Compute a-b in xmm,
+            // round-trip the bit pattern to a GPR, clear the sign bit, and store.
+            // Honest for finite doubles; NaN stays NaN (sign-bit clear keeps it a NaN).
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.movq_load(0, RBX, vslot(rn));
+            buf.movq_load(1, RBX, vslot(rm));
+            buf.subsd(0, 1); // xmm0 = rn - rm
+            buf.movq_r64_xmm(RDX, 0); // RDX = bits(rn - rm)
+            buf.mov_ri64(RDI, 0x7fff_ffff_ffff_ffff); // ~signbit
+            buf.and_rr64(RDX, RDI); // clear bit 63 (|x|)
+            buf.movq_xmm_r64(0, RDX); // back to xmm
+            buf.movq_store(RBX, vslot(rd as u8), 0);
+            Ok(())
+        }
         Inst::FcvtToInt {
             rd,
             rn,
