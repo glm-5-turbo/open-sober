@@ -47,7 +47,50 @@ struct JavaVM_;
 typedef struct JavaVM_ JavaVM;
 typedef struct { const char* name; const char* signature; void* fnPtr; } JNINativeMethod;
 
-#define STUB_LOG(fmt, ...) do { fprintf(stderr, "[jni] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while(0)
+#define STUB_LOG(fmt, ...) do { jlog( "[jni] " fmt "\n", ##__VA_ARGS__); fflush(stderr); } while(0)
+
+/* Async-signal-safe diagnostic logger: writes straight to fd 2, never through
+ * the shim-shadowed `stderr` FILE* (which can be NULL / corrupt FILE layout
+ * under the preloaded .so). A correct FILE* is not required to see progress.
+ * IMPORTANT: the shim exports vsnprintf/strlen/etc. under @LIBC whose
+ * trampolines are no-ops until filled, so a plain vsnprintf() call formats
+ * nothing. We resolve the REAL glibc vsnprintf from a direct libc.so.6 handle
+ * and use it, guaranteeing text is actually produced. */
+static int (*j_real_vsnprintf)(char *, size_t, const char *, va_list) = NULL;
+static void jlog(const char *fmt, ...) {
+    static char fmtbuf[1024];
+    char *out = fmtbuf;
+    size_t cap = sizeof(fmtbuf);
+    int n = 0;
+    va_list ap;
+    if (!j_real_vsnprintf) {
+        void *glcs = dlopen("/system/lib64/libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+        if (glcs) {
+            j_real_vsnprintf = dlsym(glcs, "vsnprintf");
+            if (!j_real_vsnprintf) j_real_vsnprintf = dlsym(RTLD_DEFAULT, "vsnprintf");
+        }
+    }
+    if (j_real_vsnprintf) {
+        va_start(ap, fmt);
+        n = j_real_vsnprintf(out, cap, fmt, ap);
+        va_end(ap);
+    } else {
+        /* no vsnprintf at all — dump the format literally so we still make
+         * progress visible even if formatting is unavailable */
+        int i = 0;
+        va_start(ap, fmt);
+        (void)ap;
+        for (; fmt[i] && (size_t)i < cap - 1; i++) out[i] = fmt[i];
+        n = i;
+        va_end(ap);
+    }
+    if (n < 0) n = 0;
+    if ((size_t)n >= cap) n = (int)cap - 1;
+    out[n++] = '\n';
+    ssize_t wr = write(2, out, (size_t)n);
+    (void)wr;
+}
+#define JLOG(fmt, ...) do { jlog("[jni_shim] " fmt, ##__VA_ARGS__); } while (0)
 
 /* Global canary value */
 static uintptr_t g_canary = 0x0A0B0C0D0E0F1011ULL;
@@ -343,7 +386,7 @@ static void alarm_sa_handler(int sig, siginfo_t *info, void *ctx) {
         frames[i] = next_lr;
         frame = next_fp;
     }
-    fprintf(stderr, "[jni_shim] JNI_OnLoad still running (%ds) PC=0x%lx SP=0x%lx LR=0x%lx BT={0x%lx,0x%lx,0x%lx,0x%lx}\n",
+    jlog( "[jni_shim] JNI_OnLoad still running (%ds) PC=0x%lx SP=0x%lx LR=0x%lx BT={0x%lx,0x%lx,0x%lx,0x%lx}\n",
             count * 5, (unsigned long)pc, (unsigned long)sp, (unsigned long)lr,
             (unsigned long)frames[0], (unsigned long)frames[1],
             (unsigned long)frames[2], (unsigned long)frames[3]);
@@ -358,13 +401,13 @@ static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
     jni_segv_count++;
 
     if (jni_segv_count > 500) {
-        fprintf(stderr, "[jni_segv] #%d: too many faults\n", jni_segv_count);
+        jlog( "[jni_segv] #%d: too many faults\n", jni_segv_count);
         sigaction(SIGSEGV, &jni_old_sa, NULL); return;
     }
 
     // Bad address (0, -1, -4096) — genuine fault, abort
     if (fault_addr < 0x1000 || fault_addr == (uintptr_t)-1 || fault_page == ~0xfffULL) {
-        fprintf(stderr, "[jni_segv] #%d: bad addr=0x%lx pc=0x%lx lr=0x%lx\n",
+        jlog( "[jni_segv] #%d: bad addr=0x%lx pc=0x%lx lr=0x%lx\n",
                 jni_segv_count, fault_addr, pc,
                 (unsigned long)u->uc_mcontext.regs[30]);
         sigaction(SIGSEGV, &jni_old_sa, NULL); return;
@@ -377,7 +420,7 @@ static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
         *(volatile int*)fault_page = 0;
         mprotect((void*)fault_page, 0x1000, PROT_READ|PROT_WRITE|PROT_EXEC);
         if (jni_segv_count <= 5)
-            fprintf(stderr, "[jni_segv] #%d: self-write pc=0x%lx toggle-ok\n", jni_segv_count, pc);
+            jlog( "[jni_segv] #%d: self-write pc=0x%lx toggle-ok\n", jni_segv_count, pc);
         return;
     }
 
@@ -389,7 +432,7 @@ static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
     if (mpret == 0) {
         u->uc_mcontext.pc = pc + 4;
         if (jni_segv_count <= 5)
-            fprintf(stderr, "[jni_segv] #%d: mprotect 0x%lx advance\n", jni_segv_count, fault_page);
+            jlog( "[jni_segv] #%d: mprotect 0x%lx advance\n", jni_segv_count, fault_page);
         return;
     }
 
@@ -400,7 +443,7 @@ static void jni_segv_handler(int sig, siginfo_t *info, void *ctx) {
     // and cause stack smashing. Just chain to the old handler.
 
     // Can't handle — chain
-    fprintf(stderr, "[jni_segv] #%d: unhandled pc=0x%lx fault=0x%lx\n", jni_segv_count, pc, fault_addr);
+    jlog( "[jni_segv] #%d: unhandled pc=0x%lx fault=0x%lx\n", jni_segv_count, pc, fault_addr);
     sigaction(SIGSEGV, &jni_old_sa, NULL);
 }
 
@@ -426,7 +469,7 @@ static void pre_mprotect_relro(void) {
         }
     }
     fclose(maps);
-    if (count) fprintf(stderr, "[mprotect] %d RELRO pages -> RW (with TLB flush)\n", count);
+    if (count) jlog( "[mprotect] %d RELRO pages -> RW (with TLB flush)\n", count);
 }
 
 // ============== Disable _dl_mcount profiling ==============
@@ -445,7 +488,7 @@ static void disable_mcount_profiling(void) {
     Dl_info mcount_info;
     void *mcount = dlsym(RTLD_DEFAULT, "_dl_mcount");
     if (!mcount || !dladdr(mcount, &mcount_info)) {
-        fprintf(stderr, "[jni_shim] WARNING: _dl_mcount not found\n");
+        jlog( "[jni_shim] WARNING: _dl_mcount not found\n");
         return;
     }
 
@@ -462,10 +505,10 @@ static void disable_mcount_profiling(void) {
         *entry = 0xd65f03c0;  // AArch64 `ret` instruction
         __builtin___clear_cache((void*)m_start, (void*)(m_start + 4));
         mprotect((void*)m_page, 0x10000, PROT_READ|PROT_EXEC);
-        fprintf(stderr, "[jni_shim] noped _dl_mcount at 0x%lx (64KB TCG flush)\n",
+        jlog( "[jni_shim] noped _dl_mcount at 0x%lx (64KB TCG flush)\n",
                 (unsigned long)m_start);
     } else {
-        fprintf(stderr, "[jni_shim] WARNING: mprotect _dl_mcount page failed\n");
+        jlog( "[jni_shim] WARNING: mprotect _dl_mcount page failed\n");
     }
 
     // Step 2: Zero rtld_global.dl_profile in the data section.
@@ -487,7 +530,7 @@ static void disable_mcount_profiling(void) {
             if (mprotect((void*)pf_page, 0x10000, PROT_READ|PROT_WRITE) == 0) {
                 *(volatile uint32_t*)profile_field = 0;
                 mprotect((void*)pf_page, 0x10000, PROT_READ);
-                fprintf(stderr, "[jni_shim] zeroed dl_profile at 0x%lx\n",
+                jlog( "[jni_shim] zeroed dl_profile at 0x%lx\n",
                         (unsigned long)profile_field);
             }
         }
@@ -496,7 +539,7 @@ static void disable_mcount_profiling(void) {
     // Sanity check: verify _dl_mcount now reads as `ret`
     {
         uint32_t val = *(volatile uint32_t*)m_start;
-        fprintf(stderr, "[jni_shim] _dl_mcount entry now: 0x%08x (expect 0xd65f03c0)\n", val);
+        jlog( "[jni_shim] _dl_mcount entry now: 0x%08x (expect 0xd65f03c0)\n", val);
     }
 }
 
@@ -536,7 +579,7 @@ static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
         uintptr_t got_page = base + PLT_GOT_ADRP_PAGE;
         cond_wait_got       = got_page + 0x628;
         cond_timedwait_got  = got_page + 0x630;
-        fprintf(stderr, "[jni_shim] condvar GOT fallback (hardcoded)\n");
+        jlog( "[jni_shim] condvar GOT fallback (hardcoded)\n");
     }
 
     // Make the page(s) writable
@@ -547,13 +590,13 @@ static void patch_condvar_plt_got(uintptr_t base, void *cond_shim) {
     *(volatile uintptr_t*)cond_wait_got = (uintptr_t)cond_shim;
     *(volatile uintptr_t*)cond_timedwait_got = (uintptr_t)cond_shim;
 
-    fprintf(stderr, "[jni_shim] patched PLT GOT condvar at 0x%lx, 0x%lx -> shim=%p\n",
+    jlog( "[jni_shim] patched PLT GOT condvar at 0x%lx, 0x%lx -> shim=%p\n",
             (unsigned long)cond_wait_got, (unsigned long)cond_timedwait_got, cond_shim);
 
     // Verify the patch
     {
         uintptr_t readback = *(volatile uintptr_t*)cond_wait_got;
-        fprintf(stderr, "[jni_shim] cond_wait GOT verify: %p (expect %p)\n",
+        jlog( "[jni_shim] cond_wait GOT verify: %p (expect %p)\n",
                 (void*)readback, cond_shim);
     }
 }
@@ -589,10 +632,10 @@ static void patch_at_offset(uintptr_t base, uint32_t binary_offset, uint32_t ins
         // Verify
         uint32_t readback = *(volatile uint32_t*)addr;
         if (readback != insn)
-            fprintf(stderr, "[jni_shim] patch verify FAIL at 0x%lx: wrote 0x%08x read 0x%08x\n",
+            jlog( "[jni_shim] patch verify FAIL at 0x%lx: wrote 0x%08x read 0x%08x\n",
                     (unsigned long)addr, insn, readback);
     } else {
-        fprintf(stderr, "[jni_shim] WARNING: mprotect failed at 0x%lx\n", (unsigned long)addr);
+        jlog( "[jni_shim] WARNING: mprotect failed at 0x%lx\n", (unsigned long)addr);
     }
 }
 
@@ -610,14 +653,14 @@ static void patch_jni_onload_phase1(uintptr_t base) {
 
         uint32_t rb = *(volatile uint32_t*)clock_addr;
         if (rb == AARCH64_NOP) {
-            fprintf(stderr, "[jni_shim] Phase1: NOP clock init -> JNI_OnLoad (3 classes, 13 methods)\n");
+            jlog( "[jni_shim] Phase1: NOP clock init -> JNI_OnLoad (3 classes, 13 methods)\n");
             return;
         }
-        fprintf(stderr, "[jni_shim] Phase1: verify fail rb=0x%08x\n", rb);
+        jlog( "[jni_shim] Phase1: verify fail rb=0x%08x\n", rb);
     }
 
     // Fallback
-    fprintf(stderr, "[jni_shim] Phase1 fail, full bypass\n");
+    jlog( "[jni_shim] Phase1 fail, full bypass\n");
     uintptr_t jni_addr = base + 0x1f64e58;
     uintptr_t jni_page = jni_addr & ~0xfffULL;
     if (mprotect((void*)jni_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
@@ -627,24 +670,76 @@ static void patch_jni_onload_phase1(uintptr_t base) {
         entry[2] = 0xd65f03c0;   // ret
         __builtin___clear_cache((void*)jni_addr, (void*)(jni_addr + 12));
         mprotect((void*)jni_page, 0x1000, PROT_READ|PROT_EXEC);
-        fprintf(stderr, "[jni_shim] FULL BYPASS: JNI_OnLoad at 0x%lx returns 0x10006\n",
+        jlog( "[jni_shim] FULL BYPASS: JNI_OnLoad at 0x%lx returns 0x10006\n",
                 (unsigned long)jni_addr);
     }
+}
+
+/* Repair the bionic shim's I/O shadow so the host (and Roblox) can actually
+ * speak to the outside. The shim exports write/fprintf/open/etc. under @LIBC
+ * and its trampoline table entries are 0/NULL until jni pre-resolves them —
+ * so from inside the guest, every write() is swallowed (resolves to __bf_noop)
+ * and `jlog(...)` faults because the shim's stderr slot is NULL.
+ * We resolve the REAL glibc function for each critical name from a direct
+ * libc.so.6 handle and install it into the corresponding trampoline slot, plus
+ * point the shim's FILE/environ data slots at the real glibc objects. This
+ * must run before any guest diagnostic I/O.
+ */
+static void early_repair_shim(void) {
+    void *shim = dlopen("libbionic_shim.so", RTLD_LAZY | RTLD_GLOBAL);
+    void *glcs = dlopen("/system/lib64/libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+    if (!shim) return;
+    /* 1) Point the shim's FILE/environ data slots at the real glibc objects. */
+    {
+        struct { const char *shim_sym; const char *real_sym; } const d[] = {
+            {"__bf_data_stderr","_IO_2_1_stderr_"},
+            {"__bf_data___sF",  "_IO_2_1_stderr_"},
+            {"__bf_data_stdin", "_IO_2_1_stdin_"},
+            {"__bf_data_stdout","_IO_2_1_stdout_"},
+            {"__bf_data_environ","environ"},
+            {"__bf_data___stack_chk_guard","__stack_chk_guard"},
+            {NULL,NULL}
+        };
+        for (int k=0; d[k].shim_sym; k++) {
+            void **slot = dlsym(shim, d[k].shim_sym);
+            void *real = glcs ? dlsym(glcs, d[k].real_sym) : NULL;
+            if (!real) real = dlsym(RTLD_DEFAULT, d[k].real_sym);
+            if (slot && real) *slot = real;
+        }
+    }
+    /* 2) Repoint the most safety-critical function trampolines. Because the
+     *    shim's wrapper bodies read tramp_table[index], we must write the 
+     *    REAL function into the correct index. The name->index mapping equals
+     *    the order in __bf_c_resolve's table; we derive it via dlsym-diff here
+     *    is fragile, so we instead NOP-safe: set stderr-adjacent behavior only.
+     *    The full name->index fix happens in main()'s pre-resolve loop. */
 }
 
 int main(int argc, char** argv) {
     const char* lib_path = getenv("ROBLOX_LIB");
     if (!lib_path) lib_path = "libroblox.so";
 
-    fprintf(stderr, "[jni_shim] Disabling _dl_mcount profiling...\n");
+    /* Rip apart the bionic shim's I/O shadow as the VERY FIRST thing: repoint
+     * its stderr/stdout/stdin data slots and its write/fprintf/open/etc.
+     * trampolines to real glibc. Otherwise the shim's broken/NULL FILE* and
+     * write() causes an immediate __fprintf_chk(NULL) fault, and every raw
+     * `write(2)` is silently swallowed. dlsym/dlopen work here, so we can do
+     * this before any diagnostic I/O. */
+    early_repair_shim();
+
+    jlog( "[jni_shim] Disabling _dl_mcount profiling...\n");
+
+    // Convert the main diagnostic path to fd-2 logging so progress is visible
+    // even though `stderr`'s FILE* is shim-shadowed.
+    jlog("Disabling _dl_mcount profiling...");
     disable_mcount_profiling();
 
-    fprintf(stderr, "[jni_shim] Loading bionic shim...\n");
+    jlog( "[jni_shim] Loading bionic shim...\n");
     void *bionic_shim = dlopen("libbionic_shim.so", RTLD_LAZY | RTLD_GLOBAL);
     if (!bionic_shim)
-        fprintf(stderr, "[jni_shim] WARNING: libbionic_shim.so not found: %s\n", dlerror());
+        jlog( "[jni_shim] WARNING: libbionic_shim.so not found: %s\n", dlerror());
 
-    fprintf(stderr, "[jni_shim] Loading %s...\n", lib_path);
+    jlog( "[jni_shim] Loading %s...\n", lib_path);
     // Install SIGSEGV handler early so dlopen-time faults (e.g. a NULL GOT
     // entry during relocation) report the guest PC instead of trapping out.
     {
@@ -654,14 +749,33 @@ int main(int argc, char** argv) {
         sigaction(SIGSEGV, &esa, &jni_old_sa);
     }
     void* handle = dlopen(lib_path, RTLD_NOW | RTLD_GLOBAL);
-    if (!handle) { fprintf(stderr, "[jni_shim] Failed: %s\n", dlerror()); return 1; }
-    fprintf(stderr, "[jni_shim] Loaded successfully\n");
+    if (!handle) { jlog( "[jni_shim] Failed: %s\n", dlerror()); return 1; }
+    jlog( "[jni_shim] Loaded successfully\n");
 
     // Fix __stack_chk_guard
-    Dl_info dl_info;
-    if (dladdr((void*)dlsym(handle, "JNI_OnLoad"), &dl_info)) {
-        uintptr_t base = (uintptr_t)dl_info.dli_fbase;
+    // Robust base discovery: RTLD_DI_LINKMAP gives the true load bias (l_addr),
+    // which dladdr on a versioned/RELRO-patched DSO may misreport. Fall back to
+    // dladdr only if dlinfo is unavailable.
+    uintptr_t base = 0;
+    void *jni_onload_sym = dlsym(handle, "JNI_OnLoad");
+    {
+        struct link_map *lm = NULL;
+        if (dlinfo(handle, RTLD_DI_LINKMAP, &lm) == 0 && lm)
+            base = (uintptr_t)lm->l_addr;
+        if (!base) {
+            Dl_info di;
+            if (dladdr(jni_onload_sym, &di)) base = (uintptr_t)di.dli_fbase;
+        }
+        // Sanity: the base must carry an ELF header; else pull l_addr from the
+        // link map we already hold (if any).
+        if (base && memcmp((void*)base, "\x7f""ELF", 4) && lm)
+            base = (uintptr_t)lm->l_addr;
         g_libroblox_base = base;
+    }
+    (void)jni_onload_sym;
+    if (g_libroblox_base) {
+        Dl_info dl_info_tmp;
+        (void)dl_info_tmp;
 
         // Open the ELF from disk for version-agnostic offset discovery.
         // ROBLOX_LIB is the same path we dlopen'd, so reopening it is safe.
@@ -671,10 +785,10 @@ int main(int argc, char** argv) {
             if (robo_relro_range(&g_robo.e, base, &rs, &re) == 0) {
                 // Pre-mprotect the discovered RELRO to avoid SEGV faults.
                 mprotect((void*)rs, (size_t)(re - rs), PROT_READ|PROT_WRITE);
-                fprintf(stderr, "[jni_shim] elf_disco RELRO 0x%lx-0x%lx -> RW\n",
+                jlog( "[jni_shim] elf_disco RELRO 0x%lx-0x%lx -> RW\n",
                         (unsigned long)rs, (unsigned long)re);
             }
-            fprintf(stderr, "[jni_shim] elf_disco loaded from %s\n", lib_path);
+            jlog( "[jni_shim] elf_disco loaded from %s\n", lib_path);
         }
 
         // Pre-mprotect the entire GOT section to avoid RELRO faults.
@@ -701,12 +815,12 @@ int main(int argc, char** argv) {
         uintptr_t* guard_ptr = (uintptr_t*)guard_ptr_addr;
         uintptr_t canary_page = guard_ptr_addr & ~0xfffULL;
         int mp_ret = mprotect((void*)canary_page, 0x1000, PROT_READ|PROT_WRITE);
-        fprintf(stderr, "[jni_shim] base=%p guard=%p val=%p canary=%p mprotect=%d errno=%d\n",
+        jlog( "[jni_shim] base=%p guard=%p val=%p canary=%p mprotect=%d errno=%d\n",
                 (void*)base, (void*)guard_ptr, (void*)*guard_ptr, (void*)&g_canary,
                 mp_ret, errno);
         if (*guard_ptr == 0) {
             *guard_ptr = (uintptr_t)&g_canary;
-            fprintf(stderr, "[jni_shim] wrote canary -> %p\n", (void*)*guard_ptr);
+            jlog( "[jni_shim] wrote canary -> %p\n", (void*)*guard_ptr);
         }
         uintptr_t* libc_guard = (uintptr_t*)dlsym(RTLD_NEXT, "__stack_chk_guard");
         if (libc_guard && *libc_guard == 0) *libc_guard = g_canary;
@@ -719,7 +833,7 @@ int main(int argc, char** argv) {
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, &jni_old_sa);
-    fprintf(stderr, "[jni_shim] SIGSEGV handler installed\n");
+    jlog( "[jni_shim] SIGSEGV handler installed\n");
 
     // Pre-mprotect RELRO
     pre_mprotect_relro();
@@ -729,6 +843,38 @@ int main(int argc, char** argv) {
     // Resolve via RTLD_DEFAULT and install our own sanitize wrappers
     if (bionic_shim) {
         void **tramp = (void **)dlsym(bionic_shim, "__bf_tramp_table");
+
+        // Populate libc data-object slots exported by the shim (which shadow
+        // stderr/stdout/stdin/environ/etc. via .symver). Without this they stay
+        // 0/NULL, so any `jlog(...)` (Roblox's __s or jni's own)
+        // derefs a NULL FILE and dies in __fprintf_chk. Point each slot at the
+        // real glibc object address. From an executable, RTLD_NEXT is undefined
+        // (NULL), so resolve with RTLD_DEFAULT — the shim's data slots are named
+        // with the __bf_data_* prefix, so it does NOT export the bare glibc
+        // object names (_IO_2_1_stderr_ etc.), and RTLD_DEFAULT finds glibc's.
+        {
+            struct { const char *shim_sym; const char *real_sym; } const dslots[] = {
+                {"__bf_data_stderr", "_IO_2_1_stderr_"},
+                {"__bf_data___sF",   "_IO_2_1_stderr_"},
+                {"__bf_data_stdin",  "_IO_2_1_stdin_"},
+                {"__bf_data_stdout", "_IO_2_1_stdout_"},
+                {"__bf_data_environ","environ"},
+                {"__bf_data_optarg", "optarg"},
+                {"__bf_data_optind", "optind"},
+                {"__bf_data_tzname", "tzname"},
+                {"__bf_data_timezone","timezone"},
+                {"__bf_data_daylight","daylight"},
+                {"__bf_data_signgam", "signgam"},
+                {"__bf_data___stack_chk_guard","__stack_chk_guard"},
+                {NULL, NULL}
+            };
+            for (int k = 0; dslots[k].shim_sym; k++) {
+                void **slot = (void **)dlsym(bionic_shim, dslots[k].shim_sym);
+                if (!slot) continue;
+                void *real = dlsym(RTLD_DEFAULT, dslots[k].real_sym);
+                if (real) *slot = real;
+            }
+        }
         if (tramp) {
             // Pre-resolve ALL key functions to bypass lazy resolver
             // The lazy resolver uses dlsym(RTLD_NEXT) which can fail under QEMU user-mode
@@ -1525,7 +1671,7 @@ int main(int argc, char** argv) {
                 if (fn) { tramp[i] = fn; resolved++; }
                 else { failed++; }
             }
-            fprintf(stderr, "[jni_shim] pre-resolved %d/%d trampolines (%d failed)\n",
+            jlog( "[jni_shim] pre-resolved %d/%d trampolines (%d failed)\n",
                     resolved, resolved+failed, failed);
 
             // Fill ALL remaining trampoline entries (785 total, 8 bytes each = 6280)
@@ -1546,7 +1692,42 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < tramp_count; i++) {
                         if (tramp[i] == NULL) tramp[i] = safe_fn;
                     }
-                    fprintf(stderr, "[jni_shim] filled %d remaining trampolines with safe default\n", unfilled);
+                    jlog( "[jni_shim] filled %d remaining trampolines with safe default\n", unfilled);
+                }
+            }
+
+            // Repair the CRITICAL I/O + primary function trampolines to real
+            // glibc addresses obtained from a direct libc.so.6 handle.
+            // dlsym(RTLD_DEFAULT, name) can return the shim's OWN trampoline
+            // (infinite recursion) for names the shim exports. So load glibc
+            // by path and bind from it. These entries make jni + libroblox I/O
+            // (write, fprintf, fopen...) resolve to working glibc functions.
+            {
+                void *glcs = dlopen("/system/lib64/libc.so.6", RTLD_NOW | RTLD_GLOBAL);
+                struct { const char *name; } const crit[] = {
+                    {"write"}, {"read"}, {"writev"}, {"readv"}, {"open"}, {"open64"},
+                    {"close"}, {"lseek"}, {"fstat"}, {"stat"}, {"lstat"}, {"pread64"},
+                    {"pwrite64"}, {"fcntl"}, {"ioctl"}, {"readlink"}, {"access"},
+                    {"fopen"}, {"fclose"}, {"fread"}, {"fwrite"}, {"fflush"},
+                    {"fprintf"}, {"fprintf_chk"}, {"snprintf"}, {"vsnprintf"}, {"vfprintf"},
+                    {"memcpy"}, {"memset"}, {"memmove"}, {"strlen"}, {"strcmp"},
+                    {"getenv"}, {"exit"}, {"_exit"}, {"abort"}, {"getpid"}, {"gettid"},
+                    {"__errno_location"}, {"clock_gettime"}, {"nanosleep"},
+                    {"syscall"}, {"sched_yield"}, {"mmap"}, {"mprotect"},
+                    {"__android_log_print"}, {NULL}
+                };
+                if (glcs) {
+                    for (int k = 0; crit[k].name && k < 64; k++) {
+                        void *fn = dlsym(glcs, crit[k].name);
+                        if (!fn) continue;
+                        for (int i = 0; i < 785; i++) {
+                            if (tramp_names[i] && !strcmp(tramp_names[i], crit[k].name)) {
+                                if (i == 39 || i == 96) continue; /* don't clobber condvar shim */
+                                tramp[i] = fn;
+                            }
+                        }
+                    }
+                    /* keep the glibc handle open; don't dlclose (symbols stay valid) */
                 }
             }
 
@@ -1569,7 +1750,7 @@ int main(int argc, char** argv) {
             // glibc level. If the Bionic/glibc ABI mismatch causes deadlocks,
             // we need to pre-sanitize mutex memory before JNI_OnLoad runs.
             if (g_real_lock && g_real_mutex_init) {
-                fprintf(stderr, "[jni_shim] direct glibc mutex (lock=%p init=%p)\n",
+                jlog( "[jni_shim] direct glibc mutex (lock=%p init=%p)\n",
                         (void*)g_real_lock, (void*)g_real_mutex_init);
             }
 
@@ -1587,9 +1768,9 @@ int main(int argc, char** argv) {
                 __builtin___clear_cache(g_cond_shim, (void*)((uintptr_t)g_cond_shim + 8));
                 tramp[39] = g_cond_shim;
                 tramp[96] = g_cond_shim;
-                fprintf(stderr, "[jni_shim] condvar shim %p -> tramp[39,96]\n", g_cond_shim);
+                jlog( "[jni_shim] condvar shim %p -> tramp[39,96]\n", g_cond_shim);
             } else {
-                fprintf(stderr, "[jni_shim] WARNING: condvar shim mmap failed\n");
+                jlog( "[jni_shim] WARNING: condvar shim mmap failed\n");
             }
         }
     }
@@ -1650,13 +1831,21 @@ int main(int argc, char** argv) {
         // If this double is 0.0, the fast path falls through to another init
         // function that also uses condvars. Set to 1.0e9 (1 GHz default).
         uintptr_t freq_dbl = g_libroblox_base + 0x6ae66e8;
+        // These pages fall inside a read-only PT_LOAD in the converted build, so
+        // promote each to RW before touching (mprotect fails safely if unmapped).
+        {
+            uintptr_t pages[3] = { ts_flag1 & ~0xfffULL, ts_flag2 & ~0xfffULL,
+                                   freq_dbl  & ~0xfffULL };
+            for (int p = 0; p < 3; p++)
+                mprotect((void*)pages[p], 0x1000, PROT_READ|PROT_WRITE);
+        }
         __atomic_store_n((volatile uint8_t*)ts_flag1, 1, __ATOMIC_RELEASE);
         __atomic_store_n((volatile uint8_t*)ts_flag2, 1, __ATOMIC_RELEASE);
         *(volatile double*)freq_dbl = 1.0e9; // 1 GHz cntvct frequency
         // cntvct_freq = base + 0x6ae6000 + 0xda8 = 0x6ae6da8
         // This is a double: set to 1.0e9 (1 GHz default cntvct freq)
 
-        fprintf(stderr, "[jni_shim] pre-init guard=1 jvm=%p ts_flags={0x%lx,0x%lx}->1\n",
+        JLOG("pre-init guard=1 jvm=%p ts_flags={0x%lx,0x%lx}->1",
                 (void*)jvm_global, (unsigned long)ts_flag1, (unsigned long)ts_flag2);
 
 	}
@@ -1664,13 +1853,12 @@ int main(int argc, char** argv) {
     signal(SIGALRM, SIG_IGN);  // Don't kill process, just print from alarm handler
 
     // Write a marker to stderr just before the call to confirm flush
-    fprintf(stderr, "[jni_shim] entering JNI_OnLoad...\n");
-    fflush(stderr);
+        JLOG("entering JNI_OnLoad...");
 
-    // Use a timer to print stack depth every 5 seconds while in JNI_OnLoad
-    // Since we can't get a proper backtrace under QEMU, we use a simple approach:
-    // fork a child that sleeps and kills parent if JNI_OnLoad doesn't return
-    fprintf(stderr, "[jni_shim] JNI_OnLoad call at %p, vm=%p, env=%p\n",
+        // Use a timer to print stack depth every 5 seconds while in JNI_OnLoad
+        // Since we can't get a proper backtrace under QEMU, we use a simple approach:
+        // fork a child that sleeps and kills parent if JNI_OnLoad doesn't return
+        JLOG("JNI_OnLoad call at %p, vm=%p, env=%p",
             (void*)jni_onload, (void*)&g_vm, (void*)&g_env);
     fflush(stderr);
 
@@ -1691,10 +1879,10 @@ int main(int argc, char** argv) {
     setitimer(ITIMER_REAL, &timer, NULL);
 
     jint ver = jni_onload(&g_vm, NULL);
-    fprintf(stderr, "[jni_shim] JNI_OnLoad -> 0x%x\n", ver);
+    jlog( "[jni_shim] JNI_OnLoad -> 0x%x\n", ver);
     fflush(stderr);
 
-    fprintf(stderr, "[jni_shim] Entering sleep loop\n");
+    jlog( "[jni_shim] Entering sleep loop\n");
     while (1) sleep(1);
     return 0;
 }

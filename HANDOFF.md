@@ -621,3 +621,82 @@ C. **Now vision is REQUIRED**: launch on the live KDE :0 desktop, use
   `readelf -sW` UND FUNC/OBJECT and emits weak no-op/`_stor` objects.
 - The `"JDK"`/GSI rumored in the handoff is NOT needed to reach
   JNI_OnLoad; it only matters later for login/token.
+
+---
+
+# SESSION 2026-08-20 — TRUE BLOCKER FOUND & CLEARED (JNI_OnLoad now EXECUTES)
+
+## TL;DR for next agent
+The #1 blocker the whole project was stuck on — "bionic-shim load-time crash, can't
+`dlopen(libroblox.so)`" — was **misdiagnosed**. The **real** reason libree executed
+`pc=0` immediately on load was that this Android 2.726.1142 build ships
+**APS2-packed Android relocations** (`DT_60000011` / `DT_ANDROID_RELA`, no standard
+`DT_RELA`) and glibc's loader IGNORES them, so `.init_array`/GOT stayed zeroed.
+**Converting the packed relocs to a standard `DT_RELA` + extra `PT_LOAD` fixed it**:
+`dlopen()` now succeeds, relocation/init runs, and **`JNI_OnLoad` is reached and
+executes real Roblox code** (it currently spins in a busy-wait, not crash).
+
+## What actually happened (trace of real work)
+1. `unpack_rela.py` (in `crates/sober-core/src/bridges/`) was already ~80% there:
+   it decodes APS2 and appends a new `PT_LOAD`. This session **fixed it to:**
+   - detect `DT_ANDROID_RELA`(0x60000011)/`DT_ANDROID_RELASZ`(0x60000012) as source,
+   - append a page-aligned `R` `PT_LOAD` holding the unpacked standard `RELA` table,
+   - set `DT_RELA`/`DT_RELASZ` (tags 7/8) to point at it and **repurpose the two
+     Android tags in place to 7/8** so glibc sees them.
+   Result: post-patch `DT_RELA@0x6988000`, size 12,799,656; new PT_LOAD vaddr
+   `0x6988000`; `.init_array` (3484 entries) now gets populated at runtime.
+2. Crash then moved from `.init_array` to a **`__fprintf_chk(NULL FILE*)` update**.
+   Root cause: the bionic shim's `stderr`/`__sF`/`stdout` **data slots are 0**, and
+   its `write`/`vsnprintf` trampolines resolve to a **no-op** (`__bf_noop`) so ALL
+   guest stdout/stderr is silently swallowed. Added:
+   - `early_repair_shim()` (runs as the **first thing in `main`**): opens the shim +
+     `libc.so.6`, points `__bf_data_stderr/stdin/stdout/realloc`... at the real
+     glibc `_IO_2_1_stderr_`/`_IO_2_1_stdin_`/`_IO_2_1_stdout_`/`environ` objects,
+   - `jlog()`: an fd-2 logger that resolves the **real** glibc `vsnprintf` from a
+     `libc.so.6` handle (plain `vsnprintf` via the shim formats nothing) and
+     `write(2, ...)`. All 42 `fprintf(stderr, ...)` in jni_shim were switched to
+     `jlog()` so progress is now VISIBLE.
+3. The last crash was a `stlrb`-to-ts_flags fault because in the converted build the
+   guard/ts_flags/freq offsets (`base+0x6a26e40`, `+0x6a325e4`, `+0x6ae6690`,
+   `+0x6ae66e8`) fall inside a **read-only `PT_LOAD`** (the appended `R` RELA run).
+   Fixed by `mprotect`ing those pages `PROT_WRITE` before each write.
+4. **Result (verified, reproducible):**
+   ```
+   [jni_shim] Loaded successfully
+   [jni_shim] base=0x... mx R
+   [jni_shim] pre-init guard=1 ... ts_flags=...->1
+   [jni_shim] entering JNI_OnLoad...
+   [jni_shim] JNI_OnLoad call at 0x...db20, vm=0x420ef0, env=0x420180
+   ```
+   then CRUCIAL: **NO crash, no return** — JNI_OnLoad enters a **busy-CPU spin**
+   (qemu `-d exec` shows a 2-address loop; `-strace` shows NO futex/nanosleep after
+   the JNI call — pure spin).
+
+## Current exact state (repro)
+- Installed: `~/.cache/open-sober/android-env/system/lib64/libroblox.so` (RELA-conv
+  variant; NOT `${no}` init-disabled). `jni_shim` + `libbionic_shim.so` rebuilt with the
+  `early_repair_shim`/`jlog`/mprotect changes.
+- Run:  `qemu-patched -L ~/.cache/open-sober/android-env -E LD_LIBRARY_PATH=/system/lib64 -E LD_PRELOAD=/system/lib64/libbionic_shim.so:/system/lib64/libguest_stubs.so -E DISPLAY=:0 <env>/jni_shim`
+- git branch `dev`, work uncommitted (see `git status`): `bionic_init.c`,
+  `bridges/unpack_rela.py`, `jni_shim.c`. **Commit these.**
+
+## Next steps to actually boot (ordered)
+A. **Identify the busy-spin target.** qemu `-d in_asm` shows a GOT-indirect
+   `adrp/ldr/ldr/cbz/br x17` thunk looping; straight-text hypothesis =
+   Roblox `lock; while(!flag) pthread_cond_wait(...)` where our condvar shim
+   (tramp[39,96]=`mov w0,0; ret`) returns spurious wakeups forever and `flag`
+   never becomes 1 → pure CPU spin, no syscalls (matches strace). The `guard=1`/
+   `ts_flags=1` pre-sets cover specific offsets; this spin is on a DIFFERENT cond.
+   Fix: find the spin PC (qemu tracing) and NOP the loop, or make the condvar shim
+   also set the waiting thread's expected flag; or pre-set more guard offsets.
+2. Then JNI_OnLoad returns (registers 3 native methods) → boot GUI.
+3. **Vision/desktop (cua-driver) REQUIRED** to observe the window.
+
+## Key gotchas learned this session
+- JNI never needs the real glibc `_IO_*` FILE address trick for `jlog`; just
+  resolve `vsnprintf` + `write` from a direct `dlopen("/system/lib64/libc.so.6")`
+  handle and write raw fd 2. `RTLD_NEXT` in an executable returns NULL — use
+  `RTLD_DEFAULT`.
+- `setitimer`/itimers ARM OK under qemu but the SIGALRM is NOT delivered to the
+  guest handler (`-strace` shows no heartbeat `write`). Don't rely on it for
+  hang PC; use `-d exec`/`-d in_asm` tracing instead.

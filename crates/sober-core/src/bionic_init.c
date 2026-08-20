@@ -2557,37 +2557,42 @@ void __bf_install_mutex_wrappers(void) {
 /* ===== Legacy init function (may crash under QEMU due to dlopen+dlsym) ===== */
 __attribute__((visibility("default")))
 void __bf_init_data(void) {
-    // Try to set up data object pointers — may fail under QEMU, that's OK
+    // Populate libc data-object slots so Bionic-built code that reads
+    // `stderr`, `stdout`, `stdin`, `environ`, ... obtains the actual glibc
+    // object address. The __bf_data_* symbols are the exported slots (they
+    // shadow the real libc names via .symver); assign the resolved pointer
+    // INTO each slot (NOT through it — the old code deref'd a 0/NULL slot and
+    // faulted at address ~0).
     void *self = dlopen(NULL, RTLD_LAZY);
     if (!self) return;
     if (!__bf_data_stderr)
-        *(void **)(__bf_data_stderr) = dlsym(self, "stderr");
+        __bf_data_stderr = dlsym(self, "_IO_2_1_stderr_");
     if (!__bf_data___sF)
-        *(void **)(__bf_data___sF) = dlsym(self, "_IO_2_1_stderr_");
+        __bf_data___sF = dlsym(self, "_IO_2_1_stderr_");
     if (!__bf_data_optarg)
-        *(void **)(__bf_data_optarg) = dlsym(self, "optarg");
+        __bf_data_optarg = dlsym(self, "optarg");
     if (!__bf_data_optind)
-        *(void **)(__bf_data_optind) = dlsym(self, "optind");
+        __bf_data_optind = dlsym(self, "optind");
     if (!__bf_data_tzname)
-        *(void **)(__bf_data_tzname) = dlsym(self, "tzname");
+        __bf_data_tzname = dlsym(self, "tzname");
     if (!__bf_data_daylight)
-        *(void **)(__bf_data_daylight) = dlsym(self, "daylight");
+        __bf_data_daylight = dlsym(self, "daylight");
     if (!__bf_data_timezone)
-        *(void **)(__bf_data_timezone) = dlsym(self, "timezone");
+        __bf_data_timezone = dlsym(self, "timezone");
     if (!__bf_data_environ)
-        *(void **)(__bf_data_environ) = dlsym(self, "environ");
+        __bf_data_environ = dlsym(self, "environ");
     if (!__bf_data_in6addr_any)
-        *(void **)(__bf_data_in6addr_any) = dlsym(self, "in6addr_any");
+        __bf_data_in6addr_any = dlsym(self, "in6addr_any");
     if (!__bf_data_stdin)
-        *(void **)(__bf_data_stdin) = dlsym(self, "stdin");
+        __bf_data_stdin = dlsym(self, "_IO_2_1_stdin_");
     if (!__bf_data_stdout)
-        *(void **)(__bf_data_stdout) = dlsym(self, "stdout");
+        __bf_data_stdout = dlsym(self, "_IO_2_1_stdout_");
     if (!__bf_data_in6addr_loopback)
-        *(void **)(__bf_data_in6addr_loopback) = dlsym(self, "in6addr_loopback");
+        __bf_data_in6addr_loopback = dlsym(self, "in6addr_loopback");
     if (!__bf_data___stack_chk_guard)
-        *(void **)(__bf_data___stack_chk_guard) = dlsym(self, "__stack_chk_guard");
+        __bf_data___stack_chk_guard = (void*)(uintptr_t)((uintptr_t)dlsym(self, "__stack_chk_guard") );
     if (!__bf_data_signgam)
-        *(void **)(__bf_data_signgam) = dlsym(self, "signgam");
+        __bf_data_signgam = dlsym(self, "signgam");
     dlclose(self);
 
     // Also install mutex wrappers

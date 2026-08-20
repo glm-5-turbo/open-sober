@@ -183,21 +183,36 @@ def main():
         print("ERROR: Could not find dynamic section")
         sys.exit(1)
 
-    # Find DT_RELA and DT_RELASZ
+    # Find DT_ANDROID_RELA and DT_ANDROID_RELASZ (AArch64 packed relocs).
+    # Fall back to plain DT_RELA/DT_RELASZ if the file is already standard.
+    # AArch64 Android dynamic tags (from Android's elfinfo/Android docs):
+    #   DT_ANDROID_RELA   = 0x60000011
+    #   DT_ANDROID_RELASZ = 0x60000012
+    ANDROID_RELA_TAG   = 0x60000011
+    ANDROID_RELASZ_TAG = 0x60000012
     rela_vaddr = None
     relasz = None
+    source_is_android = False
     for entry_off in range(dyn_fo, dyn_fo + dyn_filesz, 16):
         tag = struct.unpack('<Q', elf_data[entry_off:entry_off+8])[0]
         val = struct.unpack('<Q', elf_data[entry_off+8:entry_off+16])[0]
         if tag == 0: break
-        if tag == 7: rela_vaddr = val
-        elif tag == 8: relasz = val
+        if tag == ANDROID_RELA_TAG:
+            rela_vaddr = val; source_is_android = True
+        elif tag == ANDROID_RELASZ_TAG:
+            relasz = val
+        elif tag == 7 and rela_vaddr is None:
+            rela_vaddr = val
+        elif tag == 8 and relasz is None:
+            relasz = val
 
     if rela_vaddr is None or relasz is None:
-        print("No DT_RELA found")
+        print("No DT_RELA/DT_ANDROID_RELA found")
         sys.exit(1)
 
-    print("DT_RELA vaddr=0x%x, DT_RELASZ=%d" % (rela_vaddr, relasz))
+    print("DT_%sRELA vaddr=0x%x, DT_%sRELASZ=%d" % (
+        ("ANDROID_" if source_is_android else ""), rela_vaddr,
+        ("ANDROID_" if source_is_android else ""), relasz))
 
     # Convert to file offset
     rela_fo = vaddr_to_file_offset(elf_data, e_phoff, e_phnum, e_phentsize, rela_vaddr)
@@ -311,20 +326,39 @@ def main():
             print("Updated PT_PHDR filesz: 0x%x -> 0x%x" % (old_sz, new_sz))
             break
 
-    # Update dynamic section: DT_RELA vaddr and DT_RELASZ
+    # Update dynamic section: point DT_RELA/DT_RELASZ at the new unpacked data.
+    # If the file used DT_ANDROID_RELA/DT_ANDROID_RELASZ, repurpose those two
+    # slots in place (glibc ignores the ANDROID tags anyway, and this avoids
+    # growing the dynamic array). Otherwise update the standard tags if present,
+    # or append a new DT_RELA/DT_RELASZ pair before DT_NULL if not.
     # Note: dyn_fo was computed from the ORIGINAL file, still valid
     # since we appended (didn't shift).
+    rela_tag_ok = False
+    relasz_tag_ok = False
     for entry_off in range(dyn_fo, dyn_fo + dyn_filesz, 16):
         if entry_off + 16 > len(new_file): break
         tag = struct.unpack('<Q', new_file[entry_off:entry_off+8])[0]
-        val = struct.unpack('<Q', new_file[entry_off+8:entry_off+16])[0]
+        ty = tag & 0xffffffff
         if tag == 0: break
-        if tag == 7:
+        if (tag in (7, ANDROID_RELA_TAG) and not rela_tag_ok):
+            struct.pack_into('<Q', new_file, entry_off, 7)   # force tag 0x07
             struct.pack_into('<Q', new_file, entry_off+8, new_rela_vaddr)
-            print("  DT_RELA: 0x%x -> 0x%x" % (val, new_rela_vaddr))
-        elif tag == 8:
+            print("  DT tag 0x%x -> DT_RELA vaddr 0x%x" % (tag, new_rela_vaddr))
+            rela_tag_ok = True
+        elif (tag in (8, ANDROID_RELASZ_TAG) and not relasz_tag_ok):
+            struct.pack_into('<Q', new_file, entry_off, 8)   # force tag 0x08
             struct.pack_into('<Q', new_file, entry_off+8, new_relasz)
-            print("  DT_RELASZ: %d -> %d" % (val, new_relasz))
+            print("  DT tag 0x%x -> DT_RELASZ %d" % (tag, new_relasz))
+            relasz_tag_ok = True
+
+    # If either standard DT_RELA/DT_RELASZ tag was absent, they must be ADDED.
+    # This file always carries the Android _RELA/_RELASZ pair (repurposed above),
+    # so this fallback only fires for unusual inputs. Growing the dynamic array
+    # in place is unsafe, so we refuse rather than corrupt the file.
+    if not (rela_tag_ok and relasz_tag_ok):
+            raise SystemExit(
+                "ERROR: both DT_RELA and DT_RELASZ (or their ANDROID_RELA_"
+                " variants) must be present to write the unpacked table.")
 
     # Write the patched file
     with open(path, 'wb') as f:
