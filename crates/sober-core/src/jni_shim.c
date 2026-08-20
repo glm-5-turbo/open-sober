@@ -2082,27 +2082,49 @@ int main(int argc, char** argv) {
     // MemoryPool/TLS arena globals the allocator needs; DT_INIT_ARRAYSZ is 0 in
     // the unpacked lib so glibc never runs them). Do this AFTER jumpslot patch
     // so constructors that call out through the PLT hit real functions.
-    if (g_libroblox_base && g_robo.have) {
-        run_libroblox_init_array(g_libroblox_base);
-    }
+    //
+    // DISABLED (Session 17 revert to Session-9 stable state): ctor[0..3] run,
+    // but ctor[3] (0x1c34480 -> MemoryPool TLS alloc) aborts and spins
+    // (blocker = Roblox internal pool bootstrap). To reach a stable loaded
+    // state under the bridge we skip the ctors entirely, matching the Session 9
+    // full-bypass that returns 0x10006 cleanly. Re-enable once the MemoryPool
+    // bootstrap is understood.
+    // if (g_libroblox_base && g_robo.have) {
+    //     run_libroblox_init_array(g_libroblox_base);
+    // }
 
-
-    // Phase 1a progressive patch: NOP clock init + nativeSetAssetPath.
-    // Only the guard check, GetEnv, LocalStorageManager, and JNI registration
-    // function run. The guard setter and remaining JNI calls also run.
-    if (g_libroblox_base) {
-        patch_jni_onload_phase1(g_libroblox_base);
-    }
 
     // Direct call — no code copy needed with CF_NO_GOTO_TB QEMU patch.
-    // The one-time init function (at 0x1f65a60) checks guard at base+0x6a26e40
-    // and if zero, calls 26c0c7c which does mutex+condvar in a loop that waits
-    // until another thread sets a flag. Under QEMU user-mode with no other thread,
-    // this loop spins forever (our condvar shim returns 0, which is a spurious
-    // wakeup that re-checks and re-waits, ad infinitum).
+    // One-time init guard pre-set (below) so the mutex+condvar wait loop is
+    // skipped.
     //
-    // Fix: pre-set the guard byte to 1 (already initialized) so the init function
-    // returns immediately. Also pre-init the JavaVM* at guard+8 (0x6a26e48).
+    // ENGINE BOOTSTRAP SELECTION (Session 17):
+    //  * FULL BYPASS  -- make JNI_OnLoad return JNI_VERSION_1_6 (0x10006)
+    //    immediately, skipping all Roblox internal init. Gives a STABLE loaded
+    //    state (Session 9 proved this reaches the sleep loop without crashing)
+    //    but does NOT bootstrap Roblox's engine -> no GL window yet.
+    //  * PROGRESSIVE (Phase 1a) -- NOP clock/time init and run the real JNI
+    //    init. More faithful, but aborts on Roblox's internal MemoryPool
+    //    bootstrap (the current blocker in run_libroblox_init_array -> ctor[3]).
+    // We force FULL BYPASS by default so the shim reaches a stable loaded
+    // state under the QEMU-bridge runtime; progressive init is a follow-on.
+    {
+        uintptr_t jni_addr = g_libroblox_base + 0x1f0db20;  // exported JNI_OnLoad
+        uintptr_t jni_page = jni_addr & ~0xfffULL;
+        if (mprotect((void*)jni_page, 0x1000, PROT_READ|PROT_WRITE) == 0) {
+            volatile uint32_t *entry = (volatile uint32_t*)jni_addr;
+            entry[0] = 0x528000c0;   // mov w0, #0x6
+            entry[1] = 0x72a00020;   // movk w0, #0x1, lsl #16  (w0 = 0x10006)
+            entry[2] = 0xd65f03c0;   // ret
+            __builtin___clear_cache((void*)jni_addr, (void*)(jni_addr + 12));
+            mprotect((void*)jni_page, 0x1000, PROT_READ|PROT_EXEC);
+            jlog("[jni_shim] FULL BYPASS: JNI_OnLoad@0x%lx returns 0x10006\n",
+                 (unsigned long)jni_addr);
+        } else {
+            jlog("[jni_shim] WARN: could not mprotect JNI_OnLoad page (progressive)\n");
+            patch_jni_onload_phase1(g_libroblox_base);
+        }
+    }
     if (g_libroblox_base) {
         uintptr_t guard_addr = g_libroblox_base + 0x6a26e40;
         uintptr_t jvm_global = g_libroblox_base + 0x6a26e48;
