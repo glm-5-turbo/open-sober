@@ -169,7 +169,7 @@ pub fn decode(insn: u32) -> Inst {
     // ---- ADR / ADRP: bits[31:24] = 0x00 / 0x90 ----
     let immlo = (insn >> 29) & 0x3; // imm[1:0]
     let immhi = b(insn, 5, 23); // imm[20:2]
-    let imm = (((immhi as u64) << 2) | (immlo as u64));
+    let imm = ((immhi as u64) << 2) | (immlo as u64);
     match insn >> 24 {
         0x00 => {
             return Inst::Adr {
