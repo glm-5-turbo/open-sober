@@ -372,3 +372,47 @@ main entry point for `open-sober play --apk roblox.apk`.
   `clock_nanosleep` over `futex`.
 - Tilde expansion (`~`) in paths breaks with QEMU in some shell contexts.
   Always use `$(realpath ...)` or full `/home/code-agent/...` paths.
+---
+
+## Session 12 (Aug 20, 2026 — fresh machine rebuild)
+
+Environment started empty: no qemu-patched, no android-env/GSI libs, no APK,
+no NDK. The original Roblox build whose offsets the harness hardcoded is not
+served by any mirror anymore, so blindly resuming Session 12 against an
+arbitrary current APK would not reproduce the documented behavior
+(hardcoded GOT/BSS/RELRO offsets in `jni_shim.c` are per-build).
+
+Two changes committed to `dev`:
+
+### 1. Port the custom SMC-patched QEMU into the repo (was "Phase A critical fix")
+
+`qemu/` now contains a *reproducible* build of QEMU 10.2.1:
+- `qemu/patches/0001` — force `CF_NO_GOTO_TB` on every TB in
+  `accel/tcg/cpu-exec-common.c` `curr_cflags()` (never chain goto_tb)
+- `qemu/patches/0002` — no-op `tb_set_jmp_target` in `accel/tcg/cpu-exec.c`
+- `qemu/build.sh` — download + patch + build aarch64-linux-user →
+  `qemu/out/qemu-aarch64`
+- Verified end-to-end: `./qemu/build.sh` produces a working emulator.
+  Installed to `~/.cache/open-sober/qemu-patched`.
+
+### 2. Version-agnostic offset discovery (`elf_disco.c`)
+The hardcoded GOT / canary / RELRO offsets were the true blocker on a fresh
+box (no matching APK). Added a pure ELF parser in
+`crates/sober-core/src/elf_disco.c` (+`.h`):
+- `robo_got()` — exact GOT/reloc slot for an import, from DT_RELA/DT_JMPREL
+- `robo_relro_range()` — PT_GNU_RELRO (else last PF_W PT_LOAD)
+- `arm64_adrp_target()`, `robo_first_bl()` — AArch64 decode helpers
+Wired into `jni_shim.c`: `patch_condvar_plt_got`, the canary GOT write and
+the RELRO pre-mprotect all become discovery-first with the old constants as
+automatic fallback. `qemu.rs` cross-compiles + links `elf_disc.c` into the
+shim.
+Tested without a Roblox APK: `tests/elf_disco_test.rs` cross-compiles a real
+ARM64 `.so` importing pthread_cond_* and asserts `robo_got()` matches
+`readelf -r` exactly. `cargo test --workspace` green.
+
+### Still needed (separate environment step)
+A Roblox Android APK, a GSI/system lib64 tree (bionic libc/c++), and the
+NDK/JDK so the shim can actually `dlopen(libroblox.so)`. Mirrors were
+bot-blocked / version-mismatched on this box; the acquisition is manual or
+via a browser session. Once an APK is present, the version-agnostic shim
+should load it without re-tuning offsets (subject to the GSI lib tree).
