@@ -15,7 +15,7 @@
 //! of the first instruction and (==) its host address; ADRP/ADR of globals and
 //! guest loads/stores dereference the correct host pointers directly.
 
-use arm64jit::jit::{CpuState, compile_image, run};
+use arm64jit::jit::{CpuState, jit_run};
 
 fn main() {
     let path = std::env::args()
@@ -72,39 +72,38 @@ fn main() {
     // is the guest address of the first instruction to run.
     let image = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
     let mut st = CpuState::new();
-    match compile_image(image, base, entry, &mut st as *mut CpuState) {
+
+    // Optional x0/x1/x2 init. Pass `buf` in position 3 to allocate a
+    // writable 256-byte host buffer (guest==host, so its address is a valid
+    // guest pointer) and put its address in x0; also x1=x0+32. Even when the
+    // guest is a real binary we don't yet bootstrap (no TLS/stack), this lets
+    // small aarch64 test functions run through the dispatcher.
+    for (i, arg) in std::env::args().skip(3).take(3).enumerate() {
+        let v = if arg == "buf" {
+            let b = Box::leak(vec![0x7fu8; 256].into_boxed_slice());
+            if i == 0 {
+                let base = b.as_ptr() as u64;
+                st.set(0, base);
+                st.set(1, base + 32);
+            }
+            b.as_ptr() as u64
+        } else {
+            u64::from_str_radix(arg.trim_start_matches("0x"), 16)
+                .unwrap_or_else(|e| panic!("bad x{i} hex: {e}"))
+        };
+        if !(arg == "buf" && i == 0) {
+            st.set(i, v);
+        }
+    }
+
+    // PC-driven dispatcher: compiles reachable regions and re-enters on
+    // indirect branch (`blr`) / `br` / `ret`, so real (blr-heavy) Roblox code
+    // can actually *execute* rather than stopping at the first blr.
+    match jit_run(image, base, entry, &mut st as *mut CpuState) {
         Err(e) => {
-            // compile_image errors when it hits an instruction the translator
-            // can't handle; `e` embeds the offending guest pc.
-            eprintln!(
-                "arm64jit stopped on unsupported instr at/near guest 0x{:x}: {e}",
-                entry
-            );
+            eprintln!("arm64jit run_loop stopped: {e}");
             std::process::exit(1);
         }
-        Ok(blk) => {
-            // Optional x0/x1/x2 init. Pass `buf` in position 3 to allocate a
-            // writable 256-byte host buffer (guest==host, so its address is a
-            // valid guest pointer) and put its address in x0; also x1=x0+32.
-            for (i, arg) in std::env::args().skip(3).take(3).enumerate() {
-                let v = if arg == "buf" {
-                    let b = Box::leak(vec![0x7fu8; 256].into_boxed_slice());
-                    if i == 0 {
-                        let base = b.as_ptr() as u64;
-                        st.set(0, base);
-                        st.set(1, base + 32);
-                    }
-                    b.as_ptr() as u64
-                } else {
-                    u64::from_str_radix(arg.trim_start_matches("0x"), 16)
-                        .unwrap_or_else(|e| panic!("bad x{i} hex: {e}"))
-                };
-                if !(arg == "buf" && i == 0) {
-                    st.set(i, v);
-                }
-            }
-            let r = unsafe { run(&blk, &mut st as *mut CpuState) };
-            println!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r);
-        }
+        Ok(r) => println!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r),
     }
 }

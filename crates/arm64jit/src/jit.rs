@@ -23,13 +23,19 @@ pub struct CpuState {
     pub nzcv: u32,
     pub pad: u32,
     /// 32 SIMD/NEON 128-bit vector registers. Each 128-bit vector v[i] is
-    /// stored as two little-endian u64 lanes: lane0 = low u64 at [256 + 16*i],
-    /// lane1 = high u64 at [256 + 16*i + 8]. Vector slot base = 256.
+    /// stored as two little-endian u64 lanes: lane0 = low u64 at [bb*base +
+    /// 16*i], lane1 = high u64 at [.. + 16*i + 8].
     pub v: [u64; 64],
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
-pub const VECTOR_BASE: i32 = 256;
+///
+/// Layout of `CpuState` (repr(C)): x[32] at 0..256, pc at 256..264, nzcv at
+/// 264..268, pad at 268..272, then v[64] at 272... (must not overlap pc!).
+pub const VECTOR_BASE: i32 = 272;
+
+/// Byte offset of `CpuState.pc` (after the 32 x-regs).
+pub const PC_OFF: i32 = 8 * 32; // 256
 
 impl CpuState {
     pub fn new() -> Self {
@@ -172,6 +178,47 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
     Ok(r)
 }
 
+/// A block-level, PC-driven JIT executor for a guest image whose AArch64 bytes
+/// live at guest address `base` (guest vaddr == host address). This supports
+/// *indirect* control flow (`br`/`blr`) and returns from calls that the
+/// single-shot `compile_image` cannot: each reachable region is compiled via
+/// `compile_image` (which inlines static `b`/`b.cond`/`cbz`/`bl` and stops with
+/// `pc=…; ret` at a `br`/`blr`/`ret`), then run; when it returns because of such
+/// an indirect/return transfer, `state.pc` holds the next address, so the
+/// dispatcher compiles & re-enters there. Halts when `pc == 0`.
+pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Result<u64, String> {
+    unsafe { (*state).pc = entry }
+    let mut guard: u64 = 0;
+    const MAX_STEPS: u64 = 20_000_000; // safety net against an infinite guest loop
+    loop {
+        if guard >= MAX_STEPS {
+            return Err("run_loop: step budget exceeded (infinite guest loop?)".into());
+        }
+        guard += 1;
+        let pc = unsafe { (*state).pc };
+        if pc == 0 {
+            return Ok(unsafe { (*state).x[0] });
+        }
+        if pc < base || pc - base + 4 > image.len() as u64 {
+            return Err(format!(
+                "run_loop: pc 0x{pc:x} outside image [0x{base:x}, 0x{:x})",
+                base + image.len() as u64
+            ));
+        }
+        let block = compile_image(image, base, pc, state)?;
+        unsafe { run(&block, state) };
+        if std::env::var_os("JIT_TRACE").is_some() {
+            println!(
+                "  block@0x{pc:x} -> pc=0x{:x} x0=0x{:x} x1=0x{:x} x30=0x{:x}",
+                unsafe { (*state).pc },
+                unsafe { (*state).x[0] },
+                unsafe { (*state).x[1] },
+                unsafe { (*state).x[30] }
+            );
+        }
+    }
+}
+
 /// Translate every instruction of the guest image `image` (a full program
 /// whose AArch64 bytes start at guest address `base`) into a single host
 /// function, following branches and BL calls so any reachable code is
@@ -230,11 +277,11 @@ pub fn compile_image(
                         frontier.push(target);
                     }
                 }
-                Inst::BCond { imm, .. } | Inst::Cbz { imm, .. } => {
+                Inst::BCond { imm, .. } | Inst::Cbz { imm, .. } | Inst::Tbz { imm, .. } => {
                     let target = cur.wrapping_add(*imm as u64);
                     frontier.push(target); // conditional: also fall through below
                 }
-                Inst::Ret | Inst::Unsupported(_) => {
+                Inst::Ret | Inst::Unsupported(_) | Inst::Br { .. } | Inst::Blr { .. } => {
                     // terminal; do not continue fall-through
                 }
                 _ => {
@@ -242,8 +289,11 @@ pub fn compile_image(
                 }
             }
             translate::translate(&mut buf, cur, inst, &mut fixups)?;
-            // Ret is terminal: stop this block.
-            if matches!(inst, Inst::Ret | Inst::Unsupported(_)) {
+            // Ret / indirect transfers are terminal: stop this block.
+            if matches!(
+                inst,
+                Inst::Ret | Inst::Unsupported(_) | Inst::Br { .. } | Inst::Blr { .. }
+            ) {
                 break;
             }
             cur += 4;

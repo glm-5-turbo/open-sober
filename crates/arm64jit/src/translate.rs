@@ -255,8 +255,15 @@ pub fn translate(
             writeback,
             preidx,
             size_64,
+            q128,
         } => {
-            let esize = if size_64 { 8i32 } else { 4i32 };
+            let esize = if q128 {
+                16i32
+            } else if size_64 {
+                8i32
+            } else {
+                4i32
+            };
             let imm32 = imm as i32;
             // eff base: pre-index adjusts the address by imm before the access;
             // post/offset use rn (post then adds imm for writeback).
@@ -266,7 +273,21 @@ pub fn translate(
             } else {
                 (0i32, if writeback { imm32 } else { 0 }) // access at rn, wb adds imm
             };
-            if ld {
+            if q128 {
+                // 128-bit SIMD pair: transfer 16 bytes per register between the
+                // guest v-slots (CpuState.v, VECTOR_BASE+16*reg) and memory via XMM0.
+                let v0 = crate::jit::VECTOR_BASE + (rt as i32) * 16;
+                let v1 = crate::jit::VECTOR_BASE + (rt2 as i32) * 16;
+                for (reg_vslot, mem_off) in [(v0, access_off), (v1, access_off + esize)] {
+                    if ld {
+                        buf.movdqu_load(0, RDX, mem_off); // xmm0 <- [addr]
+                        buf.movdqu_store(RBX, reg_vslot, 0); // guest v <- xmm0
+                    } else {
+                        buf.movdqu_load(0, RBX, reg_vslot); // xmm0 <- [vslot]
+                        buf.movdqu_store(RDX, mem_off, 0); // [addr] <- xmm0
+                    }
+                }
+            } else if ld {
                 // load rt = [RDX + access_off], rt2 = [.. + esize]
                 if size_64 {
                     buf.mov_load64(RAX, RDX, access_off);
@@ -388,9 +409,42 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::VecMovi { vd, lo, hi } => {
+            // Write a full 128-bit vector immediate into the guest v-slot
+            // (CpuState.v, 16 bytes at VECTOR_BASE + 16*vd). The two u64 halves
+            // are hoisted as immediates.
+            let vslot = crate::jit::VECTOR_BASE + (vd as i32) * 16;
+            buf.mov_ri64(RAX, lo);
+            buf.mov_store64(RBX, vslot, RAX);
+            buf.mov_ri64(RAX, hi);
+            buf.mov_store64(RBX, vslot + 8, RAX);
+            Ok(())
+        }
+        Inst::Hint => {
+            // Hint / PAC NOP — execute as a no-op (PAC is ignored in the guest).
+            Ok(())
+        }
+        Inst::Br { rn } => {
+            // pc = x[rn]; return to the host dispatcher (which re-enters at pc).
+            ldg(buf, RAX, rn as u32);
+            buf.mov_store64(RBX, crate::jit::PC_OFF, RAX);
+            buf.ret();
+            Ok(())
+        }
+        Inst::Blr { rn } => {
+            // x30 = pc + 4 (link); pc = x[rn]; return to the host dispatcher.
+            buf.mov_ri64(RAX, pc.wrapping_add(4));
+            stg(buf, 30, RAX);
+            ldg(buf, RAX, rn as u32);
+            buf.mov_store64(RBX, crate::jit::PC_OFF, RAX);
+            buf.ret();
+            Ok(())
+        }
         Inst::Ret => {
-            // return x0 in RAX, then ret (matches the JIT fn convention that the
-            // epilogue also uses). $[x0] at RBX+0.
+            // return x0 in RAX, and set guest pc = x30 (link address) so a host
+            // dispatcher can resume at the caller. $[x0] at RBX+0, x30 at RBX+240.
+            ldg(buf, RAX, 30);
+            buf.mov_store64(RBX, crate::jit::PC_OFF, RAX);
             buf.mov_load64(RAX, RBX, 0);
             buf.ret();
             Ok(())
@@ -449,6 +503,29 @@ pub fn translate(
             });
             Ok(())
         }
+        Inst::Tbz {
+            rt,
+            bit,
+            imm,
+            nonzero,
+            ..
+        } => {
+            let target = pc.wrapping_add(imm as u64);
+            ldg(buf, RAX, rt as u32); // load rt
+            // test the single bit: test rax, 1<<bit
+            buf.mov_ri64(RCX, (1u64 << bit.min(63)) & (if bit >= 64 { 0 } else { 0xffff_ffff_ffff_ffff }));
+            // simpler: AND with constant handled per-bit via a cached reg
+            buf.test_rr64(RAX, RCX);
+            // tbz: branch if bit==0 => JE when ZF set; tbnz: branch if bit==1 => JNE
+            let cc = if nonzero { 0x85 } else { 0x84 }; // jnz / jz
+            let disp = buf.jcc_rel32(cc);
+            fixups.push(Fixup {
+                target_pc: target,
+                disp_off: disp,
+                cc,
+            });
+            Ok(())
+        }
         Inst::BCond { cond, imm } => {
             let target = pc.wrapping_add(imm as u64);
             match cond {
@@ -477,6 +554,8 @@ pub fn translate(
             }
             Ok(())
         }
-        _ => Err(format!("translate: unhandled {:?}", inst)),
+        _ => Err(format!(
+            "translate: unhandled {inst:?} at guest pc 0x{pc:x}"
+        )),
     }
 }

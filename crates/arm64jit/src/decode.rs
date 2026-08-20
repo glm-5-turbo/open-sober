@@ -104,6 +104,7 @@ pub enum Inst {
         writeback: bool,
         preidx: bool,
         size_64: bool, // false => 32-bit W pair
+        q128: bool,    // true => 128-bit SIMD pair (ldp/stp q)
     },
     // ---- SIMD/NEON 128-bit vector load/store (ldr q0,[xN,#imm] / str q) ----
     VecLdStImm {
@@ -112,6 +113,14 @@ pub enum Inst {
         imm: u32, // scaled-by-16 byte offset
         ld: bool,
     },
+    // ---- SIMD/NEON vector move-immediate (movi Vd.<T>, #imm) ----
+    // `lo`/`hi` are the low/high 64-bit halves of the 128-bit result, already
+    // expanded to the element size (each byte/word/dword lane set to #imm).
+    VecMovi {
+        vd: u8,
+        lo: u64,
+        hi: u64,
+    },
     // ---- compare-and-branch ----
     Cbz {
         rt: u8,
@@ -119,8 +128,26 @@ pub enum Inst {
         nonzero: bool,
         sf: bool,
     },
+    // ---- test-bit-and-branch (tbz/tbnz Xt,#bit,label) ----
+    Tbz {
+        rt: u8,
+        bit: u32, // bit position to test (0..63)
+        imm: i64, // branch offset from pc
+        nonzero: bool, // true = tbnz
+        sf: bool,
+    },
+    // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
+    // Dealt with as a no-op for execution (PAC is ignored in the guest).
+    Hint,
     // ---- return (ret x30) ----
     Ret,
+    // ---- indirect branch (br Xn) and register call (blr Xn) ----
+    Br {
+        rn: u8,
+    },
+    Blr {
+        rn: u8,
+    },
     // ---- fallback ----
     Unsupported(u32),
 }
@@ -156,6 +183,17 @@ fn sext(v: u64, bits: u32) -> i64 {
 #[inline]
 fn rd(insn: u32) -> u8 {
     (insn & 0x1F) as u8
+}
+
+/// Replicate an 8-bit lane value into every byte of a 64-bit word
+/// (used by NEON `movi` .8b/.16b element broadcast).
+#[inline]
+fn replicate_imm(lane: u64) -> u64 {
+    let mut acc = 0u64;
+    for i in 0..8 {
+        acc |= (lane & 0xff) << (8 * i);
+    }
+    acc
 }
 #[inline]
 #[allow(dead_code)]
@@ -343,6 +381,51 @@ pub fn decode(insn: u32) -> Inst {
         return Inst::VecLdStImm { vt, rn, imm, ld };
     }
 
+    // ---- SIMD/NEON movi vector-immediate ----
+    // Forms the real binary hits, validated against aarch64 objdump ground
+    // truth (see Session 20/21 HANDOFF):
+    //   movi Vd.2S/.4S, #imm  (cmode=0000)  : word lanes, each = imm8
+    //   movi Vd.8B/.16B, #imm (cmode=1110)  : byte lanes, each = imm8
+    //   movi Vd.2D, #imm      (cmode=1110 + op=1) : dword lanes, each = imm8
+    // The 8-bit immediate is reassembled from bits[9:5] (low) and bits[18:16]
+    // (high): imm8 = abcd | (defg? === bits[18:16] << 5). Ebconfirmed against
+    // 6 grounds-truth encodings incl. the actual boot blocker 0x6f00e400.
+    if matches!(insn >> 24, 0x0F | 0x1F | 0x2F | 0x4F | 0x5F | 0x6F) {
+        let op = (insn >> 29) & 1;
+        let cmode = b(insn, 12, 15);
+        let imm8 = (b(insn, 5, 9)) | (b(insn, 16, 18) << 5);
+        // Replicate the 8-bit lane value across a 64-bit word.
+        let low64: u64 = replicate_imm(imm8 as u64);
+        let (lo, hi): (u64, u64) = match (op, cmode) {
+            // .2S (Q=0) / .4S (Q=1): 32-bit word lanes
+            (0, 0b0000) => {
+                let lane = (imm8 as u64) & 0xffff_ffff;
+                let low = lane | (lane << 32);
+                if (insn >> 30) & 1 == 1 {
+                    (low, low)
+                } else {
+                    (low, 0)
+                }
+            }
+            // .8B (Q=0) / .16B (Q=1): byte lanes
+            (0, 0b1110) => {
+                if (insn >> 30) & 1 == 1 {
+                    (low64, low64)
+                } else {
+                    (low64, 0)
+                }
+            }
+            // .2D: dword replicate
+            (1, 0b1110) => (imm8 as u64, imm8 as u64),
+            _ => return Inst::Unsupported(insn),
+        };
+        return Inst::VecMovi {
+            vd: rd(insn),
+            lo,
+            hi,
+        };
+    }
+
     // ---- load/store (register offset) ----
     // class: (top & 0x3b) == 0x38
     if (insn & 0x3b00_0000) == 0x3800_0000 {
@@ -372,6 +455,18 @@ pub fn decode(insn: u32) -> Inst {
         return Inst::Ret;
     }
 
+    // ---- indirect branch / call: br Xn = 0xd61f0..., blr Xn = 0xd63f0... ----
+    if insn & 0xffff_fc1f == 0xd61f_0000 {
+        return Inst::Br {
+            rn: b(insn, 5, 9) as u8,
+        };
+    }
+    if insn & 0xffff_fc1f == 0xd63f_0000 {
+        return Inst::Blr {
+            rn: b(insn, 5, 9) as u8,
+        };
+    }
+
     // ---- compare-and-branch (CBZ/CBNZ): cbz w=0x34 cbnz=0x35 cbzx=0xb4 cbnzx=0xb5 ----
     if matches!(insn >> 24, 0x34 | 0x35 | 0xb4 | 0xb5) {
         let sf = insn >> 31 == 1;
@@ -387,13 +482,45 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
-    // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29) ----
-    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8) {
-        let size_64 = insn >> 31 == 1; // sf
+    // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----
+    if insn & 0x7e00_0000 == 0x3600_0000 {
+        let sf = (insn >> 31) & 1 == 1;
+        // `op` is bit13: tbz=0, tbnz=1.
+        let nonzero = (insn >> 24) & 1 == 1;
+        let rt = (insn & 0x1f) as u8;
+        let bit = b(insn, 19, 23) | (b(insn, 31, 31) << 5); // bits[23:19] + bit31
+        let imm14 = sext(((insn >> 5) & 0x3fff) as u64, 14) * 4;
+        return Inst::Tbz {
+            rt,
+            bit,
+            imm: imm14,
+            nonzero,
+            sf,
+        };
+    }
+
+    // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
+    // Mask (insn & 0xfffff01f) == 0xd503201f covers all of these; they are no-ops
+    // (PAC is ignored in the guest). Verified clean against real system ops
+    // (mrs/msr/dmb/tlbi share 0xd503 but have nonzero register fields).
+    if (insn & 0xffff_f01f) == 0xd503_201f {
+        return Inst::Hint;
+    }
+
+    // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD) ----
+    if matches!(insn >> 24, 0x29 | 0x28 | 0xa9 | 0xa8 | 0xad) {
+        let q128 = (insn >> 24) & 0xff == 0xad; // 128-bit SIMD pair (ldp/stp q)
+        let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
         let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
         let preidx = indexed && (insn >> 24) & 1 == 1; // pre if bit24=1 within indexed
-        let scale = if size_64 { 8 } else { 4 };
+        let scale = if q128 {
+            16
+        } else if size_64 {
+            8
+        } else {
+            4
+        };
         let imm7 = b(insn, 15, 21) as i64;
         let imm = sext(imm7 as u64, 7) * scale;
         return Inst::LdStPair {
@@ -405,6 +532,7 @@ pub fn decode(insn: u32) -> Inst {
             writeback: indexed,
             preidx,
             size_64,
+            q128,
         };
     }
 
@@ -485,6 +613,7 @@ mod tests {
                 writeback,
                 preidx,
                 size_64,
+                q128,
             } => {
                 assert_eq!(rt, 0);
                 assert_eq!(rt2, 1);
@@ -506,6 +635,7 @@ mod tests {
                 writeback,
                 preidx,
                 size_64,
+                q128,
             } => {
                 assert_eq!(rt, 29);
                 assert_eq!(rt2, 30);
@@ -773,6 +903,73 @@ mod tests {
                 assert!(!shift);
             }
             other => panic!("expected LdStrReg, got {:?}", other),
+        }
+    }
+
+    // ---- indirect branch / br/blr decode uses Rn at bits[9:5] ----
+    #[test]
+    fn br_blr_ground_truth() {
+        // blr x19 = 0xd63f0260, br x19 = 0xd61f0260 (from Session 21 disasm).
+        match decode(0xd63f0260) {
+            Inst::Blr { rn } => assert_eq!(rn, 19),
+            other => panic!("expected Blr, got {other:?}"),
+        }
+        match decode(0xd61f0260) {
+            Inst::Br { rn } => assert_eq!(rn, 19),
+            other => panic!("expected Br, got {other:?}"),
+        }
+        // blr x1 (regression: register is bits[9:5], not [4:0]).
+        match decode(0xd63f0020) {
+            Inst::Blr { rn } => assert_eq!(rn, 1),
+            other => panic!("expected Blr x1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn movi_ground_truth() {
+        // Ground-truth encodings from aarch64-linux-gnu-objdump (Session 20/21).
+        //                movi v0.4s,#1
+        for (w, want_lo, want_hi, label) in [
+            (
+                0x4f00_0420u32,
+                0x0000_0001_0000_0001u64,
+                0x0000_0001_0000_0001u64,
+                "movi v0.4s,#1",
+            ),
+            (
+                0x4f00_0641u32,
+                0x0000_0012_0000_0012u64,
+                0x0000_0012_0000_0012u64,
+                "movi v1.4s,#0x12",
+            ),
+            (
+                0x4f07_07e2u32,
+                0x0000_00ff_0000_00ffu64,
+                0x0000_00ff_0000_00ffu64,
+                "movi v2.4s,#0xff",
+            ),
+            (
+                0x0f00_e4e3u32,
+                0x0707_0707_0707_0707u64,
+                0x0000_0000_0000_0000u64,
+                "movi v3.8b,#7",
+            ),
+            (
+                0x4f04_e404u32,
+                0x8080_8080_8080_8080u64,
+                0x8080_8080_8080_8080u64,
+                "movi v4.16b,#0x80",
+            ),
+            (0x6f00_e400u32, 0x0, 0x0, "movi v0.2d,#0"),
+        ] {
+            let inst = decode(w);
+            match inst {
+                Inst::VecMovi { vd, lo, hi } => {
+                    assert_eq!(lo, want_lo, "{label}: low64");
+                    assert_eq!(hi, want_hi, "{label}: hi64");
+                }
+                other => panic!("{label}: expected VecMovi, got {other:?}"),
+            }
         }
     }
 }
