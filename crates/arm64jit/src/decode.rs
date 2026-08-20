@@ -147,6 +147,8 @@ pub enum Inst {
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
     Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
+    // ---- scalar udiv/sdiv Wd/Wd/Wm ----
+    Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1082,11 +1084,22 @@ pub fn decode(insn: u32) -> Inst {
             _ => return Inst::Unsupported(insn),
         };
         return Inst::VecMovi {
-            vd: rd(insn),
-            lo,
-            hi,
-        };
-    }
+                    vd: rd(insn),
+                    lo,
+                    hi,
+                };
+            }
+
+            // ---- scalar udiv/sdiv Wd,Wn,Wm (data-processing 2-source) ----
+            if (insn & 0xffe0_0000) == 0x1ac0_0000 || (insn & 0xffe0_0000) == 0x9ac0_0000 {
+                return Inst::Div {
+                    rd: (insn & 0x1f) as u8,
+                    rn: ((insn >> 5) & 0x1f) as u8,
+                    rm: ((insn >> 16) & 0x1f) as u8,
+                    signed: (insn >> 10) & 1 == 1,
+                    is_x: (insn >> 30) & 1 == 1,
+                };
+            }
 
     // ---- load/store (register offset) ----
     // class: (top & 0x3b) == 0x38

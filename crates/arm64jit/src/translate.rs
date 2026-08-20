@@ -1836,6 +1836,21 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+        Inst::Div { rd, rn, rm, signed, is_x } => {
+            // udiv/sdiv Rd, Rn, Rm: RAX = Rn / Rm (div/rdiv in RAX/RDX:AX).
+            ldg(buf, RAX, rn as u32);        // dividend
+            ldg(buf, RCX, rm as u32);        // divisor
+            buf.xor_rr64(RDX, RDX);          // clear hi-word for unsigned div
+            if signed {
+                buf.idiv_r64(RCX);           // signed: use I DIV
+            } else if is_x {
+                buf.div_r64(RCX);
+            } else {
+                buf.div_r32(RCX);
+            }
+            stg(buf, rd as u32, RAX);        // quotient -> Rd
+            Ok(())
+        }
         Inst::SimdFpUnary { rd, rn, op, esize, q } => {
             // fneg/fabs/fsqrt Vd.T, Vn.T: per-lane unary FP on the vector slot.
             // fneg/fabs flip/clear the sign bit on the FP bit-pattern via GPRs;
