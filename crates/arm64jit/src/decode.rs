@@ -154,6 +154,14 @@ pub enum Inst {
         rt: u8,
         rn: u8,
     },
+    // ---- scalar floating-point arithmetic on d-regs (double) ----
+    FpScalar {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        op: u8, // 0=move,1=abs,2=neg,3=sqrt,4=mul,5=add,6=sub,7=div
+        sz: bool, // true = double
+    },
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
     Hint,
@@ -524,6 +532,27 @@ pub fn decode(insn: u32) -> Inst {
         let rt = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         return Inst::AcqRel { size, ld, rt, rn };
+    }
+
+    // ---- scalar FP 3-source (d-float) : class 0x1E00_0000, opcode = insn with the
+    // three register fields masked. Verified: fmul=1e600800 fadd=1e602800 fsub=1e603800
+    // fdiv=1e601800 (d, sz=1); 1-source fmov/fneg/fabs are separately classified and
+    // not handled here.
+    if insn & 0x1f80_0000 == 0x1e00_0000 {
+        let sz = (insn >> 22) & 1 == 1;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        let op = match insn & !(((0x1f) as u32) << 16 | ((0x1f) as u32) << 5 | 0x1f) {
+            0x1e60_0800 => Some(4), // fmul
+            0x1e60_2800 => Some(5), // fadd
+            0x1e60_3800 => Some(6), // fsub
+            0x1e60_1800 => Some(7), // fdiv
+            _ => None,
+        };
+        if let Some(op) = op {
+            return Inst::FpScalar { rd, rn, rm, op, sz };
+        }
     }
 
     // ---- test-bit-and-branch (tbz/tbnz): (insn & 0x7e000000) == 0x36000000 ----

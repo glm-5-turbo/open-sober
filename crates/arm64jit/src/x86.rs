@@ -265,6 +265,52 @@ impl CodeBuf {
         self.b(modrm(3, src & 7, dst & 7));
     }
 
+    // ---- scalar double-precision (FP64) ----
+    /// movq xmm, [mem] : 64-bit load (F3 48 0F 7E xmm, r/m64)
+    pub fn movq_load(&mut self, xmm: u8, base: u8, disp: i32) {
+        self.b(0xF3);
+        self.b(0x48);
+        if xmm >= 8 || base >= 8 {
+            self.b(rex(false, xmm, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0x7E);
+        self.emit_mem(xmm, base, disp);
+    }
+    /// movq [mem+disp] <- xmm (66 48 0F D6 /r)
+    pub fn movq_store(&mut self, base: u8, disp: i32, xmm: u8) {
+        self.b(0x66);
+        self.b(0x48);
+        if base >= 8 || xmm >= 8 {
+            self.b(rex(false, xmm, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0xD6);
+        self.emit_mem(xmm, base, disp);
+    }
+    // (Intel: ModRM.reg = DST, r/m = SRC) — so mulsd(0,1) => F2 0F 59 C1 => xmm0 = xmm0*xmm1.
+        fn sd(&mut self, op: u8, dst: u8, src: u8) {
+            self.b(0xF2);
+            if dst >= 8 || src >= 8 {
+                self.b(rex(false, dst, 0, src));
+            }
+            self.b(0x0F);
+            self.b(op);
+            self.b(modrm(3, dst & 7, src & 7));
+        }
+    pub fn addsd(&mut self, dst: u8, src: u8) {
+        self.sd(0x58, dst, src);
+    }
+    pub fn mulsd(&mut self, dst: u8, src: u8) {
+        self.sd(0x59, dst, src);
+    }
+    pub fn subsd(&mut self, dst: u8, src: u8) {
+        self.sd(0x5C, dst, src);
+    }
+    pub fn divsd(&mut self, dst: u8, src: u8) {
+        self.sd(0x5E, dst, src);
+    }
+
     /// lea r64, [base + disp]
     pub fn lea64(&mut self, rd: u8, base: u8, disp: i32) {
         if rd >= 8 || base >= 8 {

@@ -429,6 +429,48 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::FpScalar { rd, rn, rm, op, sz } => {
+            // scalar FP on d/s regs. d-reg = low 8 bytes of CpuState.v[reg].slot
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16; // low 8B of a 16B slot
+            if !sz {
+                return Err(format!("FpScalar single-precision (sz=0) not implemented (op {op})"));
+            }
+            match op {
+                0 => {
+                    // fmov d, d: copy 64-bit int
+                    buf.mov_load64(RAX, RBX, vslot(rn));
+                    buf.mov_store64(RBX, vslot(rd), RAX);
+                }
+                1 => {
+                    // fabs: clear sign bit (bit63)
+                    buf.mov_load64(RAX, RBX, vslot(rn));
+                    buf.mov_ri64(RCX, 0x7fff_ffff_ffff_ffff);
+                    buf.and_rr64(RAX, RCX);
+                    buf.mov_store64(RBX, vslot(rd), RAX);
+                }
+                2 => {
+                    // fneg: flip sign bit
+                    buf.mov_load64(RAX, RBX, vslot(rn));
+                    buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
+                    buf.xor_rr64(RAX, RCX);
+                    buf.mov_store64(RBX, vslot(rd), RAX);
+                }
+                4 | 5 | 6 | 7 => {
+                    buf.movq_load(0, RBX, vslot(rn));
+                    buf.movq_load(1, RBX, vslot(rm));
+                    match op {
+                        4 => buf.mulsd(0, 1),
+                        5 => buf.addsd(0, 1),
+                        6 => buf.subsd(0, 1),
+                        7 => buf.divsd(0, 1),
+                        _ => unreachable!(),
+                    }
+                    buf.movq_store(RBX, vslot(rd), 0);
+                }
+                _ => return Err(format!("FpScalar op {op} not implemented")),
+            }
+            Ok(())
+        }
         Inst::LdStPair {
             rt,
             rt2,

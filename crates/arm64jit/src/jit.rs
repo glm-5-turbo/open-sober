@@ -544,4 +544,34 @@ mod tests {
         assert_eq!(r, 33, "readg() should load the global g=33");
         unsafe { libc::munmap(rw, len) };
     }
+
+    #[test]
+    fn fp_scalar_double_ieee() {
+        // Encodings verified from objdump of /tmp/fp2.s. NOTE: d-reg `dk` lives in
+        // Rust array element `v[k*2]` (v is flat [u64;64] = 32 x two 64-bit lanes).
+        use std::f64;
+        let mut st = CpuState::new();
+        st.v[2] = 2.5f64.to_bits(); // d1
+        st.v[4] = 4.0f64.to_bits(); // d2
+        let mut code = [0x20u8, 0x08, 0x62, 0x1e].to_vec(); // fmul d0,d1,d2
+        code.extend_from_slice(&[0xc0u8, 0x03, 0x5f, 0xd6]); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fmul");
+        assert_eq!(f64::from_bits(st.v[0]), 10.0, "2.5*4.0 = 10.0 (fmul)");
+
+        let mut st2 = CpuState::new();
+        st2.v[0] = 10.0f64.to_bits(); // d0
+        st2.v[2] = 2.5f64.to_bits(); //  d1
+        let mut code2 = [0x00u8, 0x28, 0x61, 0x1e].to_vec(); // fadd d0,d0,d1
+        code2.extend_from_slice(&[0xc0u8, 0x03, 0x5f, 0xd6]);
+        exec_bytes(&mut st2, &code2, 0).expect("exec fadd");
+        assert_eq!(f64::from_bits(st2.v[0]), 12.5, "10.0 + 2.5 = 12.5");
+
+        let mut st3 = CpuState::new();
+        st3.v[12] = 10.0f64.to_bits(); // d6
+        st3.v[14] = 2.5f64.to_bits(); //  d7
+        let mut code3 = [0xc5u8, 0x18, 0x67, 0x1e].to_vec(); // fdiv d5,d6,d7
+        code3.extend_from_slice(&[0xc0u8, 0x03, 0x5f, 0xd6]);
+        exec_bytes(&mut st3, &code3, 0).expect("exec fdiv");
+        assert_eq!(f64::from_bits(st3.v[10]), 4.0, "10.0 / 2.5 = 4.0");
+    }
 }
