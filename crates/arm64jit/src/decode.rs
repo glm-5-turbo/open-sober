@@ -2002,7 +2002,6 @@ mod logical_imm_regressions {
         }
         // fabd d0,d0,d1 = 0x7ee1d400 (compiler) => Fabd.
         assert!(matches!(decode(0x7ee1d400), Inst::Fabd { rd: 0, rn: 0, rm: 1 }));
-        // dup v[truncated]
         // dup v1.4s, w10 = 0x4e040d41 (real libroblox audio mix channel loop) => SimdDupSReg.
         match decode(0x4e040d41) {
             Inst::SimdDupSReg { rd, rn } => {
