@@ -311,6 +311,7 @@ pub enum Inst {
         imms: u32,
         sf: bool,   // 64-bit
         arith: bool, // true = arithmetic shift (SBFM/asr) sign-extends
+        insert: bool, // true = BFM insert (opc=00, immr<=imms): merge field into Rd
     },
     // ---- system register access (mrs xN, <sysreg> / msr <sysreg>, xN) ----
         // Only the thread-pointer registers the JIT models are decoded: tpidr_el0
@@ -358,6 +359,13 @@ pub enum Inst {
         rn: u8,
         sf: bool,     // 64-bit operand
         cls: bool,    // true = CLS (count leading sign bits), false = CLZ
+    },
+    // ---- byte/bit reverse: rbit/rev16/rev/rev32 (0x5ac0/0xdac0 row) ----
+    Rev {
+        rd: u8,
+        rn: u8,
+        op: u8,  // 0=rbit, 1=rev16, 2=rev, 3=rev32(X only)
+        sf: bool, // 64-bit operand
     },
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
@@ -699,6 +707,26 @@ pub fn decode(insn: u32) -> Inst {
         }
     }
 
+    // ---- byte/bit reverse: rbit/rev16/rev/rev32 (the 0x5ac0/0xdac0 row) ----
+    // opcode = bits[11:10]: 00=rbit, 01=rev16, 10=rev, 11=rev32 (X only).
+    // sf=bit31 (0x5ac0 => W, 0xdac0 => X). rn=bits5-9, rd=bits0-4.
+    {
+        let bb = insn & 0xffff_fc00;
+        let rev_op = match bb {
+            0x5ac0_0000 | 0xdac0_0000 => Some(0), // rbit
+            0x5ac0_0400 | 0xdac0_0400 => Some(1), // rev16
+            0x5ac0_0800 | 0xdac0_0800 => Some(2), // rev
+            0xdac0_0c00 => Some(3),               // rev32 (X only)
+            _ => None,
+        };
+        if let Some(op) = rev_op {
+            let sf = (insn >> 31) & 1 == 1;
+            let rd = b(insn, 0, 4) as u8;
+            let rn = b(insn, 5, 9) as u8;
+            return Inst::Rev { rd, rn, op, sf };
+        }
+    }
+
     // ---- logical (shifted register): AND/ORR/EOR/BIC/ORN/EON ----
     // top byte: 0x0a xx-family; opc = bits[30:29], N = bit21
     if matches!(
@@ -999,11 +1027,11 @@ pub fn decode(insn: u32) -> Inst {
             || (immr <= imms) // UBFX/SBFX + zero/sign-extend
             || (immr > imms); // UBFIZ/ASR-or-UBFIZ insert (0xd3/0x53, immr>imms)
         if is_valid && (rd != 31) {
-            return Inst::BitField { rd, rn, immr, imms, sf, arith };
+            return Inst::BitField { rd, rn, immr, imms, sf, arith, insert: false };
         }
     }
 
-    // ---- bitfield insert (BFM/BFI/BFC): inserts bits of Rn into Rd.
+    // ---- bitfield insert (BFM/BFI/BFC/BFXIL): inserts bits of Rn into Rd ----
     // top bytes: X=0xb3, W=0x33. The wrap case immr>imms decodes to the
     // bfi/bfc aliases (lsb = (bits-immr)&(bits-1), width = imms+1); the
     // non-wrap (immr<=imms) BFM is the extract-insert and is deferred.
@@ -1014,9 +1042,12 @@ pub fn decode(insn: u32) -> Inst {
         let imms = b(insn, 10, 15);
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
-        if immr > imms {
-            // BFI/BFC (insert): lsb = (bits-immr)&(bits-1), width = imms+1
-            return Inst::BitField { rd, rn, immr, imms, sf, arith: false };
+        // Both BFM insert forms merge bits of Rn into Rd:
+        //  - wrap (immr>imms) => BFI/BFC: lsb=(bits-immr)&(bits-1), w=imms+1
+        //  - non-wrap (immr<=imms) => BFXIL: copy Rn bits [imms:immr] into the
+        //    same positions of Rd. Both are `insert` (Rd's other bits preserved).
+        if immr > imms || immr <= imms {
+            return Inst::BitField { rd, rn, immr, imms, sf, arith: false, insert: true };
         }
     }
 
@@ -1072,7 +1103,36 @@ pub fn decode(insn: u32) -> Inst {
         }
     }
 
-    // ---- `scvtf d0, w0 = 0x1e620000`. The scalar int->FP family gate
+    // ---- FP convert to int with round toward +inf/-inf: fcvtps/pu/ms/mu (Xd dest) ----
+        // Family (insn & 0xffff_0000) for the **X-dest** (top 0x9e) round forms.
+        // fcvt-round to a 64-bit int covers the libroblox boot (fcvtpu x9,s0 = 0x9e290009)
+        // and, critically, 0x9e.. does NOT collide with fcmp (which is always the 0x1e
+        // W-dest column: 0x1e70_.. == fcmp d6,d16, but 0x9e70_.. == legitimate fcvt to X).
+        // bit16=U (unsigned), bit22=double source, round: 0x28=+inf 0x30=-inf.
+        {
+            let fam = insn & 0xffff_0000;
+            let mode = match fam {
+                0x9e28_0000 | 0x9e29_0000 | 0x9e68_0000 | 0x9e69_0000 => 3, // +inf
+                0x9e30_0000 | 0x9e31_0000 | 0x9e70_0000 | 0x9e71_0000 => 4, // -inf
+                _ => 255,
+            };
+            if mode != 255 {
+                let szd = (insn >> 22) & 1 == 1; // 1 => source is double (d)
+                let unsigned = (insn >> 16) & 1 == 1;
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let rd = (insn & 0x1f) as u8;
+                return Inst::FcvtToInt {
+                    rd,
+                    rn,
+                    mode,
+                    sf: true, // Xd dest (64-bit)
+                    unsigned,
+                    src_sng: !szd,
+                };
+            }
+        }
+
+        // ---- `scvtf d0, w0 = 0x1e620000`. The scalar int->FP family gate
             // `(insn & 0xf7be_fc00)` resolves to {0x16220000 (W source), 0x96220000 (X)}
             // for both signed and unsigned, and is disjoint from fmov/fcvt/fcmp/fmul
             // (verified vs all 8 encodings + neighbours). Fields: X-src = bit31,
@@ -2098,6 +2158,52 @@ mod logical_imm_regressions {
             Inst::FcvtToInt { unsigned, .. } => assert!(!unsigned),
             other => panic!("fcvtzs w0,d0 -> {other:?}"),
         }
+        // fcvtpu x9, s0 = 0x9e290009 (real libroblox) => round +inf, unsigned, single-src.
+        match decode(0x9e290009) {
+            Inst::FcvtToInt { rd, rn, mode, sf, unsigned, src_sng } => {
+                assert_eq!(rd, 9);
+                assert_eq!(rn, 0);
+                assert_eq!(mode, 3); // round toward +inf
+                assert!(sf); // X dest
+                assert!(unsigned); // fcvtpu (unsigned)
+                assert!(src_sng); // single (s) source
+            }
+            other => panic!("fcvtpu x9,s0 -> {other:?}"),
+        }
+        // fcvtpu x9, d0 (double-src form = 0x9e690009) => src_sng false, still +inf.
+        match decode(0x9e690009) {
+            Inst::FcvtToInt { mode, unsigned, src_sng, .. } => {
+                assert_eq!(mode, 3);
+                assert!(unsigned);
+                assert!(!src_sng); // double source
+            }
+            other => panic!("fcvtpu x9,d0 -> {other:?}"),
+        }
+
+        // BFXIL: bfxil w8, w9, #0, #1 = 0x33000128 (real libroblox boot wall) is
+        // the non-wrap BFM insert -- must decode as BitField with insert flag set.
+        match decode(0x33000128) {
+            Inst::BitField { rd, rn, immr, imms, sf, arith, insert } => {
+                assert_eq!(rd, 8);
+                assert_eq!(rn, 9);
+                assert_eq!(immr, 0);
+                assert_eq!(imms, 0);
+                assert!(!sf); // 32-bit (w)
+                assert!(!arith);
+                assert!(insert); // BFM insert (not a plain extract)
+            }
+            other => panic!("bfxil w8,w9,#0,#1 -> {other:?}"),
+        }
+        // BFM (opc=00, non-wrap) with immr<=imms must NOT be miscast as a plain
+        // UBFM extract that would overwrite Rd's other bits on translate.
+        assert!(matches!(
+            decode(0xb3400000), // bfxil x0,x0,#0,#1 (X-form, immr=imms=0)
+            Inst::BitField { insert: true, sf: true, .. }
+        ));
+        // fcmp d6,d16 = 0x1e7020c0 must NOT decode as FcvtToInt round (regression guard).
+        assert!(!matches!(decode(0x1e7020c0), Inst::FcvtToInt { .. }));
+        // fmov d6,d0 = 0x1e604006 must still be FmovFp (not round-fcvt).
+        assert!(matches!(decode(0x1e604006), Inst::FmovFp { .. }));
         // mrs x19, cntfrq_el0 (real libroblox) => SysReg cntfrq (sysreg==1).
         match decode(0xd53be013) {
             Inst::SysReg { sysreg, rt, read } => {

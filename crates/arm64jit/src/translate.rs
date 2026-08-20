@@ -464,6 +464,75 @@ pub fn translate(
             stg(buf, rd as u32, RAX);
             Ok(())
         }
+        Inst::Rev { rd, rn, op, sf } => {
+            if rd == 31 {
+                return Ok(());
+            }
+            ldg(buf, RAX, rn as u32);
+            match op {
+                2 => {
+                    // rev: full byte reverse. W => 32-bit bswap, X => 64-bit bswap.
+                    if sf {
+                        buf.bswap_r64(RAX);
+                    } else {
+                        buf.bswap_r32(RAX); // 32-bit bswap zeroes upper half
+                    }
+                }
+                1 => {
+                    // rev16: reverse each adjacent byte pair (16-bit element).
+                    // X: ((x & 0x00FF00FF00FF00FF) << 8) | ((x & 0xFF00FF00FF00FF00) >> 8)
+                    if sf {
+                        buf.mov_ri64(RCX, 0x00ff_00ff_00ff_00ff);
+                        buf.and_rr64(RCX, RAX);          // even-lane bytes
+                        buf.mov_rr64(RDX, RAX);
+                        buf.mov_ri64(R10, 0xff00_ff00_ff00_ff00);
+                        buf.and_rr64(RDX, R10);          // odd-lane bytes
+                        buf.shl_ri8(RCX, 8);
+                        buf.shr_ri8(RDX, 8);
+                        buf.or_rr64(RAX, RCX);
+                        buf.or_rr64(RAX, RDX);
+                    } else {
+                        // W (32-bit): two swaps.
+                        buf.mov_rr64(RCX, RAX);
+                        buf.and_ri64(RCX, 0x00ff_00ff);
+                        buf.shl_ri8(RCX, 8);
+                        buf.and_ri64(RAX, 0xff00_ff00);
+                        buf.shr_ri8(RAX, 8);
+                        buf.or_rr64(RAX, RCX);
+                    }
+                }
+                3 => {
+                    // rev32 (X only): swap the two 32-bit halves.
+                    buf.ror_ri8(RAX, 32);
+                }
+                _ => {
+                    // op==0 rbit: reverse all bits (SWAR byte/pair steps up to 64).
+                    let steps: [(u8, u64); 6] = [
+                        (1, 0x5555_5555_5555_5555),
+                        (2, 0x3333_3333_3333_3333),
+                        (4, 0x0f0f_0f0f_0f0f_0f0f),
+                        (8, 0x00ff_00ff_00ff_00ff),
+                        (16, 0x0000_ffff_0000_ffff),
+                        (32, 0x0000_0000_ffff_ffff),
+                    ];
+                    let width = if sf { 6usize } else { 4usize };
+                    for (k, (sh, m)) in steps.iter().take(width).enumerate() {
+                        // t = ((x >> sh) & m) | ((x & m) << sh)
+                        buf.mov_rr64(RCX, RAX);
+                        buf.shr_ri8(RCX, *sh);
+                        buf.and_ri64(RCX, *m as u32); // m low32 (archs: pre-32 steps fit u32)
+                        buf.and_ri64(RAX, *m as u32);
+                        buf.shl_ri8(RAX, (1u32 << k as u32) as u8);
+                        buf.or_rr64(RAX, RCX);
+                    }
+                }
+            }
+            if !sf {
+                buf.and_ri64(RAX, 0xffff_ffff);
+            }
+            stg(buf, rd as u32, RAX);
+            Ok(())
+        }
         Inst::CSel {
             rd,
             rn,
@@ -699,8 +768,24 @@ pub fn translate(
             stg(buf, 0, RAX); // system value -> guest x0 (AArch64 return reg)
             Ok(())
         }
-        Inst::BitField { rd, rn, immr, imms, sf, arith } => {
+        Inst::BitField { rd, rn, immr, imms, sf, arith, insert } => {
             let bits = if sf { 64u32 } else { 32u32 };
+            if insert && immr <= imms {
+                // BFXIL (opc=00, non-wrap): rd[imms:immr] = rn[imms:immr],
+                // i.e. the field is copied in-place and Rd's other bits are kept.
+                // mask = ((1<<width)-1) << immr  on a `bits`-wide integer.
+                let width = (imms - immr + 1) as u32;
+                let mask: u64 = (((1u64 << width) - 1) << immr) & (if sf { u64::MAX } else { 0xffff_ffff });
+                ldg(buf, RAX, rn as u32); // Rn
+                ldg(buf, R10, rd as u32); // old Rd
+                buf.mov_ri64(RCX, mask);
+                buf.and_rr64(RAX, RCX); // field of Rn
+                // rd & ~mask
+                buf.not_r64(RCX);
+                buf.and_rr64(R10, RCX);
+                buf.or_rr64(R10, RAX);
+                buf.mov_rr64(RAX, R10);
+            } else {
             ldg(buf, RAX, rn as u32); // load Rn
             if imms == bits - 1 {
                 // LSR (logical) or ASR (arithmetic/sign) by immr
@@ -765,6 +850,7 @@ pub fn translate(
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
             }
+            } // end `else` (non-BFXIL) arm of BitField
             Ok(())
         }
         Inst::SysReg { sysreg, rt, read } => {

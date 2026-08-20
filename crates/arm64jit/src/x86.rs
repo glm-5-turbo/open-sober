@@ -676,6 +676,17 @@ impl CodeBuf {
         self.b(modrm(3, 1, rd & 7));
         self.b(imm);
     }
+    /// bswap r32  (0F C8+rd): reverse byte order of the low 32 bits.
+    pub fn bswap_r32(&mut self, rd: u8) {
+        self.b(0x0F);
+        self.b(0xC8 | (rd & 7));
+    }
+    /// bswap r64  (48 0F C8+rd): reverse byte order of the whole 64 bits.
+    pub fn bswap_r64(&mut self, rd: u8) {
+        self.b(0x48);
+        self.b(0x0F);
+        self.b(0xC8 | (rd & 7));
+    }
     // ---- control flow ----
     /// jmp rel32; returns patch offset for disp
     pub fn jmp_rel32(&mut self) -> usize {
