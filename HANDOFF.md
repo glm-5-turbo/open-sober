@@ -1040,3 +1040,21 @@ then `adic` integration into libloader `--no-qemu`.
 Next (task 4): integrate into libloader/sober-core — map the Roblox ELF at its vaddr, then
 compile_image(text_segment, vaddr, entry) for _start/JNI_OnLoad. adrp/ldr now resolve because
 guest address == host address when segments are mapped at their ELF vaddr.
+
+## Session 19c - JIT wired into the product (no QEMU path)
+
+- **libloader**: exposed `pub mod elf` so `load_elf`/`LoadedElf` are usable downstream (commit 9c8e791).
+- **arm64jit/examples/elfjit.rs**: loads a real static aarch64 ELF with libloader's loader and JIT-runs
+  its entry -> returns 42 on x86-64, no QEMU. Proven end-to-end loader+JIT wiring.
+- **sober-core**: `--jit` CLI flag -> `mod jit::run_elf_entry` loads the Roblox .so via libloader and
+  hands it to arm64jit. `qemu::find_main_binary` made pub. (commit 4b89619)
+- **Honest boundary**: trying to run `/tmp/robpatched/libroblox.so` (a PIE `ET_DYN`) through elfjit
+  SEGV s because for PIE .so the host address of the code is NOT simply `e_entry`: the loader maps the
+  PT_LOAD text segment at a real host address, and `compile_image` must be fed the mapped host range +
+  its guest base, not `entry` directly. Plus the full .so uses far more instructions than the current
+  subset, so full execution is still months of translator work.
+
+**Next (task 5)**: fix the PIE path - derive the mapped text host address from `LoadedSegment.vaddr`,
+  feed `compile_image(image=mapped_host_slice, base=guest_text_vaddr, entry=host-of-entry)`, and report
+  the *first unsupported instruction's guest address* as an honest diagnostic target for the next
+  decoder slice (start with SVC syscall routing + TLS, then SP, then BL/ADR linkage).
