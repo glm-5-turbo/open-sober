@@ -496,6 +496,18 @@ static int wrap_android_log_print(int prio, const char *tag, const char *fmt, ..
     return 1;
 }
 
+// Neutralize the allocator's bare abort(): log the caller PC(s) and return
+// instead of SIGABRT. Roblox calls abort() (quadruple) on an OOM NULL; we make
+// it non-fatal so we can see the next phase. `ra` is the caller's return
+// address (the book offset is ra - base, useful for attribution).
+__attribute__((noinline))
+static void wrap_abort(void) {
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+    jlog("[jni_shim] abort intercepted (caller base+0x%lx) -- returning\n",
+         (unsigned long)(g_libroblox_base ? (ra - (uintptr_t)g_libroblox_base) : ra));
+    /* do NOT call real abort; just unwind */
+}
+
 // ============== SIGSEGV handler ==============
 
 static struct sigaction jni_old_sa;
@@ -781,8 +793,10 @@ static void patch_all_jumpslots(uint64_t base) {
                        } else if (!strcmp(buf,"android_set_abort_message")) {   /* reveal abort reason */
                            fn = (void*)wrap_android_set_abort_message;
                        } else if (!strcmp(buf,"__android_log_print")) {   /* reveal fatal logs */
-                           fn = (void*)wrap_android_log_print;
-                       } else {
+                                   fn = (void*)wrap_android_log_print;
+                               } else if (!strcmp(buf,"abort")) {   /* don't die on OOM NULL; log+continue */
+                                   fn = (void*)wrap_abort;
+                               } else {
             fn = g_real_libc ? dlsym(g_real_libc, buf) : NULL;
             if (!fn) fn = dlsym(RTLD_DEFAULT, buf);
         }
