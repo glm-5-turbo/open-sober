@@ -1744,3 +1744,58 @@ v0.16b, #8` (0x6e004001) — SIMD byte-shift/immediate, NEXT ON AGENDA.
 - Real Roblox STILL does NOT boot. Remaining path: ext v.16B -> lane->GPR -> svc syscall table.
 - Edit caveat: patches to decode.rs/translate.rs surface massive pre-existing rustfmt
   churn in the lint output — edits are correct; build/tests/boot are the real gate.
+
+## Session 30c (Aug 20, 2026) — ext + lane->GPR + a burst of FP walls; boot leaps out of the audio loop
+
+Picked up the 30b wall (`ext v1.16b,v0,v0,#8` = `0x6e004001`). Cleared **ext and 10 more walls in one extended
+run**, carrying the guest from the FMOD audio-DSP loop all the way through `LocalStorageManager` init,
+`MainGameActivity`/NativeSettings and stopping deep in an FP round-to-integer wall. **39 tests pass.**
+
+### New instructions implemented this session (all objdump/qemu-verified)
+- `Inst::SimdExt` (ext Vd.16B/.8B, Vn, Vm, #imm) — the 30b wall. Gate `(insn&0xffe0_0400)` in
+  `{0x6e00_0000 (16B Q=1), 0x2e00_0000 (8B)}`. Semantics: result = 128/64-bit window of the
+  concatenation `{Vn(high), Vm(low)}` starting at byte `imm` (= half-swap of u64s when Vn==Vm & imm=8).
+  General imm via a 4×u64 concat byte-fission (aligned load or `(W>>sh)|(Wnext<<(64-sh))`).
+- **SimdLaneGp** (mov/umov/smov Wd|Xd, Vn.T[idx]) — gate `(insn&0xffe0_0c00)` in `{0x0e000c00,0x4e000c00}`.
+  esize=1<<(ctz(imm5)); index=imm5>>p; sign(SMOV)=bit12 clear. Copy element at `index*esize` in the 16-byte
+  sl‑o t, zero/sign-ext. (Real `mov w8,v0.s[1]=0x0e0c3c08`.)
+- `fabs d0,d0`(0x1e60c000) + `fneg` — scalar FP unary sign ops (clear/clear via 0x7FFF… & 0x8000…).
+- `clz`/`cls` (ClzCls) — LZCNT (F3 0F BD) direct; cls via clz of (x<<1)^x. Gate `(insn&0xffff_fc00)` in
+  `{0x5ac01000(W),0xdac01000(X),0x5ac01400,0xdac01400}`.
+- `ubfiz`/SBFM insert — extended the UBFM (0xd3/0x53) gate to accept `immr>imms` (the BFI/insert form),
+  which the BitField translate already handled.
+- Scalar `ucvtf Dd,Dn` (ScalarUcvtf) — honest u64->f64 via cvtsi2sd + sign-corrective `add 2^64` (JNS-1).
+- `ucvt d0,x8`/scvtf unsigned — added `unsigned` to `Scvtf`; scalar int->FP family gate `(insn&0xf7be_fc00)`
+  in `{0x1622_0000(W),0x9622_0000(X)}` (unsigned=bit16, dbl=bit22, X=bit31); honest u64 u- handling.
+- `fmov s,s` (single-precision scalar copy) — extended FmovFp gate to `0x1e20_4000` (was d-only).
+- `fmul/fadd/fsub/fdiv s` (single) — FpScalar decode accepts the `0x1e20_08/28/38/18` forms (bit22=0) and
+  translate uses `movd`/SSE scalar-single (movss-family, added a `comiss` x86 helper). ops 0-3 stay double-only.
+- `fcmp s,s` — Fcmp gained `sz`; single via `comiss` (0F 2F, no 66-prefix). store_nzcv_fp unchanged.
+
+### Boot path / wall history (this session, guest pcs)
+```
+ext .16b #8 (0x105dfe260) -> mov w8,v0.s[1] (.268) -> fabs d0,d0 (.2ac) -> ucvtf s0,x8 (eat..)
+  -> ucvtf s2,x23 (nativeInitCrashpad area 0x101f69cbx) -> fmul s2,s1,s2 (.2cbc) -> fcmp s2,s0 (.cc0)
+  -> STALL 0x101f69cec: `fcvtpu x9, s0` (0x9e290009)  <-- current wall
+```
+(Wait, earlier saw `0x1f69cec` in different formatting — the guest stopped honestly at fcvtpu.)
+Big-picture: the guest runs real `nativeAppBridgeV2StartAppWithParams`/`LiveStorageManager`/
+`MainGameActivity`/Crashpad JNI init code now, far beyond the FMOD DSP loop.
+
+### qemu ground truth gathered for the NEXT wall (fcvtpu Xd, Sn) — so it's ready to implement:
+```
+fcvtpu( s ): 1 ->1, 1+eps->2, 1.5->2, 2->2, 0.5->1, 0->0, -1->0, -2->0,
+             +inf->0xFFFFFFFFFFFFFFFF, NaN->0, 2^31->0x80000000, 30->0x1e
+```
+i.e. ceil toward +inf for x>0, 0 for x<=0/NaN, u64::MAX for +inf. Implement with cvttsd2si(trunc-floor)
++ frac-has `+1`, negatives/NaN→0, inf→MAX. (Same honesty class as fcvtzu.)
+
+### Verification
+`cargo test -p arm64jit` → **39 passed** (added `clz_scalar_ucvtf_decode`, ror/share fine). Workspace
+`cargo build -p arm64jit` clean (warnings are the pre-existing rustfmt churn). Tree has decode.rs /
+translate.rs / x86.rs + HANDOFF.
+
+### Next (ordered)
+1. `fcvtpu Xd, Sn` (0x9e290009, FP→unsigned-int round-toward-+inf) + siblings (`fcvtps/ns/ms…`) — have qemu truth.
+2. Then continue grind; eventually the `svc` real AArch64→x86-64 syscall table (mmap/futex/mprotect; numbers
+   differ: mmap 222->9, futex 95->202, mprotect 226->10) — the big-ticket item before real Roblox boot.

@@ -441,6 +441,29 @@ pub fn translate(
                         }
                         Ok(())
                     }
+        Inst::ClzCls { rd, rn, sf, cls } => {
+            // clz/cls Wd|Xd, Rn. CLZ via LZCNT (F3 0F BD /r), which returns the
+            // count of leading zeros directly and matches AArch64's clz(x=0)=|bits|.
+            // Host x86-64 (Haswell+) universally supports LZCNT.
+            if cls {
+                return Err("CLS (count leading sign) not implemented".into());
+            }
+            if rd == 31 {
+                return Ok(());
+            }
+            ldg(buf, RAX, rn as u32);
+            if !sf {
+                buf.and_ri64(RAX, 0xffff_ffff);
+            }
+            if sf {
+                buf.bytes.extend_from_slice(&[0x48, 0xf3, 0x0f, 0xbd, 0xc0]); // lzcnt rax, rax
+            } else {
+                buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0xbd, 0xc0]); // lzcnt eax, eax
+                                                                        // lzcnt eax zeroes the upper 32 (correct W zero-extend)
+            }
+            stg(buf, rd as u32, RAX);
+            Ok(())
+        }
         Inst::CSel {
             rd,
             rn,
@@ -782,8 +805,9 @@ pub fn translate(
         Inst::FpScalar { rd, rn, rm, op, sz } => {
             // scalar FP on d/s regs. d-reg = low 8 bytes of CpuState.v[reg].slot
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16; // low 8B of a 16B slot
-            if !sz {
-                return Err(format!("FpScalar single-precision (sz=0) not implemented (op {op})"));
+            // ops 0-3 (fmov/fabs/fneg) are double-only; single handled for 4-7 below.
+            if !sz && op <= 3 {
+                return Err(format!("FpScalar single-precision (sz=0) op {op} not implemented"));
             }
             match op {
                 0 => {
@@ -806,16 +830,37 @@ pub fn translate(
                     buf.mov_store64(RBX, vslot(rd), RAX);
                 }
                 4 | 5 | 6 | 7 => {
-                    buf.movq_load(0, RBX, vslot(rn));
-                    buf.movq_load(1, RBX, vslot(rm));
-                    match op {
-                        4 => buf.mulsd(0, 1),
-                        5 => buf.addsd(0, 1),
-                        6 => buf.subsd(0, 1),
-                        7 => buf.divsd(0, 1),
-                        _ => unreachable!(),
+                    if sz {
+                        buf.movq_load(0, RBX, vslot(rn));
+                        buf.movq_load(1, RBX, vslot(rm));
+                        match op {
+                            4 => buf.mulsd(0, 1),
+                            5 => buf.addsd(0, 1),
+                            6 => buf.subsd(0, 1),
+                            7 => buf.divsd(0, 1),
+                            _ => unreachable!(),
+                        }
+                        buf.movq_store(RBX, vslot(rd), 0);
+                    } else {
+                        // single-precision (32-bit scalar FP): operands live in
+                        // the low 4 bytes of each slot.
+                        let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                        buf.mov_load32(RAX, RBX, f(rn));
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.mov_load32(RAX, RBX, f(rm));
+                        buf.movd_xmm_r32(1, RAX);
+                        // emit scalar single (F3 0F 5x /r): SrcDst=xmm0, rm=xmm1
+                        let opcode: u8 = match op {
+                            4 => 0x59, // mulss
+                            5 => 0x58, // addss
+                            6 => 0x5c, // subss
+                            7 => 0x5e, // divss
+                            _ => unreachable!(),
+                        };
+                        buf.bytes.extend_from_slice(&[0xf3, 0x0f, opcode, 0xc1]);
+                        buf.movd_r32_xmm(RAX, 0);
+                        buf.mov_store32(RBX, f(rd), RAX);
                     }
-                    buf.movq_store(RBX, vslot(rd), 0);
                 }
                 _ => return Err(format!("FpScalar op {op} not implemented")),
             }
@@ -833,6 +878,20 @@ pub fn translate(
                 1 => buf.roundsd(0, 0, 0x01), // frintm: round toward -inf (floor)
                 2 => buf.roundsd(0, 0, 0x02), // frintp: round toward +inf (ceil)
                 4 => buf.roundsd(0, 0, 0x03), // (frintz: toward zero) — reserved mapping
+                5 => {
+                    // fabs d{rd}, d{rn}: clear the sign bit on the FP bit-pattern.
+                    buf.movq_r64_xmm(RAX, 0);
+                    buf.mov_ri64(RCX, 0x7fff_ffff_ffff_ffff);
+                    buf.and_rr64(RAX, RCX);
+                    buf.movq_xmm_r64(0, RAX);
+                }
+                6 => {
+                    // fneg d{rd}, d{rn}: flip the sign bit on the FP bit-pattern.
+                    buf.movq_r64_xmm(RAX, 0);
+                    buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
+                    buf.xor_rr64(RAX, RCX);
+                    buf.movq_xmm_r64(0, RAX);
+                }
                 _ => return Err(format!("FpUnary op {op} not implemented")),
             }
             buf.movq_store(RBX, vslot(rd), 0);
@@ -912,18 +971,54 @@ pub fn translate(
             rn,
             to_double,
             sf,
+            unsigned,
         } => {
-            // scvtf -> cvtsi2{sd|ss}: load the integer Rn, widen per `sf`, and
-            // store the float into v{rd} (low 8B for double, low 4B for single).
+            // scvtf/ucvtf -> cvtsi2{sd|ss}: load the integer Rn, widen per `sf`,
+            // and store the float into v{rd} (low 8B for double, low 4B for single).
+            // For unsigned (ucvtf) with a 64-bit source, cvtsi2sd is exact only up
+            // to 2^63-1, so we apply the standard +2^64 correction when the sign
+            // bit of the 64-bit value is set (see Ucvtf2d). 32-bit-unsigned fits
+            // exactly in f64 so no correction is needed there.
             let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
-            ldg(buf, RAX, rn as u32); // integer src (already sign-correct in x64)
-            if to_double {
-                buf.cvtsi2sd(0, sf, RAX);
-                buf.movq_store(RBX, vslot, 0); // low 8B = double value
+            if unsigned && sf {
+                // RDX = u64 source
+                ldg(buf, RDX, rn as u32);
+                if to_double {
+                    buf.cvtsi2sd(0, true, RDX); // xmm0 = (double)(int64)u
+                    buf.test_rr64(RDX, RDX);
+                    let jns = buf.jcc_rel32(0x89); // JNS: skip correction if u < 2^63
+                    buf.mov_ri64(RCX, 0x43f0_0000_0000_0000); // 2^64 (double bits)
+                    buf.movq_xmm_r64(1, RCX);
+                    buf.addsd(0, 1);
+                    let end = buf.len();
+                    let disp = (end as i64 - (jns as i64 + 4)) as i32;
+                    buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
+                    buf.movq_store(RBX, vslot, 0);
+                } else {
+                    // single result from 64-bit unsigned: (float)u = (double)u then cvtss
+                    buf.cvtsi2sd(0, true, RDX);
+                    buf.test_rr64(RDX, RDX);
+                    let jns = buf.jcc_rel32(0x89);
+                    buf.mov_ri64(RCX, 0x43f0_0000_0000_0000);
+                    buf.movq_xmm_r64(1, RCX);
+                    buf.addsd(0, 1);
+                    let end = buf.len();
+                    let disp = (end as i64 - (jns as i64 + 4)) as i32;
+                    buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
+                    buf.cvtsd2ss(0, 0); // float from the double
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, vslot, RAX);
+                }
             } else {
-                buf.cvtsi2ss(0, sf, RAX);
-                buf.movd_r32_xmm(RAX, 0); // RAX = low 32 bits of the single
-                buf.mov_store32(RBX, vslot, RAX); // low 4B = single value
+                ldg(buf, RAX, rn as u32);
+                if to_double {
+                    buf.cvtsi2sd(0, sf, RAX);
+                    buf.movq_store(RBX, vslot, 0);
+                } else {
+                    buf.cvtsi2ss(0, sf, RAX);
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, vslot, RAX);
+                }
             }
             Ok(())
         }
@@ -953,15 +1048,25 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::Fcmp { rn, rm } => {
-            // fcmp d{rn}, d{rm}: compare and set guest NZCV from the FP relation.
-            // Use comisd (CF=1 if a<b, ZF=1 if equal/unordered, PF=1 if unordered);
-            // store_nzcv_fp maps those to the AArch64 NZCV exactly (Z=ZF, V=PF,
-            // C=(!CF)|PF, N=0) so the branch/select that follows sees the right bits.
+        Inst::Fcmp { rn, rm, sz } => {
+            // fcmp d{rn}, d{rm} / fcmp s{rn}, s{rm}: compare and set guest NZCV.
+            // Use comisd/comiss (CF=1 if a<b, ZF=1 if equal/unordered, PF=1 if
+            // unordered); store_nzcv_fp maps to AArch64 NZCV.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            buf.movq_load(0, RBX, vslot(rn)); // xmm0 = d{rn}
-            buf.movq_load(1, RBX, vslot(rm)); // xmm1 = d{rm}
-            buf.comisd(0, 1); // flags: a vs b  (a=xmm0=rn, b=xmm1=rm)
+            if sz {
+                buf.movq_load(0, RBX, vslot(rn));
+                buf.movq_load(1, RBX, vslot(rm));
+            } else {
+                buf.mov_load32(RAX, RBX, vslot(rn));
+                buf.movd_xmm_r32(0, RAX);
+                buf.mov_load32(RAX, RBX, vslot(rm));
+                buf.movd_xmm_r32(1, RAX);
+            }
+            if sz {
+                buf.comisd(0, 1);
+            } else {
+                buf.comiss(0, 1);
+            }
             store_nzcv_fp(buf);
             Ok(())
         }
@@ -1100,6 +1205,23 @@ pub fn translate(
                             }
                             Ok(())
                         }
+                        Inst::ScalarUcvtf { rd, rn } => {
+                            // ucvtf Dd, Dn : read Dn's low 64 bits as an unsigned integer
+                            // and write the double to Dd. Honest u64->f64 (Ucvtf2d lane).
+                            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                            buf.mov_load64(RDX, RBX, slot(rn));
+                            buf.cvtsi2sd(0, true, RDX);
+                            buf.test_rr64(RDX, RDX);
+                            let jns = buf.jcc_rel32(0x89); // JNS (sign clear -> skip correction)
+                            buf.mov_ri64(RCX, 0x43f0_0000_0000_0000); // 2^64 as double
+                            buf.movq_xmm_r64(1, RCX);
+                            buf.addsd(0, 1);
+                            let end = buf.len();
+                            let disp = (end as i64 - (jns as i64 + 4)) as i32;
+                            buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
+                            buf.movq_store(RBX, slot(rd), 0);
+                            Ok(())
+                        }
                         Inst::Simd2dFp { rd, rn, rm, op } => {
                             // 2xdouble lanewise FP: op Vd.2D, Vn.2D, Vm.2D. For each 64-bit lane:
                             //   xmm0 = Vn lane; xmm1 = Vm lane; xmm0 op xmm1; store to Vd lane.
@@ -1188,11 +1310,83 @@ pub fn translate(
                                                                                                                                                                                         buf.xor_rr64(RCX, RDI); // RCX = ~Vm
                                                                                                                                                                                         buf.and_rr64(RDX, RCX); // RDX = Vd & ~Vm
                                                                                                                                                                                         buf.or_rr64(RAX, RDX); // (Vn&Vm)|(Vd&~Vm)
-                                                                                                                                                                                        buf.mov_store64(RBX, slot(rd) + off, RAX);
-                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                                                                                buf.mov_store64(RBX, slot(rd) + off, RAX);
+                                                                                                                                                                                                                                                                                                                                                                        }
                                                                                                                                                                                     Ok(())
                                                                                                                                                                                 }
-                                                                                                                                                                                Inst::LdStPair {
+                                                                                                                                                                                Inst::SimdExt { rd, rn, rm, imm, q } => {
+                                                                                                                                                                                    // ext Vd, Vn, Vm, #imm: Vd = the 128(64)-bit window of the
+                                                                                                                                                                                    // concatenation {Vn(high), Vm(low)} starting at byte `imm`.
+                                                                                                                                                                                    // concat words W[0..3] = Vm.lo, Vm.hi, Vn.lo, Vn.hi (byte
+                                                                                                                                                                                    // addresses 0..31). result.lo = bytes imm..imm+7 of concat,
+                                                                                                                                                                                    // result.hi = bytes imm+8..imm+15 (16B form). For 8B (Q=0)
+                                                                                                                                                                                    // only the low 64 bits are produced and the high lane is 0.
+                                                                                                                                                                                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                                                                                    // Emit 64-bit field of concat starting at byte `start` into `dst`.
+                                                                                                                                                                                    let emit_bytes64 = |buf: &mut crate::x86::CodeBuf, dst: u8, start: usize| {
+                                                                                                                                                                                        let wi = start / 8;
+                                                                                                                                                                                        let sh = (start % 8) as u8; // bytes -> bits
+                                                                                                                                                                                        if sh == 0 {
+                                                                                                                                                                                            // aligned: 8 bytes directly from one concat word
+                                                                                                                                                                                            match wi {
+                                                                                                                                                                                                0 => buf.mov_load64(dst, RBX, slot(rm)),
+                                                                                                                                                                                                1 => buf.mov_load64(dst, RBX, slot(rm) + 8),
+                                                                                                                                                                                                2 => buf.mov_load64(dst, RBX, slot(rn)),
+                                                                                                                                                                                                _ => buf.mov_load64(dst, RBX, slot(rn) + 8),
+                                                                                                                                                                                            }
+                                                                                                                                                                                        } else {
+                                                                                                                                                                                            // unaligned: (W[wi] >> sh) | (W[wi+1] << (64-sh))
+                                                                                                                                                                                            let (ra0, a_off, rb0, b_off) = match wi {
+                                                                                                                                                                                                0 => (rm, 0, rm, 8),
+                                                                                                                                                                                                1 => (rm, 8, rn, 0),
+                                                                                                                                                                                                _ => (rn, 0, rn, 8),
+                                                                                                                                                                                            };
+                                                                                                                                                                                            buf.mov_load64(RDX, RBX, slot(ra0) + a_off);
+                                                                                                                                                                                            buf.shr_ri8(RDX, sh);
+                                                                                                                                                                                            buf.mov_load64(RDI, RBX, slot(rb0) + b_off);
+                                                                                                                                                                                            buf.shl_ri8(RDI, 64 - sh);
+                                                                                                                                                                                            buf.or_rr64(RDX, RDI);
+                                                                                                                                                                                            buf.mov_rr64(dst, RDX);
+                                                                                                                                                                                        }
+                                                                                                                                                                                    };
+                                                                                                                                                                                    if !q {
+                                                                                                                                                                                        // 8B: result.lo = bytes imm..imm+7 of concat; hi lane zeroed.
+                                                                                                                                                                                        emit_bytes64(buf, RAX, imm as usize);
+                                                                                                                                                                                        buf.mov_store64(RBX, slot(rd), RAX);
+                                                                                                                                                                                        buf.mov_ri64(RDI, 0);
+                                                                                                                                                                                        buf.mov_store64(RBX, slot(rd) + 8, RDI);
+                                                                                                                                                                                    } else {
+                                                                                                                                                                                        emit_bytes64(buf, RAX, imm as usize);
+                                                                                                                                                                                        emit_bytes64(buf, RCX, (imm as usize) + 8);
+                                                                                                                                                                                        buf.mov_store64(RBX, slot(rd), RAX);
+                                                                                                                                                                                        buf.mov_store64(RBX, slot(rd) + 8, RCX);
+                                                                                                                                                                                    }
+                                                                                                                                                                                    Ok(())
+                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                    Inst::SimdLaneGp { rd, rn, esize, index, sign, wide } => {
+                                                                                                                                                                                                                                                                                                        // mov/umov/smov Wd|Xd, Vn.T[index]: copy one element
+                                                                                                                                                                                                                                                                                                        // (esize bytes) from the 16-byte vector slot of Vn at byte
+                                                                                                                                                                                                                                                                                                        // offset index*esize into GPR rd, (sign|zero) extended.
+                                                                                                                                                                                                                                                                                                        // Slot layout: [D0@+0..+7][D1@+8..+15]; lane i lives at
+                                                                                                                                                                                                                                                                                                        // index*esize (e.g. s[1] = +4, d[0]=+0, d[1]=+8).
+                                                                                                                                                                                                                                                                                                        let off = (index as i32) * (esize as i32);
+                                                                                                                                                                                                                                                                                                        let vbase = crate::jit::VECTOR_BASE + (rn as i32) * 16 + off;
+                                                                                                                                                                                                                                                                                                        if esize == 8 {
+                                                                                                                                                                                                                                                                                                            buf.mov_load64(RAX, RBX, vbase);
+                                                                                                                                                                                                                                                                                                            stg(buf, rd as u32, RAX);
+                                                                                                                                                                                                                                                                                                        } else {
+                                                                                                                                                                                                                                                                                                                        // esize == 4 (.s). umov/smov: load 32-bit at byte offset
+                                                                                                                                                                                                                                                                                                                        // index*esize (== vbase); zero- or sign-extend to the 64-bit
+                                                                                                                                                                                                                                                                                                                        // guest slot (mov_load32 zero-extends; movsxd sign-extends).
+                                                                                                                                                                                                                                                                                                                        buf.mov_load32(RAX, RBX, vbase);
+                                                                                                                                                                                                                                                                                                                        if sign {
+                                                                                                                                                                                                                                                                                                                            buf.movsxd_r64_r32(RAX, RAX);
+                                                                                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                                                                                        stg(buf, rd as u32, RAX);
+                                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                    Ok(())
+                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                    Inst::LdStPair {
             rt,
             rt2,
             rn,

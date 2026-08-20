@@ -409,6 +409,13 @@ impl CodeBuf {
             self.b(0x2F);
             self.b(modrm(3, a & 7, b & 7));
         }
+        /// comiss xmm_a, xmm_b  (0F 2F /r) — single-precision order compare.
+    pub fn comiss(&mut self, a: u8, b: u8) {
+        self.b(rex(false, a, 0, b));
+        self.b(0x0F);
+        self.b(0x2F);
+        self.b(modrm(3, a & 7, b & 7));
+    }
         /// cvttsd2si r64, xmm  (F2 48 0F 2C /r) — truncate toward zero
     pub fn cvttsd2si(&mut self, rd: u8, xmm: u8) {
         self.b(0xF2);

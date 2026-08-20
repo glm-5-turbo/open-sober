@@ -183,10 +183,11 @@ pub enum Inst {
         },
         // ---- FP convert from signed integer (scvtf: Wn|Xn -> Sd|Dd) ----
         Scvtf {
-            rd: u8,        // destination FP reg
-            rn: u8,        // source integer reg
+            rd: u8,          // destination FP reg
+            rn: u8,          // source integer reg
             to_double: bool, // true => Dd (double), false => Sd (single)
-            sf: bool,      // true => 64-bit source reg (Rn), false => 32-bit (Wn)
+            sf: bool,        // true => 64-bit source reg (Rn), false => 32-bit (Wn)
+            unsigned: bool,  // true => ucvtf (unsigned int), false => scvtf (signed)
         },
        // ---- FMOV between a core register and a scalar FP register ----
        //   FMOV Dd,Xn 0x9E670000 (write GPR to low 64 of Dd, zero hi)
@@ -223,9 +224,10 @@ pub enum Inst {
                            },
                            // ---- scalar FP compare to NZCV (fcmp Dn, Dm / fcmp Dn, #0.0) ----
                            Fcmp {
-                               rn: u8, // first operand (source fp reg / d-reg)
-                               rm: u8, // second fp reg (0 for the #0.0 form)
-                           },
+                                   rn: u8, // first operand (source fp reg / d-reg)
+                                   rm: u8, // second fp reg (0 for the #0.0 form)
+                                   sz: bool, // true = double (fcmp Dn,Dm), false = single (fcmp Sn,Sm)
+                               },
     // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
         FcsSel {
             rd: u8,   // destination FP reg
@@ -252,7 +254,11 @@ pub enum Inst {
     // in Vd. Gate (insn & 0xffe0_fc00)==0x6e60d800 (verified vs real decir0x6e61d842
     // and compiler 0x6e61dbff; excludes scvtf/scalar/compare forms).
     Ucvtf2d { rd: u8, rn: u8 },
-    // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
+    // ---- scalar unsigned int64->double: ucvtf Dd, Dn (int in Dn -> double) ----
+    // Gate (insn & 0xffe0_fc00) == 0x7e60_d800, disjoint from the vector Ucvtf2d
+    // (0x6e60_d800, bit23 differs), Fabd (0x7ee0_d400) and fmov (0x1e604000).
+    // Reads Dn's low 64 bits as an unsigned integer, writes the double to Dd.
+    ScalarUcvtf { rd: u8, rn: u8 },
     // Both 64-bit lanes of Vd get Vn's selected lane. Gate
     // (insn & 0xffff_fc00)==0x4e180400 (the Q=1 vector dup-d; distinct from the
     // 0x6e18:0x4e18 ins-variant). index in bit 16 (`[.../inst]` D[0] vs D[1]).
@@ -280,6 +286,21 @@ pub enum Inst {
     // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B bit-select, real 0x6ea11c40;
     // distinct from orr16 0x4ea01c00 by bit31). Out = (Vn & Vm) | (Vd & ~Vm).
     SimdBit { rd: u8, rn: u8, rm: u8 },
+    // ---- SIMD extract immediate: ext Vd.16B/Vd.8B, Vn., Vm., #imm ----
+    // Byte-shift extract. Gate (insn & 0xffe0_0400) == 0x6e000000 (16B, Q=1) /
+    // 0x2e000000 (8B, Q=0); imm = bits[15:11] (byte count, 0..15 for 16B,
+    // 0..7 for 8B). Semantics: bytes of Vd = the 128(64)-bit window of the
+    // concatenation {Vn(high), Vm(low)} starting at byte `imm`. For Vn==Vm and
+    // imm=8 this is the classic 64-bit half-swap. `q` = has Q (16B) set.
+    SimdExt { rd: u8, rn: u8, rm: u8, imm: u8, q: bool },
+        // ---- SIMD lane extract to GPR: mov/umov/smov Wd,Xd, Vn.T[idx] ----
+    // Copies an element (esize bytes) of vector lane into a GPR, zero- (umov/mov)
+    // or sign- (smov) extended. Gate (insn & 0xffe0_0c00) in {0x0e000c00 (Wd dest),
+    // 0x4e000c00 (Xd dest)}. esize via imm5 trailing-zeros (p=ctz(imm5)+1 gives
+    // esize=1<<(p-1)); index = imm5>>p. sign flag = (bit12 cleared). Distinct
+    // real ops (orr16 0x4ea41c40, mul 0x0ea09c00, InsDv1D0 0x4e18400) verified
+    // not to fall under this mask.
+    SimdLaneGp { rd: u8, rn: u8, esize: u8, index: u8, sign: bool, wide: bool },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -329,6 +350,13 @@ pub enum Inst {
             ra: u8, // MADD/MSUB accumulate reg; 0 for DIV
             sf: bool,
         },
+    // ---- count leading zeros / sign bits: clz Wd,Xd,Rn ; cls Wd,Xd,Rn ----
+    ClzCls {
+        rd: u8,
+        rn: u8,
+        sf: bool,     // 64-bit operand
+        cls: bool,    // true = CLS (count leading sign bits), false = CLZ
+    },
     // ---- HINT / PAC NOP (nop, yield, esb, csdb, paciasp, autiasp, bti, ...) ----
     // Dealt with as a no-op for execution (PAC is ignored in the guest).
     Hint,
@@ -650,6 +678,25 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
+    // ---- count leading zeros / leading sign bits: clz Wd,Xd, Rn ; cls Wd,Xd, Rn ----
+    // clz W: mask 0x5ac0_1000, clz X: 0xdac0_1000 ; cls W: 0x5ac0_1400,
+    // cls X: 0xdac0_1400 (mask 0xffff_fc00). sf=bit31. rn=bits5-9, rd=bits0-4.
+    {
+        let zz = insn & 0xffff_fc00;
+        let clz_cls = match zz {
+            0x5ac0_1000 => Some((false, false)), // clz W
+            0xdac0_1000 => Some((true, false)),  // clz X
+            0x5ac0_1400 => Some((false, true)),  // cls W
+            0xdac0_1400 => Some((true, true)),   // cls X
+            _ => None,
+        };
+        if let Some((sf, is_cls)) = clz_cls {
+            let rd = b(insn, 0, 4) as u8;
+            let rn = b(insn, 5, 9) as u8;
+            return Inst::ClzCls { rd, rn, sf, cls: is_cls };
+        }
+    }
+
     // ---- logical (shifted register): AND/ORR/EOR/BIC/ORN/EON ----
     // top byte: 0x0a xx-family; opc = bits[30:29], N = bit21
     if matches!(
@@ -887,10 +934,10 @@ pub fn decode(insn: u32) -> Inst {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         let op = match insn & !(((0x1f) as u32) << 16 | ((0x1f) as u32) << 5 | 0x1f) {
-            0x1e60_0800 => Some(4), // fmul
-            0x1e60_2800 => Some(5), // fadd
-            0x1e60_3800 => Some(6), // fsub
-            0x1e60_1800 => Some(7), // fdiv
+            0x1e60_0800 | 0x1e20_0800 => Some(4), // fmul
+            0x1e60_2800 | 0x1e20_2800 => Some(5), // fadd
+            0x1e60_3800 | 0x1e20_3800 => Some(6), // fsub
+            0x1e60_1800 | 0x1e20_1800 => Some(7), // fdiv
             _ => None,
         };
         if let Some(op) = op {
@@ -906,6 +953,10 @@ pub fn decode(insn: u32) -> Inst {
         let unary = match insn & 0xffff_fc00 {
             0x1e61_c000 => Some(0), // fsqrt d{rd}, d{rn}
             0x1e65_4000 => Some(1), // frintm (round toward -inf) = floor
+            0x1e64_8000 => Some(2), // frintp (round toward +inf) = ceil
+            0x1e65_c000 => Some(3), // frintz (round toward zero)
+            0x1e60_c000 => Some(5), // fabs d{rd}, d{rn} (clear sign)
+            0x1e61_4000 => Some(6), // fneg d{rd}, d{rn} (flip sign)
             _ => None,
         };
         if let Some(op) = unary {
@@ -938,10 +989,13 @@ pub fn decode(insn: u32) -> Inst {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         // Accept the shift aliases (lsr/asr/lsl) plus the general extract aliases
-        // (ubfx/sbfx/uxb/sxtb/ughl. any immr<=imms) — BFM-insert (bfi/bfc) left later.
+        // (ubfx/sbfx/uxb/sxtb/ughl. any immr<=imms) AND the UBFIZ insert form
+        // (immr>imms => zero-extend+shift, all translate BitField). BFM-insert
+        // (bfi/bfc) is 0xb3/0x33, handled in the block below.
         let is_valid = (imms == bits - 1) // LSR/ASR
             || (immr == (imms + 1) % bits) // LSL
-            || (immr <= imms); // UBFX/SBFX + zero/sign-extend
+            || (immr <= imms) // UBFX/SBFX + zero/sign-extend
+            || (immr > imms); // UBFIZ/ASR-or-UBFIZ insert (0xd3/0x53, immr>imms)
         if is_valid && (rd != 31) {
             return Inst::BitField { rd, rn, immr, imms, sf, arith };
         }
@@ -1014,23 +1068,30 @@ pub fn decode(insn: u32) -> Inst {
         }
     }
 
-        // ---- FP convert from signed integer (scvtf): Wn|Xn -> Dd (double) ----
-        // `scvtf d0, w0 = 0x1e620000`. The int->FP family is at base 0x1e60_0000
-        // (double dest) / 0x1e22_0000 (single); FP->int `fcvt*` sits at the SAME
-        // 0x1e60_0000 base but has bit17=0 (fcvtns=0x1e600000, fcvtzs=0x1e780000,
-        // fcvtas=0x1e7a0000), whereas `scvtf` sets bit17 — so require bit17.
-        if (insn & 0x7ff0_fc00) == 0x1e60_0000 && (insn & 0x20000) != 0 {
-            let sf = (insn >> 31) & 1 == 1; // 1 => 64-bit integer src (Xn)
-            let to_double = true;
-            let rn = ((insn >> 5) & 0x1f) as u8;
-            let rd = (insn & 0x1f) as u8;
-            return Inst::Scvtf {
-                rd,
-                rn,
-                to_double,
-                sf,
-            };
-        }
+        // ---- FP convert from signed/unsigned integer (scvtf/ucvtf: Wn|Xn -> Sd|Dd) ----
+            // `scvtf d0, w0 = 0x1e620000`. The scalar int->FP family gate
+            // `(insn & 0xf7be_fc00)` resolves to {0x16220000 (W source), 0x96220000 (X)}
+            // for both signed and unsigned, and is disjoint from fmov/fcvt/fcmp/fmul
+            // (verified vs all 8 encodings + neighbours). Fields: X-src = bit31,
+            // unsigned (ucvtf) = bit16, double-dest = bit22. FP->int fcvt* (bit17=0)
+            // and fmov are handled above, so this family is unambiguous.
+            {
+                let gi = insn & 0xf7be_fc00;
+                if gi == 0x1622_0000 || gi == 0x9622_0000 {
+                    let sf = (insn >> 31) & 1 == 1; // 1 => 64-bit integer src (Xn)
+                    let to_double = (insn >> 22) & 1 == 1; // 1 => Dd (double), 0 => Sd
+                    let unsigned = (insn >> 16) & 1 == 1; // ucvtf (unsigned)
+                    let rn = ((insn >> 5) & 0x1f) as u8;
+                    let rd = (insn & 0x1f) as u8;
+                    return Inst::Scvtf {
+                        rd,
+                        rn,
+                        to_double,
+                        sf,
+                        unsigned,
+                    };
+                }
+            }
 
                 // ---- FMOV scalar immediate (fmov Dd, #imm) / (fmov Sd, #imm) ----
                 // Double imm family `0x1e_XX_1...` (imm8 in bits 13:20, `0x1000`
@@ -1050,23 +1111,24 @@ pub fn decode(insn: u32) -> Inst {
                     };
                 }
                 // ---- scalar FP register-to-register move: fmov Dd,Dn / fmov Sd,Sn ----
-                // Double form = 0x1e60_4000, single form = 0x1e20_4000 (sz bit selects).
-                if (insn & 0xffff_f000) == 0x1e60_4000 {
-                    let sz = (insn >> 22) & 1 == 1; // 1 => double (d), 0 => single (s)
-                    let rn = ((insn >> 5) & 0x1f) as u8;
-                    let rd = (insn & 0x1f) as u8;
-                    return Inst::FmovFp { rd, rn, sz };
+                    // Double form = 0x1e60_4000, single form = 0x1e20_4000 (sz bit22 selects).
+                    if (insn & 0xffff_f000) == 0x1e60_4000 || (insn & 0xffff_f000) == 0x1e20_4000 {
+                        let sz = (insn >> 22) & 1 == 1; // 1 => double (d), 0 => single (s)
+                        let rn = ((insn >> 5) & 0x1f) as u8;
+                        let rd = (insn & 0x1f) as u8;
+                        return Inst::FmovFp { rd, rn, sz };
                 }
-                // ---- scalar FP compare to NZCV: fcmp Dn, Dm (dbl) / fcmp Dn, #0.0 ----
-                    // Gate `(insn & 0xffe0_fc00) == 0x1e602000` masks out rn(5-9)/rm(16-20)/rd(0-4)
-                    // and keeps the fixed `0x...20...` + top bytes, so high rm registers (bit16-20
-                    // feeding into the base nibble, e.g. fcmp d6,d16 = 0x1e7020c0) still resolve.
-                    // rm==0 covers the `fcmp Dn, #0.0` form (ignored operand => compare with 0.0).
-                    if (insn & 0xffe0_fc00) == 0x1e602000 {
+                // ---- scalar FP compare to NZCV: fcmp Dn, Dm / fcmp Sn, Sm ----
+                    // Double gate (insn & 0xffe0_fc00)==0x1e602000, single ==0x1e202000 (bit22
+                    // selects). Masks rn(5-9)/rm(16-20)/rd(0-4); rm==0 covers `fcmp Dn,#0.0`.
+                    let fcmp_sz = (insn & 0xffe0_fc00) == 0x1e60_2000
+                        || (insn & 0xffe0_fc00) == 0x1e20_2000;
+                    if fcmp_sz {
+                        let sz = (insn & 0x400000) != 0; // 1 => double (0x1e6...), 0 => single
                         let rn = ((insn >> 5) & 0x1f) as u8;
                         let rm = ((insn >> 16) & 0x1f) as u8;
-                        return Inst::Fcmp { rn, rm };
-                            }
+                        return Inst::Fcmp { rn, rm, sz };
+                    }
                             // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
                             // Gate (insn & 0xffe0_fc00) == 0x7ee0_d400 (scalar double; disjoint from
                             // fadd/fmul/fdiv/fcmp/scvtf). rn=bits5-9, rm=bits16-20, rd=bits0-4.
@@ -1154,6 +1216,14 @@ pub fn decode(insn: u32) -> Inst {
                                                 let rd = (insn & 0x1f) as u8;
                                                 return Inst::Ucvtf2d { rd, rn };
                                             }
+                                            // ---- scalar unsigned int64->double: ucvtf Dd, Dn ----
+                                            // Gate (insn & 0xffe0_fc00) == 0x7e60_d800 (scalar, disjoint from
+                                            // vector Ucvtf2d 0x6e60_d800 by bit23). Reads Dn low 64 as u64 -> double.
+                                            if (insn & 0xffe0_fc00) == 0x7e60_d800 {
+                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                let rd = (insn & 0x1f) as u8;
+                                                return Inst::ScalarUcvtf { rd, rn };
+                                            }
                                             // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
                                                 // Gate `(insn & 0xffff_fc00)==0x4e180400`: the Q=1 vector `dup` (element from
                                                 // the same vector), distinguished from the GPR-source `dup Vd.2D,Xn`
@@ -1211,7 +1281,51 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                             let rd = (insn & 0x1f) as u8;
                                                                                                                                             return Inst::SimdBit { rd, rn, rm };
                                                                                                                                         }
-                                                                                                        // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
+                                                                                                        // ---- SIMD extract immediate: ext Vd.16B/Vd.8B, Vn., Vm., #imm ----
+                                                                                                        // Gate (insn & 0xffe0_0400) == 0x6e000000 (16B, Q=1) / 0x2e000000
+                                                                                                        // (8B, Q=0). Verified disjoint from Ucvtf2d (0x6e60d800), SimdCmhi
+                                                                                                        // (0x6ea03400), SimdBit (0x6ea01c00), Simd2dFp (0x6e60fc00),
+                                                                                                        // InsD1D0 (0x6e180400), and the orr16/mul gates. imm = bits[15:11]
+                                                                                                        // (byte count). Real: ext v1.16b,v0.16b,v0.16b,#8 = 0x6ee004001.
+                                                                                                        {
+                                                                                                            let sxe = insn & 0xffe0_0400;
+                                                                                                            if sxe == 0x6e00_0000 || sxe == 0x2e00_0000 {
+                                                                                                                let q = sxe == 0x6e00_0000;
+                                                                                                                let imm = ((insn >> 11) & 0x1f) as u8;
+                                                                                                                // imm must fit the vector: 0..15 (16B) / 0..7 (8B).
+                                                                                                                let hi = if q { 15u8 } else { 7u8 };
+                                                                                                                if imm <= hi {
+                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                    let rd = (insn & 0x1f) as u8;
+                                                                                                                    return Inst::SimdExt { rd, rn, rm, imm, q };
+                                                                                                                }
+                                                                                                            }
+                                                                                                        }
+                                                                                                        // ---- SIMD lane extract to GPR: mov/umov/smov Wd,Xd, Vn.T[idx] ----
+                                                                                                        // Gate (insn & 0xffe0_0c00) in {0x0e000c00 (Wd dest), 0x4e000c00 (Xd dest)}.
+                                                                                                            // esize from imm5 trailing-zeros: p=ctz(imm5)+1 => esize=1<<(p-1);
+                                                                                                            // index = imm5 >> p. sign flag = bit12 clear (SMOV). Verified disjoint from
+                                                                                                            // orr16 (0x4ea41c40), mul (0x0ea09c00), cmhi, bit, InsDv1D0 (0x4e18400),
+                                                                                                            // dup, ucvtf, and the add lane form (they don't mask to the 0x0c00 residue).
+                                                                                                            {
+                                                                                                                let gt = insn & 0xffe0_0c00;
+                                                                                                                if (gt == 0x0e00_0c00 || gt == 0x4e00_0c00) {
+                                                                                                                    let imm5 = (insn >> 16) & 0x1f;
+                                                                                                                    let p = 1u32 + imm5.trailing_zeros();
+                                                                                                                    let esize = (1u8 << (p - 1)) as u8; // 1,2,4,8
+                                                                                                                    if esize == 4 || esize == 8 {
+                                                                                                                        let index = (imm5 >> p) as u8;
+                                                                                                                        let wide = gt == 0x4e00_0c00;
+                                                                                                                        // sign (SMOV) when bit12 clear (umov has it set).
+                                                                                                                        let sign = (insn & 0x1000) == 0;
+                                                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                        let rd = (insn & 0x1f) as u8;
+                                                                                                                        return Inst::SimdLaneGp { rd, rn, esize, index, sign, wide };
+                                                                                                                    }
+                                                                                                                }
+                                                                                                            }
+                                                                                                            // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {
                                                                                                             0x6e60_fc00 => Some(0), // fdiv
@@ -1883,6 +1997,47 @@ mod tests {
                             }
 
                             #[test]
+                            fn clz_scalar_ucvtf_decode() {
+                                // clz w8, w24 = 0x5ac01308 (real libroblox LocalStorage): Clz W, sf=false.
+                                match decode(0x5ac01308) {
+                                    Inst::ClzCls { rd, rn, sf, cls } => {
+                                        assert_eq!(rd, 8);
+                                        assert_eq!(rn, 24);
+                                        assert!(!sf);
+                                        assert!(!cls);
+                                    }
+                                    other => panic!("clz w8,w24 -> {other:?}"),
+                                }
+                                // clz x9, x2 = 0xdac01400-ish: X (sf=true) form. (0xdac01009)
+                                match decode(0xdac01009) {
+                                    Inst::ClzCls { rd, rn, sf, cls } => {
+                                        assert_eq!(rd, 9);
+                                        assert_eq!(rn, 0);
+                                        assert!(sf);
+                                        assert!(!cls);
+                                    }
+                                    other => panic!("clz x9,x0 -> {other:?}"),
+                                }
+                                // cls w8, w24 = 0x5ac01708 (signs): cls flag set.
+                                match decode(0x5ac01708) {
+                                    Inst::ClzCls { cls, .. } => {
+                                        assert!(cls);
+                                    }
+                                    other => panic!("cls -> {other:?}"),
+                                }
+                                // scalar ucvtf d0, d1 = 0x7e61d820 (real libroblox audio mix): ScalarUcvtf.
+                                match decode(0x7e61d820) {
+                                    Inst::ScalarUcvtf { rd, rn } => {
+                                        assert_eq!(rd, 0);
+                                        assert_eq!(rn, 1);
+                                    }
+                                    other => panic!("ucvtf d0,d1 -> {other:?}"),
+                                }
+                                // vector ucvtf v2.2d,v2.2d must NOT decode as scalar.
+                                assert!(!matches!(decode(0x6e61d842), Inst::ScalarUcvtf { .. }));
+                            }
+
+                            #[test]
                             fn svc_decode() {
                                 // svc #0 = 0xd4000001 ; svc #0x7a = 0xd4000f41
                                 match decode(0xd4000001) {
@@ -1968,18 +2123,20 @@ mod logical_imm_regressions {
         }
         // fcmp d7, d6 = 0x1e6620e0 (real libroblox audio loop) => Fcmp sets NZCV.
         match decode(0x1e6620e0) {
-            Inst::Fcmp { rn, rm } => {
+            Inst::Fcmp { rn, rm, sz } => {
                 assert_eq!(rn, 7);
                 assert_eq!(rm, 6);
+                assert!(sz);
             }
             other => panic!("fcmp d7,d6 -> {other:?}"),
         }
         // fcmp d6, d16 = 0x1e7020c0 (real libroblox; high rm reg folded into the
         // base nibble) → must still decode as Fcmp with rm=16.
         match decode(0x1e7020c0) {
-            Inst::Fcmp { rn, rm } => {
+            Inst::Fcmp { rn, rm, sz } => {
                 assert_eq!(rn, 6);
                 assert_eq!(rm, 16);
+                assert!(sz);
             }
             other => panic!("fcmp d6,d16 -> {other:?}"),
         }
@@ -2082,6 +2239,39 @@ mod logical_imm_regressions {
                 assert_eq!(rm, 1);
             }
             other => panic!("bit v0.16b,v2.16b,v1.16b -> {other:?}"),
+        }
+        // ext v1.16b, v0.16b, v0.16b, #8 (real libroblox boot stop) => SimdExt 16B imm=8.
+        match decode(0x6e004001) {
+            Inst::SimdExt { rd, rn, rm, imm, q } => {
+                assert_eq!(rd, 1);
+                assert_eq!(rn, 0);
+                assert_eq!(rm, 0);
+                assert_eq!(imm, 8);
+                assert!(q);
+            }
+            other => panic!("ext v1.16b,v0.16b,v0.16b,#8 -> {other:?}"),
+        }
+        // ext v2.16b, v3.16b, v4.16b, #15 (max 16B imm) => SimdExt.
+        match decode(0x6e047862) {
+            Inst::SimdExt { rd, rn, rm, imm, q } => {
+                assert_eq!(rd, 2);
+                assert_eq!(rn, 3);
+                assert_eq!(rm, 4);
+                assert_eq!(imm, 15);
+                assert!(q);
+            }
+            other => panic!("ext v2.16b,v3.16b,v4.16b,#15 -> {other:?}"),
+        }
+        // ext v5.8b, v6.8b, v6.8b, #1 (8B form) => SimdExt Q=0.
+        match decode(0x2e0708c5) {
+            Inst::SimdExt { rd, rn, rm, imm, q } => {
+                assert_eq!(rd, 5);
+                assert_eq!(rn, 6);
+                assert_eq!(rm, 7);
+                assert_eq!(imm, 1);
+                assert!(!q);
+            }
+            other => panic!("ext v5.8b,v6.8b,v6.8b,#1 -> {other:?}"),
         }
         match decode(0x1e6c1001) {
             Inst::FmovImm {
