@@ -951,6 +951,16 @@ pub fn decode(insn: u32) -> Inst {
                     (low, 0)
                 }
             }
+            // .2S/.4S: mvni (inverted word lanes) — replicate ~imm8 in 32-bit words
+            (1, 0b0000) => {
+                let lane = (!(imm8 as u64)) & 0xffff_ffff;
+                let low = lane | (lane << 32);
+                if (insn >> 30) & 1 == 1 {
+                    (low, low)
+                } else {
+                    (low, 0)
+                }
+            }
             // .8B (Q=0) / .16B (Q=1): byte lanes
             (0, 0b1110) => {
                 if (insn >> 30) & 1 == 1 {
