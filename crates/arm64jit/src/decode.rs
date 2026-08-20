@@ -175,12 +175,14 @@ pub enum Inst {
     Fabd { rd: u8, rn: u8, rm: u8 },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
-            rd: u8,
-            rn: u8,        // source fp reg
-            mode: u8,      // 0=fcvtzs, 2=fcvtas, 1=fcvtzu, 3=fcvtzu(nearest? unused)
-            sf: bool,      // 64-bit dest
-            unsigned: bool, // fcvtzu: convert to unsigned int (clamp/-to-0 semantics)
-        },
+           rd: u8,
+           rn: u8,     // source fp reg
+           mode: u8,   // 0=fcvtzs(trunc), 1=fcvtzu(uns-trunc), 2=fcvtas(nearest),
+                       // 3=fcvtpu/ps (+inf round), 4=fcvtmu/ms (-inf round)
+           sf: bool,   // 64-bit dest (X)
+           unsigned: bool, // unsigned result (uclamp negatives to 0 / u64 result)
+           src_sng: bool, // source is single (S) not double (D)
+       },
         // ---- FP convert from signed integer (scvtf: Wn|Xn -> Sd|Dd) ----
         Scvtf {
             rd: u8,          // destination FP reg
@@ -1043,6 +1045,7 @@ pub fn decode(insn: u32) -> Inst {
                     mode,
                     sf,
                     unsigned: false,
+                    src_sng: false,
                 };
             }
             return Inst::Unsupported(insn); // single (s) source not modelled yet
@@ -1064,12 +1067,12 @@ pub fn decode(insn: u32) -> Inst {
                 mode: 0, // truncate-toward-zero (fcvtzu always truncates)
                 sf,
                 unsigned: true,
+                src_sng: false,
             };
         }
     }
 
-        // ---- FP convert from signed/unsigned integer (scvtf/ucvtf: Wn|Xn -> Sd|Dd) ----
-            // `scvtf d0, w0 = 0x1e620000`. The scalar int->FP family gate
+    // ---- `scvtf d0, w0 = 0x1e620000`. The scalar int->FP family gate
             // `(insn & 0xf7be_fc00)` resolves to {0x16220000 (W source), 0x96220000 (X)}
             // for both signed and unsigned, and is disjoint from fmov/fcvt/fcmp/fmul
             // (verified vs all 8 encodings + neighbours). Fields: X-src = bit31,
@@ -2073,7 +2076,7 @@ mod logical_imm_regressions {
         assert!(!matches!(decode(0x1e600000), Inst::Scvtf { .. }));
         // fcvtzu x19, d0 = 0x9e790013 (real libroblox) => unsigned FP->u64.
         match decode(0x9e790013) {
-            Inst::FcvtToInt { rd, rn, mode, sf, unsigned } => {
+            Inst::FcvtToInt { rd, rn, mode, sf, unsigned, .. } => {
                 assert_eq!(rd, 19);
                 assert_eq!(rn, 0);
                 assert!(sf); // X dest

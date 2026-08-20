@@ -918,9 +918,17 @@ pub fn translate(
             mode,
             sf,
             unsigned,
+            src_sng,
         } => {
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            buf.movq_load(0, RBX, vslot(rn)); // d-source (low 8B) -> xmm0
+            if src_sng {
+                // single (S) source: load low 32 bits, promote to double in xmm0.
+                buf.mov_load32(RAX, RBX, vslot(rn));
+                buf.movd_xmm_r32(0, RAX);
+                buf.cvtss2sd(0, 0);
+            } else {
+                buf.movq_load(0, RBX, vslot(rn)); // d-source (low 8B) -> xmm0
+            }
             if mode == 2 {
                 buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
             } else if unsigned {
