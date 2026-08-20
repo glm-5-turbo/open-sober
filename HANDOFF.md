@@ -1022,3 +1022,21 @@ can run.
 compile_image), 0ee07fc (LDP/STP).
 **Next slice (3e):** adrp/adr (PC-relative), ORR/EOR/AND-reg + reg-reg MOV/aliases,
 then `adic` integration into libloader `--no-qemu`.
+
+## Session 19: arm64jit — core-ISA coverage (26 tests, drop-QEMU verified)
+
+**Verified this session** (all through the real from-scratch JIT, no QEMU):
+- **Flags + B.cond** (commit 43f7af3): cmp/SUBS/ADDS set flags; b.eq/ne/le/lt/ge/gt/hs/ls/cs/cc
+  translate to x86 jcc. Real `cmp w0,#3; b.le` runs correctly.
+- **LDP/STP pair load/store** (0ee07fc): offset/pre/post index, X and W, verified vs 5 real
+  encodings. Real prologue stp/ldp round-trips regs and restores SP.
+- **BL calls + call-graph compile_image(image, base, entry)** (874800c, 0ee07fc): walks
+  BL/B/CBZ targets, emits into one image buffer, host call + host ret (LR saved). caller()=20.
+- **LogicReg AND/ORR/EOR + mov alias** (dc88106): mov rd,xm; XZR reads as zero; real logic.
+- **ADRP/ADR** (47f7a5f): PC-relative addressing; adrp/add/ldr loads a mapped global (guest==host
+  address when the ELF is placed at its vaddr).
+
+**State: 26 tests green — core AArch64 ISA executes real compiled code on x86-64, no QEMU.
+Next (task 4): integrate into libloader/sober-core — map the Roblox ELF at its vaddr, then
+compile_image(text_segment, vaddr, entry) for _start/JNI_OnLoad. adrp/ldr now resolve because
+guest address == host address when segments are mapped at their ELF vaddr.
