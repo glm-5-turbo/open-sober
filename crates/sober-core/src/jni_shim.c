@@ -766,6 +766,25 @@ int main(int argc, char** argv) {
             Dl_info di;
             if (dladdr(jni_onload_sym, &di)) base = (uintptr_t)di.dli_fbase;
         }
+
+        /* The appended RELA PT_LOAD (vaddr 0x6988000, size 0xc34ea8) is
+         * relocation DATA, not code. QEMU user-mode enforces no NX, so an
+         * indirect call routed into it (mis-applied RELATIVE addend / raw vtable
+         * target) would silently *execute the RELA bytes* and look like a hang.
+         * Force it non-executable so such a call SIGSEGVs at the exact `blr`,
+         * turning the opaque spin into a traceable fault at the real call site. */
+        if (base) {
+            uintptr_t r_start = base + 0x6988000;
+            size_t r_len = 0xc34ea8;
+            /* relocate table is dead after dlopen; deny both read+exec so any
+             * stray call into it faults at the caller instead of executing
+             * RELA bytes as code (QEMU user-mode has no NX, so this is the only
+             * reliable way to make the bogus call crash where we can find it). */
+            errno = 0;
+            int rc = mprotect((void*)r_start, r_len, PROT_NONE);
+            jlog("RELA region protector rc=%d errno=%d (region 0x%lx..0x%lx)",
+                 rc, errno, (unsigned long)r_start, (unsigned long)(r_start + r_len));
+        }
         // Sanity: the base must carry an ELF header; else pull l_addr from the
         // link map we already hold (if any).
         if (base && memcmp((void*)base, "\x7f""ELF", 4) && lm)
