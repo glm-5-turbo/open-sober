@@ -407,8 +407,10 @@ pub enum Inst {
     SimdAddH { rd: u8, rn: u8, rm: u8, sub: bool, q: bool },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
-    // ---- SIMD compare (non:<0>) test: cmtst Vd.T, Vn.T, Vm.T ----
-    SimdCmTest { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
+    // ---- SIMD compare (nonzero) test: cmtst Vd.T, Vn.T, Vm.T ----
+        SimdCmTest { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
+        // ---- SIMD table lookup: tbl Vd.16B/8B, {Vn...}, Vm ---- (1-reg form)
+        Tbl { rd: u8, rn: u8, rm: u8, tbx: bool },
     // ---- SIMD narrowing extract: xtn Vd.T, Vn.U (low halves) ----
     SimdXtn { rd: u8, rn: u8, dst_esize: u8 }, // lanes = 8/dst_esize (Q=0)
     // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
@@ -2083,8 +2085,16 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                                                                                                                     return Inst::SimdCmTest { rd, rn, rm, lanes, esize };
                                                                                                                                                                                                                                 }
                                                                                                                                                                                                                                 return Inst::SimdCmEq { rd, rn, rm, lanes, esize };
-                                                                                                                                                                                                                }
-                                                                                                                                                                                                                                                                                // ---- SIMD narrowing extract: xtn Vd.8b/4h/2s, Vn.(wider) ----
+                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                    // ---- SIMD table lookup: tbl Vd.T, {Vn}, Vm (1-reg form) ----
+                                                                                                                                                                                                                                                                                                    // Gate (insn & 0xffe0_fc00)==0x4e00_0000 (tbl), tbx sets 0x1000.
+                                                                    if (insn & 0xffe0_fc00) == 0x4e00_0000 {
+                                                                        let vn = ((insn >> 5) & 0x1f) as u8;
+                                                                        let vd = (insn & 0x1f) as u8;
+                                                                        let vm = ((insn >> 16) & 0x1f) as u8;
+                                                                        let tbx = (insn & 0x1000) != 0;
+                                                                        return Inst::Tbl { rd: vd, rn: vn, rm: vm, tbx };
+                                                                    }
                                                                                                                                                                                                                                                                                 // Low-half truncation. Gate &0xffe0_fc00 residues (all Q=0, no
                                                                                                                                                                                                                                                                                 // collision): 0x0e202800 (8b<8h), 0x0e602800 (4h<4s), 0x0ea02800 (2s<2d).
                                                                                                                                                                                                                                                                                 let xe = insn & 0xffe0_fc00;

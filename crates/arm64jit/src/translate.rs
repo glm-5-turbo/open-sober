@@ -2038,6 +2038,26 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                         }
                         Ok(())
                     }
+                    Inst::Tbl { rd, rn, rm, tbx } => {
+                    // tbl vd.16b, {vn}, vm: vd[i] = (vm[i]<16 ? table[vn+i] : 0/keep).
+                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    for i in 0..16i32 {
+                        buf.movzx_byte_mem(RAX, RBX, slot(rm) + i); // idx = vm[i]
+                        buf.mov_ri64(R10, slot(rn) as u64);
+                        buf.add_rr64(R10, RBX);
+                        buf.add_rr64(R10, RAX);                      // R10 = &table[idx]
+                        buf.movzx_byte_mem(RCX, R10, 0);             // RCX = table[idx]
+                        buf.mov_ri64(RDX, 0);                         // default 0 (tbl)
+                        if tbx {
+                            buf.movzx_byte_mem(RDX, RBX, slot(rd) + i); // keep old for tbx
+                        }
+                        buf.mov_ri64(RDI, 16);
+                                                buf.cmp_rr64(RAX, RDI);
+                                                buf.cmov_rr64(0x42, RDX, RCX);              // cmovb: table if idx<16
+                        buf.mov_store8(RBX, slot(rd) + i, RDX);
+                    }
+                    Ok(())
+                }
                     Inst::SimdXtn { rd, rn, dst_esize } => {
                     // xtn Vd.8b/4h/2s, Vn.<wider>: take the LOW `dst_esize` bytes of each
                     // source element (source element esize = 2*dst_esize) and pack them
