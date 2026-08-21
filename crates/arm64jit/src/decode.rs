@@ -159,6 +159,8 @@ pub enum Inst {
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
+    // ---- SIMD shift-right accumulate: usra/ssra Vd.T, Vn.T, #imm (Vd += Vn >> imm) ----
+    SimdShrAcc { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
     Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
     // ---- SIMD st2 (structure store of two vectors) ----
@@ -1123,6 +1125,31 @@ pub fn decode(insn: u32) -> Inst {
             rn: ((insn >> 5) & 0x1f) as u8,
             esize: (1u8 << es2),          // 1/2/4/8-byte lanes
             shift: ((insn >> 16) & 0x7) as u8,
+        };
+    }
+
+    // ---- SIMD shift-right accumulate (usra/ssra Vd.T, Vn.T, #imm): Vd += Vn >> imm.
+    // Same 0x0f/0x0f/0x4f/0x6f prefix family as shl but the ACCUM marker is bit12
+    // ((insn & 0x0000_7000)==0x0000_1000, vs shl's 0x5000 and ushr's 0x0000).
+    // unsigned=bit11 (0x6f/0x6e -> usra). shift = esize_bits - (tagless immh:immb).
+    // acc=bit12; bit16 set is the shift-by-imm discriminator against fmla-by-element
+    // (fmla-el leaves bit16 clear, usra/ssra set it as the LSB of the shift imm).
+    if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f)
+        && (insn & 0x0000_7000) == 0x0000_1000 && (insn & 0x0001_0000) == 0x0001_0000 {
+        let immh = (insn >> 19) & 0x7;
+        let es2 = if immh == 0 { 3 } else { immh.trailing_zeros() };
+        let esize: u8 = 1 << es2;
+        let immh4: u32 = (insn >> 19) & 0xf;         // immh incl. the size-tag top bit
+        let val = if immh4 == 0 { 0 } else { immh4 & ((1u32 << (32 - immh4.leading_zeros() - 1)) - 1) };
+                let full: u32 = (val << 3) | ((insn >> 16) & 0x7);
+                let cap: u32 = (esize as u32) * 8;
+                let shift: u32 = if full < cap { cap - full } else { 0 };
+        return Inst::SimdShrAcc {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            esize,
+            shift: shift as u8,
+            unsigned: (insn >> 11) & 1 == 1,
         };
     }
 

@@ -2371,6 +2371,37 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdShrAcc { rd, rn, esize, shift, unsigned } => {
+                    // usra/ssra Vd.T, Vn.T, #imm : Vd_i += Vn_i >> imm (logical if
+                    // unsigned/usra, arithmetic if signed/ssra). Plain GPR-register lanes.
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let lanes = 16 / (esize as i32);
+                    for i in 0..lanes {
+                        let off = vslot(rn) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_load64(RAX, RBX, off),
+                            4 => buf.mov_load32(RAX, RBX, off),
+                            2 => buf.movzx_word_mem(RAX, RBX, off),
+                            _ => buf.movzx_byte_mem(RAX, RBX, off),
+                        }
+                        if unsigned { buf.shr_ri8(RAX, shift); } else { buf.sar_ri8(RAX, shift); }
+                        let dst = vslot(rd) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_load64(RCX, RBX, dst),
+                            4 => buf.mov_load32(RCX, RBX, dst),
+                            2 => buf.movzx_word_mem(RCX, RBX, dst),
+                            _ => buf.movzx_byte_mem(RCX, RBX, dst),
+                        }
+                        buf.add_rr64(RCX, RAX);
+                        match esize {
+                            8 => buf.mov_store64(RBX, dst, RCX),
+                            4 => buf.mov_store32(RBX, dst, RCX),
+                            2 => buf.mov_store16(RBX, dst, RCX),
+                            _ => buf.mov_store8(RBX, dst, RCX),
+                        }
+                    }
+                    Ok(())
+                }
                 Inst::SimdInsD { rd, rn, dst_idx, src_idx, esize } => {
                     // mov Vd.T[dst], Vn.T[src]: copy one element (esize bytes) lane
                     // between vectors (d 64-bit or s 32-bit lanes).
