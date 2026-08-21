@@ -2296,3 +2296,11 @@ block@0x105ce0828 -> pc=0x1068c7518        (run_loop: pc outside image)
 - **Not a JIT bug** — it's the fake-object/interface wall: the guest calls a valid vtable offset on an object the minimal `elfjit --jni` env didn't construct. Next: find what initializes the object behind `x21` (candidate: a JNI/`ANativeActivity`-provided global, or a `__cxa_atexit`/static-init baked elsewhere), or stub the virtual interface (slot-48 method) to return and continue.
 
 Tools added (commit `ec39a35`): JIT_DUMP `[outside-image]` full-register dump + `[term]` guest terminal-pc trace for pinning such stops.
+
+**Refined frontier analysis (next session):** the guest's failing tail, traced per-instruction, is:
+`0x1c7b768: stp x30..; adr x8,0x631b000(=guest .got); ..reads GOT..; then 0x1ace7c: str x8,[x19]; ldp x29,x30,[sp]; ret` — a
+guest subroutine reading its **own GOT/@.dynamic (page 0x631b000)** and returning; the `ret` lands on `x30=0x68c7518` (guest data/bss page 0x68c7000 = `__stop_pb_defaults`). Two candidate roots:
+(a) **`0x68c7000` is in a real PT_LOAD-APTA gap** — `readelf` shows LOAD3 ends 0x6368df8, LOAD4 starts 0x6988000; nothing covers 0x68c7000. But the `elfjit` example only mapregs the r-x segment & hands `image`=that SLICE to the JIT run_loop, whose "pc outside image" bound is `base+len`=0x105e67390. So (i) that page is genuinely unmapped in-guest (a real loader gap if Roblox expects it) and (ii) the run_loop bound would also reject any legit guest let the other segments. Check `load_elf_image` mmaps ALL segments, both for real load and so `run_loop` uses the full address-space range, not just the r-x slice, as its valid-pc bound.
+(b) x30 got corrupted upstream by a mis-emission; would need per-step guest tracing.
+
+`[it]`/`[term]` were reverted to `[term]`-only (committed ec39a19); they're JIT_DUMP-gated.
