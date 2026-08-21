@@ -335,6 +335,8 @@ pub enum Inst {
                 cond: u8, // AArch64 condition code
                 sz: bool, // true = double (fcmp Dn,Dm), false = single
             },
+            // ---- scalar FP->int to FP reg: fcvtzs Dd,Dn / Sd,Sn (trunc toward zero) ----
+            FcvtTzReg { rd: u8, rn: u8, dbl: bool },
         // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
                            InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
                            // ---- EXTR / ROR rotate: rm==rn in the EXTR base ----
@@ -1791,6 +1793,15 @@ pub fn decode(insn: u32) -> Inst {
                         let nzcv = (insn & 0xf) as u8;
                         let cond = ((insn >> 12) & 0xf) as u8;
                         return Inst::Fccmp { rn, rm, nzcv, cond, sz };
+                    }
+                    // ---- scalar FP->int stored to a FP reg: fcvtzs Dd,Dn / Sd,Sn ----
+                    // Prefix 0x5e (bit29 set = scalar FP target, vs vector 0xfe/0x4e);
+                    // residue (insn&0xffe0_fc00) in {0x5ea0_b800 (s), 0x5ee0_b800 (d)}.
+                    if (insn & 0xffe0_fc00) == 0x5ea0_b800 || (insn & 0xffe0_fc00) == 0x5ee0_b800 {
+                        let rd = (insn & 0x1f) as u8;
+                        let rn = ((insn >> 5) & 0x1f) as u8;
+                        let dbl = (insn & 0x0040_0000) != 0; // 0x5ee vs 0x5ea (bit22)
+                        return Inst::FcvtTzReg { rd, rn, dbl };
                     }
                             // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
                             // Gate (insn & 0xffe0_fc00) == 0x7ee0_d400 (scalar double; disjoint from
