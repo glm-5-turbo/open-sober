@@ -2304,3 +2304,38 @@ guest subroutine reading its **own GOT/@.dynamic (page 0x631b000)** and returnin
 (b) x30 got corrupted upstream by a mis-emission; would need per-step guest tracing.
 
 `[it]`/`[term]` were reverted to `[term]`-only (committed ec39a19); they're JIT_DUMP-gated.
+
+## Session — removed the misleading "outside image" stop; true root is a corrupt FMOD vtable call (commit e056128)
+
+Earlier sessions misread the frontier as "guest pc outside image" — that was FALSE: `load_elf_image` maps ONE contiguous
+anonymous region spanning ALL PT_LOADs + inter-segment gaps at the 0x100000000 base, but elfjit handed the JIT only the
+**r-x text slice** as `image`, so any legit mentor into data/.bss past the slice was rejected as "outside image".
+
+**Fix (e056128):** elfjit now computes `len = (max(guest_vaddr+memsz) - base)` so the run_loop valid-pc bound covers
+the whole zero-filled mapped span. Boot now proceeds past that stop until it genuinely hits non-code data:
+```
+running entry guest=0x101f0db20 ...
+  block@0x101f0db20 -> pc=0x101f0e728 ...   (JNI_OnLoad -> init-guard)
+  block@0x105ce0828 -> pc=0x1068c7518 ...
+arm64jit run_loop stopped: translate: unhandled Unsupported(0x68c74d0) at guest pc 0x1068c7518
+```
+
+**True root of the dispatch to 0x68c7518 (FMOD Audio static-init, guest 0x5ce0828):**
+```
+5ce094c: mov w8,#6; ldr x9,[x0]     ; x9 = vtable of object x0=(0x10045b848 arg)
+5ce0950: ...
+5ce0968: ldr x8,[x9,#32]            ; method ptr = vtable slot 32
+5ce096c: blr x8                     ; virtual call -> pc=0x68c7518
+```
+`0x68c7518` is the guard / a `.bss` (region 0x68c7000, `__stop_pb_defaults`) DATA address, not code. So this is a
+**corrupted C++ vtable slot** (offset 32) on an FMOD/engine object passed in x0 — the vtable points into data/bss
+instead of `.text`, so the virtual method call lands on raw bytes (Unsupported(0x68c74d0)).
+
+Confirmed: `.rela.dyn` is **entirely absent** (only 537 `.rela.plt` JUMP_SLOTs), so there are NO R_AARCH64_RELATIVE /
+data-absolute relocations for the loader to apply. The guest's `.data` vtables are whatever the file laid out.
+
+Next leads (no .init_array / no .rela.dyn / no ifunc): the object at x0 (0x10045b848) has a vtable that is wrong
+after the once-init — either (a) its vtable entry 32 was never set because a guest constructor didn't run under
+`elfjit --jni` (no .init_array run), or (b) vtable base-scaled entries need the loader to add the 0x100000000 PIE
+base to `.data.relro`-style absolute pointers, which this ## loader does not do (no R_AARCH64_RELATIVE present =
+presumptively absolute at build, but for a PIE that needs +base).
