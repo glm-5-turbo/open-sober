@@ -13,7 +13,7 @@
 //! args/results (sinf/powf/...) use XMM registers and need a separate
 //! float-ABI path, added later.
 
-use crate::jit::{host_call_addr, register_float_call, register_host_call, HostCall, HostFloat32Call, HostFloatCall};
+use crate::jit::{host_call_addr, register_host_call, HostCall, HostFloat32Call, HostFloatCall};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Mutex, OnceLock};
