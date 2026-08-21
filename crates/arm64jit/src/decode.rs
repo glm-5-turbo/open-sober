@@ -1911,7 +1911,8 @@ pub fn decode(insn: u32) -> Inst {
                                         // ---- SIMD int add/sub 2D (64-bit lanes): add Vd.2D, Vn.2D, Vm.2D ----
                                         // Same walk as Simd4s but size-field == 3 (D lanes), Q=0/1.
                                         // sub = 0x6e.. vs add 0x4e.. (bit29). Disjoint: Simd4s above only when size!=3.
-                                        if (insn & 0x2f20_0c00) == 0x0e20_0400 && ((insn >> 22) & 3) == 3 {
+                                        let add2d = insn & 0x2f20_0c00;
+if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
