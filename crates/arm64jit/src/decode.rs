@@ -191,6 +191,8 @@ pub enum Inst {
     },
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----  
     WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool },
+    // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
+    FmulScalar { rd: u8, rn: u8, rm: u8, double: bool, neg: bool },
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
@@ -1224,6 +1226,20 @@ pub fn decode(insn: u32) -> Inst {
             (2u8, 8u8) // .8h
         };
         return Inst::WidenShl { rd, rn, dst_esize, nlanes, signed: true };
+    }
+    // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
+        // Gate (insn&0x1fe0_0c00) in {0x1e20_0800 (single), 0x1e60_0800 (double)}
+        // AND byte2 (bits15:8) in {0x08, 0x88} (fmul opcode; excludes fdiv 0x18, fadd 0x28,
+        // and the `ut`-family ucvtf d0,d1=0x7e61d820 byte2 0xd8). neg = fnmul (bit15).
+        if ((insn & 0x1fe0_0c00) == 0x1e20_0800 || (insn & 0x1fe0_0c00) == 0x1e60_0800)
+            && (((insn >> 8) & 0xff) == 0x08 || ((insn >> 8) & 0xff) == 0x88)
+        {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        let neg = (insn & 0x8000) != 0;         // bit15: fnmul vs fmul
+        let double = (insn & 0x0040_0000) != 0; // bit22: .d vs .s
+        return Inst::FmulScalar { rd, rn, rm, double, neg };
     }
     if matches!(insn >> 24, 0x0F | 0x1F | 0x2F | 0x4F | 0x5F | 0x6F) {
         let op = (insn >> 29) & 1;

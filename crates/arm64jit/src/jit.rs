@@ -1009,4 +1009,18 @@ mod tests {
         assert_eq!(st.v[2] as i64, -4i64, "shll lane0 sign-ext");
         assert_eq!(st.v[3], 0x4000_0000u64, "shll lane1 sign-ext");
     }
+
+    #[test]
+    fn fnmul_scalar_negate_mul() {
+        // fnmul s10, s0, s1 = 0x1e21880a (wall): s10 = -(s0*s1).
+        let f = |x: f32| x.to_bits() as u64;
+        let mut st = CpuState::new();
+        st.v[0] = f(2.5);       // s0 = v0 lane0
+        st.v[2] = f(4.0);       // s1 = v1 lane0
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x1e21_880au32.to_le_bytes()); // fnmul s10,s0,s1
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fnmul");
+        assert_eq!(f32::from_bits((st.v[20] & 0xffff_ffff) as u32), -10.0, "fnmul -(2.5*4.0)");
+    }
 }

@@ -1393,7 +1393,38 @@ pub fn translate(
                                 }
                                 Ok(())
                             }
-                            Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
+                            Inst::FmulScalar { rd, rn, rm, double, neg } => {
+                                            // fmul/fnmul Sd/Dd, Sn, Sm: rd = (+/-)(rn*rm) scalar.
+                                            let dn = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                            let nn = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                            let mn = crate::jit::VECTOR_BASE + (rm as i32) * 16;
+                                            if double {
+                                                buf.movq_load(0, RBX, nn);
+                                                buf.movq_load(1, RBX, mn);
+                                                buf.mulsd(0, 1);
+                                                if neg {
+                                                    buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
+                                                    buf.movq_xmm_r64(1, RCX);
+                                                    buf.pxor_xmm(0, 1);
+                                                }
+                                                buf.movq_store(RBX, dn, 0);
+                                            } else {
+                                                buf.mov_load32(RCX, RBX, nn);
+                                                buf.movd_xmm_r32(0, RCX);
+                                                buf.mov_load32(RCX, RBX, mn);
+                                                buf.movd_xmm_r32(1, RCX);
+                                                buf.mulss(0, 1);
+                                                if neg {
+                                                    buf.mov_ri64(RCX, 0x8000_0000);
+                                                    buf.movd_xmm_r32(1, RCX);
+                                                    buf.pxor_xmm(0, 1);
+                                                }
+                                                buf.movd_r32_xmm(RCX, 0);
+                                                buf.mov_store32(RBX, dn, RCX);
+                                            }
+                                            Ok(())
+                                        }
+                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
                                             // ucvtf/scvtf Dd,Rn,#fbits: convert int to float, then /2^fbits.
                                             let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                             ldg(buf, RAX, rn as u32);
