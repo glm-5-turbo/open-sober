@@ -42,6 +42,28 @@ fn resolver() -> &'static Mutex<Resolver> {
     R.get_or_init(|| Mutex::new(Resolver::new()))
 }
 
+/// One-time `dlopen` of `libm.so.6` (`RTLD_GLOBAL|RTLD_NOW`) so the float/libm
+/// functions we `dlsym` are visible even if nothing else loaded libm yet.
+fn libm_handle() -> *mut libc::c_void {
+    // Raw pointers aren't Send/Sync; store as usize (an address is).
+    static H: OnceLock<usize> = OnceLock::new();
+    let addr = *H.get_or_init(|| {
+        let path = b"libm.so.6\0";
+        unsafe {
+            libc::dlopen(
+                path.as_ptr() as *const libc::c_char,
+                libc::RTLD_NOW | libc::RTLD_GLOBAL,
+            ) as usize
+        }
+    });
+    addr as *mut libc::c_void
+}
+
+/// `dlsym` `name` from a given handle, returning the fn pointer or null.
+unsafe fn sym_from(handle: *mut libc::c_void, name: *const libc::c_char) -> *mut libc::c_void {
+    libc::dlsym(handle, name)
+}
+
 /// Give an import name a host call slot. If the host symbol is found via
 /// `dlsym`, register it and return the thunk's *guest address*; if the name
 /// can't be resolved on the host, return `None` (caller must decide how to
@@ -56,7 +78,15 @@ pub fn resolve(name: &[u8]) -> Option<u64> {
     // symbol space (libc/libm/any shared lib already loaded), which covers
     // the aarch64 libc/libm imports whose names collide with host names.
     let sym = key.as_ptr();
-    let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    // RTLD_DEFAULT only sees already-loaded libs; libm is often not yet loaded.
+    // Fall back to an explicit `dlopen("libm.so.6")` handle so libm names resolve.
+    let mut ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    if ptr.is_null() {
+        let mh = libm_handle();
+        if !mh.is_null() {
+            ptr = unsafe { sym_from(mh, sym) };
+        }
+    }
     if ptr.is_null() {
         return None; // not present on the host
     }
@@ -111,7 +141,13 @@ pub fn register_named(name: &[u8], f: crate::jit::HostCall) -> u64 {
 pub fn resolve_float(name: &[u8]) -> Option<u64> {
     let key = CString::new(name).ok()?;
     let sym = key.as_ptr();
-    let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    let mut ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    if ptr.is_null() {
+        let mh = libm_handle();
+        if !mh.is_null() {
+            ptr = unsafe { sym_from(mh, sym) };
+        }
+    }
     if ptr.is_null() {
         return None;
     }
@@ -140,7 +176,13 @@ pub const FLOAT32_NAMES: &[&str] = &[
 pub fn resolve_float32(name: &[u8]) -> Option<u64> {
     let key = CString::new(name).ok()?;
     let sym = key.as_ptr();
-    let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    let mut ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    if ptr.is_null() {
+        let mh = libm_handle();
+        if !mh.is_null() {
+            ptr = unsafe { sym_from(mh, sym) };
+        }
+    }
     if ptr.is_null() {
         return None;
     }
