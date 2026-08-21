@@ -1645,7 +1645,7 @@ pub fn decode(insn: u32) -> Inst {
                 0x9e28_0000 | 0x9e29_0000 | 0x9e68_0000 | 0x9e69_0000
                     | 0x1e28_0000 | 0x1e29_0000 | 0x1e68_0000 | 0x1e69_0000 => 3, // +inf (X & W dest)
                 0x9e30_0000 | 0x9e31_0000 | 0x9e70_0000 | 0x9e71_0000 => 4, // -inf (X dest only; 0x1e70 collides with fcmp)
-                0x9e24_0000 | 0x9e25_0000 | 0x9e64_0000 | 0x9e65_0000 | 0x9e60_0000 | 0x9e61_0000 => 2, // nearest (X dest only)
+                0x9e24_0000 | 0x9e25_0000 | 0x9e64_0000 | 0x9e65_0000 | 0x9e60_0000 | 0x9e61_0000 | 0x1e65_0000 => 2, // nearest (X dest; + W fcvtau 0x1e65)
                 _ => 255,
             };
             if mode != 255 {
