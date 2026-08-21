@@ -696,6 +696,66 @@ pub fn compile_image(
     compile_image_bounded(image, base, entry, state, 0)
 }
 
+/// Detect whether the instructions at host address `addr` are a PLT stub
+/// (`adrp xd,P; ldr xc,[xd,#imm]; add xd,xd,#off; br xc`) whose GOT slot holds a
+/// host-thunk address (>= HOST_THUNK_BASE). This identifies a direct guest `bl`
+/// to a host import (e.g. `bl pthread_mutex_lock@plt`). Since guest == host
+/// memory here, we read the stub bytes and the (already patched) JUMP_SLOT GOT
+/// entry straight from mapped memory. Returns false on any mismatch so this is
+/// conservative: a real guest function is never mistaken for an import stub.
+fn is_host_plt_stub(addr: u64) -> bool {
+    if addr < 0x1000 {
+        return false;
+    }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("JIT_DUMP").is_some() {
+        let dbg_p = addr as *const u8;
+        eprintln!(
+            "[hps] addr={addr:#x} w0={:#010x} w1={:#010x} w2={:#010x} w3={:#010x}",
+            unsafe { std::ptr::read_unaligned(dbg_p as *const u32) },
+            unsafe { std::ptr::read_unaligned(dbg_p.add(4) as *const u32) },
+            unsafe { std::ptr::read_unaligned(dbg_p.add(8) as *const u32) },
+            unsafe { std::ptr::read_unaligned(dbg_p.add(12) as *const u32) }
+        );
+    }
+    let p = addr as *const u8;
+    // word 0: adrp Xd, #page
+    let w0 = unsafe { std::ptr::read_unaligned(p as *const u32) };
+    if (w0 & 0x9f00_0000) != 0x9000_0000 {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("JIT_DUMP").is_some() {
+            eprintln!("[hps] {addr:#x} NOT adrp (w0 {w0:#x})");
+        }
+        return false;
+    }
+    let d0 = w0 & 0x1f;
+    // word 1: ldr Xt, [Xn, #imm]   (64-bit unsigned-offset load)
+    let w1 = unsafe { std::ptr::read_unaligned(p.add(4) as *const u32) };
+    if (w1 & 0xffc0_0000) != 0xf940_0000 {
+        return false;
+    }
+    let rn = (w1 >> 5) & 0x1f;
+    let dt = w1 & 0x1f;
+    if rn != d0 {
+        return false; // must load from the adrp'ed page reg (a real PLT stub)
+    }
+    // word 2: add Xd, Xd, #off (the AArch64 canonical PLT stub does this)
+    let w2 = unsafe { std::ptr::read_unaligned(p.add(8) as *const u32) };
+    if (w2 & 0xff00_0000) != 0x9100_0000 {
+        return false;
+    }
+    // word 3: br Xt   — must branch to the register loaded by the `ldr` above.
+    let w3 = unsafe { std::ptr::read_unaligned(p.add(12) as *const u32) };
+    if (w3 & 0xffff_fc1f) != 0xd61f_0000 || ((w3 >> 5) & 0x1f) != dt {
+        return false;
+    }
+    // A `bl` to exactly this canonical 4-instruction PLT stub is a host import:
+    // after `bind_image_plt`, every JUMP_SLOT GOT entry resolves to a host thunk
+    // (>= HOST_THUNK_BASE), so the stub's `br` will hand pc to the dispatcher's
+    // host-call bridge only if this `bl` is diverted rather than call-inlined.
+    true
+}
+
 /// Like `compile_image` but stops expanding the reachable frontier once the
 /// translation has emitted `budget` guest instructions (0 = unbounded). Every
 /// branch/call fixup whose target was NOT emitted is redirected to an appended
@@ -733,6 +793,11 @@ pub fn compile_image_bounded(
     // Whether the budget cut us off before draining the reachable frontier. When
     // true we must divert any not-yet-emitted targets to the dispatcher.
     let mut truncated = false;
+    // Set when we deliberately divert a `bl` to a host-import PLT stub (see the
+    // `Inst::B` handler): those targets are intentionally not emitted, so we must
+    // still build dispatcher-return stubs for them even when the frontier drains
+    // normally (otherwise their fixups index an empty stub table).
+    let mut force_stubs = false;
     // Invariant: every address in frontier is a candidate block start.
     while let Some(addr) = frontier.pop() {
         if host_of_guest.contains_key(&addr) {
@@ -762,7 +827,25 @@ pub fn compile_image_bounded(
                     let target = cur.wrapping_add(*imm as u64);
                     if *link {
                         frontier.push(cur /* continue after call (fall-through) */ + 4);
-                        frontier.push(target);
+                        // A `bl` to a host-import PLT stub (pthread_mutex_lock,
+                        // syslog, abort, ...) must NOT be compiled inline as guest
+                        // text: doing so makes the stub's `br x17` return into the
+                        // inlined caller instead of handing pc to the dispatcher's
+                        // host-call bridge, so the real import never runs and the
+                        // guest keeps going with a garbage return. Divert it to
+                        // the dispatcher (the fixup will route to a return-stub).
+                        let hps = is_host_plt_stub(target);
+                        #[cfg(debug_assertions)]
+                        if std::env::var_os("JIT_DUMP").is_some() {
+                            eprintln!("[bl] {cur:#x} -> {target:#x} hostplt={hps}");
+                        }
+                        if !hps {
+                            frontier.push(target);
+                        } else {
+                            // Diverted: don't inline this import; make sure the
+                            // stub table is built so the fixup has a real target.
+                            force_stubs = true;
+                        }
                     } else {
                         frontier.push(target);
                     }
@@ -811,7 +894,7 @@ pub fn compile_image_bounded(
     // block at its stub (rewriting a call's host `call` into a `jmp` so no host
     // return address is left on the stack — the stub hands pc back to `jit_run`).
     let mut stub_of_target: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-    if truncated || !frontier.is_empty() {
+    if truncated || !frontier.is_empty() || force_stubs {
         // collect the set of targets referenced by fixups but not emitted.
         let need: Vec<u64> = fixups
             .iter()
