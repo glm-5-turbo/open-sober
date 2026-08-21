@@ -2064,3 +2064,26 @@ backing or never-bound paths, and (3) the JIT's per-instruction coverage for
 whatever the real boot path executes. Tests 58/58 (incl. bind_image_plt_real
 test loading the real .so). Commits: 9b340c0 (libm fallback), 71403e0 (stub
 binding), b254508 (fold into elfjit).
+
+## Session — JNI host bridge on the JIT path (guest-visible JNIEnv/JavaVM)
+
+Port of QEMU's jni_shim.c tables to guest-address space.
+- `jni.rs`: build_jni() builds a 256-slot JNIEnv table + 8-slot JavaVM table, each
+  entry = HOST_THUNK guest address; JNIEnv/JavaVM objects in host==guest memory.
+  Slots mirror QEMU slot map (4=GetVersion->0x10006, 5/7=GetMethodID sentinel,
+  13/14=Throw/ThrowNew, 21=NewGlobalRef, 36=NewStringUTF, 193=RegisterNatives,
+  197=GetJavaVM, etc). Proper JVM GetEnv writes *penv=env, returns JNI_OK(0).
+- Proof: jit_jni_onload_getenv_getversion JIT-executes guest JNI_OnLoad preamble
+  (JavaVM* in x0 -> vm->GetEnv(&env,0x10006) -> env->GetVersion()) through both
+  host-thunk tables; x0==0x10006. NOTE: hand-assembled aarch64 ldr encodings must
+  be validated (e.g. ldr x9,[x10,#48]=0xf9401949, NOT 0xf9400d49). Use
+  aarch64-linux-gnu-as/objdump -m aarch64 to confirm immediates.
+- elfjit `--jni`: sets x0 = JavaVM* from build_jni() (JNI_OnLoad(JavaVM*,void*));
+  positional x-arg loop tolerates the flag. Boot path now: 537/537 PLT bound +
+  x0=vm before running entry. 61/61.
+- `host_call_at` made pub; `register_host_call_auto` (int-thunk auto-allocator).
+
+NEXT actual-boot blocker: exercising real JNI_OnLoad (Roblox does TLS-bootstrap
+block-alloc, clock, mprotect, GetStaticMethodID+NewStringUTF+GetChar) — QEMU path
+had to Phase1-NOP clock + bypass; expect same under JIT. JNI_OnLoad = base+0x1f64e58
+(QEMU notes) vs entry 0x1c34480 used here.
