@@ -53,12 +53,16 @@ pub fn run_elf_entry(path: &Path, entry: u64) -> Result<u64> {
         seg.memsz
     );
 
-    // Give the guest a small anonymous stack at a chosen address (just below
-    // where our mappings live) so spills/prologues have room.
+    // Bootstrap a guest runtime the JIT can actually run against:
+    //  (1) guest stack — a real writable region whose host pointer is also a
+    //      valid guest address (guest==host), SP (x31) at the top.
+    //  (2) TLS base — point `tpidr` at a writable region so `mrs tpidr_el0`
+    //      returns a usable, writable thread pointer (FS/GS-style).
+    const STACK_SIZE: usize = 8 * 1024 * 1024;
     let stack = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            8 * 1024 * 1024,
+            STACK_SIZE,
             PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS,
             -1,
@@ -71,25 +75,48 @@ pub fn run_elf_entry(path: &Path, entry: u64) -> Result<u64> {
             std::io::Error::last_os_error()
         );
     }
-    let stack_top = stack as u64 + (8 * 1024 * 1024);
-    // The translator's CpuState lives in our address space; set its sp so guest
-    // LDP/STP-BL prologue has a usable RSP. (CpuState holds a host context; for
-    // a C ABI entry the caller's rsp/reset is done by compile_image's prologue.)
-    info!("guest stack mapped at 0x{:x} (top 0x{:x})", stack as usize, stack_top);
+    let stack_top = stack as u64 + STACK_SIZE as u64;
+    const TLS_SIZE: usize = 64 * 1024;
+    let tls = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            TLS_SIZE,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if tls == libc::MAP_FAILED {
+        anyhow::bail!(
+            "Failed to mmap guest tls: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 
     let mut st = arm64jit::jit::CpuState::new();
-    let blk = arm64jit::jit::compile_image(image, base, entry, &mut st as *mut _).map_err(|e| {
+    st.set(31, stack_top); // x31 = SP (top; stack grows down)
+    st.tpidr = tls as u64;
+    info!(
+        "guest stack 0x{:x} tls 0x{:x} — running via jit_run dispatcher (handles blr/br/ret + svc)",
+        stack_top,
+        tls as u64
+    );
+
+    // Use the PC-driven dispatcher: compiles reachable regions and re-enters on
+    // `blr`/`br`/`ret`, so real (blr-heavy, syscall-making) Roblox init code can
+    // actually execute rather than stopping at the first indirect call.
+    let r = arm64jit::jit::jit_run(image, base, entry, &mut st as *mut _).map_err(|e| {
         anyhow::anyhow!(
-            "arm64jit stopped on the first unsupported instruction near guest 0x{:x}: {e} \
-             \nThis is the honest next decoder slice for libroblox.so.",
-            entry
+            "arm64jit run_loop stopped near guest 0x{:x}: {e}",
+            st.pc
         )
     })?;
-    let r = unsafe { arm64jit::jit::run(&blk, &mut st as *mut _) };
     info!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r);
     warn!(
-        "guest stack remains mapped at 0x{:x} (leaked by design for one-shot run)",
-        stack as usize
+        "guest stack mapped at 0x{:x} and tls at 0x{:x} (leaked by design for one-shot run)",
+        stack_top,
+        tls as u64
     );
     Ok(r)
 }
