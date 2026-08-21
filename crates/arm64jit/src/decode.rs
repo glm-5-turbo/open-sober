@@ -160,6 +160,8 @@ pub enum Inst {
         SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8, esize: u8 },
         // ---- SIMD fp mul by element: fmul Vd.T, Vn.T, Vm.T[L] ----
         SimdFmulEl { rd: u8, rn: u8, rm: u8, esize: u8, index: u8, q: bool },
+    // ---- SIMD byte reverse in 64-bit element: rev64 Vd.T, Vn.T ----
+    SimdRev { rd: u8, rn: u8, q: bool },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
     SimDup { rd: u8, rn: u8, esize: u8, src_idx: u8, q: bool },
     // ---- SIMD vector immediate: fmov Vd.T, #imm ----
@@ -1056,6 +1058,15 @@ pub fn decode(insn: u32) -> Inst {
         let esize: u8 = match (insn >> 22) & 0x3 { 1 => 2, 2 => 4, _ => 8 };
         let index = (((insn >> 11) & 1) | (((insn >> 13) & 1) << 1)) as u8;
         return Inst::SimdFmulEl { rd, rn, rm, esize, index, q };
+    }
+
+    // ---- SIMD byte reverse in 64-bit element: rev64 Vd.T, Vn.T ----
+    // Gate (insn & 0x3f00_f800)==0x0e00_0800 (REV64-family residue; q=bit30;
+    // arrangement via size bits). Byte-reverse each 64-bit granule.
+    if insn & 0x3f00_0c00 == 0x0e00_0800 {
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::SimdRev { rd, rn, q: (insn >> 30) & 1 == 1 };
     }
 
     // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----

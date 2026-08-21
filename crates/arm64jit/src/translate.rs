@@ -1172,21 +1172,21 @@ pub fn translate(
                     buf.mov_store32(RBX, vslot, RAX);
                 }
             }
-            Ok(())
-        }
-        Inst::FmovImm { rd, f64, value_bits } => {
-            // fmov Dd,#imm / fmov Sd,#imm: write the decoded IEEE-754 value into
-            // the destination FP slot (low 8B for double, low 4B for single).
-            let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
-            if f64 {
-                buf.mov_ri64(RAX, value_bits);
-                buf.mov_store64(RBX, slot, RAX); // low 8B of slot = double bits
-            } else {
-                buf.mov_ri32(RAX, value_bits as u32);
-                buf.mov_store32(RBX, slot, RAX); // low 4B of slot = single bits
-            }
-            Ok(())
-        }
+                        Ok(())
+                    }
+                    Inst::FmovImm { rd, f64, value_bits } => {
+                        // fmov Dd,#imm / fmov Sd,#imm: write the decoded IEEE-754 value into
+                        // the destination FP slot (low 8B for double, low 4B for single).
+                        let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                        if f64 {
+                            buf.mov_ri64(RAX, value_bits);
+                            buf.mov_store64(RBX, slot, RAX); // low 8B of slot = double bits
+                        } else {
+                            buf.mov_ri32(RAX, value_bits as u32);
+                            buf.mov_store32(RBX, slot, RAX); // low 4B of slot = single bits
+                        }
+                        Ok(())
+                    }
         Inst::FmovFp { rd, rn, sz } => {
             // fmov Dd,Dn / fmov Sd,Sn: register-to-register FP copy (no conversion).
             let sslot = crate::jit::VECTOR_BASE + (rn as i32) * 16;
@@ -1939,11 +1939,24 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                             buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x59, 0xc1]); // mulss xmm0,xmm1
                             buf.movd_r32_xmm(RAX, 0);
                             buf.mov_store32(RBX, f(rd) + to, RAX);
-                        }
-                    }
-                    Ok(())
-                }
-                // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
+                                    }
+                                }
+                                Ok(())
+                            }
+                            Inst::SimdRev { rd, rn, q } => {
+                                // rev64 Vd.T, Vn.T: byte-reverse each 64-bit element (BSWAP).
+                                let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                let base = f(rn);
+                                let dbase = f(rd);
+                                for g in 0..if q { 2 } else { 1 } {
+                                    let o = g * 8;
+                                    buf.mov_load64(RAX, RBX, base + o);
+                                    buf.bswap_r64(RAX);
+                                    buf.mov_store64(RBX, dbase + o, RAX);
+                                }
+                                Ok(())
+                            }
+                            // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
         Inst::SimdFmovImm { rd, esize, value_bits, q } => {
             // fmov Vd.T, #imm: broadcast the immediate FP float (esize bytes,
             // 64-bit double or 32-bit single bits) into every lane of Vd.
