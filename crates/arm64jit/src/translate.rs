@@ -1862,10 +1862,10 @@ pub fn translate(
                                                                                                                         }
                                                                                                                         Ok(())
                                                                                                                     }
-                                                                                                                    Inst::SimdMull { rd, rn, rm, res_esize, unsigned, q } => {
-                                                                                                                        // smull/umull Vd.T, Vn.T, Vm.T: widen each src element to res_esize
-                                                                                                                        // and multiply. src = res_esize/2, lanes = res bytes/2 in dst.
-                                                                                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                    Inst::SimdMull { rd, rn, rm, res_esize, unsigned, q, acc } => {
+                                                                                                                                                                            // smull/umull/smlal/umlal: widen each src element to res_esize and
+                                                                                                                                                                            // multiply (or add to the existing result if acc). lanes = res bytes.
+                                                                                                                                                                            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                                                                                                                         let src_es: i32 = (res_esize as i32) / 2;
                                                                                                                         let lanes = if res_esize == 8 { 2 } else { 4 };
                                                                                                                         let uphalf = if q { 8 } else { 0 }; // smull2 reads the upper reg half
@@ -1886,7 +1886,11 @@ pub fn translate(
                                                                                                                                                                                 }
                                                                                                                         buf.imul_rr64(RAX, RCX);
                                                                                                                         let doff = (i as i32) * (res_esize as i32);
-                                                                                                                        if res_esize == 8 { buf.mov_store64(RBX, slot(rd)+doff, RAX); } else { buf.mov_store32(RBX, slot(rd)+doff, RAX); }
+                                                                                                                        if acc {
+                                                                                                                            if res_esize == 8 { buf.mov_load64(RDX, RBX, slot(rd)+doff); } else { buf.mov_load32(RDX, RBX, slot(rd)+doff); }
+                                                                                                                            buf.add_rr64(RDX, RAX);
+                                                                                                                            if res_esize == 8 { buf.mov_store64(RBX, slot(rd)+doff, RDX); } else { buf.mov_store32(RBX, slot(rd)+doff, RDX); }
+                                                                                                                        } else if res_esize == 8 { buf.mov_store64(RBX, slot(rd)+doff, RAX); } else { buf.mov_store32(RBX, slot(rd)+doff, RAX); }
                                                                                                                         }
                                                                                                                         Ok(())
                                                                                                                     }
