@@ -153,7 +153,73 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
         }
     }
 
+    // __stack_chk_guard: the guest prologue (`adrp xN, …; ldr xN,[xN,#off]; ldr
+    // …,[xN]; stur …,[x29,#-8]`) reads a *data* GOT slot for libc's canary. The
+    // Android NDK build emits NO relocation for this slot (only JUMP_SLOTs — no
+    // .rela.dyn / GLOB_DAT / RELATIVE), so it stays 0x0 and the guest null-faults
+    // on its first `ldr x8,[x0]`. The QEMU path (jni_shim.c) fixed this by
+    // writing a live canary address into the GOT; mirror it here.
+    patch_stack_canary(el, &wr64);
+
     (resolved, unresolved)
+}
+
+/// Write a live canary pointer into the guest `__stack_chk_guard` GOT slot.
+///
+/// The slot holds the *address* of the canary variable; the guest then does
+/// `ldr x8,[xN]` to read the canary bytes, storing them on its stack to check
+/// against a later `ldr`. We point it at libc's real `__stack_chk_guard` so the
+/// value matches what `__stack_chk_fail` expects, falling back to a stable
+/// static canary if the host symbol can't be resolved. The slot address is a
+/// per-build constant (see caller notes); `LoadedElf` guards sanity.
+fn patch_stack_canary(el: &LoadedElf, wr64: &impl Fn(usize, u64)) {
+    // Guest vaddr of the `__stack_chk_guard` data GOT slot for the reference
+    // build. Verified (Session xx): JNI_OnLoad's prologue
+    //   adrp x24, 0x631a000 ; ldr x24,[x24,#2608] ; ldr x8,[x24] ; stur x8,[x29,#-8]
+    // reads this slot, which is 0x0 in the file (no relocation). Note objdump
+    // prints `#2608` in DECIMAL = 0xa30, so the slot is 0x631a000 + 0xa30.
+    // For PIE the loaded guest address of a link-time slot is `guest_of(link)`;
+    // because the runtime maps guest==host (contig), that value doubles as the
+    // host addr.
+    const CANARY_GOT_LINK: u64 = 0x631a000 + 0xa30; // = 0x631aa30
+    let host_addr = el.guest_of(CANARY_GOT_LINK) as usize;
+    if host_addr == 0 {
+        eprintln!("[plt] canary slot link {:#x} maps to 0; skipping", CANARY_GOT_LINK);
+        return;
+    }
+    let cur = unsafe { std::ptr::read_unaligned(host_addr as *const u64) };
+
+    static CANARY: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let canary_val = CANARY.load(std::sync::atomic::Ordering::Relaxed);
+    let canary_addr = if canary_val != 0 {
+        &canary_val as *const u64 as u64
+    } else {
+        // Prefer libc's real canary so __stack_chk_fail and our value agree.
+        let libc_guard =
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, b"__stack_chk_guard\0".as_ptr() as *const _) };
+        let addr = if !libc_guard.is_null() {
+            libc_guard as u64
+        } else {
+            // Static fallback: a stable non-zero canary byte pattern.
+            let canary = 0x2f_2a_1a_0a_0e_0f_10_11u64;
+            // If libc guard exists but reads 0, seed it too (mirror jni_shim).
+            if !libc_guard.is_null() {
+                unsafe { std::ptr::write_unaligned(libc_guard as *mut u64, canary) };
+            }
+            CANARY.store(canary, std::sync::atomic::Ordering::Relaxed);
+            &CANARY as *const _ as u64
+        };
+        CANARY.store(addr, std::sync::atomic::Ordering::Relaxed);
+        addr
+    };
+
+    if cur & !0x0000_0000_ffff_ffffu64 == 0 {
+        // Only write when the slot doesn't already reference a real page, so we
+        // never clobber a legitimately-bound canary or an unrelated GOT slot.
+        wr64(host_addr, canary_addr);
+        eprintln!("[plt] patched __stack_chk_guard GOT {:#x} ({:#x}) -> {:#x}", CANARY_GOT_LINK, cur, canary_addr);
+    }
 }
 
 #[cfg(test)]
