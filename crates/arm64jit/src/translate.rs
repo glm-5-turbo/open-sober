@@ -2011,8 +2011,34 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 }
             }
             Ok(())
-        }
-                Inst::SimdXtn { rd, rn, dst_esize } => {
+                    }
+                    Inst::SimdCmTest { rd, rn, rm, lanes, esize } => {
+                        // cmtst Vd.T, Vn.T, Vm.T (wall 0x4e208c01): each element is all-ones
+                        // iff (Vn[i] & Vm[i]) != 0, else 0. Load element, test Vn&Vm != 0, cmov.
+                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                        for i in 0..lanes {
+                            let off = (i as i32) * (esize as i32);
+                            if esize == 8 {
+                                buf.mov_load64(RAX, RBX, slot(rn) + off);
+                                buf.mov_load64(RCX, RBX, slot(rm) + off);
+                            } else {
+                                buf.mov_load32(RAX, RBX, slot(rn) + off);
+                                buf.mov_load32(RCX, RBX, slot(rm) + off);
+                            }
+                            buf.test_rr64(RAX, RCX); // ZF=1 if (Vn&Vm)==0
+                            buf.mov_ri64(RDI, 0);
+                            buf.mov_ri64(RDX, 0xffff_ffff_ffff_ffff);
+                            buf.cmov_rr64(0x45, RDI, RDX); // 0x45=cmovne: ones if nonzero
+                            match esize {
+                                8 => buf.mov_store64(RBX, slot(rd) + off, RDI),
+                                4 => buf.mov_store32(RBX, slot(rd) + off, RDI),
+                                2 => buf.mov_store16(RBX, slot(rd) + off, RDI),
+                                _ => buf.mov_store8(RBX, slot(rd) + off, RDI),
+                            }
+                        }
+                        Ok(())
+                    }
+                    Inst::SimdXtn { rd, rn, dst_esize } => {
                     // xtn Vd.8b/4h/2s, Vn.<wider>: take the LOW `dst_esize` bytes of each
                     // source element (source element esize = 2*dst_esize) and pack them
                     // into dest lanes. Q=0 => 64-bit dest result (high lane of Vd zeroed).
