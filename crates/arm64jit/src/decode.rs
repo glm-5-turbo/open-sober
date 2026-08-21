@@ -200,8 +200,10 @@ pub enum Inst {
     },
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
         WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool, upper: bool },
-        // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
-        SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool },
+        // ---- SIMD add/sub-long widening: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T ----
+            SimdAddl { rd: u8, rn: u8, rm: u8, esrc: u8, sign: bool, sub: bool, upper: bool },
+    // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
+    SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool },
     // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
     FmulScalar { rd: u8, rn: u8, rm: u8, double: bool, neg: bool },
     // ---- SIMD signed/unsigned integer min/max: smin/smax/umin/umax Vd.T, Vn, Vm ----
@@ -1329,7 +1331,28 @@ pub fn decode(insn: u32) -> Inst {
                 let signed = (insn >> 29) & 1 == 0; // 0x4e/0x0e signed, 0x6e/0x2e unsigned
                 return Inst::SimdAdalp { rd, rn, src_esize, n_pairs: 0, signed };
             }
-            // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
+            // ---- SIMD add/sub-long: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T -----
+            // bit12==0 (long, vs addw wide which is bit12=1); byte2 low 0x00(add)/0x20(sub).
+            // esrc = 1<<bits[23:22]; sign=bit29==0; upper=bit30.
+            let al = insn & 0xffe0_fc00;
+            let alres = [
+                0x0e60_0000u32,0x0e60_2000u32,0x2e60_0000,0x2e60_2000,
+                0x4e60_0000,0x4e60_2000,0x6e60_0000,0x6e60_2000,
+            ];
+            if alres.contains(&al) {
+                            let b1 = (insn >> 16) & 0xff;
+                            let esrc: u8 = if b1 & 0x80 != 0 { 4 } else if b1 & 0x20 != 0 { 2 } else { 1 };
+                            return Inst::SimdAddl {
+                                rd: (insn & 0x1f) as u8,
+                                rn: ((insn >> 5) & 0x1f) as u8,
+                                rm: ((insn >> 16) & 0x1f) as u8,
+                                esrc,
+                                sign: ((insn >> 29) & 1) == 0,
+                                sub: (insn & 0x2000) != 0,
+                                upper: (insn >> 30) & 1 == 1,
+                            };
+                        }
+                        // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
         // Gate (insn&0x1fe0_0c00) in {0x1e20_0800 (single), 0x1e60_0800 (double)}
         // AND byte2 (bits15:8) in {0x08, 0x88} (fmul opcode; excludes fdiv 0x18, fadd 0x28,
         // and the `ut`-family ucvtf d0,d1=0x7e61d820 byte2 0xd8). neg = fnmul (bit15).
