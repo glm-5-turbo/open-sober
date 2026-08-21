@@ -1491,6 +1491,47 @@ pub fn translate(
                                 }
                                 Ok(())
                             }
+                            Inst::SimdSatAdd { rd, rn, rm, esize, sub, unsigned, q } => {
+                                // sqadd/uqadd/sqsub/uqsub: per-lane saturating add/sub.
+                                let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                let se = esize as i32;
+                                let lanes: i32 = if q { 16 / se } else { 8 / se };
+                                let full = (1u64 << (se * 8)) - 1;
+                                let smin = 1i64 << (se * 8 - 1);
+                                let smax = smin - 1;
+                                for i in 0..lanes {
+                                    let so_n = vslot(rn) + i * se;
+                                    let so_m = vslot(rm) + i * se;
+                                    let dd = vslot(rd) + i * se;
+                                    if se >= 4 { buf.mov_load64(RAX, RBX, so_n); buf.mov_load64(RCX, RBX, so_m); }
+                                    else { buf.mov_load32(RAX, RBX, so_n); buf.mov_load32(RCX, RBX, so_m); }
+                                    if unsigned {
+                                        if sub {
+                                            // uqsub: diff = Vn - Vm; clamp 0 on borrow
+                                            buf.mov_ri64(R10, 0);
+                                            buf.cmp_rr64(RCX, RAX);   // CF=1 if Vm>Vn
+                                            buf.sub_rr64(RAX, RCX);
+                                            buf.cmov_rr64(0x42, RAX, R10); // cmovb -> 0 if underflow
+                                        } else {
+                                            // uqadd: sum; clamp to full on carry
+                                            buf.mov_ri64(R10, full);
+                                            buf.add_rr64(RAX, RCX);
+                                            buf.cmov_rr64(0x42, RAX, R10); // cmovb (carry) -> full
+                                        }
+                                    } else {
+                                        if sub { buf.sub_rr64(RAX, RCX); } else { buf.add_rr64(RAX, RCX); }
+                                        buf.mov_ri64(R10, smax as u64);
+                                        buf.cmp_rr64(RAX, R10);
+                                        buf.cmov_rr64(0x4f, RAX, R10);   // cmovg -> smax
+                                        buf.mov_ri64(R10, smin as u64);
+                                        buf.cmp_rr64(RAX, R10);
+                                        buf.cmov_rr64(0x4c, RAX, R10);   // cmovl -> smin
+                                    }
+                                    if se >= 4 { buf.mov_store64(RBX, dd, RAX); }
+                                    else { buf.mov_store32(RBX, dd, RAX); }
+                                }
+                            Ok(())
+                            }
                             Inst::FmulScalar { rd, rn, rm, double, neg } => {
                                             // fmul/fnmul Sd/Dd, Sn, Sm: rd = (+/-)(rn*rm) scalar.
                                             let dn = crate::jit::VECTOR_BASE + (rd as i32) * 16;

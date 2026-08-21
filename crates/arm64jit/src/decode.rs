@@ -204,6 +204,8 @@ pub enum Inst {
             SimdAddl { rd: u8, rn: u8, rm: u8, esrc: u8, sign: bool, sub: bool, upper: bool },
     // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
     SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool },
+    // ---- SIMD saturating add/sub: sqadd/uqadd/sqsub/uqsub Vd.T, Vn, Vm ----
+    SimdSatAdd { rd: u8, rn: u8, rm: u8, esize: u8, sub: bool, unsigned: bool, q: bool },
     // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
     FmulScalar { rd: u8, rn: u8, rm: u8, double: bool, neg: bool },
     // ---- SIMD signed/unsigned integer min/max: smin/smax/umin/umax Vd.T, Vn, Vm ----
@@ -1330,6 +1332,22 @@ pub fn decode(insn: u32) -> Inst {
                 let src_esize: u8 = if b1 & 0x40 != 0 { 1 } else { 2 }; // byte1 bit6: 0x20=>.b, 0x60=>.h
                 let signed = (insn >> 29) & 1 == 0; // 0x4e/0x0e signed, 0x6e/0x2e unsigned
                 return Inst::SimdAdalp { rd, rn, src_esize, n_pairs: 0, signed };
+            }
+            // ---- SIMD saturating add/sub: sqadd/uqadd/sqsub/uqsub Vd.T, Vn, Vm -----
+            // byte2 {0x0c (add), 0x2c (sub)}; prefix 0x0e/2e/4e/6e (signed 0e/4e, unsigned 2e/6e).
+            let b2s = (insn >> 8) & 0xff;
+            if ((b2s == 0x0c || b2s == 0x2c) && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e)) {
+                let b1 = (insn >> 16) & 0xff;
+                let esize: u8 = 1u8 << ((insn >> 22) & 0x3);
+                return Inst::SimdSatAdd {
+                    rd: (insn & 0x1f) as u8,
+                    rn: ((insn >> 5) & 0x1f) as u8,
+                    rm: ((insn >> 16) & 0x1f) as u8,
+                    esize,
+                    sub: b2s == 0x2c,
+                    unsigned: ((insn >> 29) & 1) == 1, // 0x2e/0x6e
+                    q: (insn >> 30) & 1 == 1,
+                };
             }
             // ---- SIMD add/sub-long: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T -----
             // bit12==0 (long, vs addw wide which is bit12=1); byte2 low 0x00(add)/0x20(sub).
