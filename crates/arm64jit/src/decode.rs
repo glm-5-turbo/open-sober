@@ -1319,9 +1319,18 @@ pub fn decode(insn: u32) -> Inst {
             (1, 0b1110) => (imm8 as u64, imm8 as u64),
             // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes)
             // cmode [3:1]=0b001/010/011/100 ... covered by S2/S4/S6/S8 below.
+            // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes)
+            // cmode [3:1]=0b001/010/011/100 ... covered by S2/S4/S6/S8 below.
             (0, 2) | (0, 4) | (0, 6) | (0, 8) => {
                 let sh = (cmode << 2) as u32;
                 let lane = ((imm8 as u64) << sh) & 0xffff_ffff;
+                let low = lane | (lane << 32);
+                if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
+            }
+            // mvni .2S/.4S with LSL shift: value = ~(imm8 << (cmode<<2))
+            (1, 2) | (1, 4) | (1, 6) | (1, 8) => {
+                let sh = (cmode << 2) as u32;
+                let lane = (!((imm8 as u64) << sh)) & 0xffff_ffff;
                 let low = lane | (lane << 32);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
