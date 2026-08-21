@@ -1136,10 +1136,10 @@ pub fn decode(insn: u32) -> Inst {
     // Same 0x0f/0x0f/0x4f/0x6f prefix family as shl but the ACCUM marker is bit12
     // ((insn & 0x0000_7000)==0x0000_1000, vs shl's 0x5000 and ushr's 0x0000).
     // unsigned=bit11 (0x6f/0x6e -> usra). shift = esize_bits - (tagless immh:immb).
-    // acc=bit12; bit16 set is the shift-by-imm discriminator against fmla-by-element
-    // (fmla-el leaves bit16 clear, usra/ssra set it as the LSB of the shift imm).
+    // acc=bit12; bit23 clear is the shift-by-imm discriminator vs fmla-el
+    // (fmla-el requires bit23 set; usra/ssra shift-imm leave it clear).
     if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f)
-        && (insn & 0x0000_7000) == 0x0000_1000 && (insn & 0x0001_0000) == 0x0001_0000 {
+        && (insn & 0x0000_7000) == 0x0000_1000 && (insn & 0x0080_0000) == 0 {
         let immh = (insn >> 19) & 0x7;
         let es2 = if immh == 0 { 3 } else { immh.trailing_zeros() };
         let esize: u8 = 1 << es2;
