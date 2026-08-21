@@ -1584,22 +1584,28 @@ pub fn translate(
             buf.bytes[je as usize..(je + 4) as usize].copy_from_slice(&d2);
             Ok(())
         }
-        Inst::FcvtTzReg { rd, rn, dbl } => {
-            // fcvtzs Dd,Dn / Sd,Sn: store the trunc-toward-zero int of a FP scalar
-            // back into the destination FP reg (as an integer bit-pattern).
+        Inst::FcvtTzReg { rd, rn, dbl, unsigned } => {
+            // fcvtzs/fcvtzu Dd,Dn / Sd,Sn: store the trunc toward-zero int of a FP
+            // scalar back into the destination FP reg as an integer bit-pattern.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             let dst = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             if dbl {
                 buf.movq_load(0, RBX, vslot(rn));
-                buf.cvttsd2si(RAX, 0);              // RAX = (i64)trunc(Dn)
-                buf.mov_store64(RBX, dst(rd), RAX);
+                buf.cvttsd2si(RAX, 0);
             } else {
                 buf.mov_load32(RAX, RBX, vslot(rn));
                 buf.movd_xmm_r32(0, RAX);
-                buf.cvtss2sd(0, 0);                  // upconvert single -> double
-                buf.cvttsd2si(RAX, 0);               // RAX = (i64)trunc(Sn)
-                buf.mov_store32(RBX, dst(rd), RAX);
+                buf.cvtss2sd(0, 0);
+                buf.cvttsd2si(RAX, 0);
             }
+            if unsigned {
+                // fcvtzu: clamp negatives to 0 (trunc-toward-zero unsigned).
+                buf.mov_ri64(RCX, 0);
+                buf.test_rr64(RAX, RAX);
+                buf.cmov_rr64(0x48, RAX, RCX); // cmovs RAX,RCX (RAX<0 -> 0)
+            }
+            if dbl { buf.mov_store64(RBX, dst(rd), RAX); }
+            else { buf.mov_store32(RBX, dst(rd), RAX); }
             Ok(())
         }
             Inst::SimdPopcnt { rd, rn } => {
