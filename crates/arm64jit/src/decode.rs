@@ -1298,10 +1298,10 @@ pub fn decode(insn: u32) -> Inst {
     // Rounding drives `mode`: 0=truncate (fcvtzs), 2=nearest-away (fcvtas).
     {
         let b = insn & 0xffff_f800;
-        let (mode, ok) = if b == 0x1e78_0000 || b == 0x9e78_0000 {
-            (0, true) // fcvtzs: truncate
-        } else if b == 0x1e7a_0000 || b == 0x9e7a_0000 {
-            (2, true) // fcvtas: round nearest-away
+        let (mode, ok) = if b == 0x1e78_0000 || b == 0x9e78_0000 || b == 0x1e38_0000 || b == 0x9e38_0000 {
+            (0, true) // fcvtzs: truncate (0x1e38/0x9e38 = single-source S form)
+        } else if b == 0x1e7a_0000 || b == 0x9e7a_0000 || b == 0x1e3a_0000 || b == 0x9e3a_0000 {
+            (2, true) // fcvtas: round nearest-away (0x1e3a/0x9e3a = single-source)
         } else {
             (0, false)
         };
@@ -1320,7 +1320,16 @@ pub fn decode(insn: u32) -> Inst {
                     src_sng: false,
                 };
             }
-            return Inst::Unsupported(insn); // single (s) source not modelled yet
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            return Inst::FcvtToInt {
+                rd,
+                rn,
+                mode,
+                sf,
+                unsigned: false,
+                src_sng: true, // single (S) source
+            };
         }
     }
 
