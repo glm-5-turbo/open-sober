@@ -362,12 +362,12 @@ pub enum Inst {
     // and compiler 0x6e61dbff; excludes scvtf/scalar/compare forms).
     Ucvtf2d { rd: u8, rn: u8 },
     // ---- scalar unsigned int64->double: ucvtf Dd, Dn (int in Dn -> double) ----
-    // Gate (insn & 0xffe0_fc00) == 0x7e60_d800, disjoint from the vector Ucvtf2d
-    // (0x6e60_d800, bit23 differs), Fabd (0x7ee0_d400) and fmov (0x1e604000).
-    // Reads Dn's low 64 bits as an unsigned integer, writes the double to Dd.
-    ScalarUcvtf { rd: u8, rn: u8 },
-    // ---- scalar signed int64->double from a vector sub-reg: scvtf Dd, Dn ----
-    ScalarScvtf { rd: u8, rn: u8 },
+        // Gate (insn & 0xffe0_fc00) == 0x7e60_d800, disjoint from the vector Ucvtf2d
+        // (0x6e60_d800, bit23 differs), Fabd (0x7ee0_d400) and fmov (0x1e604000).
+        // Reads Dn's low 64 bits as an unsigned integer, writes the double to Dd.
+        ScalarUcvtf { rd: u8, rn: u8, sng: bool },
+        // ---- scalar signed int64->double from a vector sub-reg: scvtf Dd, Dn ----
+        ScalarScvtf { rd: u8, rn: u8, sng: bool },
     // Both 64-bit lanes of Vd get Vn's selected lane. Gate
     // (insn & 0xffff_fc00)==0x4e180400 (the Q=1 vector dup-d; distinct from the
     // 0x6e18:0x4e18 ins-variant). index in bit 16 (`[.../inst]` D[0] vs D[1]).
@@ -1954,18 +1954,18 @@ pub fn decode(insn: u32) -> Inst {
                                             // ---- scalar unsigned int64->double: ucvtf Dd, Dn ----
                                             // Gate (insn & 0xffe0_fc00) == 0x7e60_d800 (scalar, disjoint from
                                             // vector Ucvtf2d 0x6e60_d800 by bit23). Reads Dn low 64 as u64 -> double.
-                                            if (insn & 0xffe0_fc00) == 0x7e60_d800 {
+                                            if (insn & 0xffe0_fc00) == 0x7e60_d800 || (insn & 0xffe0_fc00) == 0x7e20_d800 {
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
-                                            return Inst::ScalarUcvtf { rd, rn };
+                                            return Inst::ScalarUcvtf { rd, rn, sng: (insn & 0x0040_0000) != 0 };
                                         }
                                         // ---- scalar Ssigned int64->double: scvtf Dd, Dn ----
                                         // Gate (insn & 0xffe0_fc00) == 0x5e60_d800. Sibling of the
                                         // 0x7e60_d800 (unsigned) form; bit23 distinguishes them.
-                                        if (insn & 0xffe0_fc00) == 0x5e60_d800 {
+                                        if (insn & 0xffe0_fc00) == 0x5e60_d800 || (insn & 0xffe0_fc00) == 0x5e20_d800 {
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
-                                            return Inst::ScalarScvtf { rd, rn };
+                                            return Inst::ScalarScvtf { rd, rn, sng: (insn & 0x0040_0000) != 0};
                                         }
                                             // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
                                                 // Gate `(insn & 0xffff_fc00)==0x4e180400`: the Q=1 vector `dup` (element from
@@ -2971,7 +2971,7 @@ mod tests {
                                 }
                                 // scalar ucvtf d0, d1 = 0x7e61d820 (real libroblox audio mix): ScalarUcvtf.
                                 match decode(0x7e61d820) {
-                                    Inst::ScalarUcvtf { rd, rn } => {
+                                    Inst::ScalarUcvtf { rd, rn, sng: _ } => {
                                         assert_eq!(rd, 0);
                                         assert_eq!(rn, 1);
                                     }

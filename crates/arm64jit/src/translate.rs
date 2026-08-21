@@ -1752,7 +1752,7 @@ pub fn translate(
                             }
                             Ok(())
                         }
-                        Inst::ScalarUcvtf { rd, rn } => {
+                        Inst::ScalarUcvtf { rd, rn, sng } => {
                             // ucvtf Dd, Dn : read Dn's low 64 bits as an unsigned integer
                             // and write the double to Dd. Honest u64->f64 (Ucvtf2d lane).
                             let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
@@ -1769,13 +1769,20 @@ pub fn translate(
                             buf.movq_store(RBX, slot(rd), 0);
                             Ok(())
                         }
-                        Inst::ScalarScvtf { rd, rn } => {
+                        Inst::ScalarScvtf { rd, rn, sng } => {
                             // scvtf Dd, Dn : read Dn's low 64 bits as a SIGNED integer
                             // and write the double to Dd (two's-complement -> f64, signed).
                             let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                            if sng {
+                                buf.mov_load32(RAX, RBX, slot(rn));   // low 32 as signed i32
+                                buf.cvtsi2ss(0, false, RAX);          // i32 -> f32
+                                buf.movd_r32_xmm(RCX, 0);
+                                buf.mov_store32(RBX, slot(rd), RCX);
+                            } else {
                             buf.mov_load64(RDX, RBX, slot(rn));
                             buf.cvtsi2sd(0, true, RDX); // signed i64 -> f64
                             buf.movq_store(RBX, slot(rd), 0);
+                            }
                             Ok(())
                         }
                         Inst::Simd2dFp { rd, rn, rm, op } => {
