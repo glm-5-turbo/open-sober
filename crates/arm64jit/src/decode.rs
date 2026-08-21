@@ -320,13 +320,21 @@ pub enum Inst {
                                    sz: bool, // true = double (fcmp Dn,Dm), false = single (fcmp Sn,Sm)
                                },
     // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
-        FcsSel {
-            rd: u8,   // destination FP reg
-            rn: u8,   // "if-true" FP reg
-            rm: u8,   // "else" FP reg
-            cond: u8, // AArch64 condition code (0-14)
-            sz: bool, // true = double (8B), false = single (4B)
-        },
+            FcsSel {
+                rd: u8,   // destination FP reg
+                rn: u8,   // "if-true" FP reg
+                rm: u8,   // "else" FP reg
+                cond: u8, // AArch64 condition code (0-14)
+                sz: bool, // true = double (8B), false = single (4B)
+            },
+            // ---- scalar FP conditional compare: fccmp Dn, Dm, #nzcv, <cond> ----
+            Fccmp {
+                rn: u8,
+                rm: u8,
+                nzcv: u8, // NZCV set when cond is false
+                cond: u8, // AArch64 condition code
+                sz: bool, // true = double (fcmp Dn,Dm), false = single
+            },
         // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
                            InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
                            // ---- EXTR / ROR rotate: rm==rn in the EXTR base ----
@@ -1772,6 +1780,17 @@ pub fn decode(insn: u32) -> Inst {
                         let rn = ((insn >> 5) & 0x1f) as u8;
                         let rm = ((insn >> 16) & 0x1f) as u8;
                         return Inst::Fcmp { rn, rm, sz };
+                    }
+                    // ---- scalar FP conditional compare: fccmp Dn, Dm, #nzcv, <cond> ----
+                    // Mask 0xfff0_fc03 (drops rn/rm/rd/cond/nzcv) yields 0x1e60_c400 (d)
+                    // / 0x1e20_c400 (s); disjoint from fcmp (0x1e602000).
+                    if (insn & 0xfff0_fc03) == 0x1e60_c400 || (insn & 0xfff0_fc03) == 0x1e20_c400 {
+                        let sz = (insn & 0x400000) != 0; // 1 => double (0x1e6...), 0 => single
+                        let rn = ((insn >> 5) & 0x1f) as u8;
+                        let rm = ((insn >> 16) & 0x1f) as u8;
+                        let nzcv = (insn & 0xf) as u8;
+                        let cond = ((insn >> 12) & 0xf) as u8;
+                        return Inst::Fccmp { rn, rm, nzcv, cond, sz };
                     }
                             // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
                             // Gate (insn & 0xffe0_fc00) == 0x7ee0_d400 (scalar double; disjoint from

@@ -1548,7 +1548,43 @@ pub fn translate(
             store_nzcv_fp(buf);
             Ok(())
         }
-        Inst::SimdPopcnt { rd, rn } => {
+        Inst::Fccmp { rn, rm, nzcv, cond, sz } => {
+            // fccmp Dn, Dm, #nzcv, <cond>: if cond(guest NZCV) do FP compare -> NZCV;
+            // else NZCV = nzcv. Load guest flags, jcc to the compare path when cond
+            // true, else write the immediate nzcv, then patch both rel32 wires.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let jcc = x86_cc_for_cond(cond)
+                .ok_or_else(|| format!("Fccmp: bad cond {cond:#x}"))?;
+            load_nzcv_to_eflags(buf);              // eflags = guest NZCV (cond)
+            let j_cond = buf.jcc_rel32(jcc);       // jump to fp-compare when cond TRUE
+            // cond FALSE: NZCV = nzcv immediate
+            buf.mov_ri64(RAX, (nzcv as u64) << 28);
+            buf.mov_store32(RBX, NZCV_OFF, RAX);
+            let j_end = buf.jmp_rel32();           // skip over the fp-compare path
+            let fp_off = buf.len() as i32;         // start of cond-TRUE path
+            if sz {
+                buf.movq_load(0, RBX, vslot(rn));
+                buf.movq_load(1, RBX, vslot(rm));
+                buf.comisd(0, 1);
+            } else {
+                buf.mov_load32(RAX, RBX, vslot(rn));
+                buf.movd_xmm_r32(0, RAX);
+                buf.mov_load32(RAX, RBX, vslot(rm));
+                buf.movd_xmm_r32(1, RAX);
+                buf.comiss(0, 1);
+            }
+            store_nzcv_fp(buf);
+            let tail_off = buf.len() as i32;
+            // patch displacements: relative to disp_off+4
+            let jd = j_cond as i32;
+            let d1 = ((fp_off - (jd + 4)) as u32).to_le_bytes();
+            buf.bytes[jd as usize..(jd + 4) as usize].copy_from_slice(&d1);
+            let je = j_end as i32;
+            let d2 = ((tail_off - (je + 4)) as u32).to_le_bytes();
+            buf.bytes[je as usize..(je + 4) as usize].copy_from_slice(&d2);
+            Ok(())
+        }
+            Inst::SimdPopcnt { rd, rn } => {
             // cnt v{rd}.8b, v{rn}.8b : per-byte bit-popcount via SWAR.
             let slot = crate::jit::VECTOR_BASE + (rn as i32) * 16;
             buf.mov_load64(RAX, RBX, slot); // x
