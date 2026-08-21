@@ -244,9 +244,18 @@ pub fn host_call_addr(i: usize) -> u64 {
     HOST_THUNK_BASE + (i as u64) * 8
 }
 
+/// Register `f` at the first free slot; returns its guest address. Mirrors the
+/// float auto-allocators (`register_float_call`/`register_float32_call`).
+pub fn register_host_call_auto(f: HostCall) -> u64 {
+    let mut hc = HOST_CALLS.lock().unwrap();
+    let i = hc.iter().position(|s| s.is_none()).expect("host thunk table full");
+    hc[i] = Some(f);
+    host_call_addr(i)
+}
+
 /// Look up (host fn, slot index) for a guest `pc` that falls in the thunk
 /// region. Returns `None` if `pc` is outside it or the slot is unregistered.
-fn host_call_at(pc: u64) -> Option<(HostCall, usize)> {
+pub fn host_call_at(pc: u64) -> Option<(HostCall, usize)> {
     if pc < HOST_THUNK_BASE {
         return None;
     }

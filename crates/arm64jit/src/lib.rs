@@ -7,3 +7,4 @@ pub mod x86;
 pub mod resolver;
 pub mod shims;
 pub mod plt;
+pub mod jni;
