@@ -1976,3 +1976,36 @@ entry the Android-runtime integration eventually feeds it.
 Status: JIT engine + syscall bridge complete and end-to-end proven (svc_elf write/exit). The blocker to
 literal "Roblox boots" is 100% the Android/JNI host-runtime port (large, multi-session, separately
 scoped). No decoder or syscall wall remains in the JIT path.
+
+## Session — arm64jit guest->host call bridge + real-import resolver + float-ABI bridge
+
+Jumped the JIT across the arch boundary so a translated AArch64 libc/libm/JNI call reaches a real
+host x86-64 function (no QEMU). Three verified milestones, all committed:
+
+1. **Guest->host call bridge** (`jit.rs`, `5e76450`): the `jit_run` dispatcher now recognizes a
+   reserved guest-address region (`HOST_THUNK_BASE + i*8`) and, when a translated `blr`/`br` lands
+   there, calls the registered host x86-64 function with guest x0..x7 as SysV args, writes the
+   return into guest x0, and resumes at x30 (the `blr` caller). API: `register_host_call(i, f)`,
+   `host_call_addr(i)`. Proven: guest `blr x16` -> times_3(5) = 15.
+
+- **Real-import resolver** (`resolver.rs` + `examples/resolveimports.rs`, `646a42d`): `resolve(name)`
+   does `dlsym(RTLD_DEFAULT)` on the host, maps robotox's `R_AARCH64_JUMP_SLOT` PLT imports by walking
+   `PT_DYNAMIC` (DT_JMPREL/PLTRELSZ/SYMTAB/STRTAB) and PATCHES each GOT slot to a host thunk guest
+   addr. Against real `libroblox.so`: **334/537 imports resolve NOW** (strlen/memcpy/memcmp/
+   pthread_*/mmap/mprotect/open/read/close/clock/..). The rest (203) need the bionic/Android/JNI
+   shim. Proof: guest `blr` to resolved `strlen` returns the real host length.
+
+- **Float-ABI bridge** (`jit.rs` + `resolver.rs`, `3de5bb3`): separate float thunk region reads guest
+   v0..v7 as f64, calls a host double fn through xmm0..xmm7, returns into guest v0. `resolve_float`
+   + `DOUBLE_FLOAT_NAMES`. Proven: guest `blr` to registered atan2 -> pi/2 in v0.
+
+Key loader truth discovered: guest address != host pointer for the mapped `.so` (a PIE); every read
+must go through `LoadElf::host_addr_of(guest)` (the closest analog is `guest_of(link)->host_addr_of`).
+`libroblox.so` is e_entry=0, empty `.init_array`, no RELATIVE/RELR relocs (only JUMP_SLOT), so
+`.init_array` is not the boot path and there is no relocation pass for the loader to perform.
+
+**NEXT (immediate)**: finish the single-precision f32 bridge. Roblox's float imports are `*f`
+(`atan2f`, `asinf`, `sinf`, ...) which store f32 in the low 32 bits of a v-lane; the current f64
+bridge reads the whole 64-bit lane and would feed garbage. Add an f32 thunk array that widens
+low-32 v-lane -> f64, calls the host double fn, narrows f64 -> f32 back into v0 low lane. That
+closes the last `*f` shim gap and pushes `resolveimports` past 334 resolved.
