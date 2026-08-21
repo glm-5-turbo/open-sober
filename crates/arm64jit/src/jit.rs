@@ -895,4 +895,41 @@ mod tests {
         ];
         assert_eq!(got, [d[0], d[1], d[2], d[3]], "sha1c 4-round Ch");
     }
+
+    #[test]
+    fn add_carry_reference() {
+        // adc w12, w14, w11 = 0x1a0b01cc  (rm=11, rn=14, rd=12). carry C=1
+        // (NZCV bit29).  0 + 10 + 1 = 11.
+        let mut st = CpuState::new();
+        st.x[14] = 0;
+        st.x[11] = 10;
+        st.nzcv = 0x2000_0000; // C=1
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x1a0b_01ccu32.to_le_bytes());
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec adc");
+        assert_eq!(st.x[12], 11, "adc w: 0 + 10 + C(1) = 11");
+
+        // carry clear: 0 + 10 + 0 = 10
+        let mut st2 = CpuState::new();
+        st2.x[14] = 0;
+        st2.x[11] = 10;
+        st2.nzcv = 0; // C=0
+        let mut code2 = Vec::new();
+        code2.extend_from_slice(&0x1a0b_01ccu32.to_le_bytes());
+        code2.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        exec_bytes(&mut st2, &code2, 0).expect("exec adc c-0");
+        assert_eq!(st2.x[12], 10, "adc w: 0 + 10 + 0 = 10");
+
+        // sbc w12, w14, w11 = 0x5a0b01cc: 100 - 40 - (1-C). C=1 -> 100-40-0 = 60.
+        let mut st3 = CpuState::new();
+        st3.x[14] = 100;
+        st3.x[11] = 40;
+        st3.nzcv = 0x2000_0000; // C=1
+        let mut code3 = Vec::new();
+        code3.extend_from_slice(&0x5a0b_01ccu32.to_le_bytes());
+        code3.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        exec_bytes(&mut st3, &code3, 0).expect("exec sbc");
+        assert_eq!(st3.x[12], 60, "sbc w C=1: 100 - 40 - 0 = 60");
+    }
 }

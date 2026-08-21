@@ -66,6 +66,15 @@ pub enum Inst {
         shift: ShiftKind,
         sh_amt: u8,
     },
+    // ---- add/subtract with carry: adc/sbc/adcs/sbcs Xd, Xn, Xm ----
+    AddCarry {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        sub: bool,
+        sf: bool,
+        s: bool,
+    },
     // ---- logical (shifted register) ----
     LogicReg {
         rd: u8,
@@ -770,6 +779,19 @@ pub fn decode(insn: u32) -> Inst {
             shift,
             sh_amt,
         };
+    }
+
+    // ---- add/subtract with carry: adc/sbc/adcs/sbcs Xd, Xn, Xm ----
+    // Mask (insn & 0x1fe0_0000)==0x1a00_0000. Distinct from AddSubReg-shifted
+    // (top 0x0b/0x1b/0x2b...), madd (0x1b00_0000) and CSEL (0x1a80_0000).
+    if (insn & 0x1fe0_0000) == 0x1a00_0000 {
+        let sub = b(insn, 30, 30) == 1;
+        let s = b(insn, 29, 29) == 1;
+        let rd = b(insn, 0, 4) as u8;
+        let rn = b(insn, 5, 9) as u8;
+        let rm = b(insn, 16, 20) as u8;
+        let sf = b(insn, 31, 31) == 1;
+        return Inst::AddCarry { rd, rn, rm, sf, s, sub };
     }
 
     // ---- conditional select (CSEL/CSINC/CSINV/CSNEG): mask (insn&0x7fe00000)==0x1a800000 ----

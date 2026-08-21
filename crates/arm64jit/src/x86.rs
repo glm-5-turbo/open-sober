@@ -644,6 +644,18 @@ impl CodeBuf {
     pub fn sub_rr64(&mut self, rd: u8, rs: u8) {
         self.binop(0x29, rd, rs);
     }
+    /// adc r64 <- r64 + CF  (opcode 11: reg=src, rm=dest)
+    pub fn adc_rr64(&mut self, rd: u8, rs: u8) {
+        self.binop(0x11, rd, rs);
+    }
+    /// sbb r64 <- r64 - CF  (opcode 19)
+    pub fn sbb_rr64(&mut self, rd: u8, rs: u8) {
+        self.binop(0x19, rd, rs);
+    }
+    /// cmc (F5): complement the carry flag
+    pub fn cmc(&mut self) {
+        self.b(0xF5);
+    }
     /// xor r64 <- r64
     pub fn xor_rr64(&mut self, rd: u8, rs: u8) {
         self.binop(0x31, rd, rs);

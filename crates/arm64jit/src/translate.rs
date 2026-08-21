@@ -310,6 +310,45 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::AddCarry { rd, rn, rm, sf, s, sub } => {
+            // adc/sbc/adcs/sbcs Xd, Xn, Xm: Rd = Xn +/- Xm +/- carry.
+            // AArch64 adds the previous C flag (NZCV bit29). SBC subtracts the
+            // borrow (1 - C). Read the stored carry into x86 CF via
+            // load_nzcv_to_eflags (preserves RAX/RCX), then use native adc/sbb.
+            ldg(buf, RAX, rn as u32);
+            ldg(buf, RCX, rm as u32);
+            if !sf {
+                // 32-bit form: zero the upper halves so the 64-bit adc/sbb below
+                // yields exactly the 32-bit carry semantics.
+                buf.shl_ri8(RAX, 32);
+                buf.shr_ri8(RAX, 32);
+                buf.shl_ri8(RCX, 32);
+                buf.shr_ri8(RCX, 32);
+            }
+            // Inject stored C into CF (last op = popfq); RAX/RCX are preserved.
+            load_nzcv_to_eflags(buf);
+            if sub {
+                // sbc: Rd = rn - rm - (1 - C). With CF currently = C, first
+                // complement CF so the subtraction consumes 1-C.
+                buf.cmc(); // CF = 1 - C
+                buf.sbb_rr64(RAX, RCX);
+                if s {
+                    // ARM sbc sets C = NOT(borrow); sbb left CF=borrow, so
+                    // invert before store_nzcv reads it as the carry flag.
+                    buf.cmc();
+                    store_nzcv(buf);
+                }
+            } else {
+                buf.adc_rr64(RAX, RCX); // RAX = rn + rm + C
+                if s {
+                    store_nzcv(buf);
+                }
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
         Inst::LogicReg {
             rd,
             rn,
