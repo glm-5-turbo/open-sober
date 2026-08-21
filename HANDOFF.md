@@ -1807,4 +1807,53 @@ translate.rs / x86.rs + HANDOFF.
 2. Then continue grind; eventually the `svc` real AArch64→x86-64 syscall table (mmap/futex/mprotect; numbers
    differ: mmap 222->9, futex 95->202, mprotect 226->10) — the big-ticket item before real Roblox boot.
 - Commits this session: `b80ed31` (10+ walls), `1b16fc9` (FcvtToInt round-mode translate, dead-code-y wiring).
-  Tree clean, `cargo test -p arm64jit` = 39 pass. Boot stalls honestly at `fcvtpu x9,s0` (0x9e290009) pc 0x101f69cec.
+
+## Session 31 (Aug 20, 2026) — Verified SHA-1 crypto core, adc/sbc w/ carry, fmaxv; 43/43 tests; boot far past the SHA integrity region
+
+Took over from 30c's `fcvtpu` note. The guest, past the FCVT round wall, reached the **SHA-1 crypto block** of
+libroblox and the JIT was failing on it. Implemented + **verified against qemu** the full SHA-1/SHA-256 crypto
+extension, then adc/sbc-with-carry, then fmaxv. **43 tests pass.** Tree clean at HEAD `5de6e56`.
+
+### New instructions implemented (all verified by seed-tests / objdump ground truth)
+- **SHA-1 / SHA-256 crypto** via a host helper `guest_sha1stem` (extern "C" `f(st,*mut CpuState, packed)->u64`),
+  called from translate via `mov_rr64(RDI, RBX); mov_ri64(RSI, packed); mov_ri64(RAX, addr); call_r64(RAX)`.
+  Decode gate on `0x5e00_xxxx` SHA residues (sha1h=`0x5e20_0800`, sha1c/p/m=`0x5e00_xxxx` by op field, sha256h,
+  sha1su0/su1=`0x5e00_3000` with bit20=clear→su0/set→su1). Semantics transcribed from authoritative qemu
+  `crypto_helper.c`: `sha1h = Sd.word0=ror32(Sn,2)` (NOT the 3-xor I first shipped — fixed), `sha1c/p/m` =
+  4-round `t=fn(d1,d2,d3)+rol(d0,5)+n0+m[i]; n0=d3; d3=d2; d2=ror(d1,2); d1=d0; d0=t` (fn: cho/par/maj);
+  sha256h S0/S1; sha1su0/su1 schedule. `sha1_round_correct_reference` validates sha1h+sha1c vs the Rust ref.
+- **adc/sbc/adcs/sbcs** (AddCarry, all 4 prefics ×32/64) — gate `(insn&0x1fe0_0000)==0x1a00_0000` (disjoint from
+  AddSubReg-shifted 0x0b/0x8b, madd 0x1b, csel 0x1a80). Translate reads stored C (NZCV bit29) into x86 CF via the
+  existing `load_nzcv_to_eflags`, then native `adc`/`sbb` (`add_rr64`-style `binop(0x11/0x19)`, added to x86.rs),
+  `cmc` (`F5`) for sbc's `1-C` borrow + the `-s` carry restore. New `adc_x86.s` ground truth: `48 11 c8`=`adc
+  adc %rcx,%rax`, `48 19 c8`=`sbb`, `f5`=`cmc`; REX.B for r8-r15 confirmed (`4d 11 d3`). `add_carry_reference`.
+- **fmaxv/fminv Sd, Vn.4s** (FMaxV) — horizontal FP max/min of the 4 single lanes into scalar Sd. Gate
+  `(insn&0x3f20_0c00)==0x2e20_0800 && (insn&0x0010_0000)!=0` — **bit20 demanded to exclude `ucvtf v2.2d`
+  (0x6e61d842), which shares the residue** (caught by the `mov_ccc_/ucvtf` regression test → tighten). min =
+  bit23 (`0x0080_0000`). Accumulator: 4×`movd_xmm_r32`/`maxss`/`minss` → `movd_r32_xmm` store. `fmaxv_reduce_reference`.
+
+### NEW LATENT BUG FOUND & FIXED (the "silent miscompile" class the memory tracks)
+- **`movd_xmm_r32` / `movd_r32_xmm` had their ModRM reg/rm fields SWAPPED for opcodes 6E/7E.** Correct is
+  reg-field=xmm(dst), rm-field=GPR (6E) and reg=xmm(src), rm=GPR(dst) (7E). It only *coincidentally* worked
+  when the GPR and XMM were index 0 (RAX & xmm0, as the old FMaxMin scalar path used), so it went unnoticed —
+  my fmaxv loop's `movd_xmm_r32(1, RAX)` (xmm1≠0) exposed it by reading RCX instead of RAX. Fixed both emitters
+  to `modrm(3, xmm&7, gpr&7)`. (Earlier `movq_xmm_r64`/`movq_r64_xmm` were already correct.)
+
+### Boot wall history (this session, guest pcs)
+```
+sha1h(s) -> sha1c q0,s1,v20.4s (.0xa8c) -> sha1su0 (.0xa94)  [SHA-1 core]
+  -> st1 {v0.4s},[x0],#16 (0x4c9f7800) -> udf #0 (0x105e651d8, zero-pad -> graceful trap like brk)
+  -> adc w12,w14,w11 (0x1a0b01cc)  -> fmaxv s1,v0.4s (0x6e30f801)
+  -> CURRENT WALL: fmla v29.4s, v19.4s, v26.4s = 0x4e3ace7d at guest pc 0x1058d5970
+```
+
+### New wall to implement next: `fmla v29.4s, v19.4s, v26.4s` (0x4e3ace7d)
+Scalar-by-vector / vector FMLA (multiply-accumulate). Assemble the family (`fmla v.4s/`.2d`, `fmls`, `.2s/.4s`,
+register vs by-element) to get disjoint gates; the `0x4e3a`/`0x2e3a` residue vs `0x4e32` (fmls), bit 24 for
+vector-by-scalar, bit 30 for `.2s/.2d` width. Then continue → the big remaining ticket is the `svc` AArch64→x86
+syscall table (mmap 222→20, futex 95→202, mprotect 226→10) before a real boot.
+
+### Verification
+`cargo test -p arm64jit` → **43 passed** (sha1, adc_carry, fmaxv + all prior). `cargo build -p arm64jit` clean.
+Tree: decode.rs / translate.rs / x86.rs / jit.rs + HANDOFF. Commits: `ff35b63` (adc/sbc), `5de6e56` (fmaxv +
+movd fix). Prior: `80f9874` (udf trap), `c7a75e2` (st1), `6a8cf7f` (sha1 ref), `444f6dd` (SHA core).
