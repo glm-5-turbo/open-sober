@@ -2153,6 +2153,51 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.mov_store64(RBX, slot(rd) + 8, RAX);
                     Ok(())
                 }
+                Inst::SaturatNarrow { rd, rn, dst_esize, src_signed, dst_signed, q } => {
+                    // sqxtn/uqxtn/sqxtun/uqxtun Vd.T, Vn.U: saturating narrow. Each src
+                    // element (2*dst_esize) is sign/zero-extended to 64, clamped into the
+                    // dst range, then the low dst_esize bytes stored into V[rd] lane.
+                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let src_esize = 2 * (dst_esize as i32);
+                    let lanes = if q { 16 / (dst_esize as i32) } else { 8 / (dst_esize as i32) };
+                    let maxv: i64 = if dst_esize == 2 { 0xffff } else { 0xff };
+                    let minv: i64 = if dst_signed {
+                        if dst_esize == 2 { -0x8000 } else { -0x80 }
+                    } else { 0 };
+                    for i in 0..lanes {
+                        let src_off = (i as i32) * src_esize;
+                        let dst_off = (i as i32) * (dst_esize as i32);
+                        match src_esize {
+                            2 => {
+                                if src_signed { buf.movsx_word_mem(RAX, RBX, slot(rn)+src_off); }
+                                else { buf.movzx_word_mem(RAX, RBX, slot(rn)+src_off); }
+                            }
+                            _ => {
+                                buf.mov_load32(RAX, RBX, slot(rn)+src_off);
+                                if src_signed { buf.shl_ri8(RAX, 32); buf.sar_ri8(RAX, 32); }
+                            }
+                        }
+                        // clamp low: RAX = max(RAX, minv) using signed compare
+                        buf.mov_ri64(RCX, minv as u64);
+                        buf.cmp_rr64(RAX, RCX);
+                        buf.cmov_rr64(0x4c, RAX, RCX); // cmovl: RAX=RCX(minv) if RAX<RCX
+                        // clamp high: RAX = min(RAX, maxv)
+                        buf.mov_ri64(RCX, maxv as u64);
+                        buf.cmp_rr64(RAX, RCX);
+                        buf.cmov_rr64(0x4f, RAX, RCX); // cmovg: RAX=RCX(maxv) if RAX>RCX
+                        // store low dst_esize bytes
+                        match dst_esize {
+                            2 => buf.mov_store16(RBX, slot(rd)+dst_off, RAX),
+                            _ => buf.mov_store8(RBX, slot(rd)+dst_off, RAX),
+                        }
+                    }
+                    // Q=0 zero the high 64 bits of Vd
+                    if !q {
+                        buf.mov_ri64(RAX, 0);
+                        buf.mov_store64(RBX, slot(rd) + 8, RAX);
+                    }
+                    Ok(())
+                }
                 Inst::Ld1V { rd, rn, bytes } => {
                     // ld1 {Vt.T}, [Xn], #imm: load `bytes` (16 or 8) contiguous bytes
                     // from guest address x[rn] into V[rd], then x[rn] += bytes.
