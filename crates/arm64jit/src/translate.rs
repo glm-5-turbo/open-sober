@@ -884,6 +884,13 @@ pub fn translate(
                 }
                 return Ok(());
             }
+            if sysreg == 4 {
+                // mrs xN, nzcv  ->  xN = CpuState.nzcv (packed N=31,Z=30,C=29,V=28).
+                if read && rt != 31 {
+                    buf.mov_load32(rt, RBX, NZCV_OFF);
+                }
+                return Ok(());
+            }
             if read {
                 // Rt = [RBX + TPIDR_OFF]
                 if rt != 31 {

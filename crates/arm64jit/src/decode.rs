@@ -1930,6 +1930,12 @@ pub fn decode(insn: u32) -> Inst {
             };
             return Inst::SysReg { sysreg, rt, read };
         }
+        // mrs xN, nzcv = 0xd53b4201: op1=3, CRn=4, CRm=2, op2=0. Read the packed
+        // condition flags (N=31,Z=30,C=29,V=28 from CpuState.nzcv) into rt.
+        if op1 == 3 && crn == 4 && crm == 2 && op2 == 0 && read {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 4, rt, read };
+        }
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
