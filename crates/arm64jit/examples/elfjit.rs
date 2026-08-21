@@ -24,7 +24,15 @@ fn main() {
     let entry_arg = std::env::args().nth(2);
 
     let el = unsafe { libloader::elf::load_elf_image(std::path::Path::new(&path)) }
-        .expect("load_elf_image");
+            .expect("load_elf_image");
+
+        // Fold the import resolver + host shims into the boot path: bind every PLT
+        // JUMP_SLOT GOT slot to a host thunk so translated Roblox `blr`s hit real
+        // host functions (libc/libm/float/bionic/graphics-stub) instead of stalling.
+        let (nbound, nunresolved) = arm64jit::plt::bind_image_plt(&el);
+        if nbound > 0 {
+            println!("PLT imports bound: {nbound} to host thunks ({} unbound)", nunresolved);
+        }
 
     // Guest entry: the ELF's own e_entry (already relocated to guest space by
     // load_elf_image) unless a link-time address is supplied, in which case we
