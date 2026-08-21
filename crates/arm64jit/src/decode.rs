@@ -162,8 +162,8 @@ pub enum Inst {
         SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8, esize: u8 },
         // ---- SIMD fp mul by element: fmul Vd.T, Vn.T, Vm.T[L] ----
         SimdFmulEl { rd: u8, rn: u8, rm: u8, esize: u8, index: u8, q: bool },
-    // ---- SIMD byte reverse in 64-bit element: rev64 Vd.T, Vn.T ----
-    SimdRev { rd: u8, rn: u8, q: bool },
+    // ---- SIMD byte reverse (rev64/rev32): reverse bytes within each granule ----
+    SimdRev { rd: u8, rn: u8, granule: u8, q: bool },
     // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----
     SimdLaneS { rd: u8, rn: u8, esize: u8, index: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1070,7 +1070,12 @@ pub fn decode(insn: u32) -> Inst {
     if insn & 0x3f00_0c00 == 0x0e00_0800 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
-        return Inst::SimdRev { rd, rn, q: (insn >> 30) & 1 == 1 };
+        return Inst::SimdRev { rd, rn, granule: 8, q: (insn >> 30) & 1 == 1 };
+    }
+    if (insn & 0x3f00_0c00) == 0x2e00_0800 && (insn & 0x3f00) == 0x0800 && (insn & 0x0020_0000) != 0 {
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::SimdRev { rd, rn, granule: 4, q: (insn >> 30) & 1 == 1 };
     }
 
     // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----

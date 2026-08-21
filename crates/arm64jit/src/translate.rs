@@ -1962,16 +1962,25 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                 }
                                 Ok(())
                             }
-                            Inst::SimdRev { rd, rn, q } => {
-                                // rev64 Vd.T, Vn.T: byte-reverse each 64-bit element (BSWAP).
+                            Inst::SimdRev { rd, rn, granule, q } => {
+                                // rev64/rev32 Vd.T, Vn.T: byte-reverse within each
+                                // granule (8B for rev64, 4B for rev32) via BSWAP.
                                 let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                                 let base = f(rn);
                                 let dbase = f(rd);
-                                for g in 0..if q { 2 } else { 1 } {
-                                    let o = g * 8;
-                                    buf.mov_load64(RAX, RBX, base + o);
-                                    buf.bswap_r64(RAX);
-                                    buf.mov_store64(RBX, dbase + o, RAX);
+                                let total = if q { 16 } else { 8 };
+                                let n = total / (granule as i32);
+                                for g in 0..n {
+                                    let o = g * (granule as i32);
+                                    if granule == 8 {
+                                        buf.mov_load64(RAX, RBX, base + o);
+                                        buf.bswap_r64(RAX);
+                                        buf.mov_store64(RBX, dbase + o, RAX);
+                                    } else {
+                                        buf.mov_load32(RAX, RBX, base + o);
+                                        buf.bswap_r32(RAX);
+                                        buf.mov_store32(RBX, dbase + o, RAX);
+                                    }
                                 }
                                 Ok(())
                             }
