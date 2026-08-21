@@ -15,7 +15,7 @@
 // the flags result is only written back as a placeholder.
 
 use crate::decode::{Inst, ShiftKind};
-use crate::x86::{CodeBuf, RAX, RBX, RCX, RDX, RDI, R10};
+use crate::x86::{CodeBuf, RSI, RAX, RBX, RCX, RDX, RDI, R10};
 
 /// Byte offset of guest register g inside CpuState (x[g] at 8*g).
 #[inline]
@@ -1999,18 +1999,16 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                 }
                                 Ok(())
                             }
-                            Inst::Sha1h { rd, rn } => {
-                                // sha1h Sd, Sn: Sd = ror32(x,27) ^ ror32(x,13) ^ ror32(x,6).
-                                let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                                buf.mov_load32(RAX, RBX, f(rn));
-                                buf.mov_rr64(RDX, RAX);
-                                buf.mov_rr64(RCX, RAX);
-                                buf.ror32_ri8(RAX, 27);
-                                buf.ror32_ri8(RDX, 13);
-                                buf.ror32_ri8(RCX, 6);
-                                buf.xor_rr64(RAX, RDX);
-                                buf.xor_rr64(RAX, RCX);
-                                buf.mov_store32(RBX, f(rd), RAX);
+                            Inst::Sha { mode, rd, rn, rm } => {
+                                // Call the host SHA helper: passes the current
+                                // guest-state pointer (RBX) and a packed[op|rd|rn|rm].
+                                let packed = ((mode as u64) << 24) | ((rd as u64) << 16)
+                                    | ((rn as u64) << 8) | (rm as u64);
+                                let addr = crate::jit::guest_sha1stem as usize as u64;
+                                buf.mov_rr64(RDI, RBX);   // arg0 = CpuState*
+                                buf.mov_ri64(RSI, packed); // arg1 = packed op
+                                buf.mov_ri64(RAX, addr);
+                                buf.call_r64(RAX);
                                 Ok(())
                             }
                             // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes

@@ -212,6 +212,111 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     (-38i64) as u64 // -ENOSYS
 }
 
+/// Hased SHA-1 / SHA-256 crypto helper called by translated code for the
+/// ARM crypto SHA instructions. `packed` = [mode(8)][rd(5)][rn(5)][rm(5)][--9]
+/// with mode: 1=sha1h, 2=sha1c, 3=sha1p, 4=sha1m, 5=sha256h, 6=sha1su0,
+/// 7=sha1su1, 8=sha256su0, 9=sha256su1, 10=sha256h2.
+/// Vector register r lives at st.v[2r] (words 0..1) and st.v[2r+1] (words 2..3).
+pub extern "C" fn guest_sha1stem(st: *mut CpuState, packed: u64) -> u64 {
+    // shim over the pure Rust helpers so the impl is testable.
+    let s = unsafe { &mut *st };
+    unsafe { sha1_host_impl(s, packed) };
+    0
+}
+
+fn sha1_host_impl(s: &mut CpuState, packed: u64) {
+    let mode = (packed >> 24) & 0xff;
+    let rd = ((packed >> 16) & 0x1f) as usize;
+    let rn = ((packed >> 8) & 0x1f) as usize;
+    let rm = (packed & 0x1f) as usize;
+    let rol = |x: u32, n: u32| x.rotate_left(n);
+    let ror = |x: u32, n: u32| x.rotate_right(n);
+    let s1 = |x: u32| ror(x, 6) ^ ror(x, 11) ^ ror(x, 25);
+    let s0 = |x: u32| ror(x, 2) ^ ror(x, 13) ^ ror(x, 22);
+
+    // Free helpers (no closure capture of s.v => no borrow conflict).
+    fn lw(v: &[u64], r: usize, i: usize) -> u32 {
+        ((v[2 * r + i / 2]) >> ((i % 2) * 32)) as u32 & 0xffff_ffff
+    }
+    fn wr(v: &mut [u64], r: usize, i: usize, val: u32) {
+        let sh = (i % 2) * 32;
+        v[2 * r + i / 2] = (v[2 * r + i / 2] & !(0xffff_ffffu64 << sh)) | (((val as u64) & 0xffff_ffff) << sh);
+    }
+
+    match mode {
+        1 => {
+            // sha1h: rd.word0 = ror32(rn,2); w1..3 = 0
+            let v = lw(&s.v, rn, 0).rotate_right(2);
+            wr(&mut s.v, rd, 0, v);
+            wr(&mut s.v, rd, 1, 0); wr(&mut s.v, rd, 2, 0); wr(&mut s.v, rd, 3, 0);
+        }
+        2 | 3 | 4 => {
+            // sha1c/p/m Qd(d), Sn(=n0), Vm.4s
+            let mut d = [lw(&s.v, rd, 0), lw(&s.v, rd, 1), lw(&s.v, rd, 2), lw(&s.v, rd, 3)];
+            let n0 = lw(&s.v, rn, 0);
+            let m = [lw(&s.v, rm, 0), lw(&s.v, rm, 1), lw(&s.v, rm, 2), lw(&s.v, rm, 3)];
+            let mut nn = n0;
+            let f: fn(u32, u32, u32) -> u32 = match mode {
+                3 => |x, y, z| x ^ y ^ z,
+                4 => |x, y, z| (x & y) | ((x | y) & z),
+                _ => |x, y, z| (x & (y ^ z)) ^ z, // cho
+            };
+            for i in 0..4 {
+                let t = f(d[1], d[2], d[3])
+                    .wrapping_add(d[0].rotate_left(5))
+                    .wrapping_add(nn)
+                    .wrapping_add(m[i]);
+                nn = d[3];
+                d[3] = d[2];
+                d[2] = d[1].rotate_right(2);
+                d[1] = d[0];
+                d[0] = t;
+            }
+            for i in 0..4 { wr(&mut s.v, rd, i, d[i]); }
+        }
+        5 => {
+            // sha256h: 4 rounds
+            let mut d = [lw(&s.v, rd, 0), lw(&s.v, rd, 1), lw(&s.v, rd, 2), lw(&s.v, rd, 3)];
+            let mut n = [lw(&s.v, rn, 0), lw(&s.v, rn, 1), lw(&s.v, rn, 2), lw(&s.v, rn, 3)];
+            let m = [lw(&s.v, rm, 0), lw(&s.v, rm, 1), lw(&s.v, rm, 2), lw(&s.v, rm, 3)];
+            let cho = |x: u32, y: u32, z: u32| (x & (y ^ z)) ^ z;
+            let maj = |x: u32, y: u32, z: u32| (x & y) | ((x | y) & z);
+            for i in 0..4 {
+                let t = cho(n[0], n[1], n[2])
+                    .wrapping_add(n[3])
+                    .wrapping_add(s1(n[0]))
+                    .wrapping_add(m[i]);
+                n[3] = n[2]; n[2] = n[1]; n[1] = n[0];
+                n[0] = d[3].wrapping_add(t);
+                let t = t.wrapping_add(maj(d[0], d[1], d[2])).wrapping_add(s0(d[0]));
+                d[3] = d[2]; d[2] = d[1]; d[1] = d[0];
+                d[0] = t;
+            }
+            for i in 0..4 { wr(&mut s.v, rd, i, d[i]); }
+        }
+        _ => {
+            // 6 = sha1su0, 7 = sha1su1
+            let d0 = lw(&s.v, rd, 0); let d1 = lw(&s.v, rd, 1);
+            let d2 = lw(&s.v, rd, 2); let d3 = lw(&s.v, rd, 3);
+            let n0 = lw(&s.v, rn, 0);
+            let m0 = lw(&s.v, rm, 0); let m1 = lw(&s.v, rm, 1);
+            if mode == 6 {
+                // sha1su0: d0 = d1^d0^m0 ; d1 = n0^d1^m1
+                wr(&mut s.v, rd, 0, d0 ^ d1 ^ m0);
+                wr(&mut s.v, rd, 1, d1 ^ n0 ^ m1);
+            } else {
+                // sha1su1
+                let m2 = lw(&s.v, rm, 2); let m3 = lw(&s.v, rm, 3);
+                wr(&mut s.v, rd, 0, (d0 ^ m1).rotate_left(1));
+                wr(&mut s.v, rd, 1, (d1 ^ m2).rotate_left(1));
+                wr(&mut s.v, rd, 2, (d2 ^ m3).rotate_left(1));
+                wr(&mut s.v, rd, 3, (d3 ^ d0).rotate_left(1));
+            }
+        }
+    }
+    let _ = (&rol, &s1, &s0);
+}
+
 /// Convenience: translate+call a slice of raw guest bytes (AArch64) reached at
 /// the given initial PC, executing them against `state`. Returns the final x0.
 pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<u64, String> {

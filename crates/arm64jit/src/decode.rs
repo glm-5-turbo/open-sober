@@ -166,8 +166,9 @@ pub enum Inst {
     SimdRev { rd: u8, rn: u8, granule: u8, q: bool },
     // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----
     SimdLaneS { rd: u8, rn: u8, esize: u8, index: u8 },
-    // ---- SHA-1 halfway: sha1h Sd, Sn (Sd = ror32^3 of Sn) ----
-    Sha1h { rd: u8, rn: u8 },
+    // ---- SHA-1/SHA-256 crypto ops (mode: 1=sha1h,2=sha1c,3=sha1p,4=sha1m,
+//        5=sha256h,6=sha1su0,7=sha1su1,8=sha256su0,9=sha256su1) ----
+    Sha { mode: u8, rd: u8, rn: u8, rm: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
     SimDup { rd: u8, rn: u8, esize: u8, src_idx: u8, q: bool },
     // ---- SIMD vector immediate: fmov Vd.T, #imm ----
@@ -1093,11 +1094,28 @@ pub fn decode(insn: u32) -> Inst {
         }
     }
 
-    // ---- SHA-1: sha1h Sd, Sn (0x5e28_08xx, mask 0xffe0_fc00==0x5e20_0800) ----
-    if (insn & 0xffe0_fc00) == 0x5e20_0800 {
-        let rn = ((insn >> 5) & 0x1f) as u8;
+    // ---- SHA-1 / SHA-256 crypto ops ----
+    // Recognise by the specific (masked) v8 SHA opcodes. mode -> helper op.
+    let sh = (insn & 0xffe0_fc00, (insn >> 16) & 0x10);
+    let sha_op = match sh {
+        (0x5e20_0800, _) => 1, // sha1h
+        (0x5e00_0000, _) => 2, // sha1c
+        (0x5e00_1000, _) => 3, // sha1p
+        (0x5e00_2000, _) => 4, // sha1m
+        (0x5e00_4000, _) => 5, // sha256h
+        (0x5e00_3000, _) => {
+            // sha1su0 (bit20 clear) / sha1su1 (bit20 set)
+            if (insn & 0x100000) == 0 { 6 } else { 7 }
+        }
+        (0x5e20_2800, _) => 8, // sha256su0
+        (0x5e00_6000, _) => 9, // sha256su1
+        _ => 0,
+    };
+    if sha_op != 0 {
         let rd = (insn & 0x1f) as u8;
-        return Inst::Sha1h { rd, rn };
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        return Inst::Sha { mode: sha_op, rd, rn, rm };
     }
 
     // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----
