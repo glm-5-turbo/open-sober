@@ -1444,6 +1444,8 @@ pub fn decode(insn: u32) -> Inst {
             0x1e25_4000 => Some(1), // frintm s (floor)
             0x1e64_8000 => Some(2), // frintp (round toward +inf) = ceil
             0x1e24_8000 => Some(2), // frintp s (ceil)
+            0x1e64_c000 => Some(2), // frintp d (alt imm, e.g. frintp s0,s0 = 0x1e24c000)
+            0x1e24_c000 => Some(2), // frintp s (alt imm)
             0x1e65_c000 => Some(3), // frintz (round toward zero)
             0x1e25_c000 => Some(3), // frintz s (trunc)
             0x1e60_c000 => Some(5), // fabs d{rd}, d{rn} (clear sign)
