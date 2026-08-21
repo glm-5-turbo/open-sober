@@ -2085,8 +2085,44 @@ Port of QEMU's jni_shim.c tables to guest-address space.
 
 NEXT actual-boot blocker: exercising real JNI_OnLoad (Roblox does TLS-bootstrap
 block-alloc, clock, mprotect, GetStaticMethodID+NewStringUTF+GetChar) — QEMU path
-had to Phase1-NOP clock + bypass; expect same under JIT. JNI_OnLoad = base+0x1f64e58
-(QEMU notes) vs entry 0x1c34480 used here.
+had to Phase1-NOP clock + bypass; expect same under JIT. JNI_OnLoad = base+0x1f0db20
+(verified via readelf symtab; NOT the older QEMU note 0x1f64e58 = NativeSettings
+Interface func). Entry 0x1c34480 was a decoy (Java_...shouldDisplayOpenGLUnsupported
+Message) that body-branches into FMOD audio init — don't use it as the boot entry.
+
+------------------------------------------------------------------------------
+SESSION (latest boot frontier, commit bcf6a88, 62/62 tests)
+------------------------------------------------------------------------------
+Built on the bounded-trace fix (see its own section below): after that, elfjit @
+0x1f0db20 --jni reached JNI_OnLoad's first real init but gdb pinned the next crash
+to `mov (%rdx),%rax` with rdx=0 in the entry prologue. Root-caused it to the
+`__stack_chk_guard` DATA-GOT slot:
+    adrp x24, 0x631a000 ; ldr x24,[x24,#2608] ; ldr x8,[x24] ; stur x8,[x29,#-8]
+The Android build emits ONLY JUMP_SLOT relocations (no .rela.dyn/GLOB_DAT/
+RELATIVE), so that slot is 0x0 and the first `ldr x8,[x0]` null-faults. NEW
+`patch_stack_canary()` in plt.rs (called from `bind_image_plt`) writes a live
+canary pointer into it. Pitfalls hit:
+   - slot is link **0x631aa30** = 0x631a000 + 0xa30: objdump prints `#2608` in
+     DECIMAL (= 0xa30), not hex — a first attempt at 0x631c608 was wrong.
+   - `host_addr_of(guest_of(slot))` returned None (loader segment bookkeeping
+     gap); use `el.guest_of(slot)` directly since the runtime maps guest==host.
+Canary value = dlsym(RTLD_DEFAULT,"__stack_chk_guard") if resolvable, else a
+static AtomicU64 seeded non-zero, and we store that pointer so `ldr x8,[x24]`
+reads back real canary bytes.
+
+RESULT / PROOF: elfjit @ 0x1f0db20 --jni now executes JNI_OnLoad's prologue
+(SP setup, canary store, GOT loads) and dispatches to its FIRST real init callee
+at pc 0x101f0e728 (x30 = 0x101f0db5c, x0 = JavaVM*) -- JIT_TRACE block count
+0 -> 1. That callee is the one-time-init *guard* (`adrp x8,0x68c7000; add x8,#0x520;
+ldarb w8,[x8]; tbz...`) -- the same pthread_once-style guard the QEMU path had to
+Phase1-NOP + deadlock-bypass, so expect to handle it under the JIT too.
+NEXT fault: a guest deref of a small pointer (base=2, [base+8]=0xa) deeper in that
+init path; the guest now needs the faked Android runtime the QEMU bridge provides
+(JNIEnv method tables / fake object handles). Honest status: 62/62 arm64jit tests,
+`cargo build --workspace` clean; unrelated pre-existing failure stays libloader's
+android::test_setup_android_layout_creates_dirs (does `mkdir /storage/emulated/0`).
+Full boot remains a multi-session effort — this session cleared the canary wall
+and got the guest into real init/guard code.
 
 ## Session — bounded trace compilation FIXES the 78 MB blast-block (JIT actually executes; 62/62)
 
