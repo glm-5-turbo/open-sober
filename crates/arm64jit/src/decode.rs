@@ -1606,21 +1606,25 @@ pub fn decode(insn: u32) -> Inst {
     // ---- FP convert to UNSIGNED integer (fcvtzu): Dn -> Rd (unsigned int) ----
     // bases 0x1e79_0000 (W dest) / 0x9e79_0000 (X dest). Distinct from signed
     // fcvtzs at 0x1e78_0000/0x9e78_0000 (bit16 of the nibble: 0x79 vs 0x78).
-    if (insn & 0xffff_f800) == 0x1e79_0000 || (insn & 0xffff_f800) == 0x9e79_0000 {
+    // ---- FP convert to UNSIGNED integer (fcvtzu): Dn -> Rd (unsigned int) ----
+    // bases 0x1e79_0000 (W dest) / 0x9e79_0000 (X dest), double source; and
+    // 0x1e39_0000/0x9e39_0000 single source (src_sng). Distinct from signed
+    // fcvtzs at 0x1e78_0000/0x9e78_0000 (bit16 of the nibble).
+    if (insn & 0xffff_f800) == 0x1e79_0000 || (insn & 0xffff_f800) == 0x9e79_0000
+        || (insn & 0xffff_f800) == 0x1e39_0000 || (insn & 0xffff_f800) == 0x9e39_0000
+    {
         let sf = (insn >> 31) & 1 == 1; // 1 => 64-bit (X) destination
         let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
-        if sz {
-            let rn = ((insn >> 5) & 0x1f) as u8;
-            let rd = (insn & 0x1f) as u8;
-            return Inst::FcvtToInt {
-                rd,
-                rn,
-                mode: 0, // truncate-toward-zero (fcvtzu always truncates)
-                sf,
-                unsigned: true,
-                src_sng: false,
-            };
-        }
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::FcvtToInt {
+            rd,
+            rn,
+            mode: 0, // truncate-toward-zero (fcvtzu always truncates)
+            sf,
+            unsigned: true,
+            src_sng: !sz,
+        };
     }
 
     // ---- FP convert to int with round toward +inf/-inf: fcvtps/pu/ms/mu (Xd dest) ----
