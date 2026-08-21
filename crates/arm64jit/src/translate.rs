@@ -1199,11 +1199,43 @@ pub fn translate(
                                 buf.mov_load32(RAX, RBX, vslot(rm));
                                 buf.movd_xmm_r32(1, RAX);
                                 if is_max { buf.maxss(0, 1); } else { buf.minss(0, 1); }
-                                buf.movd_r32_xmm(RAX, 0);
-                                buf.mov_store32(RBX, vslot(rd), RAX);
-                            }
-                            Ok(())
-                        }
+                                                                buf.movd_r32_xmm(RAX, 0);
+                                                                buf.mov_store32(RBX, vslot(rd), RAX);
+                                                            }
+                                                            Ok(())
+                                                        }
+                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
+                                            // ucvtf/scvtf Dd,Rn,#fbits: convert int to float, then /2^fbits.
+                                            let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                            ldg(buf, RAX, rn as u32);
+                                            if unsigned && sf {
+                                                // 64-bit unsigned: cvtsi2sd + the +2^64 correction, then scale.
+                                                ldg(buf, RDX, rn as u32);
+                                                buf.cvtsi2sd(0, true, RDX);
+                                                buf.test_rr64(RDX, RDX);
+                                                let jns = buf.jcc_rel32(0x89); // JNS: skip if u < 2^63
+                                                buf.mov_ri64(RCX, 0x43f0_0000_0000_0000);
+                                                buf.movq_xmm_r64(1, RCX);
+                                                buf.addsd(0, 1);
+                                                let end = buf.len();
+                                                let disp = (end as i64 - (jns as i64 + 4)) as i32;
+                                                buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
+                                            } else {
+                                                buf.cvtsi2sd(0, sf, RAX);
+                                            }
+                                            // divide by 2^fbits (normal-power double in xmm1)
+                                            buf.mov_ri64(RCX, (((1023 + fbits as u64) << 52)));
+                                            buf.movq_xmm_r64(1, RCX);
+                                            buf.divsd(0, 1);
+                                            if to_double {
+                                                buf.movq_store(RBX, vslot, 0);
+                                            } else {
+                                                buf.cvtsd2ss(0, 0);
+                                                buf.movd_r32_xmm(RAX, 0);
+                                                buf.mov_store32(RBX, vslot, RAX);
+                                            }
+                                            Ok(())
+                                        }
         Inst::Fcmp { rn, rm, sz } => {
             // fcmp d{rn}, d{rm} / fcmp s{rn}, s{rm}: compare and set guest NZCV.
             // Use comisd/comiss (CF=1 if a<b, ZF=1 if equal/unordered, PF=1 if

@@ -154,6 +154,8 @@ pub enum Inst {
     SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool },
     // ---- scalar FP max/min (fmax/fmin/fmaxnm/fminnm) ----
     FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
+    // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
+    ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1392,6 +1394,23 @@ pub fn decode(insn: u32) -> Inst {
                         to_double,
                         sf,
                         unsigned,
+                    };
+                }
+            }
+
+            // ---- scalar fixed-point int->FP: ucvtf/scvtf Dd,Xn,#fbits / Sd,Wn,#fbits ----
+            // Gate: byte1 (bits 16:23)&0xfe ∈ {0x42, 0x02}; byte0 ∈ {0x9e(D), 0x1e(S)}.
+            // distinct from unscaled Scvtf (byte1 0x63/0x23) and fmov/fcvt.
+            {
+                let m1 = ((insn >> 16) & 0xff) & 0xfe;
+                if (m1 == 0x42 || m1 == 0x02) && (insn & 0x3000_0000) == 0x1000_0000 {
+                    return Inst::ScvtfFixed {
+                        rd: (insn & 0x1f) as u8,
+                        rn: ((insn >> 5) & 0x1f) as u8,
+                        to_double: (insn >> 30) & 1 == 1,
+                        sf: (insn >> 30) & 1 == 1,
+                        unsigned: (insn >> 16) & 1 == 1,
+                        fbits: (64 - ((insn >> 10) & 0x3f)) as u8,
                     };
                 }
             }
