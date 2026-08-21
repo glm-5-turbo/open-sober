@@ -586,7 +586,15 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         // the return into guest x0. The guest `blr` already linked x30 to the
         // caller, so resume there. This is how a resolved import (libc/libm/JNI
         // shim) is reached from translated Roblox code.
-        if let Some((hostf, _slot)) = host_call_at(pc) {
+        if let Some((hostf, slot)) = host_call_at(pc) {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("JIT_TRACE").is_some() {
+                let s = unsafe { &*state };
+                println!(
+                    "  hostcall@slot{slot} pc={pc:#x} x0={:#x} x1={:#x} x2={:#x} x30={:#x}",
+                    s.x[0], s.x[1], s.x[2], s.x[30]
+                );
+            }
             let s = unsafe { &mut *state };
             let ret = hostf(s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5], s.x[6], s.x[7]);
             s.x[0] = ret;

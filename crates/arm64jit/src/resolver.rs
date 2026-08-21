@@ -74,6 +74,33 @@ pub fn resolve(name: &[u8]) -> Option<u64> {
     if let Some(addr) = r.slots.get(&key) {
         return Some(*addr);
     }
+    // Bionic pthread fixup: the guest binary was built against bionic, whose
+    // pthread_mutex_t is 44 bytes (glibc's is 40), __kind lives at offset 16 and
+    // __count is reused as __owner at offset 8. Passing such a mutex to glibc's
+    // pthread_mutex_lock/cond_wait makes glibc see kind==0x10 (ROBUST_NORMAL) or
+    // a stray owner count and it crashes/deadlocks, driving Roblox init into its
+    // abort path. Mirror jni_shim.c `sanitize_mutex`: route these imports
+    // through a wrapper that fixes the mutex layout in place first. Since the
+    // runtime maps guest==host contiguously, the guest pointer is host-addressable.
+    if let Some(real) = real_libc_pthread(name) {
+        store_real(name_str(name), real);
+        let hostf: HostCall = match name_str(name) {
+            "pthread_mutex_lock" | "pthread_mutex_unlock" => {
+                // both take one mutex arg and return int; lock/unlock collide, so
+                // pick the right bridge by exact name.
+                if name_str(name) == "pthread_mutex_unlock" {
+                    host_mutex_unlock
+                } else {
+                    host_mutex_lock
+                }
+            }
+            "pthread_cond_wait" => host_cond_wait,
+            "pthread_cond_timedwait" => host_cond_timedwait,
+            "pthread_mutex_init" => host_mutex_init,
+            _ => unsafe { std::mem::transmute(real) },
+        };
+        return alloc_slot(&mut r, &key, hostf);
+    }
     // dlsym the host symbol. We are resolving against the process-global
     // symbol space (libc/libm/any shared lib already loaded), which covers
     // the aarch64 libc/libm imports whose names collide with host names.
@@ -90,19 +117,138 @@ pub fn resolve(name: &[u8]) -> Option<u64> {
     if ptr.is_null() {
         return None; // not present on the host
     }
+    let hostf: HostCall = unsafe { std::mem::transmute(ptr) };
+    alloc_slot(&mut r, &key, hostf)
+}
+
+/// Register `hostf` at a fresh resolver slot keyed by `key`; returns slot addr.
+fn alloc_slot(r: &mut Resolver, key: &CString, hostf: HostCall) -> Option<u64> {
     if r.next >= crate::jit::HOST_THUNK_MAX {
         return None;
     }
     let slot = r.next;
     r.next += 1;
-    // Cast: `HostCall` takes 8 u64 args -> u64, which matches the SysV GPR
-    // ABI for integer/pointer-returning C functions. SAFETY: we only resolve
-    // GPR-ABI functions; the caller agrees not to route XMM-ABI funcs here.
-    let hostf: HostCall = unsafe { std::mem::transmute(ptr) };
     register_host_call(slot, hostf);
     let addr = host_call_addr(slot);
-    r.slots.insert(key, addr);
+    r.slots.insert(key.clone(), addr);
     Some(addr)
+}
+
+/// Name of an import as `&str`, tolerating a trailing NUL.
+fn name_str(name: &[u8]) -> &str {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    std::str::from_utf8(&name[..end]).unwrap_or("")
+}
+
+/// dlsym a pthread mutex/cond function we plan to wrap, or None (not ours).
+fn real_libc_pthread(name: &[u8]) -> Option<*mut libc::c_void> {
+    let n = name_str(name);
+    if !(n == "pthread_mutex_lock"
+        || n == "pthread_mutex_unlock"
+        || n == "pthread_mutex_init"
+        || n == "pthread_cond_wait"
+        || n == "pthread_cond_timedwait")
+    {
+        return None;
+    }
+    let c = CString::new(n).ok()?;
+    // SAFETY: name is one of the fixed whitelist strings above; NUL-terminated.
+    Some(unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) })
+}
+
+/// Normalize a candidate bionic-layout pthread_mutex_t in place to glibc layout:
+/// clear the robust/high kind bits at offset 16 and a stray __owner at offset 8.
+///
+/// # Safety
+/// `m` must be a non-null, writable pointer to at least 20 bytes (the mutex).
+unsafe fn sanitize_mutex(m: *mut u8) {
+    if m.is_null() {
+        return;
+    }
+    let kind = core::ptr::read_unaligned(m.add(16) as *const i32);
+    core::ptr::write_unaligned(m.add(16) as *mut i32, kind & 3);
+    let cnt = core::ptr::read_unaligned(m.add(8) as *const i32);
+    if cnt > 0x0001_0000 || cnt < 0 {
+        core::ptr::write_unaligned(m.add(8) as *mut i32, 0);
+    }
+}
+
+type MutexLockFn = unsafe extern "C" fn(*mut u8) -> i32;
+type MutexCondFn = unsafe extern "C" fn(*mut u8, *mut u8) -> i32;
+type MutexInitFn = unsafe extern "C" fn(*mut u8, *mut u8) -> i32;
+
+// Real glibc pthread functions, cached once. "real" means we already vetted the
+// dlsym'd address before installing a wrapper, so these are non-null.
+static REAL_LOCK: OnceLock<MutexLockFn> = OnceLock::new();
+static REAL_UNLOCK: OnceLock<MutexLockFn> = OnceLock::new();
+static REAL_COND_WAIT: OnceLock<MutexCondFn> = OnceLock::new();
+static REAL_COND_TIMEDWAIT: OnceLock<MutexCondFn> = OnceLock::new();
+static REAL_MUTEX_INIT: OnceLock<MutexInitFn> = OnceLock::new();
+
+/// Record the real glibc fn for `name`; false on an unknown/unwanted name.
+fn store_real(name: &str, real: *mut libc::c_void) {
+    let poke = |target: &OnceLock<MutexLockFn>, f: MutexLockFn| {
+        let _ = target.set(f);
+    };
+    match name {
+        "pthread_mutex_lock" => poke(&REAL_LOCK, unsafe { std::mem::transmute(real) }),
+        "pthread_mutex_unlock" => poke(&REAL_UNLOCK, unsafe { std::mem::transmute(real) }),
+        "pthread_cond_wait" => {
+            let _ = REAL_COND_WAIT.set(unsafe { std::mem::transmute(real) });
+        }
+        "pthread_cond_timedwait" => {
+            let _ = REAL_COND_TIMEDWAIT.set(unsafe { std::mem::transmute(real) });
+        }
+        "pthread_mutex_init" => {
+            let _ = REAL_MUTEX_INIT.set(unsafe { std::mem::transmute(real) });
+        }
+        _ => {}
+    }
+}
+
+/// Host bridge fn: pthread_mutex_lock/mutex_unlock over the guest mutex.
+extern "C" fn host_mutex_lock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
+    let f = *REAL_LOCK.get().expect("pthread_mutex_lock resolved");
+    unsafe {
+        sanitize_mutex(a0 as *mut u8);
+        f(a0 as *mut u8) as u64
+    }
+}
+extern "C" fn host_mutex_unlock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
+    let f = *REAL_UNLOCK.get().expect("pthread_mutex_unlock resolved");
+    unsafe {
+        sanitize_mutex(a0 as *mut u8);
+        f(a0 as *mut u8) as u64
+    }
+}
+extern "C" fn host_cond_wait(a0: u64, a1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
+    let f = *REAL_COND_WAIT.get().expect("pthread_cond_wait resolved");
+    unsafe {
+        sanitize_mutex(a1 as *mut u8); // mutex is arg1 (pthread_cond_wait(cond, mutex))
+        f(a0 as *mut u8, a1 as *mut u8) as u64
+    }
+}
+extern "C" fn host_cond_timedwait(a0: u64, a1: u64, a2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
+    type CondTimedwaitFn = unsafe extern "C" fn(*mut u8, *mut u8, *const libc::timespec) -> i32;
+    let f: CondTimedwaitFn = unsafe {
+        std::mem::transmute(
+            *REAL_COND_TIMEDWAIT.get().expect("pthread_cond_timedwait resolved"),
+        )
+    };
+    unsafe {
+        sanitize_mutex(a1 as *mut u8);
+        f(a0 as *mut u8, a1 as *mut u8, a2 as *const libc::timespec) as u64
+    }
+}
+extern "C" fn host_mutex_init(a0: u64, a1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
+    let f = *REAL_MUTEX_INIT.get().expect("pthread_mutex_init resolved");
+    unsafe {
+        let r = f(a0 as *mut u8, a1 as *mut u8);
+        if r == 0 && a0 != 0 {
+            sanitize_mutex(a0 as *mut u8);
+        }
+        r as u64
+    }
 }
 
 /// Convenience: resolve and return the slot address (panics if unresolved).
@@ -358,5 +504,23 @@ mod tests {
         assert!(m.contains_key("strlen"), "common imports include strlen");
         assert!(m.contains_key("memcpy"), "common imports include memcpy");
         assert!(m.contains_key("abs"), "common imports include abs");
+    }
+
+    #[test]
+    fn sanitize_mutex_clears_bionic_kind_and_bogus_owner() {
+        // Simulate a bionic-layout pthread_mutex_t that glibc would misread:
+        // __kind (offset 16) = 0x10 (BIONIC ROBUST_NORMAL), __count (offset 8)
+        // = 0x7fff1234 (a stray bionic owner leaking into glibc's recursive
+        // count), which glibc's pthread_mutex_lock sees as already-held/reentrant.
+        let mut m = [0u8; 24];
+        m[16..20].copy_from_slice(&0x10u32.to_le_bytes());
+        m[8..12].copy_from_slice(&0x7fff_1234u32.to_le_bytes());
+
+        unsafe { super::sanitize_mutex(m.as_mut_ptr()) };
+
+        let kind = u32::from_le_bytes(m[16..20].try_into().unwrap());
+        let cnt = u32::from_le_bytes(m[8..12].try_into().unwrap());
+        assert_eq!(kind & 3, kind, "kind high bits cleared (kind=0x{kind:x})");
+        assert_eq!(cnt, 0, "bogus owner/count cleared at offset 8");
     }
 }
