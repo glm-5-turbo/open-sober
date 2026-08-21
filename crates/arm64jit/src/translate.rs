@@ -1317,7 +1317,40 @@ pub fn translate(
                                                                                                                                                 }
                                                                                                                                                 Ok(())
                                                                                                                                             }
-                                                                                                                                            Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
+                                                                                                                                            Inst::FmlaEl { rd, rn, vlm, idx, el64, q, sub } => {
+                                                                                                                                                            // fmla/fmls Vd.T, Vn, Vm.el[idx]: Vd[j] += Vn[j]*Vm.el(idx), per lane.
+                                                                                                                                                            let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                                                                                                                                            let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                                                                                                                                            let mb = crate::jit::VECTOR_BASE + (vlm as i32) * 16;
+                                                                                                                                                            let lanes = if el64 { 2 } else if q { 4 } else { 2 };
+                                                                                                                                                            // broadcast scalar element into xmm2
+                                                                                                                                                            if el64 {
+                                                                                                                                                                buf.movq_load(2, RBX, mb + (idx as i32) * 8);
+                                                                                                                                                            } else {
+                                                                                                                                                                buf.mov_load32(RAX, RBX, mb + (idx as i32) * 4);
+                                                                                                                                                                buf.movd_xmm_r32(2, RAX);
+                                                                                                                                                            }
+                                                                                                                                                            for l in 0..lanes {
+                                                                                                                                                                if el64 {
+                                                                                                                                                                    buf.movq_load(0, RBX, db + 8 * l);
+                                                                                                                                                                    buf.movq_load(1, RBX, nb + 8 * l);
+                                                                                                                                                                    buf.mulsd(1, 2);                // xmm1 = Vn[l]*Vm.el
+                                                                                                                                                                    if sub { buf.subsd(0, 1); } else { buf.addsd(0, 1); }
+                                                                                                                                                                    buf.movq_store(RBX, db + 8 * l, 0);
+                                                                                                                                                                } else {
+                                                                                                                                                                    buf.mov_load32(RAX, RBX, db + 4 * l);
+                                                                                                                                                                    buf.movd_xmm_r32(0, RAX);
+                                                                                                                                                                    buf.mov_load32(RAX, RBX, nb + 4 * l);
+                                                                                                                                                                    buf.movd_xmm_r32(1, RAX);
+                                                                                                                                                                    buf.mulss(1, 2);
+                                                                                                                                                                    if sub { buf.subss(0, 1); } else { buf.addss(0, 1); }
+                                                                                                                                                                    buf.movd_r32_xmm(RAX, 0);
+                                                                                                                                                                    buf.mov_store32(RBX, db + 4 * l, RAX);
+                                                                                                                                                                }
+                                                                                                                                                            }
+                                                                                                                                                            Ok(())
+                                                                                                                                                        }
+                                                                                                                                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
                                             // ucvtf/scvtf Dd,Rn,#fbits: convert int to float, then /2^fbits.
                                             let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                             ldg(buf, RAX, rn as u32);

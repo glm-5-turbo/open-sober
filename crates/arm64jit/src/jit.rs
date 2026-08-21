@@ -969,4 +969,27 @@ mod tests {
         let exp: Vec<u32> = [7.0f32,7.0,17.0,11.0].iter().map(|x| x.to_bits()).collect();
         for i in 0..4 { assert_eq!(lanes[i], exp[i], "fmla lane {}", i); }
     }
+
+    #[test]
+    fn fmla_by_element_reference() {
+        // fmla v29.4s, v21.4s, v2.s[0] = 0x4f8212bd. v29[j] += v21[j]*v2.s[0].
+        // v21=[1,2,3,4], v2.s[0]=10, v29=[0,0,0,0] => v29=[10,20,30,40].
+        let f = |x: f32| x.to_bits() as u32;
+        let mut st = CpuState::new();
+        st.v[42] = ((f(2.0) as u64) << 32) | f(1.0) as u64;  // v21 lanes 0,1
+        st.v[43] = ((f(4.0) as u64) << 32) | f(3.0) as u64;  // v21 lanes 2,3
+        st.v[4] = f(10.0) as u64;                             // v2.s[0] (lane0)
+        st.v[58] = 0; st.v[59] = 0;                            // v0 acc = 0
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x4f82_12bdu32.to_le_bytes()); // fmla v29.4s,v21,v2.s[0]
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fmla by-element");
+        let lanes = [(st.v[58]&0xffff_ffff) as u32,(st.v[58]>>32) as u32,
+                     (st.v[59]&0xffff_ffff) as u32,(st.v[59]>>32) as u32];
+        let exp: Vec<u32> = [10.0f32, 20.0, 30.0, 40.0]
+            .iter()
+            .map(|x| x.to_bits())
+            .collect();
+        for i in 0..4 { assert_eq!(lanes[i], exp[i], "fmla-el lane {}", i); }
+    }
 }

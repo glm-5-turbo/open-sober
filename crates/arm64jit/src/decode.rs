@@ -179,6 +179,16 @@ pub enum Inst {
         q: bool,
         sub: bool,
     },
+    // ---- FP by-element multiply-accumulate: fmla/fmls Vd.T, Vn, Vm.Ts[idx] ----
+    FmlaEl {
+        rd: u8,
+        rn: u8,
+        vlm: u8,
+        idx: u8,
+        el64: bool,
+        q: bool,
+        sub: bool,
+    },
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
@@ -1179,6 +1189,24 @@ pub fn decode(insn: u32) -> Inst {
     // The 8-bit immediate is reassembled from bits[9:5] (low) and bits[18:16]
     // (high): imm8 = abcd | (defg? === bits[18:16] << 5). Ebconfirmed against
     // 6 grounds-truth encodings incl. the actual boot blocker 0x6f00e400.
+    // ---- FP multiply-accumulate by-element: fmla/fmls Vd.T, Vn, Vm.T[idx] ----
+    // MUST precede the broad MOVI/mvni gate below (which matches all 0x0f/0x4f
+    // prefixes and would otherwise swallow these). Indexed form: byte0 nibble
+    // == 0xf (0x4f/0x0f) with bit29 clear (excludes by-element fmul (bit29 set)).
+    if ((insn >> 24) & 0x0f) == 0x0f && (insn & 0x2000_0000) == 0 && (insn & 0x0080_0000) != 0 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let vlm = ((insn >> 16) & 0x1f) as u8;
+        let idx = if (insn & 0x0040_0000) != 0 {
+            ((insn >> 11) & 1) as u8            // .2d: index is L(bit11) only
+        } else {
+            ((((insn >> 21) & 1) << 1) | ((insn >> 11) & 1)) as u8 // .s: H21<<1|L11
+        };
+        let el32 = (insn & 0x0040_0000) != 0;
+        let q = (insn & 0x4000_0000) != 0;
+        let sub = (insn & 0x4000) != 0;
+        return Inst::FmlaEl { rd, rn, vlm, idx, el64: el32, q, sub };
+    }
     if matches!(insn >> 24, 0x0F | 0x1F | 0x2F | 0x4F | 0x5F | 0x6F) {
         let op = (insn >> 29) & 1;
         let cmode = b(insn, 12, 15);
@@ -3068,6 +3096,18 @@ mod logical_imm_regressions {
                 assert_eq!(value_bits, 0x4000_0000_0000_0000); // 2.0 double
             }
             other => panic!("fmov d0,#2.0 -> {other:?}"),
+        }
+        // fmla v29.4s, v21.4s, v2.s[0] = 0x4f8212bd (real boot wall) => FmlaEl.
+        match decode(0x4f8212bd) {
+            Inst::FmlaEl { rd, rn, vlm, idx, q, sub, .. } => {
+                assert_eq!(rd, 29);
+                assert_eq!(rn, 21);
+                assert_eq!(vlm, 2);
+                assert_eq!(idx, 0);
+                assert!(q);
+                assert!(!sub);
+            }
+            other => panic!("fmla v29.4s,v21,v2.s[0] -> {other:?}"),
         }
     }
 
