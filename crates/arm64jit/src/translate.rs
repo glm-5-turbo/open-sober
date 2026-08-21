@@ -1723,6 +1723,23 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     stg(buf, rn as u32, RAX);
                     Ok(())
                 }
+                Inst::St1V { rd, rn, bytes } => {
+                    // st1 {Vt.T}, [Xn], #imm: store V[rd]'s `bytes` to guest
+                    // address x[rn], then x[rn] += bytes.
+                    let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                    ldg(buf, RDX, rn as u32); // RDX = host ptr
+                    if bytes == 16 {
+                        buf.movdqu_load(0, RBX, slot);
+                        buf.movdqu_store(RDX, 0, 0);
+                    } else {
+                        buf.movq_load(0, RBX, slot);
+                        buf.movq_store(RDX, 0, 0);
+                    }
+                    ldg(buf, RAX, rn as u32);
+                    buf.add_ri64(RAX, bytes as u32); // post-index
+                    stg(buf, rn as u32, RAX);
+                    Ok(())
+                }
                 Inst::Ld1 { rd, rn, esize, q } => {
                     // ld1r {Vt.T}, [Xn]: load `esize` bytes from [x[rn]] and
                     // replicate across (q?16:8)/esize lanes of Vd. Guest memory is
