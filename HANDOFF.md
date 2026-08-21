@@ -2087,3 +2087,61 @@ NEXT actual-boot blocker: exercising real JNI_OnLoad (Roblox does TLS-bootstrap
 block-alloc, clock, mprotect, GetStaticMethodID+NewStringUTF+GetChar) — QEMU path
 had to Phase1-NOP clock + bypass; expect same under JIT. JNI_OnLoad = base+0x1f64e58
 (QEMU notes) vs entry 0x1c34480 used here.
+
+## Session — bounded trace compilation FIXES the 78 MB blast-block (JIT actually executes; 62/62)
+
+### Root-cause found (why elfjit `--jni` "hung" / spun for seconds then SIGSEGV'd)
+
+`jit_run` called `compile_image` (unbounded), which EAGERLY expands the entire reachable
+call graph from the entry into ONE monolithic host block. For real JNI_OnLoad that's a
+**78,238,218-byte single block taking 7.38s to translate** (measured via a throwaway
+timing harness), then the runaway block SIGSEGVs. That also explains why JIT_TRACE never
+printed a `block@` line: the very first `compile_image` never returned within the timeout.
+Not an infinite guest loop — a compile-explosion straight-line wall.
+
+The default elfjit entry `0x1c34480` used in prior sessions was ALSO a wrong proxy:
+objdump shows it is `Java_com_roblox_engine_jni_NativeGLInterface_shouldDisplayOpenGLUnsupportedMessage`
+whose FIRST insn is `b 0x5d9ce10` straight into the huge **FMOD_OutputAAudioHeadphonesChanged**
+function — so its frontier balloons into the audio subsystem, never the boot path.
+**The real JNI_OnLoad is at base+0x1f0db20** (`readelf -sW`), not the HANDOFF's
+QEMU-guess 0x1f64e58. Use `elfjit libroblox.so 0x1f0db20 --jni`.
+
+### The fix: bounded trace compilation (`compile_image_bounded`, budget + divert stubs)
+
+- `compile_image` now delegates to new `compile_image_bounded(image, base, entry, state, budget)`
+  (budget 0 = old unbounded behavior, so `compile()`/single-shot tests unchanged).
+- `jit_run` uses `BLOCK_BUDGET=8192` guest instructions per compile. Each block is a small,
+  bounded straight-line trace; the frontier is NOT drained to the whole call graph.
+- Any branch/call fixup whose target was NOT emitted (out of budget) is redirected to an
+  appended **dispatcher-return stub**: `mov [CpuState+PC_OFF], #target ; ret`, and a host
+  `call` (E8) for a `bl` is rewritten to a `jmp` (E9) so no host return address is left on
+  the stack — the stub hands `pc` back to `jit_run`, which re-enters at the callee. The
+  callee's own `ret` (guest x30) covers the real return.
+- Two real bugs fixed while wiring this:
+  - `E8→E9` opcode was at `disp_off-5` but `patch_here()` sets `disp_off = len-4` right
+    after the E8, so the opcode is at **`disp_off-1`** → fixup corrupted 4 preceding bytes.
+  - The stub address map was stored AFTER `buf.ret()` (off by the stub length) so the
+    redirect `rel32` pointed one instruction past the stub. Now captured `buf.len()` *before*
+    emitting the stub body.
+- New test `bounded_bl_diverts_through_dispatcher`: budget-1 block where `bl 0x14` targets a
+  callee that doesn't fit; asserts running the block leaves `CpuState.pc == 0x14` and
+  `x30 == 4` (link), proving genuine dispatcher re-entry (not an in-trace call).
+
+### What this unblocks (verified by gdb on the crash)
+
+`elfjit libroblox.so 0x1f0db20 --jni` now compiles small blocks instantly and EXECUTES real
+JNI_OnLoad init code (no 7s compile, no in-`compile_image` hang). The remaining SIGSEGV is
+**not a JIT bug** — it's the documented NEXT frontier: JNI_OnLoad's first indirect
+`vm->GetEnv` dispatch through the synthetic JavaVM table faults at a guest address that our
+`build_jni()` host thunk table doesn't yet satisfy (`0x7fff...` runtime ptr not host-callable).
+i.e. the guest is faithfully doing what a real JNI_OnLoad does and tripping on the host JNIEnv
+runtime that still needs QEMU's jni global-state (classes/methods/RegisterNatives) backing.
+
+### Honest status
+
+- 62/62 arm64jit tests green (the +1 is the bounded divert test); `cargo build --workspace` OK.
+  (`libloader::android::test_setup_android_layout_creates_dirs` fails on this host because it
+  wants to mkdir `/storage/emulated/0` at the actual root; pre-existing, unrelated to this change.)
+- The JIT now reaches and begins executing the real JNI load path. Next brick is the host JNIEnv
+  runtime (GetStaticMethodID/newStringUTF/RegisterNative real callbacks + clock/mprotect no-op
+  under the JIT like QEMU had to).

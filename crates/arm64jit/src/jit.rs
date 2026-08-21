@@ -640,7 +640,14 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
                 base + image.len() as u64
             ));
         }
-        let block = compile_image(image, base, pc, state)?;
+        // Bounded trace compilation: cap each block's guest-instruction budget so
+        // a real function like `JNI_OnLoad` is compiled into small, bounded
+        // blocks whose out-of-range branch/call edges divert back through the
+        // dispatcher loop below — instead of eagerly expanding the whole
+        // reachable call graph into one multi-MB blast that took seconds to
+        // translate and then SIGSEGV'd. CONFIG_JUMP_GUEST_BUDGET tunable.
+        const BLOCK_BUDGET: usize = 8192;
+        let block = compile_image_bounded(image, base, pc, state, BLOCK_BUDGET)?;
         #[cfg(debug_assertions)]
         if std::env::var_os("JIT_DUMP").is_some() {
             let raw = block.dump();
@@ -678,6 +685,24 @@ pub fn compile_image(
     entry: u64,
     state: *mut CpuState,
 ) -> Result<JitBlock, String> {
+    compile_image_bounded(image, base, entry, state, 0)
+}
+
+/// Like `compile_image` but stops expanding the reachable frontier once the
+/// translation has emitted `budget` guest instructions (0 = unbounded). Every
+/// branch/call fixup whose target was NOT emitted is redirected to an appended
+/// dispatcher-return stub that writes that target into `CpuState.pc` and `ret`s,
+/// so `jit_run` picks up the next block on its own re-entry loop. This is the
+/// mechanism that keeps a real function like `JNI_OnLoad` from being eagerly
+/// compiled into a single 78 MB blast-block that makes translation take seconds
+/// and then SIGSEGVs.
+pub fn compile_image_bounded(
+    image: &[u8],
+    base: u64,
+    entry: u64,
+    state: *mut CpuState,
+    budget: usize,
+) -> Result<JitBlock, String> {
     // Protect against nonsense sizes.
     if entry < base || entry - base >= image.len() as u64 {
         return Err(format!(
@@ -695,13 +720,22 @@ pub fn compile_image(
     // Walk the image: emit fall-through linearly, following branch/call targets.
     let mut host_of_guest: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let mut frontier: Vec<u64> = vec![entry];
-    // Invariant: every addresses in frontier is a candidate block start.
+    let mut emitted: usize = 0;
+    let bounded = budget > 0;
+    // Whether the budget cut us off before draining the reachable frontier. When
+    // true we must divert any not-yet-emitted targets to the dispatcher.
+    let mut truncated = false;
+    // Invariant: every address in frontier is a candidate block start.
     while let Some(addr) = frontier.pop() {
         if host_of_guest.contains_key(&addr) {
             continue; // already emitted
         }
         let mut cur = addr;
         loop {
+            if bounded && emitted >= budget {
+                truncated = true;
+                break;
+            }
             if cur < base || cur - base + 4 > image.len() as u64 {
                 break; // out of bounds; translate.rs will error if truly needed
             }
@@ -737,6 +771,7 @@ pub fn compile_image(
                 }
             }
             translate::translate(&mut buf, cur, inst, &mut fixups)?;
+            emitted += 1; // count a translated guest instruction toward the budget
             // Ret / indirect transfers / unconditional B are terminal: stop this
             // block (an unconditional `b` must NOT fall through to the next word,
             // which may be `.text` zero-fill or an unrelated function — landing
@@ -763,11 +798,52 @@ pub fn compile_image(
     buf.mov_load64(RAX, RBX, 0);
     buf.ret();
 
+    // Bounded-mode: append one dispatcher-return stub per distinct target we
+    // could not emit, then point every outstanding fixup whose target missed the
+    // block at its stub (rewriting a call's host `call` into a `jmp` so no host
+    // return address is left on the stack — the stub hands pc back to `jit_run`).
+    let mut stub_of_target: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    if truncated || !frontier.is_empty() {
+        // collect the set of targets referenced by fixups but not emitted.
+        let need: Vec<u64> = fixups
+            .iter()
+            .filter(|fx| !host_of_guest.contains_key(&fx.target_pc))
+            .map(|fx| fx.target_pc)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !need.is_empty() {
+            for target in need.iter() {
+                // record the stub address *before* emitting it so the fixup
+                // rel32 resolves to the stub's entry (the mov_ri64 below).
+                let stub_at = buf.len();
+                // stub: mov [CpuState+PC_OFF], #target ; ret
+                buf.mov_ri64(RAX, *target);
+                buf.mov_store64(RBX, crate::jit::PC_OFF, RAX);
+                buf.ret();
+                stub_of_target.insert(*target, stub_at);
+            }
+        }
+    }
+
     // Resolve fixups (buffer-relative).
     for fx in &fixups {
-        let target = *host_of_guest
-            .get(&fx.target_pc)
-            .ok_or_else(|| format!("branch/call to untranslated pc {:x}", fx.target_pc))?;
+        let target = if host_of_guest.contains_key(&fx.target_pc) {
+            host_of_guest[&fx.target_pc]
+        } else if bounded {
+            // Divert to a dispatcher-return stub. Change a `call` into a `jmp`
+            // so the host return address disappears (the stub hands pc back to
+            // jit_run, and the callee's own `ret` via x30 covers the return).
+            if fx.cc == 0xfe {
+                // call_rel32 emits opcode 0xE8 then a 4-byte disp whose field
+                // starts at disp_off (patch_here sets disp_off = len-4 right
+                // after the E8), so the E8 byte sits at disp_off-1.
+                buf.bytes[fx.disp_off - 1] = 0xe9; // E8 -> E9 (call->jmp)
+            }
+            stub_of_target[&fx.target_pc]
+        } else {
+            return Err(format!("branch/call to untranslated pc {:x}", fx.target_pc));
+        };
         let disp = target as i64 - (fx.disp_off as i64 + 4);
         let bytes = (disp as u32).to_le_bytes();
         buf.bytes[fx.disp_off..fx.disp_off + 4].copy_from_slice(&bytes);
@@ -884,6 +960,32 @@ mod tests {
         let blk = compile_image(&image, 0, 0, &mut st as *mut CpuState).expect("compile");
         let r = unsafe { run(&blk, &mut st as *mut CpuState) };
         assert_eq!(r, 20, "caller(5) should be 20");
+    }
+
+    #[test]
+    fn bounded_bl_diverts_through_dispatcher() {
+        // Entry at 0: `bl 0x14` (link to a callee we will NOT fit in the budget).
+        // Verifies that with a tight budget the `bl` is rewritten into a
+        // dispatcher-return stub: running the block leaves CpuState.pc == 0x14
+        // so `jit_run` genuinely re-enters the callee next.
+        let mut image = Vec::<u8>::new();
+        image.extend_from_slice(&0x94000005u32.to_le_bytes()); // 0x00 bl 0x14
+        image.extend_from_slice(&0xd4200000u32.to_le_bytes()); // 0x04 brk #0 (halt)
+        while image.len() < 0x14 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0xd65f03c0u32.to_le_bytes()); // 0x14 ret
+
+        // Budget 1: only the `bl` fits; the callee at 0x14 is out of trace, so its
+        // fixup must be redirected to a dispatcher-return stub.
+        let mut st = CpuState::new();
+        let blk =
+            compile_image_bounded(&image, 0, 0, &mut st as *mut CpuState, 1).expect("bounded compile");
+        let _ = unsafe { run(&blk, &mut st as *mut CpuState) };
+        // The stub wrote the diverted target into state.pc; the dispatcher (here
+        // the test harness) would now re-enter there.
+        assert_eq!(st.pc, 0x14, "bounded bl to out-of-budget target must divert via pc=0x14");
+        assert_eq!(st.x[30], 0x04, "bl sets x30 link to pc+4");
     }
 
     #[test]
