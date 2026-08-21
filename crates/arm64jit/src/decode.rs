@@ -1623,7 +1623,7 @@ pub fn decode(insn: u32) -> Inst {
                                         // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01);
                                         // sub is the same class with bit29 set (0x2e20_0400 vs 0x0e20_0400).
                                         let addclass = insn & 0x2f20_0c00;
-                                        if (addclass == 0x0e20_0400 || addclass == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && (insn & 0x3) != 3 {
+                                        if (addclass == 0x0e20_0400 || addclass == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && ((insn >> 22) & 3) == 2 {
                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
