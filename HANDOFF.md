@@ -2339,3 +2339,13 @@ after the once-init — either (a) its vtable entry 32 was never set because a g
 `elfjit --jni` (no .init_array run), or (b) vtable base-scaled entries need the loader to add the 0x100000000 PIE
 base to `.data.relro`-style absolute pointers, which this ## loader does not do (no R_AARCH64_RELATIVE present =
 presumptively absolute at build, but for a PIE that needs +base).
+
+**Correction to the abute "vtable slot 32 = corrupt" (added right after):** `x0` at the FMOD static-init is NOT a C++
+object. Guest bytes at `0x10045b848` are the ASCII string `__cxa_guard_acquire[...]` (a .rodata/.dynstr symbol string).
+So the "vtable" `[x0]` is really a string-literal address; `[x0]+32` is garbage → the "virtual call" is actually the
+guest's C++ `__cxa_guard` / exception runtime being fed a **string address where a control block / function address
+belongs** (guard-state at 0x68c7518, and a `__cxa_guard_acquire`-symbol-string in x0). Real root is **bionic/libc++
+`__cxa_guard` machinery the minimal `elfjit --jni` shims do NOT provide**: our `bind_image_plt` binds .rela.plt JUMP_SLOTs
+but the guest's C++ static-init path (guard acquire/release) is not shimmed, so it strays into string/data. Next:
+shim/redirect `__cxa_guard_acquire`/`__cxa_guard_release`/`__cxa_guard_abort` (guest `__cxa_atexit` too) to real host
+libc++/bionic so FMOD's static-init guard works, mirroring how we patched `__stack_chk_guard`.
