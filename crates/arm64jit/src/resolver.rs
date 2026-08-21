@@ -80,6 +80,29 @@ pub fn require(name: &str) -> u64 {
     resolve(name.as_bytes()).expect("host symbol not resolvable")
 }
 
+/// Register a host call for a **named** import without `dlsym` (for bionic/
+/// Android names that have no host symbol). Returns the thunk's guest address.
+/// Takes a NUL-terminated byte slice (the `.dynstr`-style name).
+pub fn register_named(name: &[u8], f: crate::jit::HostCall) -> u64 {
+    let mut r = resolver().lock().unwrap();
+    let key = CString::new(name).ok().or_else(|| {
+        CString::new(name.strip_suffix(&[0]).unwrap_or(name)).ok()
+    });
+    let key = match key {
+        Some(k) => k,
+        None => return 0,
+    };
+    if let Some(addr) = r.slots.get(&key) {
+        return *addr;
+    }
+    let slot = r.next;
+    r.next += 1;
+    crate::jit::register_host_call(slot, f);
+    let addr = crate::jit::host_call_addr(slot);
+    r.slots.insert(key, addr);
+    addr
+}
+
 /// Resolve a **double-precision** float-ABI import to a float thunk guest addr.
 /// The guest (Roblox) passes doubles in v0-v7; our float bridge reads those
 /// lanes as f64 and calls the host double function through xmm0-xmm7. Only

@@ -54,6 +54,7 @@ unsafe fn read_cstr_host(mut p: usize) -> String {
 }
 
 fn main() {
+    arm64jit::shims::register_shims(); // register host-side bionic shims first
     let args: Vec<String> = std::env::args().collect();
     let path = args
         .get(1)
