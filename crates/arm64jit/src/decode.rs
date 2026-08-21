@@ -1724,16 +1724,24 @@ pub fn decode(insn: u32) -> Inst {
                 // with bit29 (=0x2000_0000) CLEAR, which excludes fmul (bit29 set) and
                 // SIMD-3-same logical `bit/bif/bsl` (0x6ea11c40 -> residue 0x0ea00c00).
                 // Disjoint from fmaxv (0x0e20_0800) / ucvtf2d (0x0e60_0800). Fields:
-                // bit23 = subtract(fmls), bit22(el64) = .2d double, bit30(q) = high width.
-                if (insn & 0x1fe0_0c00) == 0x0e20_0c00 && (insn & 0x2000_0000) == 0 {
-                    let rd = (insn & 0x1f) as u8;
-                    let rn = ((insn >> 5) & 0x1f) as u8;
-                    let rm = ((insn >> 16) & 0x1f) as u8;
-                    let el64 = (insn & 0x0040_0000) != 0; // bit22: .2d
-                    let q = (insn & 0x4000_0000) != 0; // .4s/.2d (high) vs .2s
-                    let sub = (insn & 0x0080_0000) != 0; // bit23: fmls
-                    return Inst::Fmla { rd, rn, rm, el64, q, sub };
-                }
+                                // bit23 = subtract(fmls), bit22(el64) = .2d double, bit30(q) = high width.
+                                // Mask 0xffe0_fc00 drops rd/rn/rm; base .2s/.4s/.2d widths (bit22 el
+                                // -> 0x0e60/0x4e60) and stray fmls (bit23 -> 0x..a0). Excludes fmul
+                                // (0x6e prefix, bit29) and by-element (0x0f, handled earlier).
+                                let fmla_b = insn & 0xffe0_fc00;
+                                if (fmla_b == 0x0e20_cc00 || fmla_b == 0x4e20_cc00 || fmla_b == 0x0e60_cc00
+                                    || fmla_b == 0x4e60_cc00 || fmla_b == 0x0ea0_cc00 || fmla_b == 0x4ea0_cc00
+                                    || fmla_b == 0x0ee0_cc00 || fmla_b == 0x4ee0_cc00)
+                                    && (insn & 0x2000_0000) == 0
+                                {
+                                    let rd = (insn & 0x1f) as u8;
+                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                    let rm = ((insn >> 16) & 0x1f) as u8;
+                                    let el64 = (insn & 0x0040_0000) != 0;
+                                    let q = (insn & 0x4000_0000) != 0;
+                                    let sub = (insn & 0x0080_0000) != 0;
+                                    return Inst::Fmla { rd, rn, rm, el64, q, sub };
+                                }
 
                 // ---- FMOV scalar immediate (fmov Dd, #imm) / (fmov Sd, #imm) ----
                 // Double imm family `0x1e_XX_1...` (imm8 in bits 13:20, `0x1000`
