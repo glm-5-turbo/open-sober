@@ -1897,3 +1897,33 @@ all 4 PT_LOAD segments mapped, entry runs, guest sp/tls valid. **The Roblox boot
 ### Verified by
 `cargo test -p arm64jit` → **49 passed**. `cargo build -p arm64jit --example elfjit` clean. Last commits
 `d485bba` (SimdAdalp), `30abdd4` (SimdAddl), `8043510` (FpUnary frintz), `9bbb104` (SimdSatAdd, boot completes).
+
+---
+
+## Session — arm64jit syscall bridge (honest re-scope of "boot completes")
+
+**Clarification (correcting the earlier milestone wording):** `elfjit 0x1c34480` running a `.so` entry
+to exit-0 proves the **decoder + translator cover the full instruction space of Robust .so boot/init code** —
+but it is NOT "Roblox boots." The entry we drive is a JNI-method stub (not `JNI_OnLoad`/dyld), it makes
+**no `svc` syscalls** and does not launch the game. A real boot additionally requires the guest syscall
+bridge, the PLT/trampoline table, JNI glue, and the loader spawn path (all in libloader/sober-core).
+
+**Implemented now (`guest_svc` in jit.rs, commit `7c96cae`):** real AArch64->host syscall routing. The
+old stub only handled exit(93)/exit_group(94) and returned `-ENOSYS` for everything else. Now the AArch64
+syscall numbers (`x8`) dispatch to the matching libc call + the correct x86-64 semantics, returning the
+kernel's `-errno` encoding for errors (guest reads x0 as signed). Covered: read 63, write 64, close 57,
+openat 56, mmap 222, mprotect 226, munmap 215, brk 214, mremap 220, futex 98 (WAIT/WAKE), clock_gettime
+113, nanosleep 101, getpid 172, getuid 199, getrandom 278. Anything unmapped -> `-ENOSYS` (log + grow the
+table). Unit test `guest_svc_routes_write_and_mmap` proves write->pipe read, mmap->writable host ptr,
+getpid==process id all hit the real kernel. Suite now **50 passed.**
+
+**Remaining to a genuine Roblox boot (next steps, in order):**
+1. Drive the real boot path (JNI_OnLoad / nativeSetAssetPath) rather than a JNI stub; wire GoBloader +
+   jit through libloader `--no-qemu` (the `guest_svc` bridge unblocks the mmap/futex/mprotect the init
+   path needs).
+2. Host-call trampolines (libc/libm/libdl) + the 785-entry PLT GOT + JNIEnv table in the JIT path.
+3. Then the CHROME renderer / Android surface expects GPU; Carla graphical mode is the tail.
+
+### Last commits
+`d485bba` (SimdAdalp), `30abdd4` (SimdAddl), `8043510` (FpUnary frintz), `9bbb104` (SimdSatAdd),
+`7c96cae` (guest_svc real syscall dispatch, 50/50).
