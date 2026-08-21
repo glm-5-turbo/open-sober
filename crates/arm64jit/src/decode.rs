@@ -1146,7 +1146,7 @@ pub fn decode(insn: u32) -> Inst {
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 8, q: (insn >> 30) & 1 == 1 };
     }
-    if (insn & 0x3f00_0c00) == 0x2e00_0800 && (insn & 0x3f00) == 0x0800 && (insn & 0x0020_0000) != 0 {
+    if (insn & 0x3f00_0c00) == 0x2e00_0800 && (insn & 0x3c00) == 0x0800 && (insn & 0x0020_0000) != 0 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 4, q: (insn >> 30) & 1 == 1 };
