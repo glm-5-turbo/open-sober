@@ -1560,6 +1560,47 @@ Inst::SimdUz1 { rd, rn, rm, esize, q } => {
             }
             Ok(())
 }
+Inst::SimdZip1 { rd, rn, rm, esize, q } => {
+            // zip1 Vd.T, Vn.T, Vm.T: interleave lower halves. Vd[2k]=Vn[k] and
+            // Vd[2k+1]=Vm[k] for k in 0..(n/2), n = 8 (q=0) / 16 (q=1) bytes,
+            // element size = es (1,2,4,8). Source element k at Vn[+]k*es and
+            // Vm[k*es]; dest at Vd[2k*es] / Vd[(2k+1)*es].
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let n: i32 = if q { 16 } else { 8 };
+            let es = esize as i32;
+            for k in 0..(n / (2 * es)) {
+                let so = k * es; // source element k byte offset (Vn & Vm)
+                let d0 = 2 * k * es; // dest element 2k
+                let d1 = (2 * k + 1) * es; // dest element 2k+1
+                match esize {
+                    8 => {
+                        buf.mov_load64(RAX, RBX, slot(rn) + so);
+                        buf.mov_store64(RBX, slot(rd) + d0, RAX);
+                        buf.mov_load64(RAX, RBX, slot(rm) + so);
+                        buf.mov_store64(RBX, slot(rd) + d1, RAX);
+                    }
+                    4 => {
+                        buf.mov_load32(RAX, RBX, slot(rn) + so);
+                        buf.mov_store32(RBX, slot(rd) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, slot(rm) + so);
+                        buf.mov_store32(RBX, slot(rd) + d1, RAX);
+                    }
+                    2 => {
+                        buf.mov_load32(RAX, RBX, slot(rn) + so);
+                        buf.mov_store16(RBX, slot(rd) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, slot(rm) + so);
+                        buf.mov_store16(RBX, slot(rd) + d1, RAX);
+                    }
+                    _ => {
+                        buf.mov_load32(RAX, RBX, slot(rn) + so);
+                        buf.mov_store8(RBX, slot(rd) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, slot(rm) + so);
+                        buf.mov_store8(RBX, slot(rd) + d1, RAX);
+                    }
+                }
+            }
+            Ok(())
+}
 Inst::SimdAddD { rd, rn, rm, sub } => {
             // add/sub Vd.2D, Vn.2D, Vm.2D: two 64-bit lanes.
             let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
