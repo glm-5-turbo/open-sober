@@ -474,6 +474,7 @@ pub fn compile_image(
                     | Inst::Br { .. }
                     | Inst::Blr { .. }
                     | Inst::Brk { .. }
+                    | Inst::Udf { .. }
                     | Inst::B {
                         link: false, ..
                     }

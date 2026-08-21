@@ -295,8 +295,11 @@ pub enum Inst {
                            // ---- supervisor call (svc #imm) -> host syscall routing ----
                            Svc { imm: u16 },
                            // ---- breakpoint (brk #imm) -> guest trap; JIT halts gracefully
-                           //       (a real AArch64 CPU would take a SIGTRAP/exception here) ----
-                           Brk { imm: u16 },
+                               //       (a real AArch64 CPU would take a SIGTRAP/exception here) ----
+                               Brk { imm: u16 },
+                               // ---- undefined instruction (udf #imm = 0x00000000 | imm) -> guest abort
+                               //       trap; a real AArch64 CPU raises UndefinedInstruction. JIT halts like Brk ----
+                               Udf { imm: u16 },
                            // ---- NEON lane add: add Vd.4s, Vn.4s, Vm.4s ---------
     Simd4s {
         rd: u8,
@@ -2004,6 +2007,13 @@ pub fn decode(insn: u32) -> Inst {
     if (insn & 0xffe0_001f) == 0xd420_0000 {
         let imm = ((insn >> 5) & 0xffff) as u16;
         return Inst::Brk { imm };
+    }
+
+    // ---- undefined instruction: udf #imm = 0x0000_0000 (high 16 bits zero) ----
+    // AArch64 defines UDF as an always-undefined trap. 0x00000000, at our wall,
+    // is `udf #0`. Mirror Brk: decode it so translate can halt gracefully.
+    if (insn >> 16) == 0 {
+        return Inst::Udf { imm: (insn & 0xffff) as u16 };
     }
 
     // ---- system register read/write (mrs xN, <sysreg> / msr <sysreg>, xN) ----

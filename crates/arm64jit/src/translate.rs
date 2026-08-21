@@ -778,6 +778,15 @@ pub fn translate(
             buf.mov_store64(RBX, crate::jit::PC_OFF, RAX); // state.pc = 0
             Ok(())
         }
+        Inst::Udf { imm } => {
+            // Undefined instruction (udf #imm): a real AArch64 CPU faults here
+            // (Undefined Instruction exception). Mirror Brk by halting the run
+            // loop gracefully (state.pc = 0 sentinel).
+            let _ = imm;
+            buf.mov_ri64(RAX, 0);
+            buf.mov_store64(RBX, crate::jit::PC_OFF, RAX); // state.pc = 0
+            Ok(())
+        }
         Inst::BitField { rd, rn, immr, imms, sf, arith, insert } => {
             let bits = if sf { 64u32 } else { 32u32 };
             if insert && immr <= imms {
