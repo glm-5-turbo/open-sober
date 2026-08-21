@@ -8,6 +8,7 @@
 // The prologue loads it into RBX (the base the translator reads/writes).
 
 use std::ptr;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -184,6 +185,62 @@ pub unsafe fn run(blk: &JitBlock, state: *mut CpuState) -> u64 {
         let f: extern "C" fn(*mut CpuState) -> u64 = std::mem::transmute(blk.ptr);
         f(state)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Guest -> host call bridge
+//
+// A guest import (libc/libm/Android symbol) is reached by the guest branching
+// (`blr`/`br`) to an address. Real imports must land on a *host* x86-64
+// function, not more guest code. We reserve a fixed region of guest addresses
+// `HOST_THUNK_BASE .. HOST_THUNK_BASE + N*8` that NEVER overlaps the mapped
+// ELF image. When the `jit_run` dispatcher sees `pc` inside that region, it
+// calls the registered host thunk with the guest x0..x7 as x86-64 SysV args
+// (RDI,RSI,RDX,RCX,R8,R9, then stack) and stores the return into guest x0.
+//
+// A loader/linker fills each slot by resolving an aarch64 `R_AARCH64_JUMP_SLOT`
+// GOT entry (or a `blr xN` target) to `HOST_THUNK_BASE + slot*8`, so a PLT
+// `br x16` naturally lands on the thunk.
+// ---------------------------------------------------------------------------
+
+/// First guest address of the host-call thunk region (above any guest image).
+pub const HOST_THUNK_BASE: u64 = 0x7f00_0000_0000;
+/// Number of `HostCall` slots. Address of slot `i` is `HOST_THUNK_BASE + i*8`.
+pub const HOST_THUNK_MAX: usize = 4096;
+
+/// A host function callable with the x86-64 SysV ABI.
+pub type HostCall = extern "C" fn(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64, a7: u64) -> u64;
+
+static HOST_CALLS: Mutex<[Option<HostCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
+
+/// Register `f` as the host call for guest slot `i`. Returns the guest address
+/// the caller should resolve a JUMP_SLOT/intra-image `blr` target to so that the
+/// `jit_run` dispatcher falls through to this host call.
+pub fn register_host_call(i: usize, f: HostCall) {
+    let mut hc = HOST_CALLS.lock().unwrap();
+    if i < hc.len() {
+        hc[i] = Some(f);
+    }
+}
+
+/// Guest address of host-call slot `i`.
+pub fn host_call_addr(i: usize) -> u64 {
+    HOST_THUNK_BASE + (i as u64) * 8
+}
+
+/// Look up (host fn, slot index) for a guest `pc` that falls in the thunk
+/// region. Returns `None` if `pc` is outside it or the slot is unregistered.
+fn host_call_at(pc: u64) -> Option<(HostCall, usize)> {
+    if pc < HOST_THUNK_BASE {
+        return None;
+    }
+    let off = pc - HOST_THUNK_BASE;
+    if off % 8 != 0 {
+        return None;
+    }
+    let i = (off / 8) as usize;
+    let hc = HOST_CALLS.lock().unwrap();
+    hc.get(i).copied().flatten().map(|f| (f, i))
 }
 
 /// Supervisor-call dispatcher. AArch64 uses x8 as the syscall number and x0-x5
@@ -431,6 +488,18 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         let pc = unsafe { (*state).pc };
         if pc == 0 {
             return Ok(unsafe { (*state).x[0] });
+        }
+        // Guest -> host call bridge: if `pc` is a registered host thunk slot,
+        // invoke the host x86-64 function with the guest x0..x7 args and store
+        // the return into guest x0. The guest `blr` already linked x30 to the
+        // caller, so resume there. This is how a resolved import (libc/libm/JNI
+        // shim) is reached from translated Roblox code.
+        if let Some((hostf, _slot)) = host_call_at(pc) {
+            let s = unsafe { &mut *state };
+            let ret = hostf(s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5], s.x[6], s.x[7]);
+            s.x[0] = ret;
+            s.pc = s.x[30]; // return to the `blr` caller
+            continue;
         }
         if pc < base || pc - base + 4 > image.len() as u64 {
             return Err(format!(
@@ -1164,5 +1233,35 @@ mod tests {
         st.x[8] = 172;
         let pid = guest_svc(&mut st as *mut CpuState);
         assert_eq!(pid as u32, std::process::id());
+    }
+
+    #[test]
+    fn host_call_bridge_blr_into_host_local() {
+        // Guest->host bridge through jit_run's dispatcher: a guest `blr x16`
+        // where x16 = host_call_addr(1) must invoke our registered host local
+        // function (x0..x7 args; host ret -> guest x0) and resume at x30.
+        extern "C" fn times_three(
+            a0: u64,
+            _a1: u64,
+            _a2: u64,
+            _a3: u64,
+            _a4: u64,
+            _a5: u64,
+            _a6: u64,
+            _a7: u64,
+        ) -> u64 {
+            a0.wrapping_mul(3)
+        }
+
+        let host = host_call_addr(1);
+        register_host_call(1, times_three);
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0xd28000a0u32.to_le_bytes()); // movz x0,#5
+        img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0 -> halt (pc=0)
+        let mut st = CpuState::new();
+        st.x[16] = host; // x16 = host thunk slot address (bridge target)
+        let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
+        assert_eq!(r, 15, "host call times_3(5) via blr-through-dispatcher");
     }
 }
