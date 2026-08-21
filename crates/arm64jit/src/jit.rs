@@ -211,7 +211,15 @@ pub const HOST_THUNK_MAX: usize = 4096;
 /// A host function callable with the x86-64 SysV ABI.
 pub type HostCall = extern "C" fn(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64, a7: u64) -> u64;
 
+/// A host **float-ABI** function: all args and the return use the x86-64 SysV
+/// XMM registers (doubles), ABI-identical to an `extern "C" fn(f64,...,f64)->f64`.
+/// AArch64 calls libm (sinf/cosf/atan2f/...) with floats in v0-v7, and the host
+/// SysV rule routes the same values through xmm0-xmm7 — so reading the guest
+/// v0-v7 low lanes and calling this recovers correct float results.
+pub type HostFloatCall = extern "C" fn(f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64) -> f64;
+
 static HOST_CALLS: Mutex<[Option<HostCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
+static HOST_FLOAT_CALLS: Mutex<[Option<HostFloatCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 
 /// Register `f` as the host call for guest slot `i`. Returns the guest address
 /// the caller should resolve a JUMP_SLOT/intra-image `blr` target to so that the
@@ -240,6 +248,39 @@ fn host_call_at(pc: u64) -> Option<(HostCall, usize)> {
     }
     let i = (off / 8) as usize;
     let hc = HOST_CALLS.lock().unwrap();
+    hc.get(i).copied().flatten().map(|f| (f, i))
+}
+
+/// Guest base address of the **float**-ABI thunk region (after the integer slots).
+pub fn host_float_base() -> u64 {
+    HOST_THUNK_BASE + (HOST_THUNK_MAX as u64) * 8
+}
+
+/// Register a float host fn at an auto-allocated slot; returns its guest addr.
+pub fn register_float_call(f: HostFloatCall) -> u64 {
+    let mut hc = HOST_FLOAT_CALLS.lock().unwrap();
+    let i = hc.iter().position(|s| s.is_none()).expect("float thunk table full");
+    hc[i] = Some(f);
+    host_float_call_addr(i)
+}
+
+/// Guest address of float host-call slot `i`.
+pub fn host_float_call_addr(i: usize) -> u64 {
+    host_float_base() + (i as u64) * 8
+}
+
+/// Look up a float host fn for a guest `pc` in the float thunk region.
+fn host_float_call_at(pc: u64) -> Option<(HostFloatCall, usize)> {
+    let base = host_float_base();
+    if pc < base {
+        return None;
+    }
+    let off = pc - base;
+    if off % 8 != 0 {
+        return None;
+    }
+    let i = (off / 8) as usize;
+    let hc = HOST_FLOAT_CALLS.lock().unwrap();
     hc.get(i).copied().flatten().map(|f| (f, i))
 }
 
@@ -499,6 +540,26 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             let ret = hostf(s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5], s.x[6], s.x[7]);
             s.x[0] = ret;
             s.pc = s.x[30]; // return to the `blr` caller
+            continue;
+        }
+        // Float-ABI bridge: guest libm calls (atan2f/... with v0-v7 args). Read
+        // the guest v0..v7 d-lanes as f64, call the host float fn (double via
+        // xmm0..xmm7 in SysV), store the f64 return into guest v0.
+        if let Some((hostf, _slot)) = host_float_call_at(pc) {
+            let s = unsafe { &mut *state };
+            let v = &s.v;
+            let a0 = f64::from_bits(v[0]);
+            let a1 = f64::from_bits(v[2]);
+            let a2 = f64::from_bits(v[4]);
+            let a3 = f64::from_bits(v[6]);
+            let a4 = f64::from_bits(v[8]);
+            let a5 = f64::from_bits(v[10]);
+            let a6 = f64::from_bits(v[12]);
+            let a7 = f64::from_bits(v[14]);
+            let ret = hostf(a0, a1, a2, a3, a4, a5, a6, a7);
+            let s = unsafe { &mut *state };
+            s.v[0] = ret.to_bits(); // d0 = float return
+            s.pc = s.x[30];
             continue;
         }
         if pc < base || pc - base + 4 > image.len() as u64 {
@@ -1263,5 +1324,31 @@ mod tests {
         st.x[16] = host; // x16 = host thunk slot address (bridge target)
         let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
         assert_eq!(r, 15, "host call times_3(5) via blr-through-dispatcher");
+    }
+
+    #[test]
+    fn host_float_call_bridge_atan2_via_blr() {
+        // Float-ABI bridge through the dispatcher: a guest `blr x16` where x16 =
+        // a registered float thunk reads guest v0/v1 (as f64) and the host f64
+        // return lands back in guest v0.
+        extern "C" fn host_atan2(y: f64, x: f64, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64, _f: f64) -> f64 {
+            // host libc atan2 (double via xmm0/xmm1) = Rust f64::atan2
+            y.atan2(x)
+        }
+        let fslot = register_float_call(host_atan2);
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0xd2800000u32.to_le_bytes()); // movz x16,#0 (placeholder; x16 host-set)
+        img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0 -> halt
+        let mut st = CpuState::new();
+        st.v[0] = 1.0f64.to_bits(); // v0.d = y (arg0)
+        st.v[2] = 0.0f64.to_bits(); // v1.d = x (arg1)  -> atan2(1,0)=pi/2
+        st.x[16] = fslot;
+        let _ = jit_run(&img, 0x2000, 0x2000, &mut st as *mut CpuState).expect("jit_run");
+        let got = f64::from_bits(st.v[0]);
+        assert!(
+            (got - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+            "float bridge atan2(1,0) = {got} != pi/2"
+        );
     }
 }

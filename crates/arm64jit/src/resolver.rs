@@ -13,7 +13,7 @@
 //! args/results (sinf/powf/...) use XMM registers and need a separate
 //! float-ABI path, added later.
 
-use crate::jit::{host_call_addr, register_host_call, HostCall};
+use crate::jit::{host_call_addr, register_host_call, register_float_call, HostCall, HostFloatCall};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Mutex, OnceLock};
@@ -79,6 +79,30 @@ pub fn resolve(name: &[u8]) -> Option<u64> {
 pub fn require(name: &str) -> u64 {
     resolve(name.as_bytes()).expect("host symbol not resolvable")
 }
+
+/// Resolve a **double-precision** float-ABI import to a float thunk guest addr.
+/// The guest (Roblox) passes doubles in v0-v7; our float bridge reads those
+/// lanes as f64 and calls the host double function through xmm0-xmm7. Only
+/// double-precision names are safe here (single-precision `*f` need f32 lane
+/// handling and are intentionally excluded).
+pub fn resolve_float(name: &[u8]) -> Option<u64> {
+    let key = CString::new(name).ok()?;
+    let sym = key.as_ptr();
+    let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    if ptr.is_null() {
+        return None;
+    }
+    // Host f64 -> f64 via double (xmm0..) ABI = `HostFloatCall`.
+    let hostf: HostFloatCall = unsafe { std::mem::transmute(ptr) };
+    Some(crate::jit::register_float_call(hostf))
+}
+
+/// Double-precision libm names whose f64 ABI matches our float bridge.
+pub const DOUBLE_FLOAT_NAMES: &[&str] = &[
+    "atan2", "atan", "asin", "acos", "sin", "cos", "tan", "exp", "log", "log10", "log2",
+    "pow", "sqrt", "floor", "ceil", "fabs", "fmod", "hypot", "copysign", "trunc", "round",
+    "exp2", "log1p", "expm1", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+];
 
 /// Regist directly known common imports: name -> host function. Returns a map
 /// of import name -> thunk guest address for the ones the host provides.

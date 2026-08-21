@@ -137,8 +137,24 @@ fn main() {
                 resolved += 1;
             }
             None => {
-                rows.push(format!("  {name:<42} (shim needed)"));
-                needs_shim += 1;
+                // Try the double-precision float ABI (f64 via v0-v7/xmm0-xmm7).
+                let double_float = arm64jit::resolver::DOUBLE_FLOAT_NAMES
+                    .iter()
+                    .any(|f| f.as_bytes() == name.as_bytes());
+                if double_float {
+                    if let Some(fthunk) = arm64jit::resolver::resolve_float(name.as_bytes()) {
+                        let got_host = host(el.guest_of(r_offset));
+                        unsafe { wr64(got_host, fthunk) };
+                        rows.push(format!("  {name:<42} -> host-f64 (GOT patched)"));
+                        resolved += 1;
+                    } else {
+                        rows.push(format!("  {name:<42} (f64 host missing)"));
+                        needs_shim += 1;
+                    }
+                } else {
+                    rows.push(format!("  {name:<42} (shim needed)"));
+                    needs_shim += 1;
+                }
             }
         }
     }
