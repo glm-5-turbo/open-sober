@@ -1135,17 +1135,20 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----
-    // Gate (insn & 0xfff0_0c00)==0x5e00_0400; esize=1<<tz(imm5), index=imm5>>(tz+1).
-    if insn & 0xfff0_0c00 == 0x5e00_0400 {
-        let imm5 = (insn >> 16) & 0x1f;
-        if imm5 != 0 {
-            let esize = (1u8 << imm5.trailing_zeros()) as u8;
-            let index = (imm5 >> (imm5.trailing_zeros() + 1)) as u8;
-            let rn = ((insn >> 5) & 0x1f) as u8;
-            let rd = (insn & 0x1f) as u8;
-            return Inst::SimdLaneS { rd, rn, esize, index };
+        // Gate prefix 0x5e (bits31:24) AND byte2 (bits15:8)==0x04. Covers all idx variants
+        // (s[0..3], d[0..1], h[0..7], incl. the byte1-nibble set resids 0x5e10/0x5e14/0x5e1c
+        // that the narrower 0xfff0_0c00==0x5e00_0400 form missed). esize=1<<tz(imm5),
+        // index=imm5>>(tz+1), imm5 = bits20:16.
+        if insn & 0xff00_ff00 == 0x5e00_0400 {
+            let imm5 = (insn >> 16) & 0x1f;
+            if imm5 != 0 {
+                let esize = (1u8 << imm5.trailing_zeros()) as u8;
+                let index = (imm5 >> (imm5.trailing_zeros() + 1)) as u8;
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let rd = (insn & 0x1f) as u8;
+                return Inst::SimdLaneS { rd, rn, esize, index };
+            }
         }
-    }
 
     // ---- SHA-1 / SHA-256 crypto ops ----
     // Recognise by the specific (masked) v8 SHA opcodes. mode -> helper op.
