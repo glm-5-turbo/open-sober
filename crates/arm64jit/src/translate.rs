@@ -2418,7 +2418,37 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())
                 }
-                Inst::Ld2 { rd, rn, q, post } => {
+                Inst::SimdHighNarrow { rd, rn, rm, dst_esize, sub, round } => {
+                                        // addhn/subhn/raddhn Vd.T, Vn.W, Vm.W: dst[i] = high half of the
+                                        // src-width (Vn[i] +/- Vm[i]), narrowed to dst_esize bytes. Q=0.
+                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                        let src_esize = 2 * (dst_esize as i32);
+                                        let lanes = 8 / (dst_esize as i32);
+                                        let dst_bits = (8 * (dst_esize as i32)) as u8;
+                                        for i in 0..lanes {
+                                            let so = (i as i32) * src_esize;
+                                            let de = (i as i32) * (dst_esize as i32);
+                                            if src_esize >= 4 {
+                                                buf.mov_load64(RAX, RBX, slot(rn)+so);
+                                                buf.mov_load64(RCX, RBX, slot(rm)+so);
+                                            } else {
+                                                buf.mov_load32(RAX, RBX, slot(rn)+so);
+                                                buf.mov_load32(RCX, RBX, slot(rm)+so);
+                                            }
+                                            if sub { buf.sub_rr64(RAX, RCX); } else { buf.add_rr64(RAX, RCX); }
+                                            if round { let h = (1u64 << (dst_bits - 1)) as u64; buf.mov_ri64(R10, h); buf.add_rr64(RAX, R10); }
+                                            buf.shr_ri8(RAX, dst_bits);
+                                            match dst_esize {
+                                                4 => buf.mov_store32(RBX, slot(rd)+de, RAX),
+                                                2 => buf.mov_store16(RBX, slot(rd)+de, RAX),
+                                                _ => buf.mov_store8(RBX, slot(rd)+de, RAX),
+                                            }
+                                        }
+                                        buf.mov_ri64(RAX, 0);
+                                        buf.mov_store64(RBX, slot(rd)+8, RAX);
+                                        Ok(())
+                                    }
+                                        Inst::Ld2 { rd, rn, q, post } => {
                     // ld2 {Vt, Vt1}, [Xn]: load 2*q elements, deinterleave bytes.
                     // Vt[i] = mem[2i], Vt1[i] = mem[2i+1], i in 0..n (n = q?16:8).
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
