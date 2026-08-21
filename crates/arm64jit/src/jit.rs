@@ -187,29 +187,101 @@ pub unsafe fn run(blk: &JitBlock, state: *mut CpuState) -> u64 {
 }
 
 /// Supervisor-call dispatcher. AArch64 uses x8 as the syscall number and x0-x5
-/// as args (like the iOS ARM64 kernel asvp); the AArch64 syscall ABI is
-/// x8=number, x0..x5 args, return in x0 (negative = -errno). We forward the
-/// handful the guest needs early on to real host syscalls via `libc` (the
-/// kernel numbers match Linux AArch64 == x86-64 for the common set, so libc's
-/// `syscall` with the same number works for mmap/open/futex/exit_group/...).
+/// as args (AArch64 Linux ABI: x8=number, x0..x5 args, return in x0, negative =
+/// -errno). The guest (Roblox on the Android aarch64 ABI) issues AArch64 syscall
+/// numbers, but we run on x86-64, whose syscall number table is entirely
+/// different. So we map each AArch64 nr -> x86-64 nr and forward the first 3-5
+/// args to `libc::syscall` (the raw kernel path). `libc::syscall` already
+/// returns the kernel's -errno encoding, which we re-package as the u64 the
+/// guest expects (high bits set for errors).
+///
+/// Common mappings (AArch64 -> x86-64, Linux):
+///   read 63->0, write 64->1, openat 56->257, close 57->3, fstat 79->4,
+///   brk 214->12, mmap 222->9, mprotect 226->10, munmap 215->11,
+///   ioctl 29->16, futex 98->202, exit 93->60, exit_group 94->231,
+///   getpid 172->39, getppid 173->110, getuid 199->102, nanosleep 101->35,
+///   clock_gettime 113->228, getrandom 278->318, access 48->21, uname 160->65,
+///   gettimeofday 169->96 (to libc instead), readahead, ...
 pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     let s = unsafe { &mut *st };
     let nr = s.x[8];
     let a = [s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5]];
     if std::env::var("JIT_TRACE_SVC").is_ok() {
-        eprintln!("guest svc {:x} ({}) a0={:#x} a1={:#x} a2={:#x}",
-            nr, nr, a[0], a[1], a[2]);
+        eprintln!(
+            "guest svc {:x} ({}) a0={:#x} a1={:#x} a2={:#x} a3={:#x}",
+            nr, nr, a[0], a[1], a[2], a[3]
+        );
     }
-    // exit(93) / exit_group(94) end the process cleanly.
-    if nr == 93 || nr == 94 {
-        eprintln!("guest_svc: syscall({nr}) status {}", a[0] as i32);
-        std::process::exit(a[0] as i32);
+    use libc::{c_long, c_void, c_char, c_int};
+    // AArch64 -> host. We dispatch by AArch64 syscall number directly to the
+    // matching libc call (which does the native x86-64 syscall), so the mapping
+    // is exact and readable rather than a fragile number shuffle. Errors come
+    // back as -1 + errno; we convert to the kernel's -errno convention.
+    let ret: c_long = match nr {
+        // --- process / exit ---
+        93 | 94 => { // exit(93) / exit_group(94)
+            eprintln!("guest_svc: exit_group({}) from guest", a[0]);
+            std::process::exit(a[0] as i32);
+        }
+        // --- basic I/O ---
+        63 => unsafe { libc::read(a[0] as c_int, a[1] as *mut c_void, a[2] as usize) as c_long },
+        64 => unsafe { libc::write(a[0] as c_int, a[1] as *const c_void, a[2] as usize) as c_long },
+        57 => unsafe { libc::close(a[0] as c_int) as c_long },
+        56 => unsafe { libc::openat(a[0] as c_int, a[1] as *const c_char, a[2] as c_int, a[3] as c_long as u32) as c_long },
+        // --- memory ---
+        222 => unsafe { libc::mmap(a[0] as *mut c_void, a[1] as usize, a[2] as c_int, a[3] as c_int, a[4] as c_int, a[5] as i64) as c_long },
+        226 => unsafe { libc::mprotect(a[0] as *mut c_void, a[1] as usize, a[2] as c_int) as c_long },
+        215 => unsafe { libc::munmap(a[0] as *mut c_void, a[1] as usize) as c_long },
+        214 => unsafe {
+            // brk(0) quirk: return current break by calling with NULL.
+            let r = libc::syscall(c_long::from(libc::SYS_brk), a[0] as usize) as *mut c_void;
+            if a[0] == 0 { return libc::syscall(libc::SYS_brk, 0 as usize) as u64; }
+            r as c_long
+        },
+        220 => unsafe { libc::syscall(libc::SYS_mremap, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as c_int, a[4] as usize) as c_long },
+        // --- time ---
+        113 => unsafe { libc::clock_gettime(a[0] as libc::clockid_t, a[1] as *mut libc::timespec) as c_long },
+        101 => unsafe { libc::nanosleep(a[1] as *const libc::timespec, a[2] as *mut libc::timespec) as c_long },
+        // --- process / user identity ---
+        172 => unsafe { libc::getpid() as c_long },
+        199 => unsafe { libc::getuid() as c_long },
+        98 => unsafe {
+            // futex: only FUTEX_WAIT(0)/FUTEX_WAKE(1) forwarded to the host. Others return 0.
+            let op = a[1] as i32;
+            let fut = a[0] as *mut libc::c_int;
+            let om = (op as u32) & 0x7f;
+            if om == libc::FUTEX_WAKE as u32 {
+                libc::syscall(libc::SYS_futex, fut as usize, op, a[2] as c_long, 0 as usize) as c_long
+            } else if om == libc::FUTEX_WAIT as u32 {
+                libc::syscall(
+                    libc::SYS_futex,
+                    fut as usize,
+                    op,
+                    a[2] as c_long,
+                    a[3] as *const libc::timespec,
+                ) as c_long
+            } else {
+                0
+            }
+        },
+        // --- misc upper commonly needed ---
+        278 => unsafe { libc::syscall(libc::SYS_getrandom, a[0] as usize, a[1] as usize, a[2] as u32) as c_long },
+        _ => {
+            eprintln!(
+                "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (a0={:#x} a1={:#x} a2={:#x})",
+                a[0], a[1], a[2]
+            );
+            return (-38i64) as u64; // -ENOSYS
+        }
+    };
+    // Convert -1-with-errno into the kernel's -errno encoding the guest expects.
+    if ret == -1 {
+        // errno is positive; kernel convention is to return -errno.
+        let e = unsafe { *libc::__errno_location() };
+        (0i64 - e as i64) as u64
+    } else {
+        ret as u64
     }
-    eprintln!(
-        "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (args {:#x},{:#x},{:#x})",
-        a[0], a[1], a[2]
-    );
-    (-38i64) as u64 // -ENOSYS
 }
 
 /// Hased SHA-1 / SHA-256 crypto helper called by translated code for the
@@ -1050,5 +1122,47 @@ mod tests {
         // v0 lanes: min(5,2)=2, min(-3,7)=-3
         assert_eq!((st.v[0] & 0xffff_ffff) as i32, 2,  "v0.l0 min(5,2)=2");
         assert_eq!((st.v[0] >> 32) as i32, -3, "v0.l1 min(-3,7)=-3");
+    }
+
+    #[test]
+    fn guest_svc_routes_write_and_mmap() {
+        // Directly exercise the AArch64->host syscall dispatcher (AArch64 numbers):
+        //   nr=64 write(fd, buf, n) to a pipe, and nr=222 mmap(len,...) returning real mem.
+        let mut st = CpuState::new();
+        let msg = b"hello-svc";
+        // pipe so write is observable without corrupting stdout
+        let mut pfd = [0; 2];
+        unsafe { assert_eq!(libc::pipe(pfd.as_mut_ptr()), 0); }
+        st.x[8] = 64;            // AArch64 write
+        st.x[0] = pfd[1] as u64; // fd = write end
+        st.x[1] = msg.as_ptr() as u64;
+        st.x[2] = msg.len() as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        // write returns bytes written (== len) — NOT -errno.
+        assert_eq!(r as isize, msg.len() as isize, "write syscall count");
+        let mut buf = [0u8; 64];
+        let n = unsafe { libc::read(pfd[0], buf.as_mut_ptr() as *mut libc::c_void, 64) };
+        assert_eq!(n as usize, msg.len());
+        assert_eq!(&buf[..msg.len()], msg, "write->read roundtrip");
+        unsafe { libc::close(pfd[0]); libc::close(pfd[1]); }
+
+        // mmap (AArch64 222): map 4096 RW anonymous at addr=NULL.
+        st.x[8] = 222;
+        st.x[0] = 0;                                    // addr
+        st.x[1] = 4096;                                 // length
+        st.x[2] = libc::PROT_READ as u64 | libc::PROT_WRITE as u64;
+        st.x[3] = (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS) as u64;
+        st.x[4] = -1i64 as u64;                          // fd = -1
+        st.x[5] = 0;                                     // offset
+        let m = guest_svc(&mut st as *mut CpuState);
+        assert!(m != 0 && (m as u64) < 0x8000_0000_0000_0000, "mmap returned host ptr {:#x}", m);
+        unsafe { std::ptr::write_volatile(m as *mut u8, 0xabu8); }
+        assert_eq!(unsafe { std::ptr::read_volatile(m as *const u8) }, 0xabu8, "mmap writable");
+        unsafe { libc::munmap(m as *mut libc::c_void, 4096); }
+
+        // getpid (AArch64 172) -> real host pid
+        st.x[8] = 172;
+        let pid = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(pid as u32, std::process::id());
     }
 }
