@@ -162,6 +162,8 @@ pub enum Inst {
         SimdFmulEl { rd: u8, rn: u8, rm: u8, esize: u8, index: u8, q: bool },
     // ---- SIMD byte reverse in 64-bit element: rev64 Vd.T, Vn.T ----
     SimdRev { rd: u8, rn: u8, q: bool },
+    // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----
+    SimdLaneS { rd: u8, rn: u8, esize: u8, index: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
     SimDup { rd: u8, rn: u8, esize: u8, src_idx: u8, q: bool },
     // ---- SIMD vector immediate: fmov Vd.T, #imm ----
@@ -1067,6 +1069,19 @@ pub fn decode(insn: u32) -> Inst {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, q: (insn >> 30) & 1 == 1 };
+    }
+
+    // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----
+    // Gate (insn & 0xfff0_0c00)==0x5e00_0400; esize=1<<tz(imm5), index=imm5>>(tz+1).
+    if insn & 0xfff0_0c00 == 0x5e00_0400 {
+        let imm5 = (insn >> 16) & 0x1f;
+        if imm5 != 0 {
+            let esize = (1u8 << imm5.trailing_zeros()) as u8;
+            let index = (imm5 >> (imm5.trailing_zeros() + 1)) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            return Inst::SimdLaneS { rd, rn, esize, index };
+        }
     }
 
     // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----

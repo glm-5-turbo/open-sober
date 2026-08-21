@@ -1956,6 +1956,21 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                 }
                                 Ok(())
                             }
+                            Inst::SimdLaneS { rd, rn, esize, index } => {
+                                // mov Sd/Dd, Vn.T[idx]: copy the element into the
+                                // low bytes of the dest FP register slot.
+                                let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                let src = f(rn) + (index as i32) * (esize as i32);
+                                let dst = f(rd);
+                                if esize == 8 {
+                                    buf.mov_load64(RAX, RBX, src);
+                                    buf.mov_store64(RBX, dst, RAX);
+                                } else {
+                                    buf.mov_load32(RAX, RBX, src);
+                                    buf.mov_store32(RBX, dst, RAX);
+                                }
+                                Ok(())
+                            }
                             // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
         Inst::SimdFmovImm { rd, esize, value_bits, q } => {
             // fmov Vd.T, #imm: broadcast the immediate FP float (esize bytes,
