@@ -1159,7 +1159,9 @@ pub fn decode(insn: u32) -> Inst {
         // (s[0..3], d[0..1], h[0..7], incl. the byte1-nibble set resids 0x5e10/0x5e14/0x5e1c
         // that the narrower 0xfff0_0c00==0x5e00_0400 form missed). esize=1<<tz(imm5),
         // index=imm5>>(tz+1), imm5 = bits20:16.
-        if insn & 0xff00_ff00 == 0x5e00_0400 {
+        // Mask 0xffe0_fc00 (drops rn/rd, keeps imm5) -- fixes rn>=8 forms like
+        // mov s4,v19.s[2]=0x5e140664 vs rn0 0x5e140402 (both -> 0x5e000400).
+        if insn & 0xffe0_fc00 == 0x5e00_0400 {
             let imm5 = (insn >> 16) & 0x1f;
             if imm5 != 0 {
                 let esize = (1u8 << imm5.trailing_zeros()) as u8;
