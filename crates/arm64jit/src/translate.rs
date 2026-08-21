@@ -2353,9 +2353,15 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     if esize == 8 {
                         buf.mov_load64(RAX, RBX, src);
                         buf.mov_store64(RBX, dst, RAX);
-                    } else {
+                    } else if esize == 4 {
                         buf.mov_load32(RAX, RBX, src);
                         buf.mov_store32(RBX, dst, RAX);
+                    } else if esize == 2 {
+                        buf.movzx_word_mem(RAX, RBX, src);
+                        buf.mov_store16(RBX, dst, RAX);
+                    } else {
+                        buf.movzx_byte_mem(RAX, RBX, src);
+                        buf.mov_store8(RBX, dst, RAX);
                     }
                     Ok(())
                 }
