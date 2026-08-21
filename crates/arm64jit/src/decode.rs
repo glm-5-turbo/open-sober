@@ -169,6 +169,16 @@ pub enum Inst {
     FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
     // ---- FP horizontal reduction cross vector: fmaxv/fminv Sd, Vn.4s ----
     FMaxV { rd: u8, rn: u8, min: bool },
+    // ---- switchable FP multiply-accumulate: fmla/fmls Vd.4s/.2s/.2d, Vn, Vm ----
+    Fmla {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        // el64: .2d double; q: .4s/.2d (high) width vs .2s
+        el64: bool,
+        q: bool,
+        sub: bool,
+    },
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
@@ -1575,6 +1585,22 @@ pub fn decode(insn: u32) -> Inst {
                     let rn = ((insn >> 5) & 0x1f) as u8;
                     let min = (insn & 0x0080_0000) != 0;
                     return Inst::FMaxV { rd, rn, min };
+                }
+
+                // ---- FP multiply-accumulate: fmla/fmls Vd.T, Vn, Vm ----
+                // Vd = Vd +/- Vn*Vm per-lane. Tight gate (insn&0x1fe0_0c00)==0x0e20_0c00
+                // with bit29 (=0x2000_0000) CLEAR, which excludes fmul (bit29 set) and
+                // SIMD-3-same logical `bit/bif/bsl` (0x6ea11c40 -> residue 0x0ea00c00).
+                // Disjoint from fmaxv (0x0e20_0800) / ucvtf2d (0x0e60_0800). Fields:
+                // bit23 = subtract(fmls), bit22(el64) = .2d double, bit30(q) = high width.
+                if (insn & 0x1fe0_0c00) == 0x0e20_0c00 && (insn & 0x2000_0000) == 0 {
+                    let rd = (insn & 0x1f) as u8;
+                    let rn = ((insn >> 5) & 0x1f) as u8;
+                    let rm = ((insn >> 16) & 0x1f) as u8;
+                    let el64 = (insn & 0x0040_0000) != 0; // bit22: .2d
+                    let q = (insn & 0x4000_0000) != 0; // .4s/.2d (high) vs .2s
+                    let sub = (insn & 0x0080_0000) != 0; // bit23: fmls
+                    return Inst::Fmla { rd, rn, rm, el64, q, sub };
                 }
 
                 // ---- FMOV scalar immediate (fmov Dd, #imm) / (fmov Sd, #imm) ----

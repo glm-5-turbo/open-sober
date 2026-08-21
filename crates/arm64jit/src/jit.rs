@@ -946,4 +946,27 @@ mod tests {
         exec_bytes(&mut st, &code, 0).expect("exec fmaxv");
         assert_eq!((st.v[2] & 0xffff_ffff) as u32, 0x40b0_0000, "fmaxv -> 5.5");
     }
+
+    #[test]
+    fn fmla_macc_lanes_reference() {
+        // fmla v0.4s, v1.4s, v2.4s = 0x4e22cc20. Vd += Vn*Vm per lane.
+        // v1=[2,3,4,5] v2=[3,2,4,2] v0=[1,1,1,1] => v0=[7,7,17,11].
+        let f = |x: f32| x.to_bits() as u64;
+        let pack = |lo: u64, hi: u64| (hi << 32) | lo;
+        let mut st = CpuState::new();
+        st.v[0] = (f(1.0) << 32) | f(1.0);        // v0 lanes 0,1
+        st.v[1] = (f(1.0) << 32) | f(1.0);        // v0 lanes 2,3
+        st.v[2] = (f(3.0) << 32) | f(2.0);        // v1 lanes 0,1
+        st.v[3] = (f(5.0) << 32) | f(4.0);        // v1 lanes 2,3
+        st.v[4] = (f(2.0) << 32) | f(3.0);        // v2 lanes 0,1
+        st.v[5] = (f(2.0) << 32) | f(4.0);        // v2 lanes 2,3
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x4e22_cc20u32.to_le_bytes()); // fmla v0.4s,v1.4s,v2.4s
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fmla .4s");
+        let lanes = [ (st.v[0] & 0xffff_ffff) as u32, (st.v[0] >> 32) as u32,
+                      (st.v[1] & 0xffff_ffff) as u32, (st.v[1] >> 32) as u32 ];
+        let exp: Vec<u32> = [7.0f32,7.0,17.0,11.0].iter().map(|x| x.to_bits()).collect();
+        for i in 0..4 { assert_eq!(lanes[i], exp[i], "fmla lane {}", i); }
+    }
 }
