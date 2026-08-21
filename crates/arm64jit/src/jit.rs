@@ -1023,4 +1023,17 @@ mod tests {
         exec_bytes(&mut st, &code, 0).expect("exec fnmul");
         assert_eq!(f32::from_bits((st.v[20] & 0xffff_ffff) as u32), -10.0, "fnmul -(2.5*4.0)");
     }
+
+    #[test]
+    fn fcvtms_floor_to_int() {
+        // fcvtms w8, s5 = 0x1e3000a8 (wall): w8 = floor(s5). -1.5 -> -2.
+        let f = |x: f32| x.to_bits() as u64;
+        let mut st = CpuState::new();
+        st.v[10] = f(-1.5);       // s5 = v5 lane0 (st.v[10], reg5)
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x1e30_00a8u32.to_le_bytes()); // fcvtms w8,s5
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fcvtms");
+        assert_eq!(st.x[8] as i32, -2, "fcvtms floor(-1.5) = -2");
+    }
 }
