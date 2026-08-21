@@ -68,7 +68,20 @@ fn main() {
         .find(|s| s.prot.execute)
         .expect("no executable segment");
     let base = seg.guest_vaddr; // == host addr of image[0] (guest==host)
-    let len = seg.memsz as usize;
+
+    // Use the FULL mapped span (every PT_LOAD + inter-segment gaps, which
+    // load_elf_image lays into ONE contiguous anonymous region at the fixed
+    // base) as the valid-pc extent. The guest may legitimately branch/call
+    // into higher sections (data-backed trampolines, .bss-slotted function
+    // pointers) that live past the r-x slice; bounding `run_loop` to only the
+    // text slice wrongly flags those as "outside image". Compute the extent as
+    // the largest guest_vaddr+memsz across segments (the whole mmap is zero-
+    // filled), relative to this text-segment base.
+    let full_end = el
+        .segments
+        .iter()
+        .fold(0u64, |m, s| m.max(s.guest_vaddr + s.memsz));
+    let len = (full_end - base) as usize;
 
     println!(
         "running entry guest=0x{:x} host=0x{:x} (segment base guest=0x{:x} size=0x{:x})",
