@@ -2237,3 +2237,47 @@ leaves `2` in a register the guest reuses as a pointer; (b) JNI_OnLoad once/init
 handle from an unimplemented host call it then derefs. Next: trace the guest instruction that
 stores 2 into the register it derefs (step the block with gdb, or narrow with a
 `[x0,#8]`-deref watchpoint).
+
+## Session — bl-to-PLT-stub divert TRUE ROOT CAUSE + init now completes (commit 1e447b3)
+
+**The `x0=2` abort-forward was NOT a JNI shim bug — it was the JIT inline-calling host-import
+stubs.** A guest `bl <import@plt>` (pthread_mutex_lock, syslog, abort, __android_log*, ...) was
+compiled INLINE as a host `call` to the PLT stub's emitted block. The stub ends `adrp/ldr x17,GOT;
+br x17`; the `br` sets `CpuState.pc = x17` (= a host thunk slot) and `ret`s — but because it was
+*`call`-entered*, that `ret` returned into the inlined caller's fall-through (guest code) instead
+of handing pc to the dispatcher. So the real import never ran, the guest saw a garbage return
+(`x0` stayed 2 from the syslog arg setup), took the once-init ABORT branch, and deref'd `[0xa]`.
+
+**Fix (jit.rs, `compile_image_bounded`):**
+- `is_host_plt_stub(addr)`: decode the 4 instructions at the `bl` target; recognize the canonical
+  `adrp Xd; ldr Xn,[Xd,#imm]; add Xd,Xd,#off; br Xn` PLT stub. Pitfalls hit while dialing it in:
+  the `br` encodings its branch-register at bits 9:5 (`(w>>5)&0x1f`), and the `add` top-byte mask
+  is `0xff000000` to reach `0x91000000` (use `& 0x7f000000` silently drops bit 24 and rejects every
+  real `add`).
+- In the `Inst::B{link:true}` handler, if the target `is_host_plt_stub(t)`, do NOT push `t` to the
+  frontier (don't inline it). Set a new `force_stubs` flag so the dispatcher-return stub table is
+  still built even when the frontier drains (`if truncated || !frontier.is_empty() || force_stubs`),
+  otherwise the diverted `bl`'s fixup index into an empty `stub_of_target` (the `[&t]` lookup).
+- The divert rewrites the inline call (E8) into a `jmp` to a stub that writes `pc=t` and `ret`s, so
+  the dispatcher re-enters and `host_call_at(t)` routes the REAL import → host bridge → guest gets
+  a genuine return value.
+
+**Result (verified `elfjit ~/.../libroblox.so 0x1f0db20 --jni`):** the guest advances PAST JNI_OnLoad's
+pthread_once init — which now SUCCEEDS (416 hostplt `bl`s diverted) instead of aborting:
+```
+  block@0x101f0db20 -> pc=0x101f0e728      (JNI_OnLoad prologue -> init guard)
+  block@0x101f0e728 -> pc=0x105ce0828      (init guard RETURNS, guest resumes in startup!)
+  block@0x105ce0828 -> pc=0x1068c7518      (next caller; tries to call an unmapped fn pointer)
+run_loop: pc 0x1068c7518 outside image [0x100000000, 0x105e67390)
+```
+No more SIGSEGV/139 at `[0xa]`; the JIT now gracefully stops with `pc outside image` (exit 1).
+63/63 tests still pass.
+
+**NEW frontier (clean, readable):** the guest (in a real startup caller at 0x105ce0828) computes a
+function pointer = `0x1068c7518` (= guest VA `0x068c7518`) and calls it. `0x068c7518` is in a GAP
+between the RW .data/.bss seg and the RO .rodata seg — i.e. **unmapped** → a null/garbage global
+function pointer. Likely a C++ vtable / JNI-registered callback / Soong-supplied hook that the
+host `jni_shim` layer must provide backing for (the Sober "fake Android" shim), OR a `dlsym`-ed
+pointer our resolver left 0. Next: find WHICH global holds `0x68c7518` and WHICH init step should
+fill it — dump `readelf -sW`/`.rodata` owners at `0x68c7518`, disassemble the caller block
+`0x105ce0828`'s `ldr/blr` to see the pointer source.
