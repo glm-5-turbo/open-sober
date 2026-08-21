@@ -2103,22 +2103,27 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                         }
                         Ok(())
                     }
-                    Inst::Tbl { rd, rn, rm, tbx } => {
-                    // tbl vd.16b, {vn}, vm: vd[i] = (vm[i]<16 ? table[vn+i] : 0/keep).
+                    Inst::Tbl { rd, rn, rm, tbx, n_tables } => {
+                    // tbl vd.16b, {vn..vn+nt-1}, vm: vd[i] = concat(vn..vn+nt)[vm[i]].
+                    // The n_tables registers are stored CONTIGUOUSLY (16-byte stride) at
+                    // VECTOR_BASE+rn*16 .. +16*n_tables, so concatenated byte `idx` lives at
+                    // slot(rn)+idx. idx>=16*n_tables => 0 (tbl) or keep old (tbx).
                     let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let tbytes = 16 * (n_tables as i32);
                     for i in 0..16i32 {
                         buf.movzx_byte_mem(RAX, RBX, slot(rm) + i); // idx = vm[i]
+                        // candidate = concat-table byte at offset idx
                         buf.mov_ri64(R10, slot(rn) as u64);
                         buf.add_rr64(R10, RBX);
-                        buf.add_rr64(R10, RAX);                      // R10 = &table[idx]
-                        buf.movzx_byte_mem(RCX, R10, 0);             // RCX = table[idx]
-                        buf.mov_ri64(RDX, 0);                         // default 0 (tbl)
-                        if tbx {
-                            buf.movzx_byte_mem(RDX, RBX, slot(rd) + i); // keep old for tbx
-                        }
-                        buf.mov_ri64(RDI, 16);
-                                                buf.cmp_rr64(RAX, RDI);
-                                                buf.cmov_rr64(0x42, RDX, RCX);              // cmovb: table if idx<16
+                        buf.add_rr64(R10, RAX);
+                        buf.movzx_byte_mem(RCX, R10, 0);
+                        // default: 0 (tbl) or keep (tbx)
+                        buf.mov_ri64(RDX, 0);
+                        if tbx { buf.movzx_byte_mem(RDX, RBX, slot(rd) + i); }
+                        // select table value only when idx < 16*n_tables (unsigned below)
+                        buf.mov_ri64(RDI, tbytes as u64);
+                        buf.cmp_rr64(RAX, RDI);
+                        buf.cmov_rr64(0x42, RDX, RCX); // cmovb: RDX=RCX if idx<tbytes
                         buf.mov_store8(RBX, slot(rd) + i, RDX);
                     }
                     Ok(())
