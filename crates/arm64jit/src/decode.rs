@@ -1270,7 +1270,7 @@ pub fn decode(insn: u32) -> Inst {
         // AND byte2 (bits15:8) in {0x08, 0x88} (fmul opcode; excludes fdiv 0x18, fadd 0x28,
         // and the `ut`-family ucvtf d0,d1=0x7e61d820 byte2 0xd8). neg = fnmul (bit15).
         if ((insn & 0x1fe0_0c00) == 0x1e20_0800 || (insn & 0x1fe0_0c00) == 0x1e60_0800)
-            && (((insn >> 8) & 0xff) == 0x08 || ((insn >> 8) & 0xff) == 0x88)
+            && ((insn >> 8) & 0x78 == 0x08)
         {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
