@@ -2329,6 +2329,12 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 4, rt, read };
         }
+        // msr nzcv, xN = 0xd51b420d: W is a 0xD51b... (bit21 L=0). Write xN's low
+        // 4 flag bits (N=31,Z=30,C=29,V=28 of xN) into CpuState.nzcv.
+        if op1 == 3 && crn == 4 && crm == 2 && op2 == 0 && !read {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 4, rt, read };
+        }
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----

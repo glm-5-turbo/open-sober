@@ -937,6 +937,13 @@ pub fn translate(
                 if read && rt != 31 {
                     buf.mov_load32(rt, RBX, NZCV_OFF);
                 }
+                if !read && rt != 31 {
+                    // msr nzcv, xN: shift xN's low 4 flag bits up to NZCV@28..31.
+                    ldg(buf, RAX, rt as u32);
+                    buf.and_ri64(RAX, 0x0f);
+                    buf.shl_ri8(RAX, 28);
+                    buf.mov_store32(RBX, NZCV_OFF, RAX);
+                }
                 return Ok(());
             }
             if read {
