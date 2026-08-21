@@ -1476,6 +1476,8 @@ pub fn decode(insn: u32) -> Inst {
             0x1e20_c000 => Some(5), // fabs s{rd}, s{rn} (clear sign)
             0x1e61_4000 => Some(6), // fneg d{rd}, d{rn} (flip sign)
             0x1e21_4000 => Some(6), // fneg s{rd}, s{rn} (flip sign)
+            0x1e66_4000 => Some(7), // frinta d (round half-away; residue keeps bit14)
+            0x1e26_4000 => Some(7), // frinta s
             _ => None,
         };
         if let Some(op) = unary {

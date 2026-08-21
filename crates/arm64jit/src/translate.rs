@@ -1041,6 +1041,22 @@ pub fn translate(
                     1 => buf.roundsd(0, 0, 0b01), // frintm s: floor
                     2 => buf.roundsd(0, 0, 0b10), // frintp s: ceil
                     3 => buf.roundsd(0, 0, 0b00), // frintz s: trunc
+                    7 => {
+                        // frinta s: round half-away = sign*floor(|x|+0.5) on the sd'd val
+                        buf.movq_r64_xmm(RAX, 0);
+                        buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
+                        buf.and_rr64(RAX, RCX);
+                        buf.movq_xmm_r64(2, RAX);             // sign mask
+                        buf.movq_r64_xmm(RAX, 0);
+                        buf.mov_ri64(RCX, 0x7fff_ffff_ffff_ffff);
+                        buf.and_rr64(RAX, RCX);
+                        buf.movq_xmm_r64(0, RAX);             // |x|
+                        buf.mov_ri64(RAX, 0x3fe0_0000_0000_0000); // 0.5
+                        buf.movq_xmm_r64(1, RAX);
+                        buf.addsd(0, 1);                       // |x|+0.5
+                        buf.roundsd(0, 0, 0x01);               // floor
+                        buf.pxor_xmm(0, 2);                    // sign
+                    }
                     _ => return Err(format!("FpUnary single ilp-{op} not implemented")),
                 }
                 buf.cvtsd2ss(0, 0);              // back to single (xmm0 low 32)
@@ -1071,6 +1087,22 @@ pub fn translate(
                     buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
                     buf.xor_rr64(RAX, RCX);
                     buf.movq_xmm_r64(0, RAX);
+                }
+                7 => {
+                    // frinta d{rd}, d{rn}: round half-away-from-zero = sign*floor(|x|+0.5).
+                    buf.movq_r64_xmm(RAX, 0);
+                    buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
+                    buf.and_rr64(RAX, RCX);                // RAX = sign bit
+                    buf.movq_xmm_r64(2, RAX);              // xmm2 = sign mask
+                    buf.movq_r64_xmm(RAX, 0);
+                    buf.mov_ri64(RCX, 0x7fff_ffff_ffff_ffff);
+                    buf.and_rr64(RAX, RCX);                // RAX = |x|
+                    buf.movq_xmm_r64(0, RAX);              // xmm0 = |x|
+                    buf.mov_ri64(RAX, 0x3fe0_0000_0000_0000); // 0.5 (double)
+                    buf.movq_xmm_r64(1, RAX);
+                    buf.addsd(0, 1);                       // xmm0 = |x| + 0.5
+                    buf.roundsd(0, 0, 0x01);               // floor(|x|+0.5)
+                    buf.pxor_xmm(0, 2);                    // reapply sign bit
                 }
                 _ => return Err(format!("FpUnary op {op} not implemented")),
             }
