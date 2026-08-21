@@ -1948,3 +1948,31 @@ calls `JNI_OnLoad` with a real `JavaVM*`/`JNIEnv*`. The QEMU path built that env
 sessions (bionic_shim.c / libbionic_ver.c / libdl_wrapper.c, the 785-entry PLT GOT trampolines, JNIEnv
 table, condvar shim, pre-mprotect RELRO, AndroidEnv::setup). Reusing that host-runtime layer for the JIT
 path is the remaining (large, multi-session) integration; the JIT itself is no longer a blocker.
+
+---
+
+## Session — boot-target forensics (why running .init_array is not the boot path)
+
+Investigated every "first-execution" candidate on the actual binary to pin down the real boot target:
+
+- `libroblox.so` is **ET_DYN, e_entry=0** (a shared library, no program entry flips the loader).
+- `.init_array` exists but its **file bytes are all zeros** (0x6ce0 of them) — it is **empty**; putting
+  constructors there is not how this binary boots. (The `runctors` example reads them as `0` → skipped.)
+- **No `R_AARCH64_RELATIVE` and no `DT_RELR` relocations at all** — only **537 `R_AARCH64_JUMP_SLOT`**
+  in a 12.8 MB `.rela.dyn`. So there is no data-reloc set to pre-fill; a loader relocation pass has
+  nothing to do for boot (tried a RELATIVE/RELR `apply_relative_relocs` in libloader; reverted — Roblox
+  has none).
+- `JNI_OnLoad` is present **only as a `.dynstr` string** (file offset 0xc40b), **absent from `.dynsym`
+  and `.symtab`**. The Android runtime binds it by export-name convention; the JIT/loader cannot.
+- Conclusion: this binary can only start via **`JNI_OnLoad` called by the Android runtime**. That is the
+  single, precise boot frontier and it requires the host Android/JNI/bionic layer (already built for the
+  QEMU path) rather than any further decoder/syscall work.
+
+Added `crates/arm64jit/examples/runctors.rs` — a diagnostic that loads the .so, iterates `.init_array`
+constructors through `jit_run` (real syscalls), prints exactly where the chain stops. It currently reads
+all-zero slots (consistent with the empty `.init_array`) and serves as the skeleton to drive whatever
+entry the Android-runtime integration eventually feeds it.
+
+Status: JIT engine + syscall bridge complete and end-to-end proven (svc_elf write/exit). The blocker to
+literal "Roblox boots" is 100% the Android/JNI host-runtime port (large, multi-session, separately
+scoped). No decoder or syscall wall remains in the JIT path.
