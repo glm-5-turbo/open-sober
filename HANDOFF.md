@@ -1857,3 +1857,43 @@ syscall table (mmap 222→20, futex 95→202, mprotect 226→10) before a real b
 `cargo test -p arm64jit` → **43 passed** (sha1, adc_carry, fmaxv + all prior). `cargo build -p arm64jit` clean.
 Tree: decode.rs / translate.rs / x86.rs / jit.rs + HANDOFF. Commits: `ff35b63` (adc/sbc), `5de6e56` (fmaxv +
 movd fix). Prior: `80f9874` (udf trap), `c7a75e2` (st1), `6a8cf7f` (sha1 ref), `444f6dd` (SHA core).
+
+---
+
+## Session — arm64jit ROBLOX BOOT COMPLETES (all decoder walls cleared)
+
+**Milestone: `./target/debug/examples/elfjit ~/.cache/open-sober/libs/libroblox.so 0x1c34480` now runs the
+real Roblox boot path to completion (exit 0, no Unsupported/panic). 49/49 tests green.**
+
+Cleared the entire chain of decoder walls in libroblox.so's boot sequence (each verified by
+`cargo test -p arm64jit` 49 green + boot advancing). Gates added this session (all disjoint, sibling at
+top level of `pub fn decode`):
+
+- **SimdDupGp** — GPR-source `dup Vd.T, Wn/Xn` (all esizes). Gate `(insn&0xff00_fc00)==0x0e00_0c00/0x4e00_0c00`; esize from `imm5` trailing-zeros; q=bit30. Replaces the old `.4s`-only SimdDupSReg.
+- **SimdShrAcc** — usra/ssra shift-right-accumulate `Vd += Vn >>imm`. Gate `(insn&0x7000)==0x1000 && bit23-clear` (bit23-clear is the discriminator vs fmla-by-element; NOT bit16/b it6 — those are invariant for `#even` shifts / `.4s` fmla). shift = clamp(esize*8 - imm). signed vs unsigned by bit11.
+- **SimdMull / SimdMull-acc** — smull/umull/smlal/umlal widening multiply (16×16→32, 32×32→64). Gate `(insn&0x0f00_c000)==0x0e00_c000`(mul) / `0x0e00_8000`(acc); sign/zero widen src, imul, optional +Vd.
+- **VecMovi halfword + MSL immediates** — cmodes 0x8..0xb (4H/8H movi/mvni/bic) and 0xc/0xd (word MSL mask-shift). Halfword element = imm8 << (cmode&0x2?8:0) then ~ if op; **cmode 0x8/0xa correctly ownership moved from the word-lsl arms to halfword.**
+- **SimdAdalp** — sadalp/uadalp pairwise-adjacent-long accumulate. byte2 0x68; sign-extend the summed pair.
+- **SaturatNarrow** — sqxtn/uqxtn/sqxtun/uqxtun saturating narrow. byte2 0x28/0x48; per-lane clamp (cmovlt/gt) to dst dst-range.
+- **Tbl n-reg** — multi-register table lookup `{Vn..Vn+N}`. Gate widen to mask out Vd/Vn/len/Vm → `(ins&0xffe0_9c0)==0x4e00_0000` (avoids ext 0x78 collision); tables read as CONTIGUOUS 16-byte slots (VECTOR_BASE+rn*16+idx, guard idx<16*n).
+- **SimdCmgt** — signed cmgt .4s/.2s/.2d (0xea034000 family; cmovg ones-mask).
+- **SimdNot** — mvn Vd.16B/8B (0x6e20/0x2e205800; new `movdqu_ones` = pxor+pcmpeqd).
+- **SimdHighNarrow** — addhn/subhn/raddhn (byte2 0x40/0x60; dst = (sum ± round)>>8*dst then narrow store).
+- **WidenShl `upper`** — shll2 (reads upper 8 bytes of Vn). byte2 mask `&0x7c==0x38` (was exact 0x38 — missed v16 wall; 0x78=ext now excluded by &bit6).
+- **SimdAddl** — saddl/uaddl/subl/usubl long widen (residue list gate; sign which byte esrc).
+- **SimdAddl-long`S2`... ** uqadd/sub/sqadd/sqsub saturating add/sub (byte2 0x0c/0x2c; signed/unsigned cmov clamps).
+- **FpUnary op3 frintz** — double trunc toward zero (was "op 3 not implemented"), closing the last FpUnary hole.
+
+### Boot wall history (guest pcs, this work)
+```
+fmla v29.4s (0x1058d5970) -> dup v2.4h,w9 (0x1033b8e90) -> usra (0x1053c43b0 wall-in-batch)
+-> ... -> smax .2s (0x1053c8fcc) -> tbl 2-reg (0x1053c8ad4) -> ssra #even -> sqxtun -> addhn
+-> sho:v 2-reg tbl (0x1020f461c) -> cmgt -> mvn -> gob0 tspbl -> shll2 (0x10533c7c4)
+-> uadalp -> uaddl2 -> [FpUnary op3 frintz deep in audio boot] -> uqsub v0.2s (0x105d06648) -> **BOOT COMPLETES**
+```
+`timeout 40 ./target/debug/examples/elfjit ~/.cache/open-sober/libs/libroblox.so 0x1c34480` → exit 0, no walls,
+all 4 PT_LOAD segments mapped, entry runs, guest sp/tls valid. **The Roblox boot x86-JIT translation path is now fully decoded.**
+
+### Verified by
+`cargo test -p arm64jit` → **49 passed**. `cargo build -p arm64jit --example elfjit` clean. Last commits
+`d485bba` (SimdAdalp), `30abdd4` (SimdAddl), `8043510` (FpUnary frintz), `9bbb104` (SimdSatAdd, boot completes).
