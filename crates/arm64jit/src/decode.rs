@@ -1366,21 +1366,29 @@ pub fn decode(insn: u32) -> Inst {
             }
             // .2D: dword replicate
             (1, 0b1110) => (imm8 as u64, imm8 as u64),
-            // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes)
-            // cmode [3:1]=0b001/010/011/100 ... covered by S2/S4/S6/S8 below.
-            // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes)
-            // cmode [3:1]=0b001/010/011/100 ... covered by S2/S4/S6/S8 below.
-            (0, 2) | (0, 4) | (0, 6) | (0, 8) => {
+            // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes; cmodes
+            // 2,4,6 are pure word-lsl; cmodes 8,9,a,b are HALFWORD and handled below).
+            (0, 2) | (0, 4) | (0, 6) => {
                 let sh = (cmode << 2) as u32;
                 let lane = ((imm8 as u64) << sh) & 0xffff_ffff;
                 let low = lane | (lane << 32);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
             // mvni .2S/.4S with LSL shift: value = ~(imm8 << (cmode<<2))
-            (1, 2) | (1, 4) | (1, 6) | (1, 8) => {
+            (1, 2) | (1, 4) | (1, 6) => {
                 let sh = (cmode << 2) as u32;
                 let lane = (!((imm8 as u64) << sh)) & 0xffff_ffff;
                 let low = lane | (lane << 32);
+                if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
+            }
+            // .4H/.8H halfword immediates (cmode 0x8..0xb): 16-bit element = imm8
+            // shifted by (cmode&0x2)?8 when the lsl#8 marker is set, then inverted
+            // if op==1 (mvni/bic). objdump-verified v14.4h,#0xfc,lsl8 -> 0x03ff.
+            (_, 8) | (_, 9) | (_, 0xa) | (_, 0xb) => {
+                let sh = (((cmode >> 1) & 1) * 8) as u32;
+                let mut lane = (imm8 as u64) << sh;
+                if op == 1 { lane = (!lane) & 0xffff; }
+                let low = lane | (lane << 16) | (lane << 32) | (lane << 48);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
             _ => return Inst::Unsupported(insn),
