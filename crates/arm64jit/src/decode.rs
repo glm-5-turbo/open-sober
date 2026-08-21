@@ -281,6 +281,9 @@ pub enum Inst {
                            Ror { rd: u8, rn: u8, rot: u32, sf: bool }, // ror rd,rn,#rot
                            // ---- supervisor call (svc #imm) -> host syscall routing ----
                            Svc { imm: u16 },
+                           // ---- breakpoint (brk #imm) -> guest trap; JIT halts gracefully
+                           //       (a real AArch64 CPU would take a SIGTRAP/exception here) ----
+                           Brk { imm: u16 },
                            // ---- NEON lane add: add Vd.4s, Vn.4s, Vm.4s ---------
     Simd4s {
         rd: u8,
@@ -1890,6 +1893,12 @@ pub fn decode(insn: u32) -> Inst {
     if (insn & 0xffe0_001f) == 0xd400_0001 {
         let imm = ((insn >> 5) & 0xffff) as u16;
         return Inst::Svc { imm };
+    }
+
+    // ---- breakpoint: brk #imm (0xd4200000 | imm<<5) -> guest trap ----
+    if (insn & 0xffe0_001f) == 0xd420_0000 {
+        let imm = ((insn >> 5) & 0xffff) as u16;
+        return Inst::Brk { imm };
     }
 
     // ---- system register read/write (mrs xN, <sysreg> / msr <sysreg>, xN) ----

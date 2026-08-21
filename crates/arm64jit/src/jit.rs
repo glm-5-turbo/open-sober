@@ -368,6 +368,7 @@ pub fn compile_image(
                     | Inst::Unsupported(_)
                     | Inst::Br { .. }
                     | Inst::Blr { .. }
+                    | Inst::Brk { .. }
                     | Inst::B {
                         link: false, ..
                     }

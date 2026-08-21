@@ -768,6 +768,16 @@ pub fn translate(
             stg(buf, 0, RAX); // system value -> guest x0 (AArch64 return reg)
             Ok(())
         }
+        Inst::Brk { imm } => {
+            // Guest breakpoint (brk #imm): on a real AArch64 CPU this traps
+            // (SIGTRAP). Mirror that for the JIT by halting the run loop
+            // gracefully — set guest pc = 0, the same sentinel `run_loop`
+            // treats as a clean halt (it returns Ok(x[0])).
+            let _ = imm;
+            buf.mov_ri64(RAX, 0);
+            buf.mov_store64(RBX, crate::jit::PC_OFF, RAX); // state.pc = 0
+            Ok(())
+        }
         Inst::BitField { rd, rn, immr, imms, sf, arith, insert } => {
             let bits = if sf { 64u32 } else { 32u32 };
             if insert && immr <= imms {
