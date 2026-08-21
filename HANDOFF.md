@@ -2017,3 +2017,17 @@ shims (AAsset/AConfiguration/android_log/JNI-vm plumbing), then boot `JNI_OnLoad
 - f64 float bridge (`3de5bb3`): guest v0-v7 f64 -> host double via xmm -> v0.
 - f32 float bridge (`2b03e26`): guest low-32 s0-s7 f32 -> host *f via xmm -> s0
   (`HostFloat32Call`/`register_float32_call`/`resolve_float32`/`FLOAT32_NAMES`; atan2f blr proof; 55/55).
+
+**MILESTONE (1fef)c20**: host-side bionic shim module `crates/arm64jit/src/shims.rs`.
+`register_shims()` registers 4 self-contained bionic symbols without dlsym via new
+`resolver::register_named`: `__errno` (returns host `__errno_location()` addr, so guest
+reads/writes the real errno), `__strlen_chk` (plain strlen), `__strncpy_chk2` (bounded
+strncpy), `__android_log_print` (prints `[roblox:tag] msg` to stderr, returns 1). This
+drops resolveimports to 199 shims remaining (was 203) and the resolved count 334->338.
+The remaining ~199 (distinct names) are the Android asset/config/JNI/event API surface:
+AAssetManager_fromJava/open, AAsset_close/getBuffer/getLength, ANativeWindow_fromSurface/
+release, ALooper_pollOnce, AConfiguration_getScreen{Width,Height}Dp/Size/NavHidden, and
+one Java_com_roblox_client_purchase_IAPPurchaseManager... JNI method. These need real
+host implementations (AAsset backing file descriptors, AConfiguration density, JNI vm).
+Next: (a) port the AAsset/AConfiguration stubs + JNI vm dispatch; (b) fold
+resolve_common()+register_shims() into elfjit boot so the GOT is patched before onLoad.
