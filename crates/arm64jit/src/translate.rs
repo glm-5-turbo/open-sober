@@ -1862,6 +1862,34 @@ pub fn translate(
                                                                                                                         }
                                                                                                                         Ok(())
                                                                                                                     }
+                                                                                                                    Inst::SimdMull { rd, rn, rm, res_esize, unsigned, q } => {
+                                                                                                                        // smull/umull Vd.T, Vn.T, Vm.T: widen each src element to res_esize
+                                                                                                                        // and multiply. src = res_esize/2, lanes = res bytes/2 in dst.
+                                                                                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                        let src_es: i32 = (res_esize as i32) / 2;
+                                                                                                                        let lanes = if res_esize == 8 { 2 } else { 4 };
+                                                                                                                        let uphalf = if q { 8 } else { 0 }; // smull2 reads the upper reg half
+                                                                                                                        for i in 0..lanes {
+                                                                                                                            let soff = uphalf + (i as i32) * src_es;
+                                                                                                                        match res_esize / 2 {
+                                                                                                                            4 => { buf.mov_load32(RAX, RBX, slot(rn)+soff); buf.mov_load32(RCX, RBX, slot(rm)+soff); }
+                                                                                                                            2 => { buf.movzx_word_mem(RAX, RBX, slot(rn)+soff); buf.movzx_word_mem(RCX, RBX, slot(rm)+soff); }
+                                                                                                                            _ => { buf.movzx_byte_mem(RAX, RBX, slot(rn)+soff); buf.movzx_byte_mem(RCX, RBX, slot(rm)+soff); }
+                                                                                                                        }
+                                                                                                                        if !unsigned {
+                                                                                                                                                                                    // sign-extend the zero-extended operand up to 64 bits (shift by (64-8*src))
+                                                                                                                                                                                    let se = 64 - 8 * (res_esize as u16 / 2);
+                                                                                                                                                                                    buf.shl_ri8(RAX, (se % 64) as u8);
+                                                                                                                                                                                    buf.sar_ri8(RAX, (se % 64) as u8);
+                                                                                                                                                                                    buf.shl_ri8(RCX, (se % 64) as u8);
+                                                                                                                                                                                    buf.sar_ri8(RCX, (se % 64) as u8);
+                                                                                                                                                                                }
+                                                                                                                        buf.imul_rr64(RAX, RCX);
+                                                                                                                        let doff = (i as i32) * (res_esize as i32);
+                                                                                                                        if res_esize == 8 { buf.mov_store64(RBX, slot(rd)+doff, RAX); } else { buf.mov_store32(RBX, slot(rd)+doff, RAX); }
+                                                                                                                        }
+                                                                                                                        Ok(())
+                                                                                                                    }
                                                                                                                     Inst::SimdCmhi { rd, rn, rm, lanes } => {
                                                                                                                         // cmhi Vd.4S/Vd.2S, Vn., Vm.: per 32-bit lane, all-ones
                                                                                                                         // if Vn[i] > Vm[i] (unsigned), else 0. Compare unsigned

@@ -389,6 +389,10 @@ pub enum Inst {
     // ---- SIMD 32-bit lane multiply: mul Vd.4S/Vd.2S, Vn., Vm. ----
     // 4S gate (Q=1) 0x4ea09c00 ; 2S gate (Q=0) 0x0ea09c00. Per-lane low-32 product.
     SimdMul { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD widening multiply: smull/umull Vd.T, Vn.T, Vm.T (src*U res) ----
+    // Gate (insn & 0x0f00_c000)==0x0e00_c000 (mul-long, non-accumulate). unsigned=bit28.
+    // res_esize 4(.4s from .4h) or 8(.2d from .2s) by bit22; q=bit30 (smull2 upper lanes).
+    SimdMull { rd: u8, rn: u8, rm: u8, res_esize: u8, unsigned: bool, q: bool },
     // ---- SIMD unsigned compare-higher: cmhi Vd.4S, Vn.4S, Vm.4S ----
     // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
     // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
@@ -2036,6 +2040,19 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                         let rd = (insn & 0x1f) as u8;
                                                                                                                         return Inst::SimdMul { rd, rn, rm, lanes };
                                                                                                                             }
+                                                                                                                        // ---- SIMD widening multiply smull/umull (0x0f00_c000 gate) ----
+                                                                                                                        if (insn & 0x0f00_c000) == 0x0e00_c000 {
+                                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                                            let res_esize: u8 = if (insn >> 22) & 1 == 1 { 8 } else { 4 };
+                                                                                                                            return Inst::SimdMull {
+                                                                                                                                rd, rn, rm,
+                                                                                                                                res_esize,
+                                                                                                                                unsigned: (insn >> 28) & 1 == 1,
+                                                                                                                                q: (insn >> 30) & 1 == 1,
+                                                                                                                            };
+                                                                                                                        }
                                                                                                                             // ---- SIMD unsigned compare-higher: cmhi Vd.4S/Vd.2S, Vn., Vm. ----
                                                                                                                                 // Gate &0xffe0_fc00: 0x6ea03400 (4S, Q=1, real 0x6ea13461) / 0x2ea03400 (2S).
                                                                                                                                 // Each 32-bit lane = all-ones if Vn[i] > Vm[i] (unsigned), else 0.
