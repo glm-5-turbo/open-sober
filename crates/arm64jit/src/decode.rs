@@ -1391,6 +1391,14 @@ pub fn decode(insn: u32) -> Inst {
                 let low = lane | (lane << 16) | (lane << 32) | (lane << 48);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
+            // MSL (mask shift left) word immediates (cmode 0xc=msl#8, 0xd=msl#16):
+            // element = (imm8 << (8*idx)) | (all-ones mask in the low shift bits).
+            (_, 0xc) | (_, 0xd) => {
+                let sh = (((cmode & 0x1) + 1) * 8) as u32; // 8 or 16
+                let lane = ((imm8 as u64) << sh) | ((1u64 << sh) - 1);
+                let low = lane | (lane << 32);
+                if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
+            }
             _ => return Inst::Unsupported(insn),
         };
         return Inst::VecMovi {
