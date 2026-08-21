@@ -2181,3 +2181,31 @@ runtime that still needs QEMU's jni global-state (classes/methods/RegisterNative
 - The JIT now reaches and begins executing the real JNI load path. Next brick is the host JNIEnv
   runtime (GetStaticMethodID/newStringUTF/RegisterNative real callbacks + clock/mprotect no-op
   under the JIT like QEMU had to).
+
+## Session — pthread sanitizer + deeper deref frontier
+
+**Merged this session:**
+- `bcf6a88` canary GOT bind; JNI_OnLoad prologue survives its first `ldr`, block count 0->1
+  (pts into GOT slot `0x631aa30`, the `__stack_chk_guard` slot — note `#2608` in objdump is
+  DECIMAL = `0xa30`, and guest reads `[0x631a000 + 0xa30]`, not the `0x631c608` a first draft
+  patched by mistake).
+- `1c21ffc` **bionic pthread_mutex sanitizer**. The guest `.so` is bionic-built; its
+  `pthread_mutex_t` is 44B (glibc 40B), `__kind`@+16 = 0x10 (ROBUST_NORMAL), `__count`@+8 reused
+  as `__owner`. Passing it raw to glibc `pthread_mutex_lock/cond_wait` crashes/deadlocks the once-
+  init, driving Roblox into abort. Wired `sanitize_mutex` into the resolver's host bridge for
+  mutex_lock/unlock/mutex_init/cond_wait/cond_timedwait (kind&=3 @+16, clear bogus owner @+8),
+  mirroring `jni_shim.c`'s `sanitize_mutex`. +hostcall@ trace tracer (JIT_TRACE). 63/63 tests.
+
+**Current frontier (verified 0x1f0db20 --jni):**
+- block count 1, hostcalls 0: the crash is BEFORE any host bridge call, inside translated guest
+  code. `block@0x101f0db20 -> pc=0x101f0e728` (JNI_OnLoad first bl, x30 linked), then block ~2
+  (init guard at `0x2678068`, the GameActivity once-routine) crashes on a guest `ldr x, [x0, #8]`
+  deref where x0 = 2 (small pseudo-handle). Preceded by a host ld FP divsd (div by 2^54/2^63),
+  suggesting an LCG/time helper.
+- The deref of x=2 with `[x0+8]` is the faked-Android-object wall: the guest legitimately got a
+  small integer handle where it expects a real object pointer (JNIEnv/class), then derefs it.
+  pthread_sanitize is a necessary fix but is NOT the firing block — the guest hasn't reached a
+  pthread_mutex host call yet.
+- Next brick: find WHICH guest fn returns the `2` (candidate: a JNI/host shim returning a small
+  status instead of a pointer), or pre-scheme the once-flag so the init guard skips its guard
+  entirely (QEMU's documented `mov w0,#1; nop` bypass).
