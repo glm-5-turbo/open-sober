@@ -2222,3 +2222,18 @@ registered host fn is the one reading `[x0+8]` with x0=2 — but `host_call_at` 
 post-bind mismatch), or (b) a host fn genuinely reads `[arg+8]` on a `2` handle (a JNI/Android
 object). Next: dump slot 1089's registered fn + guest pc at the `blr`; if it's a JNI shim, give it
 a real fake-object backing instead of returning 2.
+
+**[RULED OUT, verified next session]** Two more dispatcher diagnostics were run: log any pc in
+`[HOST_THUNK_BASE, +8192*8)` that `host_call_at` returns None for (`unregistered-hostthunk@`),
+plus the existing `hostcall@` and `[mutex_lock]` traces. Boot: **`unregistered-hostthunk=0`,
+`hostcall@=0`, `[mutex_lock]=0`, `block@=1`.** The guest never reaches the host-thunk range or any
+host bridge — the fault is a **pure inline translated deref** inside the single block from
+`0x101f0db20`. Block decode: JVM load, then once/abort prologue (`mov w0,2; mov x1,<fmt>` =
+syslog args, int64->double trim), then `ldr xN,[x0,#8]` with guest x0=2 -> `[0xa]` SIGSEGV. The
+`0x7f0000002208` value in the CpuState is the block's in-progress next-pc, never dispatched, so
+the slot-1089 registration idea is closed. Frontier is guest logic using a small int (2) as an
+object pointer. Remaining root-cause candidates: (a) `syscall(178=gettid)`/a host fn return
+leaves `2` in a register the guest reuses as a pointer; (b) JNI_OnLoad once/init computes a
+handle from an unimplemented host call it then derefs. Next: trace the guest instruction that
+stores 2 into the register it derefs (step the block with gdb, or narrow with a
+`[x0,#8]`-deref watchpoint).
