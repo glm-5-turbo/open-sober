@@ -166,6 +166,8 @@ pub enum Inst {
     SimdRev { rd: u8, rn: u8, granule: u8, q: bool },
     // ---- SIMD lane extract to FP reg: mov Sd/Dd, Vn.T[idx] ----
     SimdLaneS { rd: u8, rn: u8, esize: u8, index: u8 },
+    // ---- SHA-1 halfway: sha1h Sd, Sn (Sd = ror32^3 of Sn) ----
+    Sha1h { rd: u8, rn: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
     SimDup { rd: u8, rn: u8, esize: u8, src_idx: u8, q: bool },
     // ---- SIMD vector immediate: fmov Vd.T, #imm ----
@@ -1089,6 +1091,13 @@ pub fn decode(insn: u32) -> Inst {
             let rd = (insn & 0x1f) as u8;
             return Inst::SimdLaneS { rd, rn, esize, index };
         }
+    }
+
+    // ---- SHA-1: sha1h Sd, Sn (0x5e28_08xx, mask 0xffe0_fc00==0x5e20_0800) ----
+    if (insn & 0xffe0_fc00) == 0x5e20_0800 {
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::Sha1h { rd, rn };
     }
 
     // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----

@@ -784,6 +784,15 @@ impl CodeBuf {
         self.b(modrm(3, 1, rd & 7));
         self.b(imm);
     }
+    /// ROR r32, imm8 : C1 /1 ib (32-bit rotate right by imm). No REX.W.
+    pub fn ror32_ri8(&mut self, rd: u8, imm: u8) {
+        if rd & 8 != 0 {
+            self.b(0x41);
+        }
+        self.b(0xC1);
+        self.b(modrm(3, 1, rd & 7));
+        self.b(imm);
+    }
     /// bswap r32  (0F C8+rd): reverse byte order of the low 32 bits.
     pub fn bswap_r32(&mut self, rd: u8) {
         self.b(0x0F);

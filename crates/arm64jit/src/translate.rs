@@ -1999,6 +1999,20 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                 }
                                 Ok(())
                             }
+                            Inst::Sha1h { rd, rn } => {
+                                // sha1h Sd, Sn: Sd = ror32(x,27) ^ ror32(x,13) ^ ror32(x,6).
+                                let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                buf.mov_load32(RAX, RBX, f(rn));
+                                buf.mov_rr64(RDX, RAX);
+                                buf.mov_rr64(RCX, RAX);
+                                buf.ror32_ri8(RAX, 27);
+                                buf.ror32_ri8(RDX, 13);
+                                buf.ror32_ri8(RCX, 6);
+                                buf.xor_rr64(RAX, RDX);
+                                buf.xor_rr64(RAX, RCX);
+                                buf.mov_store32(RBX, f(rd), RAX);
+                                Ok(())
+                            }
                             // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
         Inst::SimdFmovImm { rd, esize, value_bits, q } => {
             // fmov Vd.T, #imm: broadcast the immediate FP float (esize bytes,
