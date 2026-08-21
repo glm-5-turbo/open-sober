@@ -1036,4 +1036,19 @@ mod tests {
         exec_bytes(&mut st, &code, 0).expect("exec fcvtms");
         assert_eq!(st.x[8] as i32, -2, "fcvtms floor(-1.5) = -2");
     }
+
+    #[test]
+    fn smin_signed_lane_min() {
+        // smin v0.2s, v0.2s, v1.2s (wall 0x0ea16c00): v0[i] = min_signed(v0[i], v1[i]).
+        let mut st = CpuState::new();
+        st.v[0] = ((0xffff_fffdu64) << 32) | 5u64; // v0 lanes: [5, -3]
+               st.v[2] = ((7u64) << 32) | 2u64; // v1 (reg1) lanes: [2, 7]
+               let mut code = Vec::new();
+               code.extend_from_slice(&0x0ea1_6c00u32.to_le_bytes()); // smin v0.2s,v0.2s,v1.2s
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec smin .2s");
+        // v0 lanes: min(5,2)=2, min(-3,7)=-3
+        assert_eq!((st.v[0] & 0xffff_ffff) as i32, 2,  "v0.l0 min(5,2)=2");
+        assert_eq!((st.v[0] >> 32) as i32, -3, "v0.l1 min(-3,7)=-3");
+    }
 }

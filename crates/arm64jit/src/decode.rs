@@ -193,6 +193,8 @@ pub enum Inst {
     WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool },
     // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
     FmulScalar { rd: u8, rn: u8, rm: u8, double: bool, neg: bool },
+    // ---- SIMD signed/unsigned integer min/max: smin/smax/umin/umax Vd.T, Vn, Vm ----
+    SminMax { rd: u8, rn: u8, rm: u8, max: bool, unsigned: bool, esize: u8, q: bool },
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
@@ -1243,6 +1245,25 @@ pub fn decode(insn: u32) -> Inst {
         let neg = (insn & 0x8000) != 0;         // bit15: fnmul vs fmul
         let double = (insn & 0x0040_0000) != 0; // bit22: .d vs .s
         return Inst::FmulScalar { rd, rn, rm, double, neg };
+    }
+    // ---- SIMD signed/unsigned int min/max: smin/smax/umin/umax Vd.T, Vn, Vm ----
+    // byte0 (bits31:24) in {0x0e,0x2e,0x4e,0x6e} AND byte2 (bits15:8) in {0x64(max),0x6c(min)}.
+    // unsigned = bit29 (set: umin/umax; clear: smin/smax), q=bit30, esize: .s (bit23 set) else .b.
+    let b0 = (insn >> 24) & 0xff;
+    let b2 = (insn >> 8) & 0xff;
+    if (b0 == 0x0e || b0 == 0x2e || b0 == 0x4e || b0 == 0x6e) && (b2 == 0x64 || b2 == 0x6c) {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        return Inst::SminMax {
+            rd,
+            rn,
+            rm,
+            max: b2 == 0x64,
+            unsigned: (insn & 0x2000_0000) != 0,
+            esize: if (insn & 0x0080_0000) != 0 { 4 } else { 1 }, // .s vs .b
+            q: (insn & 0x4000_0000) != 0,
+        };
     }
     if matches!(insn >> 24, 0x0F | 0x1F | 0x2F | 0x4F | 0x5F | 0x6F) {
         let op = (insn >> 29) & 1;

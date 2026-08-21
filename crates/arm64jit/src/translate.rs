@@ -1424,7 +1424,45 @@ pub fn translate(
                                             }
                                             Ok(())
                                         }
-                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
+                                        Inst::SminMax { rd, rn, rm, max, unsigned, esize, q } => {
+                                            // smin/smax/umin/umax Vd.T, Vn, Vm: per-lane min/max.
+                                            let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                            let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
+                                            let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                            let lanes: i32 = if esize == 4 { if q { 4 } else { 2 } } else { if q { 16 } else { 8 } };
+                                                                                        for i in 0..lanes {
+                                                                                            let e = esize as i32;
+                                                                                            let so = nb + i * e;
+                                                                                            let mo = mb + i * e;
+                                                                                            // load A=Vn[i], B=Vm[i], sign/zero-extended
+                                                                                            if e == 4 {
+                                                                                                buf.mov_load32(RAX, RBX, so);
+                                                                                                if !unsigned { buf.movsxd_r64_r32(RAX, RAX); }
+                                                                                                buf.mov_load32(RCX, RBX, mo);
+                                                                                                if !unsigned { buf.movsxd_r64_r32(RCX, RCX); }
+                                                                                            } else {
+                                                                                                if unsigned {
+                                                                                                    buf.movzx_byte_mem(RAX, RBX, so);
+                                                                                                    buf.movzx_byte_mem(RCX, RBX, mo);
+                                                                                                } else {
+                                                                                                    buf.movsx_byte_mem(RAX, RBX, so);
+                                                                                                    buf.movsx_byte_mem(RCX, RBX, mo);
+                                                                                                }
+                                                                                            }
+                                                                                            buf.cmp_rr64(RCX, RAX); // flags = B - A
+                                                                                            if max {
+                                                                                                if unsigned { buf.cmov_rr64(0x47, RAX, RCX); } // cmova
+                                                                                                else { buf.cmov_rr64(0x4F, RAX, RCX); } // cmovg
+                                                                                            } else {
+                                                                                                if unsigned { buf.cmov_rr64(0x42, RAX, RCX); } // cmovb
+                                                                                                else { buf.cmov_rr64(0x4C, RAX, RCX); } // cmovl
+                                                                                            }
+                                                                                            if e == 4 { buf.mov_store32(RBX, db + i * e, RAX); }
+                                                                                            else { buf.mov_store8(RBX, db + i * e, RAX); }
+                                                                                        }
+                                                                                        Ok(())
+                                                                                    }
+                                                                                    Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
                                             // ucvtf/scvtf Dd,Rn,#fbits: convert int to float, then /2^fbits.
                                             let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                             ldg(buf, RAX, rn as u32);
