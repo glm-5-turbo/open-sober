@@ -403,6 +403,8 @@ pub enum Inst {
     SimdAddD { rd: u8, rn: u8, rm: u8, sub: bool },
     // ---- SIMD int add/sub byte lanes 16B/8B: add Vd.16b, Vn.16b, Vm.16b ----
     SimdAddB { rd: u8, rn: u8, rm: u8, sub: bool, q: bool },
+    // ---- SIMD int add/sub halfword 8H/4H (16-bit) lanes: add Vd.8h, Vn.8h, Vm.8h ----
+    SimdAddH { rd: u8, rn: u8, rm: u8, sub: bool, q: bool },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
     // ---- SIMD narrowing extract: xtn Vd.T, Vn.U (low halves) ----
@@ -1912,6 +1914,19 @@ pub fn decode(insn: u32) -> Inst {
                                                                                         let sub = (insn >> 29) & 1 == 1;
                                                                                         let q = (insn >> 30) & 1 == 1;
                                                                                         return Inst::SimdAddB { rd, rn, rm, sub, q };
+                                                                                    }
+                                                                                }
+                                                                                // ---- SIMD int add/sub halfword 8H/4H (16-bit) lanes ----
+                                                                                // Same walk/wrap residue as Simd4s/AddB but size-field == 1 (H lanes).
+                                                                                {
+                                                                                    let hc = insn & 0x2f20_0c00;
+                                                                                    if (hc == 0x0e20_0400 || hc == 0x2e20_0400) && ((insn >> 22) & 3) == 1 {
+                                                                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                        let rd = (insn & 0x1f) as u8;
+                                                                                        let sub = (insn >> 29) & 1 == 1;
+                                                                                        let q = (insn >> 30) & 1 == 1;
+                                                                                        return Inst::SimdAddH { rd, rn, rm, sub, q };
                                                                                     }
                                                                                 }
                                                                                 // Gate `(insn & 0xffe0_fc00) == 0x6e60d800`: masks rn/rd (bits 0-9, 16-20 via

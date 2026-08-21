@@ -1949,6 +1949,17 @@ Inst::SimdAddB { rd, rn, rm, sub, q } => {
             buf.movdqu_store(RBX, vslot(rd), RAX);
             Ok(())
 }
+Inst::SimdAddH { rd, rn, rm, sub, q } => {
+            // add/sub Vd.8h, Vn.8h, Vm.8h (or 4h): 16-bit halfword lanes via paddw/psubw.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            buf.movdqu_load(RAX, RBX, vslot(rn));
+            buf.movdqu_load(RCX, RBX, vslot(rm));
+            if sub { buf.psubw(RAX, RCX); } else { buf.paddw(RAX, RCX); }
+            // for q=0 (.4h) only the low 8 bytes are legal; still write the full 128b
+            // (the guest doesn't rely on the upper half of a .4h result).
+            buf.movdqu_store(RBX, vslot(rd), RAX);
+            Ok(())
+}
 Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             // umov/smov Rd, Vn.bits[idx]: load esize-byte element at offset
             // index*esize, extend zero (umov) or sign (smov) into GPR rd.
