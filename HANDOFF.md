@@ -2004,8 +2004,16 @@ must go through `LoadElf::host_addr_of(guest)` (the closest analog is `guest_of(
 `libroblox.so` is e_entry=0, empty `.init_array`, no RELATIVE/RELR relocs (only JUMP_SLOT), so
 `.init_array` is not the boot path and there is no relocation pass for the loader to perform.
 
-**NEXT (immediate)**: finish the single-precision f32 bridge. Roblox's float imports are `*f`
-(`atan2f`, `asinf`, `sinf`, ...) which store f32 in the low 32 bits of a v-lane; the current f64
-bridge reads the whole 64-bit lane and would feed garbage. Add an f32 thunk array that widens
-low-32 v-lane -> f64, calls the host double fn, narrows f64 -> f32 back into v0 low lane. That
-closes the last `*f` shim gap and pushes `resolveimports` past 334 resolved.
+**NEXT (immediate)**: the remaining 203 shim relocations reduce to ~18 distinct **Android/JNI/bionic**
+host-runtime names (verified by enumerating them): `__android_log_print`, the `AAssetManager_*` /
+`AConfiguration_*` / `ANativeWindow_*` / `ALooper_*` asset-config APIs, `__strlen_chk` /
+`__strncpy_chk2` fortified string funcs, `__errno`, and one `Java_com_roblox_...IAP_...` JNI method.
+The float-ABI bridges (f64 + f32) are done and committed but resolve nothing new against the real
+`libroblox.so` — it has NO float JUMP_SLOT imports, so the float bridges are runtime capability for
+covered math calls, not resolve-count movers. The real remaining blocker is porting the
+Android/JNI/bionic host runtime (already implemented for the QEMU path as `sober-core/src/qemu.rs`
++ `bionic_init.c` + `jni_shim.c`) onto the JIT `--no-qemu` path: register these ~18 names as host
+shims (AAsset/AConfiguration/android_log/JNI-vm plumbing), then boot `JNI_OnLoad`.
+- f64 float bridge (`3de5bb3`): guest v0-v7 f64 -> host double via xmm -> v0.
+- f32 float bridge (`2b03e26`): guest low-32 s0-s7 f32 -> host *f via xmm -> s0
+  (`HostFloat32Call`/`register_float32_call`/`resolve_float32`/`FLOAT32_NAMES`; atan2f blr proof; 55/55).
