@@ -157,7 +157,9 @@ pub enum Inst {
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
-    SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8, esize: u8 },
+        SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8, esize: u8 },
+        // ---- SIMD fp mul by element: fmul Vd.T, Vn.T, Vm.T[L] ----
+        SimdFmulEl { rd: u8, rn: u8, rm: u8, esize: u8, index: u8, q: bool },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
     SimDup { rd: u8, rn: u8, esize: u8, src_idx: u8, q: bool },
     // ---- SIMD vector immediate: fmov Vd.T, #imm ----
@@ -1042,6 +1044,20 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
+    // ---- SIMD FP multiply by element: fmul Vd.T, Vn.T, Vm.T[L] ----
+    // Gate (insn & 0x3f00_f000)==0x0f00_9000. Must precede the broad MOVI gate
+    // (0x0F|0x6F prefix) which would otherwise swallow 0x0fa29044. esize from
+    // size field; index = bit11 low | bit13 high.
+    if insn & 0x3f00_f000 == 0x0f00_9000 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        let q = (insn >> 30) & 1 == 1;
+        let esize: u8 = match (insn >> 22) & 0x3 { 1 => 2, 2 => 4, _ => 8 };
+        let index = (((insn >> 11) & 1) | (((insn >> 13) & 1) << 1)) as u8;
+        return Inst::SimdFmulEl { rd, rn, rm, esize, index, q };
+    }
+
     // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----
     // Prefix 0x0c40 (Q=0) / 0x4c40 (Q=1); st2 is 0x0c00/0x4c00. post-index when
     // bit23=1 (the load is `[Xn], #imm`). Deinterleave: Vt[i]=m[2i], Vt1[i]=m[2i+1].
@@ -1789,11 +1805,11 @@ pub fn decode(insn: u32) -> Inst {
                                                                                                                                                                                                                                                                                                                                                                                         let dst_idx = ((insn >> 20) & 1) as u8;
                                                                                                                                                                                                                                                                                                                                                                                         let src_idx = ((insn >> 14) & 1) as u8;
                                                                                                                                                                                                                                                                                                                                                                                         return Inst::SimdInsD { rd, rn, dst_idx, src_idx, esize };
-                                                                                                                                                                                                                                                                                                                                                                                    }
-                                                                                                                                                                                                                                                                                                                                                                                }
-                                                                                                                                                                                                                                                                                                                                                                        // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
-                                                                                                                                                                                                                                                                                                                                                                        // Gate (insn & 0xffe0_0c00) in {0x0e00_0400, 0x4e00_0400} (Q=bit30).
-                                                                                                                                                                                                                                                                                                                                                                        // Disjoint from InsD (0x6e00_0400) via top byte. es=lowest set bit of
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                // Gate (insn & 0xffe0_0c00) in {0x0e00_0400, 0x4e00_040019} (Q=bit30).
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                // Disjoint from InsD (0x6e00_0400) via top byte. Broadcast Vn.T[src]
                                                                                                                                                                                                                                                                                                                                                                         // the imm5 field; src_idx = imm5 >> es.bit_length(). Broadcast Vn.T[src]
                                                                                                                                                                                                                                                                                                                                                                         // across all lanes of Vd.
                                                                                                                                                                                                                                                                                                                                                                         if ((insn & 0xffe0_0c00) == 0x0e00_0400 || (insn & 0xffe0_0c00) == 0x4e00_0400) {

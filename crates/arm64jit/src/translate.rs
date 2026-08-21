@@ -1915,6 +1915,34 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdFmulEl { rd, rn, rm, esize, index, q } => {
+                    // fmul Vd.T, Vn.T, Vm.T[L]: each lane of Vd = Vn[lane] * Vm[L].
+                    let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let es = esize as i32;
+                    let n = if q { 16i32 } else { 8i32 };
+                    let lanes = n / es;
+                    let mel = f(rm) + (index as i32) * es; // address of Vm[L]
+                    for l in 0..lanes {
+                        // total lane byte offset: lanes may be 2S(8B),4S/2d(16B)
+                        let to = l * es;
+                        if esize == 8 {
+                            buf.movq_load(0, RBX, f(rn) + to);
+                            buf.movq_load(1, RBX, mel);
+                            buf.mulsd(0, 1);
+                            buf.movq_store(RBX, f(rd) + to, 0);
+                        } else {
+                            // single-precision lanes
+                            buf.mov_load32(RAX, RBX, f(rn) + to);
+                            buf.movd_xmm_r32(0, RAX);
+                            buf.mov_load32(RAX, RBX, mel);
+                            buf.movd_xmm_r32(1, RAX);
+                            buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x59, 0xc1]); // mulss xmm0,xmm1
+                            buf.movd_r32_xmm(RAX, 0);
+                            buf.mov_store32(RBX, f(rd) + to, RAX);
+                        }
+                    }
+                    Ok(())
+                }
                 // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
         Inst::SimdFmovImm { rd, esize, value_bits, q } => {
             // fmov Vd.T, #imm: broadcast the immediate FP float (esize bytes,

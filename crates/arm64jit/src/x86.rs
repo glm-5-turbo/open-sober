@@ -379,6 +379,17 @@ impl CodeBuf {
     pub fn mulsd(&mut self, dst: u8, src: u8) {
         self.sd(0x59, dst, src);
     }
+    /// MULSS (SSE): `F3 0F 59 /r` — dst *= src (scalar single). reg=DST, rm=SR
+    pub fn mulss(&mut self, dst: u8, src: u8) {
+        self.b(0xF3);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0x59);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
+    /// MOVAPS (SSE): `0F 28 /r` — dst = src (128-bit aligned move).
     pub fn subsd(&mut self, dst: u8, src: u8) {
         self.sd(0x5C, dst, src);
     }
