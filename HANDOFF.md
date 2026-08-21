@@ -1927,3 +1927,24 @@ getpid==process id all hit the real kernel. Suite now **50 passed.**
 ### Last commits
 `d485bba` (SimdAdalp), `30abdd4` (SimdAddl), `8043510` (FpUnary frintz), `9bbb104` (SimdSatAdd),
 `7c96cae` (guest_svc real syscall dispatch, 50/50).
+
+---
+
+## Session — JIT path is now a real syscall-capable execution engine (loader rewire)
+
+**Wired the no-QEMU path through the full dispatcher** (`3ce14e6`): `sober-core::jit::run_elf_entry`
+now bootstraps guest **stack + TLS** and runs via `arm64jit::jit::jit_run` (the PC-driven dispatcher that
+re-enters on `blr`/`br`/`ret` and emits `svc`→`guest_svc`), instead of the old single-block
+`compile_image`+`run`. This makes the JIT path an actual execution engine, not a linear-slice runner.
+
+**Proven end-to-end** (`/tmp/extest/svc_elf.s`): a self-contained, no-libc aarch64 static ELF that issues
+`mov x8,#64; svc #0` (write) and `mov x8,#94; svc #0` (exit_group) prints `jit-svc-ok` and exits cleanly
+through `load_elf_image → jit_run → Inst::Svc → guest_svc → real kernel`. Real guest machine code making
+real host syscalls with no QEMU. Suite still **50/50**.
+
+**Honest boundary to literal "Roblox boots":** `libroblox.so` is a shared library with **e_entry=0** and
+**no exported `JNI_OnLoad`** (runtime-internal, `@@LIBROBLOX`). It can only run when the Android *runtime*
+calls `JNI_OnLoad` with a real `JavaVM*`/`JNIEnv*`. The QEMU path built that environment over many
+sessions (bionic_shim.c / libbionic_ver.c / libdl_wrapper.c, the 785-entry PLT GOT trampolines, JNIEnv
+table, condvar shim, pre-mprotect RELRO, AndroidEnv::setup). Reusing that host-runtime layer for the JIT
+path is the remaining (large, multi-session) integration; the JIT itself is no longer a blocker.
