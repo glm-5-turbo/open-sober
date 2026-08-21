@@ -2031,3 +2031,36 @@ one Java_com_roblox_client_purchase_IAPPurchaseManager... JNI method. These need
 host implementations (AAsset backing file descriptors, AConfiguration density, JNI vm).
 Next: (a) port the AAsset/AConfiguration stubs + JNI vm dispatch; (b) fold
 resolve_common()+register_shims() into elfjit boot so the GOT is patched before onLoad.
+
+## Session — full import binding on the boot path (537/537) + float bridges
+
+libm was NOT in RTLD_DEFAULT: a bare `dlsym(RTLD_DEFAULT, atan2f)` fails even
+though libm.so.6 has it. `dlopen("libm.so.6", RTLD_GLOBAL|RTLD_NOW)` once and
+dlsym from that handle as a fallback freed 45+ libm imports at once, so the
+float bridges (f64 atan2, f32 atan2f via guest blr) now actually hit.
+
+Remaining imports fell into a caught-all: graphics (OpenGL ES gl*/EGL), audio
+(OpenSL ES sl*), media (AMediaCodec/AMediaFormat), full ALooper/AConfiguration/
+ANativeWindow/AAsset, bionic logging/fortified chk/gcov/property. Added
+shims::register_fallback + is_handle_name -> stub_handle/stub_zero and
+register_graphics_stubs, binding EVERY otherwise-unresolved name to a benign
+stub (QEMU jni_stubs.h philosophy: NULL/0). Result: **537/537 PLT JUMP_SLOT
+imports bind to host thunks (0 unbound)**.
+
+- `plt::bind_image_plt(&LoadedElf)` folds the binder into the boot path: walks
+  PT_DYNAMIC->DT_JMPREL, resolves each name (int resolve -> float64/32 -> bionic
+  shim -> graphics fallback stub), writes the resolved host-thunk guest addr
+  into the GOT. elfjit calls it before running entry. (Fix: PT_DYNAMIC=2, NOT
+  PT_PHDR=6 — a one-line const typo made it match the PHDR segment and read a
+  bogus p_vaddr.) Promoted libloader to a runtime dep so the lib can use it.
+- `examples/resolveimports.rs` is now a thin wrapper over bind_image_plt (DRY).
+
+**HONEST STATUS**: every import ROOT contracts to a host thunk, but the stubs
+render nothing — they only let execution *progress* / bind. The blockers to a
+real `JNI_OnLoad` boot are now (1) the JNI vm dispatch + Java_* bridge (the
+single `Java_com_roblox_...IAP_native...` import currently binds to a benign
+stub, not a real JNI call), (2) AAsset/ALooper/ANativeWindow need either real
+backing or never-bound paths, and (3) the JIT's per-instruction coverage for
+whatever the real boot path executes. Tests 58/58 (incl. bind_image_plt_real
+test loading the real .so). Commits: 9b340c0 (libm fallback), 71403e0 (stub
+binding), b254508 (fold into elfjit).
