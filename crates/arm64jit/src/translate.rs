@@ -1389,18 +1389,16 @@ pub fn translate(
                                                                                                                                                             }
                                                                                                                                                             Ok(())
                                                                                                                                                         }
-                                                                                                                                                        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed } => {
-                                // shll vd.Td, vn.Ts: widen nlanes low elements of vn, sign/
-                                // zero extend src_esize-byte lanes to dst_esize-byte lanes.
+                                                                                                                                                        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed, upper } => {
+                                // shll/s hll2 vd.Td, vn.Ts: widen nlanes low (upper half) elements
+                                // of vn, sign/zero extend to dst_esize-byte lanes.
                                 let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                 let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
                                 let src_esize = (dst_esize / 2) as i32;
-                                // Descend lane index so the (larger) dest write never
-                                // clobbers a higher source element still to be read when
-                                // rd == rn (in-place widening).
+                                let uh = if upper { 8 } else { 0 }; // shll2 reads the upper 8 bytes
                                 for rev in 0..(nlanes as i32) {
                                     let i = (nlanes as i32) - 1 - rev;
-                                    let so = nb + i * src_esize;
+                                    let so = nb + uh + i * src_esize;
                                     let doff = db + i * (dst_esize as i32);
                                     match dst_esize {
                                         8 => {
@@ -1429,6 +1427,34 @@ pub fn translate(
                                             buf.mov_store16(RBX, doff, RAX);
                                         }
                                     }
+                                }
+                                Ok(())
+                            }
+                            Inst::SimdAdalp { rd, rn, src_esize, n_pairs, signed } => {
+                                // sadalp/uadalp Vd.Td, Vn.Ts: for each adjacent pair (2i,2i+1) of
+                                // src_esize-byte srcs, accumulate their (unsigned) sum into the
+                                // dst lane of width 2*src_esize. src is in the low 8 bytes (q=0).
+                                let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                let se = src_esize as i32;
+                                let np = n_pairs as i32;
+                                let de = 2 * se;
+                                for i in 0..np {
+                                    let ss = nb + 2 * i * se;
+                                    let dd = db + i * de;
+                                    // RAX = widened(Vn[2i]); RCX = widened(Vn[2i+1])
+                                    if se == 4 { buf.mov_load64(RAX, RBX, ss); buf.mov_load64(RCX, RBX, ss + 4); }
+                                    else if se == 2 {
+                                        if signed { buf.movsx_word_mem(RAX, RBX, ss); buf.movsx_word_mem(RCX, RBX, ss + 2); }
+                                        else { buf.mov_load32(RAX, RBX, ss); buf.mov_load32(RCX, RBX, ss + 2); }
+                                    } else {
+                                        if signed { buf.movsx_byte_mem(RAX, RBX, ss); buf.movsx_byte_mem(RCX, RBX, ss + 1); }
+                                        else { buf.movzx_byte_mem(RAX, RBX, ss); buf.movzx_byte_mem(RCX, RBX, ss + 1); }
+                                    }
+                                    buf.add_rr64(RAX, RCX);
+                                    // accumulate into dst: RAX += Vd lane
+                                    if de >= 4 { buf.mov_load64(R10, RBX, dd); buf.add_rr64(RAX, R10); buf.mov_store64(RBX, dd, RAX); }
+                                    else { buf.mov_load32(R10, RBX, dd); buf.add_rr64(RAX, R10); buf.mov_store32(RBX, dd, RAX); }
                                 }
                                 Ok(())
                             }

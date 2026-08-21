@@ -198,8 +198,10 @@ pub enum Inst {
         q: bool,
         sub: bool,
     },
-    // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----  
-    WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool },
+    // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
+        WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool, upper: bool },
+        // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
+        SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool },
     // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
     FmulScalar { rd: u8, rn: u8, rm: u8, double: bool, neg: bool },
     // ---- SIMD signed/unsigned integer min/max: smin/smax/umin/umax Vd.T, Vn, Vm ----
@@ -1303,7 +1305,7 @@ pub fn decode(insn: u32) -> Inst {
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
     // byte2 (bits15:8) == 0x38; byte0 in the SHLL family {0e,1e,2e,3e,6e,7e}. Reads the
     // low nlanes half-width elements of Vn, sign/zero-extends each to double width.
-    if ((insn >> 24) & 0x0f) == 0x0e && (insn >> 8) & 0xff == 0x38 {
+    if ((insn >> 24) & 0x0f) == 0x0e && ((((insn >> 8) & 0xff) & 0x7c) == 0x38) {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let b1 = (insn >> 16) & 0xff;
@@ -1314,9 +1316,20 @@ pub fn decode(insn: u32) -> Inst {
         } else {
             (2u8, 8u8) // .8h
         };
-        return Inst::WidenShl { rd, rn, dst_esize, nlanes, signed: true };
-    }
-    // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
+        return Inst::WidenShl { rd, rn, dst_esize, nlanes, signed: true, upper: (insn >> 30) & 1 == 1 };
+            }
+            // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
+            // byte2 == 0x68; prefix 0x2e(u,q0)/0x4e(s,q0)/0x6e(u,q1)/0x0e(s,q1). For q=0 the
+            // dst lanes n_pairs = 8/(2*... ) derived in translate from src_esize below.
+            if ((insn >> 8) & 0xff) == 0x68 && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e) {
+                let rd = (insn & 0x1f) as u8;
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let b1 = (insn >> 16) & 0xff;
+                let src_esize: u8 = if b1 & 0x40 != 0 { 1 } else { 2 }; // byte1 bit6: 0x20=>.b, 0x60=>.h
+                let signed = (insn >> 29) & 1 == 0; // 0x4e/0x0e signed, 0x6e/0x2e unsigned
+                return Inst::SimdAdalp { rd, rn, src_esize, n_pairs: 0, signed };
+            }
+            // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
         // Gate (insn&0x1fe0_0c00) in {0x1e20_0800 (single), 0x1e60_0800 (double)}
         // AND byte2 (bits15:8) in {0x08, 0x88} (fmul opcode; excludes fdiv 0x18, fadd 0x28,
         // and the `ut`-family ucvtf d0,d1=0x7e61d820 byte2 0xd8). neg = fnmul (bit15).
