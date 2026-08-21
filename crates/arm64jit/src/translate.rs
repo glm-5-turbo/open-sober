@@ -1559,7 +1559,7 @@ Inst::SimdAddB { rd, rn, rm, sub, q } => {
             // add/sub Vd.16b, Vn.16b, Vm.16b (or 8b): byte-lane via paddb/psubb.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             buf.movdqu_load(RAX, RBX, vslot(rn));
-            buf.movdqu_load(RCX, RDX, vslot(rm));
+            buf.movdqu_load(RCX, RBX, vslot(rm));
             if sub { buf.psubb(RAX, RCX); } else { buf.paddb(RAX, RCX); }
             buf.movdqu_store(RBX, vslot(rd), RAX);
             Ok(())
@@ -1767,12 +1767,12 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     // translate always on the full 16-byte slot).
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     buf.movdqu_load(RAX, RBX, vslot(rn));
-                    buf.movdqu_load(RCX, RDX, vslot(rm));
+                    buf.movdqu_load(RCX, RBX, vslot(rm));
                     match op {
                         0 => buf.pand(RAX, RCX),       // AND
                         1 => buf.pxor_xmm(RAX, RCX),   // EOR
                         2 => buf.por(RAX, RCX),        // ORR
-                        _ => buf.pandn(RAX, RCX),      // BIC
+                        _ => { buf.pandn(RCX, RAX); buf.movdqu_store(RBX, vslot(rd), RCX); return Ok(()); } // BIC: xmm1 = ~v1 & v0
                     }
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())

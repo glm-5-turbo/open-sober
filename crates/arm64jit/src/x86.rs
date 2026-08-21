@@ -258,45 +258,46 @@ impl CodeBuf {
     pub fn pxor_xmm(&mut self, dst: u8, src: u8) {
         self.b(0x66);
         if dst >= 8 || src >= 8 {
-            self.b(rex(false, src, 0, dst));
+            self.b(rex(false, dst, 0, src));
         }
         self.b(0x0F);
         self.b(0xEF);
-        self.b(modrm(3, src & 7, dst & 7));
+        self.b(modrm(3, dst & 7, src & 7));
     }
 
-    /// pand xmm, xmm : 128-bit bitwise AND (66 0F DB /r)
+    /// pand xmm, xmm : 128-bit bitwise AND (66 0F DB /r). ModRM: reg=DST, rm=SRC
     pub fn pand(&mut self, dst: u8, src: u8) {
         self.b(0x66);
         if dst >= 8 || src >= 8 {
-            self.b(rex(false, src, 0, dst));
+            self.b(rex(false, dst, 0, src));
         }
         self.b(0x0F);
         self.b(0xDB);
-        self.b(modrm(3, src & 7, dst & 7));
+        self.b(modrm(3, dst & 7, src & 7));
     }
 
-    /// por xmm, xmm : 128-bit bitwise OR (66 0F EB)
+    /// por xmm, xmm : 128-bit bitwise OR (66 0F EB). reg=DST, rm=SRC
     pub fn por(&mut self, dst: u8, src: u8) {
         self.b(0x66);
         if dst >= 8 || src >= 8 {
-            self.b(rex(false, src, 0, dst));
+            self.b(rex(false, dst, 0, src));
         }
         self.b(0x0F);
         self.b(0xEB);
-        self.b(modrm(3, src & 7, dst & 7));
+        self.b(modrm(3, dst & 7, src & 7));
     }
 
-    /// pandn xmm, xmm : 128-bit AND-NOT dst = ~dst & src (66 0F DF)
-    pub fn pandn(&mut self, dst: u8, src: u8) {
-        self.b(0x66);
-        if dst >= 8 || src >= 8 {
-            self.b(rex(false, src, 0, dst));
+    /// pandn xmm, xmm : dst = ~dst & src (66 0F DF /r). Confirmed encoding:
+        /// `pandn xmm1, xmm0` = 66 0F DF C8 (modrm reg=xmm1=DST, rm=xmm0=SRC).
+        pub fn pandn(&mut self, dst: u8, src: u8) {
+            self.b(0x66);
+            if dst >= 8 || src >= 8 {
+                self.b(rex(false, dst, 0, src));
+            }
+            self.b(0x0F);
+            self.b(0xDF);
+            self.b(modrm(3, dst & 7, src & 7));
         }
-        self.b(0x0F);
-        self.b(0xDF);
-        self.b(modrm(3, src & 7, dst & 7));
-    }
 
     // ---- scalar double-precision (FP64) ----
     /// movq xmm, [mem] : 64-bit load (F3 48 0F 7E xmm, r/m64)

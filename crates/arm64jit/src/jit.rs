@@ -674,4 +674,65 @@ mod tests {
         let l3 = (st2.v[1] >> 32) as u32;
         assert_eq!([l0, l1, l2, l3], [2+20, 1+10, 3+30, 4+40], "add v0.4s lanes");
     }
+
+    #[test]
+    fn byte_lane_and_logical_reference() {
+        // Semantics of `add v.16b` / `and|orr|eor|bic v.16b` against hand bytes.
+        // Seeds v0=0x0102..0f (16 bytes), v1=0x0f0e..01 down — verifies lane-base
+        // registers (regression: these ops used RDX as the CpuState base, reading
+        // garbage for the Vm operand and silently corrupting Vd).
+        let mut st = CpuState::new();
+        // v0 (16 bytes) = 01 02 03 .. 0f 10 ; v1 (16 bytes) = 11 12 .. 20
+        st.v[0] = 0x0102_0304_0506_0708u64;          // d0 low
+        st.v[1] = 0x090a_0b0c_0d0e_0f10u64;        // d0 high
+        st.v[2] = 0x1112_1314_1516_1718u64;        // d1 low
+        st.v[3] = 0x191a_1b1c_1d1e_1f20u64;        // d1 high
+        let mut code = Vec::new();
+        for w in [0x4e218402u32, 0x6e218403u32, 0x4e211c04u32, 0x4ea11c05u32, 0x6e211c06u32, 0x4e611c07u32] {
+            code.extend_from_slice(&w.to_le_bytes());
+        }
+        code.extend_from_slice(&0xd65f03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec byte-add + logical");
+        // result v2 (16 bytes) live at st.v[4..6] (v2 low,high), v3 at v[6..8], etc.
+        let a = [st.v[0], st.v[1]];
+        let b = [st.v[2], st.v[3]];
+        let mut sum = [0u8; 16];
+        let mut and = [0u8; 16];
+        for i in 0..16 {
+            let ai = (a[i / 8] >> ((i % 8) * 8)) as u8;
+            let bi = (b[i / 8] >> ((i % 8) * 8)) as u8;
+            sum[i] = ai.wrapping_add(bi);
+            and[i] = ai & bi;
+        }
+        let vadd_lo = st.v[4]; // v2 low 8B
+        let vadd_hi = st.v[5]; // v2 high 8B
+        let vand_lo = st.v[8]; // v4 low 8B (v4 = reg index 4 -> st.v[2*4]=v[8])
+        let vand_hi = st.v[9]; // v4 high 8B
+        for i in 0..16 {
+            let val = if i < 8 { vadd_lo } else { vadd_hi };
+            let vnl = if i < 8 { vand_lo } else { vand_hi };
+            let got_add = (val >> ((i % 8) * 8)) as u8 & 0xff;
+            let got_and = (vnl >> ((i % 8) * 8)) as u8 & 0xff;
+            assert_eq!(got_add, sum[i], "add v2.16b lane {i}");
+            assert_eq!(got_and, and[i], "and v4.16b lane {i}: got={got_and:#04x} exp={:02x}", and[i]);
+        }
+        // also verify orr v5 and eor v6 and bic v7 read off the right slots.
+        let orr_lo = st.v[10];
+        let orr_hi = st.v[11];
+        let eor_lo = st.v[12];
+        let eor_hi = st.v[13];
+        let bic_lo = st.v[14];
+        let bic_hi = st.v[15];
+        for i in 0..16 {
+            let ai = (a[i / 8] >> ((i % 8) * 8)) as u8;
+            let bi = (b[i / 8] >> ((i % 8) * 8)) as u8;
+            let sel = if i < 8 { 0 } else { 1 };
+            let o = if sel == 0 { orr_lo } else { orr_hi };
+            let e = if sel == 0 { eor_lo } else { eor_hi };
+            let c = if sel == 0 { bic_lo } else { bic_hi };
+            assert_eq!((o >> ((i % 8) * 8)) as u8 & 0xff, ai | bi, "orr v5.16b lane {i}");
+            assert_eq!((e >> ((i % 8) * 8)) as u8 & 0xff, ai ^ bi, "eor v6.16b lane {i}");
+            assert_eq!((c >> ((i % 8) * 8)) as u8 & 0xff, ai & !bi, "bic v7.16b lane {i}: got {:02x}", (c >> ((i % 8) * 8)) as u8 & 0xff);
+        }
+    }
 }

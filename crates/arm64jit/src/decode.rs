@@ -996,6 +996,22 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
+    // ---- SIMD vector EOR (Vd.128 = Vn.128 ^ Vm.128) ----
+    // Encoded with prefix {0x2e,0x6e} (bit29=1, unlike and/orr/bic). Disjoint
+    // from bit/bif/bsl sel ops which also use 0x6e but set a select bit in
+    // 0x00c0_0000 (bif=bit23,bsl=bit22,bit=both); EOR/have NEITHER set.
+    if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e)
+        && (insn & 0x0000_1c00) == 0x1c00
+        && (insn & 0x00c0_0000) == 0
+    {
+        return Inst::SimdVLog {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            op: 1, // EOR
+        };
+    }
+
     // ---- SIMD bitwise select BSL only (Vd = (Vd&Vn)|(~Vd&Vm)); bit/bif handled by SimdBit ----
     if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e) && (insn & 0x0000_1c00) == 0x1c00 && (insn & 0x0040_0000) != 0 {
         return Inst::SimdSel {
