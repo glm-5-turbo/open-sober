@@ -992,4 +992,21 @@ mod tests {
             .collect();
         for i in 0..4 { assert_eq!(lanes[i], exp[i], "fmla-el lane {}", i); }
     }
+
+    #[test]
+    fn shll_widen_sign_extend() {
+        // shll v1.2d, v1.2s, #32 (wall 0x2ea13820): widen v1's 2 low .s elements to
+        // 2 .d elements, sign-extended. v1=[-7, 0x40000000] => v1.2d =[-7, 0x40000000].
+        let mut st = CpuState::new();
+        // v1 (reg 1): st.v[2]=low64, st.v[3]=high64. Load 4x32-bit: lanes0=-7,1=1<<30.
+        st.v[2] = ((0x4000_0000u64) << 32) | (0xffff_fffcu64); // lane0=-4, lane1=0x40000000
+        st.v[3] = 0;
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x2ea1_3821u32.to_le_bytes()); // shll v1.2d,v1.2s,#32
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec shll .2d");
+        // dst v1 = st[2] (lane0) and st[3] (lane1) — BUT destination now widened 2xd.
+        assert_eq!(st.v[2] as i64, -4i64, "shll lane0 sign-ext");
+        assert_eq!(st.v[3], 0x4000_0000u64, "shll lane1 sign-ext");
+    }
 }

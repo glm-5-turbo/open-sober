@@ -1350,7 +1350,50 @@ pub fn translate(
                                                                                                                                                             }
                                                                                                                                                             Ok(())
                                                                                                                                                         }
-                                                                                                                                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
+                                                                                                                                                        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed } => {
+                                // shll vd.Td, vn.Ts: widen nlanes low elements of vn, sign/
+                                // zero extend src_esize-byte lanes to dst_esize-byte lanes.
+                                let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                let src_esize = (dst_esize / 2) as i32;
+                                // Descend lane index so the (larger) dest write never
+                                // clobbers a higher source element still to be read when
+                                // rd == rn (in-place widening).
+                                for rev in 0..(nlanes as i32) {
+                                    let i = (nlanes as i32) - 1 - rev;
+                                    let so = nb + i * src_esize;
+                                    let doff = db + i * (dst_esize as i32);
+                                    match dst_esize {
+                                        8 => {
+                                            buf.mov_load32(RCX, RBX, so);
+                                            if signed {
+                                                buf.movsxd_r64_r32(RAX, RCX);
+                                            } else {
+                                                buf.mov_rr64(RAX, RCX);
+                                            }
+                                            buf.mov_store64(RBX, doff, RAX);
+                                        }
+                                        4 => {
+                                            if signed {
+                                                buf.movsx_word_mem(RAX, RBX, so);
+                                            } else {
+                                                buf.movzx_word_mem(RAX, RBX, so);
+                                            }
+                                            buf.mov_store32(RBX, doff, RAX);
+                                        }
+                                        _ => {
+                                            if signed {
+                                                buf.movsx_byte_mem(RAX, RBX, so);
+                                            } else {
+                                                buf.movzx_byte_mem(RAX, RBX, so);
+                                            }
+                                            buf.mov_store16(RBX, doff, RAX);
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            }
+                            Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
                                             // ucvtf/scvtf Dd,Rn,#fbits: convert int to float, then /2^fbits.
                                             let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                             ldg(buf, RAX, rn as u32);

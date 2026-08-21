@@ -189,6 +189,8 @@ pub enum Inst {
         q: bool,
         sub: bool,
     },
+    // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----  
+    WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool },
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
@@ -1206,6 +1208,22 @@ pub fn decode(insn: u32) -> Inst {
         let q = (insn & 0x4000_0000) != 0;
         let sub = (insn & 0x4000) != 0;
         return Inst::FmlaEl { rd, rn, vlm, idx, el64: el32, q, sub };
+    }
+    // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
+    // byte2 (bits15:8) == 0x38; byte0 in the SHLL family {0e,1e,2e,3e,6e,7e}. Reads the
+    // low nlanes half-width elements of Vn, sign/zero-extends each to double width.
+    if ((insn >> 24) & 0x0f) == 0x0e && (insn >> 8) & 0xff == 0x38 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let b1 = (insn >> 16) & 0xff;
+        let (dst_esize, nlanes) = if b1 & 0xa0 == 0xa0 {
+            (8u8, 2u8) // .2d
+        } else if b1 & 0x60 == 0x60 {
+            (4u8, 4u8) // .4s
+        } else {
+            (2u8, 8u8) // .8h
+        };
+        return Inst::WidenShl { rd, rn, dst_esize, nlanes, signed: true };
     }
     if matches!(insn >> 24, 0x0F | 0x1F | 0x2F | 0x4F | 0x5F | 0x6F) {
         let op = (insn >> 29) & 1;
