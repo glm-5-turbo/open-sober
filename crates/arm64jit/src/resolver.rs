@@ -209,10 +209,21 @@ fn store_real(name: &str, real: *mut libc::c_void) {
 /// Host bridge fn: pthread_mutex_lock/mutex_unlock over the guest mutex.
 extern "C" fn host_mutex_lock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
     let f = *REAL_LOCK.get().expect("pthread_mutex_lock resolved");
-    unsafe {
+    let kind: i32 = unsafe {
+        if a0 != 0 {
+            core::ptr::read_unaligned((a0 as *const u8).add(16) as *const i32)
+        } else {
+            0
+        }
+    };
+    let r = unsafe {
         sanitize_mutex(a0 as *mut u8);
-        f(a0 as *mut u8) as u64
+        f(a0 as *mut u8)
+    };
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[mutex_lock] {a0:#x} kind_pre={kind:#x} -> {r}");
     }
+    r as u64
 }
 extern "C" fn host_mutex_unlock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
     let f = *REAL_UNLOCK.get().expect("pthread_mutex_unlock resolved");

@@ -2209,3 +2209,16 @@ runtime that still needs QEMU's jni global-state (classes/methods/RegisterNative
 - Next brick: find WHICH guest fn returns the `2` (candidate: a JNI/host shim returning a small
   status instead of a pointer), or pre-scheme the once-flag so the init guard skips its guard
   entirely (QEMU's documented `mov w0,#1; nop` bypass).
+
+**Refined finding (next session):** instrumented `host_mutex_lock` with a `[mutex_lock]` JIT_TRACE
+line. Boot shows **zero host callbacks fire before the crash** (`hostcall@` = 0, `[mutex_lock]` =
+0) — the guest never reaches `pthread_mutex_lock` at all, so the abort is NOT started by a mutex
+failure. The crash block (decode of the compiled `0x102678*` region) sets guest `x0=2 +
+x1=0x100362f03` (a string literal), does `cvtsi2sd -> addsd 2^63 -> divsd 2^54` (the guest
+`__int64->double` HUGE_VAL trim), then a `ldr x, [x0, #8]` deref with x0=2. Guest `pc` at fault=
+`0x7f0000002208` = HOST_THUNK slot 1089, i.e. a guest `blr x16` to a host-slot address whose
+registered host fn is the one reading `[x0+8]` with x0=2 — but `host_call_at` did NOT intercept it
+(0 trace). Suspects: (a) that host slot's registration slipped (resolver `register_named`/
+post-bind mismatch), or (b) a host fn genuinely reads `[arg+8]` on a `2` handle (a JNI/Android
+object). Next: dump slot 1089's registered fn + guest pc at the `blr`; if it's a JNI shim, give it
+a real fake-object backing instead of returning 2.
