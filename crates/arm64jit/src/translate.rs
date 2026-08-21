@@ -1080,6 +1080,7 @@ pub fn translate(
                 0 => buf.sqrtsd(0, 0),  // fsqrt  d{rd}, d{rn}
                 1 => buf.roundsd(0, 0, 0x01), // frintm: round toward -inf (floor)
                 2 => buf.roundsd(0, 0, 0x02), // frintp: round toward +inf (ceil)
+                3 => buf.roundsd(0, 0, 0x03), // frintz: round toward zero (trunc)
                 4 => buf.roundsd(0, 0, 0x03), // (frintz: toward zero) — reserved mapping
                 5 => {
                     // fabs d{rd}, d{rn}: clear the sign bit on the FP bit-pattern.
