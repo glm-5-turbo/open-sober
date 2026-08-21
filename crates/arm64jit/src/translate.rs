@@ -1813,15 +1813,28 @@ pub fn translate(
                             }
                             Ok(())
                         }
-                        Inst::SimdDupSReg { rd, rn } => {
-                            // dup Vd.4S, Wn: broadcast Wn (32-bit) into all 4 S-lanes of Vd.
+                        Inst::SimdDupGp { rd, rn, esize, q } => {
+                            // dup Vd.T, Wn/Xn: broadcast the element read from GPR rn
+                            // into all `lanes` of Vd. esize 1/2/4: low 32 of Wn; esize 8: Xn.
                             let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                            ldg(buf, RAX, rn as u32); // Wn read (zero-extended into RAX's low 32)
-                            buf.and_ri64(RAX, 0xffff_ffff);
-                            for i in 0..4u32 {
-                                                            buf.mov_store32(RBX, slot(rd) + (i * 4) as i32, RAX);
-                                                        }
-                                                        Ok(())
+                            if esize == 8 {
+                                ldg(buf, RAX, rn as u32); // Xn low 64
+                            } else {
+                                ldg(buf, RAX, rn as u32);
+                                buf.and_ri64(RAX, 0xffff_ffff); // zero-extend Wn
+                                let m = ((1u64 << (8 * esize)) - 1) as u32;
+                                buf.and_ri64(RAX, m);
+                            }
+                            let lanes = ((if q { 16 } else { 8 }) / esize as i32) as u32;
+                            for i in 0..lanes {
+                                match esize {
+                                    1 => buf.mov_store8(RBX, slot(rd) + (i * 1) as i32, RAX),
+                                    2 => buf.mov_store16(RBX, slot(rd) + (i * 2) as i32, RAX),
+                                    4 => buf.mov_store32(RBX, slot(rd) + (i * 4) as i32, RAX),
+                                    _ => buf.mov_store64(RBX, slot(rd) + (i * 8) as i32, RAX),
+                                }
+                            }
+                            Ok(())
                                                     }
                                                     Inst::SimdOrr16 { rd, rn, rm } => {
                                                         // orr Vd.16B, Vn.16B, Vm.16B (also `mov Vd.16B,Vn.16B`

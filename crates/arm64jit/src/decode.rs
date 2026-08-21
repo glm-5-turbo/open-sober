@@ -376,10 +376,10 @@ pub enum Inst {
     // op 0=fdiv,1=fmul,2=fadd,3=fsub. Gate mask 0xffe0_fc00 gives the
     // per-op constants {0x6e60fc00,0x6e60dc00,0x4e60d400,0x4ee0d400}.
     Simd2dFp { rd: u8, rn: u8, rm: u8, op: u8 },
-    // ---- SIMD dup from a GPR: dup Vd.4S, Wn (broadcast Wn into 4x32-bit lanes) ----
-    // Gate `(insn & 0xffff_fc00) == 0x4e040c00` (the 4S GPR-source dup; distinct
-    // from the vector-lane dup 0x4e180400 / 0x4e040400). rn (W source) bits 5-9.
-    SimdDupSReg { rd: u8, rn: u8 },
+    // ---- SIMD dup from a GPR: dup Vd.T, Wn/Xn (broadcast the element read from the
+    // GPR into Vd's lanes). Gate (insn & 0xff00_fc00)==0x0e00_0c00(q=0)/0x4e00_0c00(q=1);
+    // element size from imm5 trailing-zeros in (insn>>16)&0x1f. Covers 8b/16b/4h/8h/2s/4s/2d.
+    SimdDupGp { rd: u8, rn: u8, esize: u8, q: bool },
     // ---- SIMD 16-byte logical OR: orr Vd.16B, Vn.16B, Vm.16B ----
     // Gate (insn & 0xffe0_fc00)==0x0ea01c00 (also the `mov Vd.16B,Vn.16B` copy
     // alias rm==rn, e.g. real 0x4ea01c02). ORs the full 16-byte vector slot.
@@ -1983,11 +1983,13 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                             return Inst::SimdDupD { rd, rn, index };
                                                                                                         }
                                                                                                         // ---- SIMD dup from GPR: dup Vd.4S, Wn ----
-                                                                                                        if (insn & 0xffff_fc00) == 0x4e040c00 {
-                                                                                                                let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                let rd = (insn & 0x1f) as u8;
-                                                                                                                return Inst::SimdDupSReg { rd, rn };
-                                                                                                            }
+                                                                                                        if (insn & 0xff00_fc00) == 0x0e00_0c00 || (insn & 0xff00_fc00) == 0x4e00_0c00 {
+                                                                                                                                                                                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                let esize = 1u8 << ((insn >> 16) & 0x1f).trailing_zeros();
+                                                                                                                                                                                                                let q = (insn >> 30) & 1 == 1;
+                                                                                                                                                                                                                return Inst::SimdDupGp { rd, rn, esize, q };
+                                                                                                                                                                                                                    }
                                                                                                             // ---- SIMD 16-byte logical OR: orr Vd.16B, Vn.16B, Vm.16B ----
                                                                                                             // (insn & 0xffe0_fc00)==0x4ea01c00 catches both real `mov v2.16b` (0x4ea01c02,
                                                                                                                 // rm==rn copy) and `orr v3.16b` (0x4ea41c63). Q=1 => 0x4ea0 (bit30). OR all 16B.
@@ -3214,9 +3216,11 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x7ee1d400), Inst::Fabd { rd: 0, rn: 0, rm: 1 }));
         // dup v1.4s, w10 = 0x4e040d41 (real libroblox audio mix channel loop) => SimdDupSReg.
         match decode(0x4e040d41) {
-            Inst::SimdDupSReg { rd, rn } => {
+            Inst::SimdDupGp { rd, rn, esize, q } => {
                 assert_eq!(rd, 1);
                 assert_eq!(rn, 10);
+                assert_eq!(esize, 4);
+                assert!(q);
             }
             other => panic!("dup v1.4s,w10 -> {other:?}"),
         }
