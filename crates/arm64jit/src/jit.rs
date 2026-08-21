@@ -643,6 +643,30 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             continue;
         }
         if pc < base || pc - base + 4 > image.len() as u64 {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("JIT_TRACE").is_some() {
+                let s = unsafe { &*state };
+                eprintln!(
+                    "[outside-image] pc={pc:#x} base={base:#x} end={:#x}",
+                    base + image.len() as u64
+                );
+                eprintln!(
+                    "[outside-image] x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+                    s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5], s.x[6], s.x[7]
+                );
+                eprintln!(
+                    "[outside-image] x8={:#x} x9={:#x} x10={:#x} x11={:#x} x12={:#x} x13={:#x} x14={:#x} x15={:#x}",
+                    s.x[8], s.x[9], s.x[10], s.x[11], s.x[12], s.x[13], s.x[14], s.x[15]
+                );
+                eprintln!(
+                    "[outside-image] x16={:#x} x17={:#x} x18={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x}",
+                    s.x[16], s.x[17], s.x[18], s.x[19], s.x[20], s.x[21], s.x[22], s.x[23]
+                );
+                eprintln!(
+                    "[outside-image] x24={:#x} x25={:#x} x26={:#x} x27={:#x} x28={:#x} x29={:#x} x30={:#x} pc={:#x}",
+                    s.x[24], s.x[25], s.x[26], s.x[27], s.x[28], s.x[29], s.x[30], s.pc
+                );
+            }
             return Err(format!(
                 "run_loop: pc 0x{pc:x} outside image [0x{base:x}, 0x{:x})",
                 base + image.len() as u64
@@ -863,6 +887,13 @@ pub fn compile_image_bounded(
             }
             translate::translate(&mut buf, cur, inst, &mut fixups)?;
             emitted += 1; // count a translated guest instruction toward the budget
+            #[cfg(debug_assertions)]
+            if std::env::var_os("JIT_DUMP").is_some() {
+                let is_ret = matches!(inst, Inst::Br { .. } | Inst::Blr { .. } | Inst::Ret);
+                if is_ret {
+                    eprintln!("[term] guest_pc={cur:#x} inst={inst:?}");
+                }
+            }
             // Ret / indirect transfers / unconditional B are terminal: stop this
             // block (an unconditional `b` must NOT fall through to the next word,
             // which may be `.text` zero-fill or an unrelated function — landing
