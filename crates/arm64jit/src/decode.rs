@@ -1552,6 +1552,8 @@ pub fn decode(insn: u32) -> Inst {
             (0, true) // fcvtzs: truncate (0x1e38/0x9e38 = single-source S form)
         } else if b == 0x1e7a_0000 || b == 0x9e7a_0000 || b == 0x1e3a_0000 || b == 0x9e3a_0000 {
             (2, true) // fcvtas: round nearest-away (0x1e3a/0x9e3a = single-source)
+        } else if b == 0x1e64_0000 || b == 0x9e64_0000 {
+            (2, true) // fcvtas Wd,Dn / Xd,Dn double-source (objdump-confirmed 0x1e640013)
         } else if b == 0x1e30_0000 || b == 0x9e30_0000 || b == 0x1e70_0000 || b == 0x9e70_0000 {
             (4, true) // fcvtms: round toward -inf / floor
         } else if b == 0x1e28_0000 || b == 0x9e28_0000 || b == 0x1e68_0000 || b == 0x9e68_0000 {
