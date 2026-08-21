@@ -1315,7 +1315,8 @@ pub fn decode(insn: u32) -> Inst {
     // unsigned = bit29 (set: umin/umax; clear: smin/smax), q=bit30, esize: .s (bit23 set) else .b.
     let b0 = (insn >> 24) & 0xff;
     let b2 = (insn >> 8) & 0xff;
-    if (b0 == 0x0e || b0 == 0x2e || b0 == 0x4e || b0 == 0x6e) && (b2 == 0x64 || b2 == 0x6c) {
+    if (b0 == 0x0e || b0 == 0x2e || b0 == 0x4e || b0 == 0x6e)
+            && ((b2 & 0xfc) == 0x64 || (b2 & 0xfc) == 0x6c) {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rm = ((insn >> 16) & 0x1f) as u8;
