@@ -841,4 +841,57 @@ mod tests {
             assert_eq!((c >> ((i % 8) * 8)) as u8 & 0xff, ai & !bi, "bic v7.16b lane {i}: got {:02x}", (c >> ((i % 8) * 8)) as u8 & 0xff);
         }
     }
+
+    #[test]
+    fn sha1_round_correct_reference() {
+        let rol = |x: u32, n: u32| x.rotate_left(n);
+        let ror = |x: u32, n: u32| x.rotate_right(n);
+        let cho = |x: u32, y: u32, z: u32| (x & (y ^ z)) ^ z;
+
+        // sha1h S1,S2 : 0x5e280800 | (rn=2<<5) | rd=1 = 0x5e280841. S2.word0 = 0x12345678.
+        let mut st = CpuState::new();
+        st.v[4] = 0x1234_5678; // vector reg 2 (s2) lives at st.v[2*2]
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x5e28_0841u32.to_le_bytes());
+        code.extend_from_slice(&0xd65f03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec sha1h");
+        assert_eq!((st.v[2] & 0xffff_ffff) as u32, ror(0x1234_5678, 2), "sha1h");
+
+        // sha1c q0, s1, v4.4s : state {A,B,C,D}=v0, E=s1(word0), message=v4.
+        let h = [0x6745_2301u32, 0xEFCD_AB89u32, 0x98BA_DCFEu32, 0x1032_5476u32, 0xC3D2_E1F0u32];
+        let mut st2 = CpuState::new();
+        st2.v[0] = ((h[1] as u64) << 32) | h[0] as u64; // A,B
+        st2.v[1] = ((h[3] as u64) << 32) | h[2] as u64; // C,D
+        st2.v[2] = h[4] as u64; // E (s1 word0 = st.v[2], reg 1)
+        let msg = [0x6162_6380u32, 0x0000_0001u32, 0x0000_0000u32, 0x0000_0000u32];
+        st2.v[8] = ((msg[1] as u64) << 32) | msg[0] as u64; // vector reg 4 (rm)
+        st2.v[9] = ((msg[3] as u64) << 32) | msg[2] as u64; // vector reg 4 (rm)
+        // sha1c q0, s1, v4.4s : 0x5e00_0000 | rm=4<<16 | rn=1<<5 | rd=0
+        let w = 0x5e00_0000u32 | (4u32 << 16) | (1u32 << 5) | 0u32;
+        let mut code2 = Vec::new();
+        code2.extend_from_slice(&w.to_le_bytes());
+        code2.extend_from_slice(&0xd65f03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st2, &code2, 0).expect("exec sha1c");
+
+        let mut d = [h[0], h[1], h[2], h[3]];
+        let mut nn = h[4];
+        for i in 0..4 {
+            let t = cho(d[1], d[2], d[3])
+                .wrapping_add(rol(d[0], 5))
+                .wrapping_add(nn)
+                .wrapping_add(msg[i]);
+            nn = d[3];
+            d[3] = d[2];
+            d[2] = ror(d[1], 2);
+            d[1] = d[0];
+            d[0] = t;
+        }
+        let got = [
+            (st2.v[0] & 0xffff_ffff) as u32,
+            ((st2.v[0] >> 32) & 0xffff_ffff) as u32,
+            (st2.v[1] & 0xffff_ffff) as u32,
+            ((st2.v[1] >> 32) & 0xffff_ffff) as u32,
+        ];
+        assert_eq!(got, [d[0], d[1], d[2], d[3]], "sha1c 4-round Ch");
+    }
 }
