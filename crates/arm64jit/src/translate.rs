@@ -1900,12 +1900,19 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
-                Inst::SimdInsD { rd, rn, dst_idx, src_idx } => {
-                    // mov Vd.d[dst], Vn.d[src]: copy one 64-bit lane between vectors.
-                    let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*8;
-                    let dst = crate::jit::VECTOR_BASE + (rd as i32)*16 + (dst_idx as i32)*8;
-                    buf.mov_load64(RAX, RBX, src);
-                    buf.mov_store64(RBX, dst, RAX);
+                Inst::SimdInsD { rd, rn, dst_idx, src_idx, esize } => {
+                    // mov Vd.T[dst], Vn.T[src]: copy one element (esize bytes) lane
+                    // between vectors (d 64-bit or s 32-bit lanes).
+                    let es = esize as i32;
+                    let src = crate::jit::VECTOR_BASE + (rn as i32)*16 + (src_idx as i32)*es;
+                    let dst = crate::jit::VECTOR_BASE + (rd as i32)*16 + (dst_idx as i32)*es;
+                    if esize == 8 {
+                        buf.mov_load64(RAX, RBX, src);
+                        buf.mov_store64(RBX, dst, RAX);
+                    } else {
+                        buf.mov_load32(RAX, RBX, src);
+                        buf.mov_store32(RBX, dst, RAX);
+                    }
                     Ok(())
                 }
                 // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
