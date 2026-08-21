@@ -2281,3 +2281,18 @@ host `jni_shim` layer must provide backing for (the Sober "fake Android" shim), 
 pointer our resolver left 0. Next: find WHICH global holds `0x68c7518` and WHICH init step should
 fill it — dump `readelf -sW`/`.rodata` owners at `0x68c7518`, disassemble the caller block
 `0x105ce0828`'s `ldr/blr` to see the pointer source.
+
+## Session — once-init completes; next frontier is an uninitialized C++ vtable virtual call (commits 1e447b3 + ec39a19)
+
+**Verified boot now** (`elfjit libroblox.so 0x1f0db20 --jni`, JIT_TRACE):
+```
+block@0x101f0db20 -> pc=0x101f0e728        (JNI_OnLoad bl init-guard)
+block@0x101f0e728 -> pc=0x105ce0828        (init-guard COMPLETES normally, no abort)
+block@0x105ce0828 -> pc=0x1068c7518        (run_loop: pc outside image)
+```
+- The pthread_once once-init at `0x2678068` now **runs the whole guard and returns success** (previous sessions' abort/deref path is gone). Roblox then advances into engine-native startup (`NativeAppBridgeV2StartAppWithParams`, GL interface init).
+- New frontier: guest `will brl x9` at guest `0x26473ac` where `x9 = 0x1068c7518` (a global `.bss`/`pb_defaults` DATA address, not code) -> dispatcher stops ("pc outside image", exit 1, not a segv).
+- Mechanism (decoded): `ldr x0,[x21,#8]; ldr x8,[x0]; ldr x9,[x8,#48]; blr x9` = a **C++ virtual-method call: vtable slot 48 holds `0x68c7518` (garbage/uninitialized)**. The object (`x21`-derived) is a Roblox interface (context: `IPlatformSystemDialogHandler`-adjacent call after it). `.init_array` is all-zeros (no C++ global ctors to run), so the object's vtable was never populated.
+- **Not a JIT bug** — it's the fake-object/interface wall: the guest calls a valid vtable offset on an object the minimal `elfjit --jni` env didn't construct. Next: find what initializes the object behind `x21` (candidate: a JNI/`ANativeActivity`-provided global, or a `__cxa_atexit`/static-init baked elsewhere), or stub the virtual interface (slot-48 method) to return and continue.
+
+Tools added (commit `ec39a35`): JIT_DUMP `[outside-image]` full-register dump + `[term]` guest terminal-pc trace for pinning such stops.
