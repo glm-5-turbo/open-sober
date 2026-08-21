@@ -480,6 +480,38 @@ impl CodeBuf {
         self.b(0x2F);
         self.b(modrm(3, a & 7, b & 7));
     }
+    // MAXSD xmm, xmm : F2 0F 5F /r (max; a = max(a,b) on doubles)
+    pub fn maxsd(&mut self, a: u8, b: u8) {
+        self.b(0xF2);
+        self.b(rex(false, a, 0, b));
+        self.b(0x0F);
+        self.b(0x5F);
+        self.b(modrm(3, a & 7, b & 7));
+    }
+    // MINSD xmm, xmm : F2 0F 5D /r (min on doubles)
+    pub fn minsd(&mut self, a: u8, b: u8) {
+        self.b(0xF2);
+        self.b(rex(false, a, 0, b));
+        self.b(0x0F);
+        self.b(0x5D);
+        self.b(modrm(3, a & 7, b & 7));
+    }
+    // MAXSS xmm, xmm : F3 0F 5F /r (max on singles)
+    pub fn maxss(&mut self, a: u8, b: u8) {
+        self.b(0xF3);
+        self.b(rex(false, a, 0, b));
+        self.b(0x0F);
+        self.b(0x5F);
+        self.b(modrm(3, a & 7, b & 7));
+    }
+    // MINSS xmm, xmm : F3 0F 5D /r (min on singles)
+    pub fn minss(&mut self, a: u8, b: u8) {
+        self.b(0xF3);
+        self.b(rex(false, a, 0, b));
+        self.b(0x0F);
+        self.b(0x5D);
+        self.b(modrm(3, a & 7, b & 7));
+    }
         /// cvttsd2si r64, xmm  (F2 48 0F 2C /r) — truncate toward zero
     pub fn cvttsd2si(&mut self, rd: u8, xmm: u8) {
         self.b(0xF2);

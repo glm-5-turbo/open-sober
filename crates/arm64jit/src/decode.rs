@@ -152,6 +152,8 @@ pub enum Inst {
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
     SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool },
+    // ---- scalar FP max/min (fmax/fmin/fmaxnm/fminnm) ----
+    FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
     SimdInsD { rd: u8, rn: u8, dst_idx: u8, src_idx: u8 },
     // ---- SIMD dup (vector, element): dup Vd.T, Vn.T[i] ----
@@ -1390,6 +1392,21 @@ pub fn decode(insn: u32) -> Inst {
                         to_double,
                         sf,
                         unsigned,
+                    };
+                }
+            }
+
+            // ---- scalar FP max/min: fmax/fmin/fmaxnm/fminnm Sd,Xn,Xm ----
+            // Gate (insn & 0x1f20_0c00)==0x1e20_0800; op=bits12-15 (4=fmax,5=fmin,6=fmaxnm,7=fminnm); sz=bit22.
+            if (insn & 0x1f20_0c00) == 0x1e20_0800 {
+                let mop = (insn >> 12) & 0xf;
+                if matches!(mop, 4 | 5 | 6 | 7) {
+                    return Inst::FMaxMin {
+                        rd: (insn & 0x1f) as u8,
+                        rn: ((insn >> 5) & 0x1f) as u8,
+                        rm: ((insn >> 16) & 0x1f) as u8,
+                        sz: (insn >> 22) & 1 == 1,
+                        op: mop as u8,
                     };
                 }
             }

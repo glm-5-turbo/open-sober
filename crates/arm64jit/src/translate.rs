@@ -1179,10 +1179,31 @@ pub fn translate(
                 buf.mov_store64(RBX, dslot, RAX); // double: copy low 8B
             } else {
                 buf.mov_load32(RAX, RBX, sslot);
-                buf.mov_store32(RBX, dslot, RAX); // single: copy low 4B
-            }
-            Ok(())
-        }
+                                buf.mov_store32(RBX, dslot, RAX); // single: copy low 4B
+                            }
+                            Ok(())
+                        }
+                        Inst::FMaxMin { rd, rn, rm, sz, op } => {
+                            // fmax/fmin/fmaxnm/fminnm: FP max/min (x86 maxss/sd ignore NaN; ok here).
+                            // op: 4=fmax,5=fmin,6=fmaxnm,7=fminnm -> max index, rn/x0 vs rm/0.
+                            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                            let is_max = matches!(op, 4 | 6);
+                            if sz {
+                                buf.movq_load(0, RBX, vslot(rn));
+                                buf.movq_load(1, RBX, vslot(rm));
+                                if is_max { buf.maxsd(0, 1); } else { buf.minsd(0, 1); }
+                                buf.movq_store(RBX, vslot(rd), 0);
+                            } else {
+                                buf.mov_load32(RAX, RBX, vslot(rn));
+                                buf.movd_xmm_r32(0, RAX);
+                                buf.mov_load32(RAX, RBX, vslot(rm));
+                                buf.movd_xmm_r32(1, RAX);
+                                if is_max { buf.maxss(0, 1); } else { buf.minss(0, 1); }
+                                buf.movd_r32_xmm(RAX, 0);
+                                buf.mov_store32(RBX, vslot(rd), RAX);
+                            }
+                            Ok(())
+                        }
         Inst::Fcmp { rn, rm, sz } => {
             // fcmp d{rn}, d{rm} / fcmp s{rn}, s{rm}: compare and set guest NZCV.
             // Use comisd/comiss (CF=1 if a<b, ZF=1 if equal/unordered, PF=1 if
