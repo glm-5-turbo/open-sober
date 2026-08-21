@@ -87,19 +87,25 @@ fn main() {
     // guest is a real binary we don't yet bootstrap (no TLS/stack), this lets
     // small aarch64 test functions run through the dispatcher.
     for (i, arg) in std::env::args().skip(3).take(3).enumerate() {
-        let v = if arg == "buf" {
-            let b = Box::leak(vec![0x7fu8; 256].into_boxed_slice());
-            if i == 0 {
-                let base = b.as_ptr() as u64;
-                st.set(0, base);
-                st.set(1, base + 32);
+        if arg == "--jni" || arg == "buf" {
+            let v = if arg == "buf" {
+                let b = Box::leak(vec![0x7fu8; 256].into_boxed_slice());
+                if i == 0 {
+                    let base = b.as_ptr() as u64;
+                    st.set(0, base);
+                    st.set(1, base + 32);
+                }
+                b.as_ptr() as u64
+            } else {
+                0 // --jni isn't an x-register value; handled separately below
+            };
+            if arg == "buf" && i == 0 {
+                continue;
             }
-            b.as_ptr() as u64
+            let _ = v;
         } else {
-            u64::from_str_radix(arg.trim_start_matches("0x"), 16)
-                .unwrap_or_else(|e| panic!("bad x{i} hex: {e}"))
-        };
-        if !(arg == "buf" && i == 0) {
+            let v = u64::from_str_radix(arg.trim_start_matches("0x"), 16)
+                .unwrap_or_else(|e| panic!("bad x{i} hex: {e}"));
             st.set(i, v);
         }
     }
@@ -117,6 +123,15 @@ fn main() {
     let tls = Box::leak(vec![0u8; TLS_SIZE].into_boxed_slice());
     st.tpidr = tls.as_ptr() as u64;
     println!("guest sp=0x{:x} tls=0x{:x}", sp, st.tpidr);
+
+    // JNI boot mode: hand the guest a guest-visible JavaVM* in x0 (as the Android
+    // runtime would). Pass `--jni` to set x0 = vm. If x0/x1/x2 were already
+    // supplied via positional args they win (we don't clobber a caller's x0).
+    if std::env::args().any(|a| a == "--jni") && st.x[0] == 0 {
+        let (_env, vm) = arm64jit::jni::build_jni();
+        st.x[0] = vm; // JNI_OnLoad(JavaVM* vm, void* reserved) -> x0 = vm
+        println!("JNI boot: x0 = JavaVM* 0x{:x}", vm);
+    }
 
     // PC-driven dispatcher: compiles reachable regions and re-enters on
     // indirect branch (`blr`) / `br` / `ret`, so real (blr-heavy) Roblox code
