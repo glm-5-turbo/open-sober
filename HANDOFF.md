@@ -2349,3 +2349,53 @@ belongs** (guard-state at 0x68c7518, and a `__cxa_guard_acquire`-symbol-string i
 but the guest's C++ static-init path (guard acquire/release) is not shimmed, so it strays into string/data. Next:
 shim/redirect `__cxa_guard_acquire`/`__cxa_guard_release`/`__cxa_guard_abort` (guest `__cxa_atexit` too) to real host
 libc++/bionic so FMOD's static-init guard works, mirroring how we patched `__stack_chk_guard`.
+
+## Session — exact mechanism of the FMOD dispatch-to-0x68c7518 + the likely nested-inline once-inv bug (update)
+
+New decisive facts this session:
+
+1. **The crash is a `Ret` to a corrupt x30, not a vtable `blr`.**
+   The guest block STARTING at `0x105ce0828` (FMOD static-init guard, guest `0x5ce0828`) terminates by setting
+   `pc = 0x1068c7518`, and CpuState at stop has `pc==x30==x0==x19 == 0x1068c7518`. The last `[term]` (JIT_DUMP)
+   correlation shows the terminal is a `Ret` whose `x30 = 0x68c7518` (a .bss guard address) — i.e. the guest
+   RETURNS into a data guard, then the translator decodes the `.bss` bytes there → `Unsupported(0x68c74d0)`.
+
+2. **The once-routine return semantics are understood:**
+   `0x2678068` (`GameActivity_initializeNativeCode`) ends:
+   ```
+   2678138: cmp w24,#1
+   267813c: cset w0,ne            ; w0 = 0 iff w24==1 (init "done")
+   ...
+   2678158: ret
+   ```
+   So it returns `w0=0` (done) only when the local `w24` was set to 1 during init. The FMOD code does
+   `bl 2678068; cbz w0, <clean ret -> `5ce085c`>; <else fallthrough to the corrupt path>`. Because the guest
+   dispatches to `0x68c7518` on the NOT-clean path, `2678068` is returning `w0=1` (NOT-done) for the FMOD
+   guard `0x68c7518` — meaning the once-body's `w24` never got set = the once-init body did not run to
+   completion for THIS second distinct guard. The once-mutex (guest `0x637a468`) / pthread_once body worked
+   for the FIRST guard (GameActivity init at 0x101f0e728, once-mutex 0x637a468) but is failing on this
+   second, FMOD, guard.
+
+3. **Why a second time fails — the suspected JIT-fidelity bug (NEXT REAL TASK):**
+   `0x105ce0828`'s compile inlines the nested `bl 0x2678068` (a *guest* function, so NOT diverted by
+   `is_host_plt_stub`; only host-import PLT `bl`s are diverted). Inside `0x2678068` the guest does
+   `bl pthread_mutex_lock@plt` — which IS diverted via the `force_stubs` mechanism. On the FIRST guard
+   this chain completed (w24=1). On the SECOND distinct guard the same routine is inlined AGAIN inside a
+   different (huge) block; the mutex return/stub table interaction appears to regress so the routine exits
+   without setting `w24` (reads stale/garbage), returning `w0=1`, and FMOD then comes/path dispatches to
+   the guard address `0x68c7518`.
+   **Verify:** add a `[it]`/gall step that logs whether `2678068`'s `mov w24,#1` (once-done) instruction is
+   ever reached in the FMOD block, vs whether the routine bails to `cset w0,ne` without it. If not reached,
+   the nested-inline of the second call is the bug (e.g. bad return-stub linking for the inner mutex call).
+
+4. **Confirmed irrelevant to THIS crash:** `.rela.dyn` is `ANDROID_RELA` (present, sections [10]) but the
+   loader/`bind_image_plt` does not apply it; `__stack_chk_guard` is patched. `.init_array` empty. No ifunc.
+   Host `dlsym(RTLD_DEFAULT)` provides `__cxa_atexit`/`__cxa_finalize` but NOT `__cxa_guard_acquire/
+   release/abort` (all null) — so a "shim the cxa_guard by resolve" approach can't source them from host libc;
+   they'd have to be guest-emulated (inline guard) or written manually.
+
+**Recommended next step:** trace (JIT_DUMP/JIT_TRACE) whether the `0x2678068` once-body sets its done flag on the
+FMOD guard, root-causing the nested guest-`bl`-in-inter-inlined-block return regt; if confirmed, divert guest
+`bl` to the once-routine (and generally guest `bl` whose callee contains diverted imports) through the
+dispatcher instead of inlining — i.e. treat a `bl` whose translatable body itself has out-of-block PLT mutex
+calls like `is_host_plt_stub`: push it to the stub table + `force_stubs`, not the inlined frontier.
