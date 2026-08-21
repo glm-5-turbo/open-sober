@@ -161,6 +161,8 @@ pub enum Inst {
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
     Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
+    // ---- SIMD st2 (structure store of two vectors) ----
+    St2 { rd: u8, rn: u8, q: bool, post: i32 },
     // ---- scalar udiv/sdiv Wd/Wd/Wm ----
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
@@ -1186,6 +1188,19 @@ pub fn decode(insn: u32) -> Inst {
             rn: ((insn >> 5) & 0x1f) as u8,
             q,
             post: if (insn >> 23) & 1 == 1 { 32 } else { 0 },
+        };
+    }
+
+    // ---- SIMD st2: store two vectors (Vt, Vt2) consecutively to [Xn] ----
+    // Prefix 0x0c00 (Q=0) / 0x4c00 (Q=1) -- disjoint from ld2 (0x0c40/0x4c40, bit20).
+    if (insn & 0xffc0_0000) == 0x0c00_0000 || (insn & 0xffc0_0000) == 0x4c00_0000 {
+        let q = (insn & 0x4000_0000) != 0;
+        let bytes = if q { 16 } else { 8 } as i32;
+        return Inst::St2 {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            q,
+            post: if (insn >> 23) & 1 == 1 { bytes * 2 } else { 0 },
         };
     }
 

@@ -2154,6 +2154,24 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::St2 { rd, rn, q, post } => {
+                    // st2 {Vt, Vt1}, [Xn]: store Vt then Vt1 consecutively at base.
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let bytes = if q { 16 } else { 8 } as i32;
+                    ldg(buf, RDX, rn as u32); // RDX = base (host ptr)
+                    for i in 0..bytes {
+                        buf.movzx_byte_mem(RAX, RBX, vslot(rd) + i);   // Vt[i]   -> mem[i]
+                        buf.mov_store8(RDX, i, RAX);
+                        buf.movzx_byte_mem(RAX, RBX, vslot(rd + 1) + i); // Vt1[i] -> mem[bytes+i]
+                        buf.mov_store8(RDX, bytes + i, RAX);
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
                 Inst::SimdShl { rd, rn, esize, shift } => {
                     // shl Vd.T, Vn.T, #imm : left-shift each lane by shift.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
