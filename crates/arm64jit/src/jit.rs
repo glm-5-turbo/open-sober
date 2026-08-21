@@ -932,4 +932,18 @@ mod tests {
         exec_bytes(&mut st3, &code3, 0).expect("exec sbc");
         assert_eq!(st3.x[12], 60, "sbc w C=1: 100 - 40 - 0 = 60");
     }
+
+    #[test]
+    fn fmaxv_reduce_reference() {
+        // fmaxv s1, v0.4s = 0x6e30f801 : max of the 4 single lanes of V0 -> S1.
+        let mut st = CpuState::new();
+        // lanes: [1.0, 5.5, -2.25, 3.0]; max = 5.5 (0x40b0_0000).
+        st.v[0] = 0x40b0_0000_3f80_0000u64; // lanes 0,1
+        st.v[1] = 0x4040_0000_c010_0000u64; // lanes 2,3
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x6e30_f801u32.to_le_bytes());
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fmaxv");
+        assert_eq!((st.v[2] & 0xffff_ffff) as u32, 0x40b0_0000, "fmaxv -> 5.5");
+    }
 }

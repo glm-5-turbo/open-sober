@@ -1265,11 +1265,28 @@ pub fn translate(
                                 buf.movd_xmm_r32(1, RAX);
                                 if is_max { buf.maxss(0, 1); } else { buf.minss(0, 1); }
                                                                 buf.movd_r32_xmm(RAX, 0);
-                                                                buf.mov_store32(RBX, vslot(rd), RAX);
-                                                            }
-                                                            Ok(())
-                                                        }
-                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
+                                                                                                                        buf.mov_store32(RBX, vslot(rd), RAX);
+                                                                                                                    }
+                                                                                                                    Ok(())
+                                                                                                                }
+                                                                                                    Inst::FMaxV { rd, rn, min } => {
+                                                                                                        // fmaxv/fminv Sd, Vn.4s: reduce the 4
+                                                                                                        // single-precision lanes of Vn to a max/
+                                                                                                        // min into scalar Sd (low 32-bit of V[rd]).
+                                                                                                        let base = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                                                                                        buf.mov_load32(RAX, RBX, base);
+                                                                                                        buf.movd_xmm_r32(0, RAX);
+                                                                                                        for i in 1..4 {
+                                                                                                            buf.mov_load32(RAX, RBX, base + 4 * i);
+                                                                                                            buf.movd_xmm_r32(1, RAX);
+                                                                                                            if min { buf.minss(0, 1); } else { buf.maxss(0, 1); }
+                                                                                                        }
+                                                                                                        buf.movd_r32_xmm(RAX, 0);
+                                                                                                        let dbase = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                                                                                        buf.mov_store32(RBX, dbase, RAX);
+                                                                                                        Ok(())
+                                                                                                    }
+                                                                                                        Inst::ScvtfFixed { rd, rn, to_double, sf, unsigned, fbits } => {
                                             // ucvtf/scvtf Dd,Rn,#fbits: convert int to float, then /2^fbits.
                                             let vslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                             ldg(buf, RAX, rn as u32);

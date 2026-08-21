@@ -593,14 +593,16 @@ impl CodeBuf {
         self.b(0x66);
         self.b(0x0F);
         self.b(0x7E);
-        self.b(modrm(3, rd & 7, xmm & 7));
+        // movd r/m32, xmm: 66 0F 7E /r with reg-field=xmm(src), rm-field=GPR(dst).
+        self.b(modrm(3, xmm & 7, rd & 7));
     }
     /// movd xmm, r32 (66 0F 6E /r) — copy low 32 bits of a GPR to xmm
     pub fn movd_xmm_r32(&mut self, xmm: u8, rs: u8) {
         self.b(0x66);
         self.b(0x0F);
         self.b(0x6E);
-        self.b(modrm(3, rs & 7, xmm & 7));
+        // movd xmm, r/m32: 66 0F 6E /r with reg.field=xmm(dst), rm-field=GPR(src).
+        self.b(modrm(3, xmm & 7, rs & 7));
     }
 
     /// lea r64, [base + disp]

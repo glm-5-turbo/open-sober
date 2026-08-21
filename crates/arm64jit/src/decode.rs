@@ -167,6 +167,8 @@ pub enum Inst {
     SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool },
     // ---- scalar FP max/min (fmax/fmin/fmaxnm/fminnm) ----
     FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
+    // ---- FP horizontal reduction cross vector: fmaxv/fminv Sd, Vn.4s ----
+    FMaxV { rd: u8, rn: u8, min: bool },
     // ---- scalar fixpoint int->FP (ucvtf/scvtf Dd/Xn,#fbits or Sd/Wn,#fbits) ----
     ScvtfFixed { rd: u8, rn: u8, to_double: bool, sf: bool, unsigned: bool, fbits: u8 },
     // ---- SIMD element copy (vector, 64-bit lane): mov Vd.d[i], Vn.d[j] ----
@@ -1562,6 +1564,18 @@ pub fn decode(insn: u32) -> Inst {
                     };
                 }
             }
+
+                // ---- FP horizontal reduction: fmaxv/fminv Sd, Vn.4s ----
+                // Cross-lane max/min of all 4 single-precision lanes of Vn into
+                // scalar Sd. Residue (insn&0x3f20_0c00)==0x2e20_0800, disjoint
+                // from the 3-operand scalar FMaxMin (residue 0x1e20_0800). Bit23
+                // selects min (fminv) vs max (fmaxv).
+                if (insn & 0x3f20_0c00) == 0x2e20_0800 && (insn & 0x0010_0000) != 0 {
+                    let rd = (insn & 0x1f) as u8;
+                    let rn = ((insn >> 5) & 0x1f) as u8;
+                    let min = (insn & 0x0080_0000) != 0;
+                    return Inst::FMaxV { rd, rn, min };
+                }
 
                 // ---- FMOV scalar immediate (fmov Dd, #imm) / (fmov Sd, #imm) ----
                 // Double imm family `0x1e_XX_1...` (imm8 in bits 13:20, `0x1000`
