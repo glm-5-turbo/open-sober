@@ -265,6 +265,26 @@ impl CodeBuf {
         self.b(modrm(3, dst & 7, src & 7));
     }
 
+    /// Set xmm register to all-ones (128 bits): pxor x,x + pcmpeqd x,x (66 0F 76 /r).
+    pub fn movdqu_ones(&mut self, xmm: u8) {
+        // pxor xmm, xmm
+        self.b(0x66);
+        if xmm >= 8 {
+            self.b(rex(false, xmm, 0, xmm));
+        }
+        self.b(0x0F);
+        self.b(0xEF);
+        self.b(modrm(3, xmm & 7, xmm & 7));
+        // pcmpeqd xmm, xmm
+        self.b(0x66);
+        if xmm >= 8 {
+            self.b(rex(false, xmm, 0, xmm));
+        }
+        self.b(0x0F);
+        self.b(0x76);
+        self.b(modrm(3, xmm & 7, xmm & 7));
+    }
+
     /// pand xmm, xmm : 128-bit bitwise AND (66 0F DB /r). ModRM: reg=DST, rm=SRC
     pub fn pand(&mut self, dst: u8, src: u8) {
         self.b(0x66);

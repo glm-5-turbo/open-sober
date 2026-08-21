@@ -157,6 +157,8 @@ pub enum Inst {
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
+    // ---- SIMD bitwise NOT (two-input mvn alias, single-source): mvn Vd.16B/8B, Vn ----
+    SimdNot { rd: u8, rn: u8 },
     // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
     // ---- SIMD shift-right accumulate: usra/ssra Vd.T, Vn.T, #imm (Vd += Vn >> imm) ----
@@ -1121,6 +1123,14 @@ pub fn decode(insn: u32) -> Inst {
             rn: ((insn >> 5) & 0x1f) as u8,
             rm: ((insn >> 16) & 0x1f) as u8,
             op: 0,
+        };
+    }
+
+    // ---- SIMD bitwise NOT: mvn Vd.16B/8B, Vn (0x6e205800 / 0x2e205800) ----
+    if (insn & 0xffe0_fc00) == 0x6e20_5800 || (insn & 0xffe0_fc00) == 0x2e20_5800 {
+        return Inst::SimdNot {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
         };
     }
 

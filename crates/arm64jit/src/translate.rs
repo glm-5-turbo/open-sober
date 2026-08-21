@@ -2385,6 +2385,16 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())
                 }
+                Inst::SimdNot { rd, rn } => {
+                    // mvn Vd.16B/8B, Vn: bitwise NOT of the full 16-byte slot.
+                    // RAX = Vn; RCX = all-ones; RAX = RAX ^ RCX.
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    buf.movdqu_load(RAX, RBX, vslot(rn));
+                    buf.movdqu_ones(RCX);
+                    buf.pxor_xmm(RAX, RCX);
+                    buf.movdqu_store(RBX, vslot(rd), RAX);
+                    Ok(())
+                }
                 Inst::SimdSel { rd, rn, rm, op } => {
                     // bsl/bit/bif bitwise select between three 128-bit vectors.
                     // BSL: Vd = (Vn & Vd) | (~Vd & Vm).  (op stored as op).
