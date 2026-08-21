@@ -218,8 +218,16 @@ pub type HostCall = extern "C" fn(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a
 /// v0-v7 low lanes and calling this recovers correct float results.
 pub type HostFloatCall = extern "C" fn(f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64) -> f64;
 
+/// A host **single-precision** float-ABI function (x86-64 SysV passes f32 in
+/// XMM0-7; a Rust `extern "C" fn(f32,...,f32)->f32` uses exactly that). The
+/// guest (Roblox `*f` imports: atan2f/asinf/sinf/...) stores an f32 in the low
+/// 32 bits of v0-v7, so the bridge widens those lanes, calls, then narrows the
+/// f32 result back into v0's low lane.
+pub type HostFloat32Call = extern "C" fn(f0: f32, f1: f32, f2: f32, f3: f32, f4: f32, f5: f32, f6: f32, f7: f32) -> f32;
+
 static HOST_CALLS: Mutex<[Option<HostCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_FLOAT_CALLS: Mutex<[Option<HostFloatCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
+static HOST_FLOAT32_CALLS: Mutex<[Option<HostFloat32Call>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 
 /// Register `f` as the host call for guest slot `i`. Returns the guest address
 /// the caller should resolve a JUMP_SLOT/intra-image `blr` target to so that the
@@ -281,6 +289,40 @@ fn host_float_call_at(pc: u64) -> Option<(HostFloatCall, usize)> {
     }
     let i = (off / 8) as usize;
     let hc = HOST_FLOAT_CALLS.lock().unwrap();
+    hc.get(i).copied().flatten().map(|f| (f, i))
+}
+
+/// Guest base address of the **single-precision** float thunk region (after the
+/// f64 float slots).
+#[inline(always)]
+pub fn host_float32_base() -> u64 {
+    host_float_base() + (HOST_THUNK_MAX as u64) * 8
+}
+
+/// Register a single-precision float host fn at an auto-allocated slot; returns
+/// its guest address.
+pub fn register_float32_call(f: HostFloat32Call) -> u64 {
+    let mut hc = HOST_FLOAT32_CALLS.lock().unwrap();
+    let i = hc
+        .iter()
+        .position(|s| s.is_none())
+        .expect("float32 thunk table full");
+    hc[i] = Some(f);
+    host_float32_base() + (i as u64) * 8
+}
+
+/// Look up a single-precision float host fn for a guest `pc` in the f32 region.
+fn host_float32_call_at(pc: u64) -> Option<(HostFloat32Call, usize)> {
+    let base = host_float32_base();
+    if pc < base {
+        return None;
+    }
+    let off = pc - base;
+    if off % 8 != 0 {
+        return None;
+    }
+    let i = (off / 8) as usize;
+    let hc = HOST_FLOAT32_CALLS.lock().unwrap();
     hc.get(i).copied().flatten().map(|f| (f, i))
 }
 
@@ -559,6 +601,27 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             let ret = hostf(a0, a1, a2, a3, a4, a5, a6, a7);
             let s = unsafe { &mut *state };
             s.v[0] = ret.to_bits(); // d0 = float return
+            s.pc = s.x[30];
+            continue;
+        }
+        // Single-precision float bridge: guest `*f` calls (atan2f/asinf/...)
+        // pass f32 in the low 32 bits of s0-s7 (v0-v7 low lanes). Widen to f32,
+        // call the host f32 fn via xmm0..xmm7, narrow the f32 result into s0.
+        if let Some((hostf, _slot)) = host_float32_call_at(pc) {
+            let s = unsafe { &mut *state };
+            let v = &s.v;
+            let l32 = |x: u64| f32::from_bits(x as u32);
+            let a0 = l32(v[0]);
+            let a1 = l32(v[2]);
+            let a2 = l32(v[4]);
+            let a3 = l32(v[6]);
+            let a4 = l32(v[8]);
+            let a5 = l32(v[10]);
+            let a6 = l32(v[12]);
+            let a7 = l32(v[14]);
+            let ret = hostf(a0, a1, a2, a3, a4, a5, a6, a7);
+            let s = unsafe { &mut *state };
+            s.v[0] = (s.v[0] & !0xffff_ffff) | ret.to_bits() as u64; // s0 = f32 return
             s.pc = s.x[30];
             continue;
         }
@@ -1346,9 +1409,43 @@ mod tests {
         st.x[16] = fslot;
         let _ = jit_run(&img, 0x2000, 0x2000, &mut st as *mut CpuState).expect("jit_run");
         let got = f64::from_bits(st.v[0]);
-        assert!(
-            (got - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
-            "float bridge atan2(1,0) = {got} != pi/2"
-        );
-    }
-}
+                assert!(
+                    (got - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+                    "float bridge atan2(1,0) = {got} != pi/2"
+                );
+            }
+
+            #[test]
+            fn host_float32_call_bridge_atan2f_via_blr() {
+                // Single-precision float bridge: guest `blr` to an f32 thunk reads the
+                // low 32 bits of s0/s1 (v0/v1), widens to f32, calls the host f32 fn,
+                // narrows the f32 result into s0.
+                extern "C" fn host_atan2f(
+                    y: f32,
+                    x: f32,
+                    _a: f32,
+                    _b: f32,
+                    _c: f32,
+                    _d: f32,
+                    _e: f32,
+                    _f: f32,
+                ) -> f32 {
+                    y.atan2(x)
+                }
+                let fslot = register_float32_call(host_atan2f);
+                let mut img: Vec<u8> = Vec::new();
+                img.extend_from_slice(&0xd2800000u32.to_le_bytes()); // movz w0,#0 (placeholder)
+                img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+                img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0 -> halt
+                let mut st = CpuState::new();
+                st.v[0] = 1.0f32.to_bits() as u64; // s0 = y (low 32)
+                st.v[2] = 0.0f32.to_bits() as u64; // s1 = x (low 32) -> atan2f(1,0)=pi/2
+                st.x[16] = fslot;
+                let _ = jit_run(&img, 0x2000, 0x2000, &mut st as *mut CpuState).expect("jit_run");
+                let got = f32::from_bits((st.v[0] & 0xffff_ffff) as u32);
+                assert!(
+                    (got - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+                    "f32 bridge atan2f(1,0) = {got} != pi/2"
+                );
+            }
+        }

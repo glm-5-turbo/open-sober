@@ -137,11 +137,12 @@ fn main() {
                 resolved += 1;
             }
             None => {
-                // Try the double-precision float ABI (f64 via v0-v7/xmm0-xmm7).
-                let double_float = arm64jit::resolver::DOUBLE_FLOAT_NAMES
+                // Try float-ABI resolution. Double-precision names use v0-v7 as
+                // f64; single-precision `*f` names use the low 32 bits of s0-s7.
+                if arm64jit::resolver::DOUBLE_FLOAT_NAMES
                     .iter()
-                    .any(|f| f.as_bytes() == name.as_bytes());
-                if double_float {
+                    .any(|f| f.as_bytes() == name.as_bytes())
+                {
                     if let Some(fthunk) = arm64jit::resolver::resolve_float(name.as_bytes()) {
                         let got_host = host(el.guest_of(r_offset));
                         unsafe { wr64(got_host, fthunk) };
@@ -149,6 +150,19 @@ fn main() {
                         resolved += 1;
                     } else {
                         rows.push(format!("  {name:<42} (f64 host missing)"));
+                        needs_shim += 1;
+                    }
+                } else if arm64jit::resolver::FLOAT32_NAMES
+                    .iter()
+                    .any(|f| f.as_bytes() == name.as_bytes())
+                {
+                    if let Some(fthunk) = arm64jit::resolver::resolve_float32(name.as_bytes()) {
+                        let got_host = host(el.guest_of(r_offset));
+                        unsafe { wr64(got_host, fthunk) };
+                        rows.push(format!("{name:<42} -> host-f32 (GOT patched)"));
+                        resolved += 1;
+                    } else {
+                        rows.push(format!("  {name:<42} (f32 host missing)"));
                         needs_shim += 1;
                     }
                 } else {

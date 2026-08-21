@@ -13,7 +13,7 @@
 //! args/results (sinf/powf/...) use XMM registers and need a separate
 //! float-ABI path, added later.
 
-use crate::jit::{host_call_addr, register_host_call, register_float_call, HostCall, HostFloatCall};
+use crate::jit::{host_call_addr, register_float_call, register_host_call, HostCall, HostFloat32Call, HostFloatCall};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Mutex, OnceLock};
@@ -103,6 +103,27 @@ pub const DOUBLE_FLOAT_NAMES: &[&str] = &[
     "pow", "sqrt", "floor", "ceil", "fabs", "fmod", "hypot", "copysign", "trunc", "round",
     "exp2", "log1p", "expm1", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
 ];
+
+/// Single-precision float-ABI libm names (guest stores f32 in low 32 bits of
+/// s0-s7); these match our f32 float bridge.
+pub const FLOAT32_NAMES: &[&str] = &[
+    "atan2f", "atanf", "asinf", "acosf", "sinf", "cosf", "tanf", "expf", "logf", "log10f",
+    "log2f", "powf", "sqrtf", "floorf", "ceilf", "fabsf", "fmodf", "hypotf", "copysignf",
+    "truncf", "roundf", "exp2f", "log1pf", "expm1f", "sinhf", "coshf", "tanhf", "asinhf",
+    "acoshf", "atanhf",
+];
+
+/// Resolve a **single-precision** float-ABI import to an f32 thunk guest addr.
+pub fn resolve_float32(name: &[u8]) -> Option<u64> {
+    let key = CString::new(name).ok()?;
+    let sym = key.as_ptr();
+    let ptr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym) };
+    if ptr.is_null() {
+        return None;
+    }
+    let hostf: HostFloat32Call = unsafe { std::mem::transmute(ptr) };
+    Some(crate::jit::register_float32_call(hostf))
+}
 
 /// Regist directly known common imports: name -> host function. Returns a map
 /// of import name -> thunk guest address for the ones the host provides.
