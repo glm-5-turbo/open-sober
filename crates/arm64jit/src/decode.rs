@@ -237,6 +237,18 @@ pub enum Inst {
         ld: bool,
         pre: bool, // pre-index (advance then access) vs post-index
     },
+    // ---- FP/SIMD scalar-register load/store with a REGISTER offset ----
+    // (ldr/str b/h/s/d0,[xN,xM{,lsl#sh}]). bit26=1 (vector file). Same family as
+    // VecLdStrReg (Q) but scalar width from bits[31:30] (1/2/4/8 B/H/S/D);
+    // MIGHT the pre-fix GPR mis-decode (register-offset gate had no bit26 mask).
+    FpLdStrReg {
+        vt: u8,
+        rn: u8,
+        rm: u8,
+        size: u8, // 1/2/4/8
+        ld: bool,
+        shift: bool, // S bit: scale index by log2(size)
+    },
     // ---- FP/SIMD scalar-register load/store (ldr/str d0,s0,h0,b0,[xN,#imm]) ----
     // bit26=1 selects the vector/FP register file; width = size (1/2/4/8 bytes:
     // B/H/S/D). Unlike a GPR store there is no XZR quirk — all 32 vector regs
@@ -1977,6 +1989,31 @@ pub fn decode(insn: u32) -> Inst {
                 ld: (insn >> 22) & 1 == 1,
             };
         }
+    }
+
+    // ---- FP/SIMD SCALAR (B/H/S/D) register-offset load/store ---- bit26=1 +
+    // register-offset form (0x38200800 residue); Q 128-bit is handled above
+    // (bit23 set) so this catches the scalar widths via bits[31:30]. `S` (bit12)
+    // scales the index by log2(size). Mirrors GPR LdStrReg address math but
+    // reads/writes the vector slot v[vt] instead of a GPR rt.
+    if (insn & 0x0400_0000) != 0
+        && (insn & 0x3b20_0c00) == 0x3820_0800
+        && (insn & 0x0080_0000) == 0
+    {
+        let size = match (insn >> 30) & 0x3 {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        return Inst::FpLdStrReg {
+            vt: (insn & 0x1f) as u8,
+            rn: b(insn, 5, 9) as u8,
+            rm: b(insn, 16, 20) as u8,
+            size,
+            ld: (insn >> 22) & 1 == 1,
+            shift: (insn >> 12) & 1 == 1,
+        };
     }
 
     // ---- SIMD/NEON 128-bit PRE/POST-index writeback load/store (ldr/str q) ----

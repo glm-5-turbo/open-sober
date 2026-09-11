@@ -3979,6 +3979,64 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             stg(buf, rn as u32, RCX);
             Ok(())
         }
+        Inst::FpLdStrReg { vt, rn, rm, size, ld, shift } => {
+            // addr = x[rn] + (x[rm] << log2(size)) in RDX ; transfer `size`
+            // bytes between [addr] and the low bytes of guest vector slot v[vt].
+            // Scalar register-offset (B/H/S/D); bit26=1 vector file.
+            let shift_amt = if shift {
+                match size {
+                    1 => 0,
+                    2 => 1,
+                    4 => 2,
+                    _ => 3,
+                }
+            } else {
+                0
+            };
+            ldg(buf, RDX, rn as u32); // base address
+            ldg(buf, RAX, rm as u32); // index
+            for _ in 0..shift_amt {
+                buf.add_rr64(RAX, RAX);
+            }
+            buf.add_rr64(RDX, RAX); // RDX = addr
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            match (size, ld) {
+                (1, true) => {
+                    buf.movzx_byte_mem(RAX, RDX, 0);
+                    buf.mov_store8(RBX, vslot, RAX);
+                }
+                (1, false) => {
+                    buf.movzx_byte_mem(RAX, RBX, vslot);
+                    buf.mov_store8(RDX, 0, RAX);
+                }
+                (2, true) => {
+                    buf.movzx_word_mem(RAX, RDX, 0);
+                    buf.mov_store16(RBX, vslot, RAX);
+                }
+                (2, false) => {
+                    buf.movzx_word_mem(RAX, RBX, vslot);
+                    buf.mov_store16(RDX, 0, RAX);
+                }
+                (4, true) => {
+                    buf.mov_load32(RAX, RDX, 0);
+                    buf.mov_store32(RBX, vslot, RAX);
+                }
+                (4, false) => {
+                    buf.mov_load32(RAX, RBX, vslot);
+                    buf.mov_store32(RDX, 0, RAX);
+                }
+                (8, true) => {
+                    buf.mov_load64(RAX, RDX, 0);
+                    buf.mov_store64(RBX, vslot, RAX);
+                }
+                (8, false) => {
+                    buf.mov_load64(RAX, RBX, vslot);
+                    buf.mov_store64(RDX, 0, RAX);
+                }
+                (s, _) => return Err(format!("FpLdStrReg size {} not implemented", s)),
+            }
+            Ok(())
+        }
         Inst::FpLdStImm { vt, rn, imm, size, ld } => {
             // Transfer `size` bytes (B/H/S/D) between the low bytes of the guest
             // vector slot v[vt] and [rn + imm*size]. Upper lanes of the 16-byte

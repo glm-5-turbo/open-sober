@@ -2953,6 +2953,29 @@ mod tests {
         }
 
         #[test]
+        fn fpl_single_reg_offset_store_with_shift() {
+            // str s0,[x0,x3,lsl#2] = 0xbc237800: stores v0's low 32 bits at
+            // [x0 + x3*4] without touching x0/x3. Pre-fix this family (bit26=1
+            // scalar reg-offset) fell into the GPR register-offset gate and was
+            // executed as a GPR op against the wrong register file.
+            let code = [
+                0x00, 0x78, 0x23, 0xbc, // str s0, [x0, x3, lsl #2]
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut mem = [0u8; 64];
+            let base = mem.as_ptr() as u64;
+            let mut st = CpuState::new();
+            st.x[0] = base;
+            st.x[3] = 0x3; // index; shifted by lsl#2 -> +12 bytes
+            st.v[0] = 0x123456789abcdef0; // low 32 = 0x9abcdef0
+            let r = exec_bytes(&mut st, &code, 0).expect("exec");
+            assert_eq!(r, base, "x0 preserved");
+            assert_eq!(st.x[3], 0x3, "x3 preserved");
+            let val = u32::from_le_bytes(mem[12..16].try_into().unwrap());
+            assert_eq!(val, 0x9abcdef0, "v0 low s-lane stored at [x0 + x3*4]");
+        }
+
+        #[test]
         fn vec128_ldst_decode_not_gpr_and_scalar_b_untouched() {
             use crate::decode::{decode, Inst};
             // 128-bit vector register-offset / unscaled / indexed forms route to
