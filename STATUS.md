@@ -326,3 +326,23 @@ pp=1 yet 64-bit. +3 tests. libbadcpu 12->15.
   tree clean.
 - HARD GATE unchanged (real Roblox boot + run log on GPU/APK host).
 ---
+cycle: 9
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T03:59:38Z
+---
+
+## Session (Sep 11, 2026) — loader→JIT e2e regression test + libbadcpu LZCNT fix (169/0)
+
+Commits `7f54fbd` (arm64jit `crates/arm64jit/tests/loader_run.rs`, the bdd8b03
+"confirm no regression" loader deliverable): cross-compiles -nostdlib aarch64
+programs and runs load_elf_image→bind_image_plt→jit_run end-to-end
+(add=42/loop=45/fp=10/fib=13); serializes the 4 parallel test threads because
+load_elf_image MAP_FIXEDs the shared 0x400000 non-PIE base (parallel threads
+clobber each other's image → stub_of_target panic). Skips when cross-gcc absent.
+`6d6ef08` (libbadcpu): fixed 16-bit LZCNT off-by-16 wrong-result (u16 count is
+already 16-bit; TZCNT had no offset) + lzcnt_16bit regtest.
+
+Gate: build clean; tests **169/0** (arm64jit 120+4, libbadcpu 16, libloader 16,
++1+1+11). HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` on a
+GPU + real-binary host.

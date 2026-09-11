@@ -126,13 +126,18 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
                 } else {
                     // BEXTR dest, src1(rm), control(vvvv): extract the bit
                     // field [start, start+len) of src1. start=control[7:0],
-                    // len=control[15:8]. len>=operand-size yields src1.
+                    // len=control[15:8]. len>=operand-size yields src1. A
+                    // start at/behind the operand size yields 0 (guarded so a
+                    // Rust `>>` never shifts by >= bits, which panics — and a
+                    // panic inside the SIGILL handler abort the process).
                     let control = get_reg(ctx, inst.vex_vvvv);
                     let start = (control & 0xff) as u32;
                     let len = ((control >> 8) & 0xff) as u32;
                     if wide {
                         if len >= 64 {
                             src2
+                        } else if start >= 64 {
+                            0
                         } else {
                             (src2 >> start) & ((1u64 << len) - 1)
                         }
@@ -140,6 +145,8 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
                         let s = src2 as u32;
                         (if len >= 32 {
                             s
+                        } else if start >= 32 {
+                            0
                         } else {
                             (s >> start) & ((1u32 << len) - 1)
                         }) as u64
@@ -617,6 +624,15 @@ mod tests {
             );
             // len=0 -> result 0 and ZF set (result 0).
             assert_eq!(run_one(&[0xC4, 0xE2, 0x70, 0xF7, 0xC2], 0x0, 0xF0F0_F0F0), 0);
+            // start >= operand size (start=64/len=4: ecx=0x440) -> DEST = 0 per x86
+            // shift-count masking; the unguarded `src2 >> start` would panic in
+            // a Rust build (worse than a wrong result inside the SIGILL handler).
+            assert_eq!(
+                run_one(&[0xC4, 0xE2, 0xF0, 0xF7, 0xC2], 0x440, 0xF0F0_F0F0_F0F0_F0F0),
+                0
+            );
+            // 32-bit: start=32/len=2 (ecx=0x220) -> 0, no shift panic.
+            assert_eq!(run_one(&[0xC4, 0xE2, 0x70, 0xF7, 0xC2], 0x220, 0xF0F0_F0F0), 0);
         }
 
         #[test]

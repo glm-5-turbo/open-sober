@@ -3243,3 +3243,46 @@ added the rest. All encodings verified vs host gcc+objdump:
   120, libbadcpu 15, libloader 16, +1+1+11). Tree clean on local `dev`.
 - HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
   GPU + real-binary host.
+
+---
+
+## Session (Sep 11, 2026) — loader→JIT end-to-end regression test + libbadcpu 16-bit LZCNT fix (169/0)
+
+Two commits on `dev` (HEAD `6d6ef08`). Workspace was 164/0 green at start
+(`test_setup_android_layout_idempotent` is already fixed in 8b72828 — passes;
+the FMOD divert 10ddb7a and JNI-table bdd8b03 tasks are also already landed).
+So this session executed the ordered "libloader ELF/loader gaps" + "libbadcpu
+ISA gaps" steps.
+
+### 1. `7f54fbd` — arm64jit: loader→JIT end-to-end regression test
+`crates/arm64jit/tests/loader_run.rs` cross-compiles real `-nostdlib` aarch64
+programs (via `aarch64-linux-gnu-gcc`) and runs `entry()` through the exact
+pipeline elfjit / `sober-core --jit` use: `load_elf_image` → `bind_image_plt`
+→ guest stack/TLS/auxv bootstrap → `jit_run`. Results: add=42, loop sum(0..9)=
+45, fp `(int)(2.5*4.0)`=10, fib(7)=13. Locks the loader path against
+regressions from the divert + JNI-table changes (the bdd8b03 "confirm no
+regression" deliverable), since the real-binary HARD GATE can't be exercised
+here. Skips cleanly when cross-gcc is absent.
+- **Found en route:** `[test]` threads run in parallel in one process, and
+  `load_elf_image` MAP_FIXEDs the same non-PIE JIT base 0x400000 — 4 threads
+  clobber each other's guest image → a `bl` target missing from the compiled
+  block's stub table panics `stub_of_target[...]` (jit.rs:1164). Real open-
+  sober loads ONE guest ELF for process lifetime, so this is purely a test-
+  harness serialization concern: `run_lock()` serializes load+bind+run.
+
+### 2. `6d6ef08` — libbadcpu: 16-bit LZCNT wrong-result bug
+emulator.rs LZCNT 16-bit arm was `(src as u16).leading_zeros() as u64 - 16`.
+`u16::leading_zeros` already returns the 0..16 count, so `-16` made every
+nonzero 16-bit LZCNT return negative (wrapped huge i64 in the dest reg).
+TZCNT's sibling arm has no such offset; the 32/64-bit arms don't either — only
+LZCNT had it. Dropped the offset; +`lzcnt_16bit_matches_real_count`
+(cx,ax=2 -> 14; cx,ax=0x8000 -> 0). Silent wrong-result class in the SIGILL
+emulator.
+
+### Gate
+- `cargo build --workspace` clean (0 errors; warnings are the pre-existing
+  decode.rs rustfmt churn — rustfmt not installed on this box).
+- `cargo test --workspace` **169/0** (arm64jit 120 + 4 loader_run + libbadcpu
+  16 + libloader 16 + 1 + 1 + 11).
+- HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
+  GPU + real-binary host (no APK/libroblox.so/GPU on this VPS).
