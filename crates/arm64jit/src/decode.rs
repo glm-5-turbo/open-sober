@@ -596,6 +596,11 @@ pub enum Inst {
     SimdCmgt { rd: u8, rn: u8, rm: u8, lanes: u8, dword: bool },
     // ---- SIMD unzip even: uzp1 Vd.T, Vn.T, Vm.T ----
     SimdUz1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
+    // ---- SIMD unzip odd: uzp2 Vd.T, Vn.T, Vm.T (gcc magic-division gather) ----
+    SimdUz2 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
+    // ---- SIMD 32-bit lane multiply-accumulate/subtract: mla/mls Vd.4S/2S ----
+    // mla: Vd = Vd + Vn*Vm ; mls: Vd = Vd - Vn*Vm (per 32-bit lane).
+    SimdMla { rd: u8, rn: u8, rm: u8, lanes: u8, sub: bool },
     // ---- SIMD zip even: zip1 Vd.T, Vn.T, Vm.T ----
     SimdZip1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD element extract to GPR: umov/smov Rd, Vn.bits[idx] ----
@@ -1800,7 +1805,10 @@ pub fn decode(insn: u32) -> Inst {
     // ---- SIMD byte reverse in 64-bit element: rev64 Vd.T, Vn.T ----
     // Gate (insn & 0x3f00_f800)==0x0e00_0800 (REV64-family residue; q=bit30;
     // arrangement via size bits). Byte-reverse each 64-bit granule.
-    if insn & 0x3f00_0c00 == 0x0e00_0800 {
+    // MUST also require bits[13:12]==00: the raw `==0x0e00_0800` residue drops
+    // bit12, so the unzip ops (uzp1 byte1 0x18, uzp2 0x58) were misdecoded as
+    // rev64 (gcc's magic-division reducer uses uzp2 to gather product-high words).
+    if insn & 0x3f00_0c00 == 0x0e00_0800 && (insn & 0x1800) == 0 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 8, q: (insn >> 30) & 1 == 1 };
@@ -2850,6 +2858,27 @@ pub fn decode(insn: u32) -> Inst {
                                         return Inst::InsD1D0 { rd, rn };
                                     }
 
+                                    // ---- NEON int multiply-accumulate/subtract (32-bit lanes): mla/mls ----
+                                    // mla  Vd = Vd + Vn*Vm ; mls Vd = Vd - Vn*Vm (per 32-bit lane).
+                                    // Gates (insn & 0xffe0_fc00): 0x0ea0_9400 (mla .2s), 0x2ea0_9400
+                                    // (mls .2s), 0x4ea0_9400 (mla .4s), 0x6ea0_9400 (mls .4s). sub=bit29.
+                                    // (The old gate fed these into Simd4s op:1, i.e. a plain SUBTRACT
+                                    // with no multiply — gcc's magic-division reducer got the wrong
+                                    // remainder, e.g. m[0]=-101 for (0*7)%101.)
+                                    let mam = insn & 0xffe0_fc00;
+                                    if let Some((lanes, sub)) = match mam {
+                                        0x0ea0_9400 => Some((2, false)),
+                                        0x2ea0_9400 => Some((2, true)),
+                                        0x4ea0_9400 => Some((4, false)),
+                                        0x6ea0_9400 => Some((4, true)),
+                                        _ => None,
+                                    } {
+                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                        let rd = (insn & 0x1f) as u8;
+                                        return Inst::SimdMla { rd, rn, rm, lanes, sub };
+                                    }
+
                                     // ---- NEON int add/sub (4x32 lanes): add Vd.4s, Vn.4s, Vm.4s | sub Vd.4s,... ----
                                         // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01);
                                         // sub is the same class with bit29 set (0x2e20_0400 vs 0x0e20_0400).
@@ -3013,13 +3042,26 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                                                                                                     // opcode bits[13:8] = 0x18 (verified non-colliding vs uzp2/zip1/zip2/trn1/trn2).
                                                                                                                                                                                                     // esize = 1 << bits[23:22]; q = bit30. Vd[i] = Vn[2i], Vd[n+i] = Vm[2i].
                                                                                                                                                                                                     if matches!((insn & 0x3f00), 0x1800 | 0x1a00) {
-                                                                                                                                                                                                         let esize = (1 << ((insn >> 22) & 0x3)) as u8;
-                                                                                                                                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
-                                                                                                                                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
-                                                                                                                                                                                                         let q = (insn >> 30) & 1 == 1;
-                                                                                                                                                                                                         return Inst::SimdUz1 { rd, rn, rm, esize, q };
-                                                                                                                                                                                                                                                                                      }
+                                                                                                                                                                                                                                                                                                                             let esize = (1 << ((insn >> 22) & 0x3)) as u8;
+                                                                                                                                                                                                                                                                                                                             let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                             let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                             let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                             let q = (insn >> 30) & 1 == 1;
+                                                                                                                                                                                                                                                                                                                             return Inst::SimdUz1 { rd, rn, rm, esize, q };
+                                                                                                                                                                                                                                                                                                                         }
+                                                                                                                                                                                                                                                                                                                         // ---- SIMD unzip odd: uzp2 Vd.T, Vn.T, Vm.T ---- 
+                                                                                                                                                                                                                                                                                                                         // opcode bits[13:8] = 0x58 (uzp1 was 0x18). Vd[i]=Vn[2i+1], Vd[n/2+i]=Vm[2i+1]
+                                                                                                                                                                                                                                                                                                                         // (the odd/upper elements) — gcc's magic-division reducer uses uzp2 to
+                                                                                                                                                                                                                                                                                                                         // gather the HIGH 32-bit product words before the sshr quotient step.
+                                                                                                                                                                                                                                                                                                                         // Must not collide: rev64 now excludes bits[13:12]!=00.
+                                                                                                                                                                                                                                                                                                                                                                                                                                                  if ((insn >> 12) & 0xf) == 5 {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      let esize = (1 << ((insn >> 22) & 0x3)) as u8;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      let q = (insn >> 30) & 1 == 1;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      return Inst::SimdUz2 { rd, rn, rm, esize, q };
+                                                                                                                                                                                                                                                                                                                                                                                                                                                  }
                                                                                                                                                                                                                                                                                       // ---- SIMD zip1: zip1 Vd.T, Vn.T, Vm.T (mask 0x3f20_fc00 == 0x0e00_3800) ----
                                                                                                                                                                                                                                                                                                                                                                    // Exact base excludes `ext` (SimdExt shares 0x..3800 but differs in
                                                                                                                                                                                                                                                                                                                                                                    // higher permute bits). d[2k]=Vn[k], d[2k+1]=Vm[k] (lower halves).
@@ -4796,6 +4838,36 @@ mod logical_imm_regressions {
                 assert!(!sub);
             }
             other => panic!("fmla v29.4s,v21,v2.s[0] -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mls_and_uzp2_decode_as_specific_ops_not_sub_or_rev() {
+        // Regression: `mls` (multiply-subtract) used to decode as a plain
+        // Simd4s SUB (losing the multiply) and `uzp2` (unpack-high) used to
+        // decode as SimdRev (rev64). Both broke gcc's magic-division %101
+        // reducer. Pin them to the real ops here.
+        // mls v26.4s, v0.4s, v28.4s = 0x6ebc941a (from gcc %101 loop)
+        match decode(0x6ebc941a) {
+            Inst::SimdMla { rd, rn, rm, lanes, sub } => {
+                assert_eq!(rd, 26);
+                assert_eq!(rn, 0);
+                assert_eq!(rm, 28);
+                assert_eq!(lanes, 4);
+                assert!(sub, "mls must set sub=true");
+            }
+            other => panic!("mls v26.4s,v0.4s,v28.4s -> {other:?}"),
+        }
+        // uzp2 v0.4s, v25.4s, v0.4s = 0x4e805b20 (from gcc %101 loop)
+        match decode(0x4e805b20) {
+            Inst::SimdUz2 { rd, rn, rm, esize, q } => {
+                assert_eq!(rd, 0);
+                assert_eq!(rn, 25);
+                assert_eq!(rm, 0);
+                assert_eq!(esize, 4);
+                assert!(q);
+            }
+            other => panic!("uzp2 v0.4s,v25.4s,v0.4s -> {other:?}"),
         }
     }
 

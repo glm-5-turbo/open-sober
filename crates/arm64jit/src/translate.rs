@@ -2645,6 +2645,29 @@ pub fn translate(
                                                                                                                         }
                                                                                                                         Ok(())
                                                                                                                     }
+                                                                                                                    Inst::SimdMla { rd, rn, rm, lanes, sub } => {
+                                                                                        // mla/mls Vd.4S/2S, Vn., Vm.: Vd = Vd +/- Vn*Vm per 32-bit lane.
+                                                                                        // low-32 of the product, accumulate into the existing Vd lane.
+                                                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                        for i in 0..lanes {
+                                                                                            let off = (i as i32) * 4;
+                                                                                            buf.mov_load32(RAX, RBX, slot(rn) + off);
+                                                                                            buf.mov_load32(RCX, RBX, slot(rm) + off);
+                                                                                            buf.imul_rr64(RAX, RCX); // low 32 = (a*b) mod 2^32
+                                                                                            if sub {
+                                                                                                // Vd = Vd - Vn*Vm
+                                                                                                buf.mov_load32(RDX, RBX, slot(rd) + off);
+                                                                                                buf.sub_rr64(RDX, RAX);
+                                                                                                buf.mov_store32(RBX, slot(rd) + off, RDX);
+                                                                                            } else {
+                                                                                                // Vd = Vd + Vn*Vm
+                                                                                                buf.mov_load32(RDX, RBX, slot(rd) + off);
+                                                                                                buf.add_rr64(RDX, RAX);
+                                                                                                buf.mov_store32(RBX, slot(rd) + off, RDX);
+                                                                                            }
+                                                                                        }
+                                                                                        Ok(())
+                                                                                                                    }
                                                                                                                     Inst::SimdMull { rd, rn, rm, res_esize, unsigned, q, acc } => {
                                                                                                         // smull/umull/smlal/umlal: widen each src element to res_esize and
                                                                                                         // multiply (or add to the existing result if acc).
@@ -2763,6 +2786,31 @@ pub fn translate(
                                     4 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store32(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
                                     2 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store16(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
                                     _ => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store8(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
+                }
+            }
+            Ok(())
+}
+Inst::SimdUz2 { rd, rn, rm, esize, q } => {
+            // uzp2 Vd.T, Vn.T, Vm.T: ODD-indexed elements of Vn then Vm.
+            // Vd[i]=Vn[2i+1] for i in 0..n/2; Vd[n/2+i]=Vm[2i+1]. n = 8 or 16 bytes.
+            // (gcc magic-division reducer gathers product-HIGH words with this.)
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let n: i32 = if q { 16 } else { 8 };
+            let es = esize as i32;
+            for i in 0..(n / (2 * es)) {
+                let oi = (2 * i + 1) * es;
+                match esize {
+                    8 => { buf.mov_load64(RAX, RBX, slot(rn) + oi); buf.mov_store64(RBX, slot(rd) + i * es, RAX); }
+                    4 => { buf.mov_load32(RAX, RBX, slot(rn) + oi); buf.mov_store32(RBX, slot(rd) + i * es, RAX); }
+                    2 => { buf.mov_load32(RAX, RBX, slot(rn) + oi); buf.mov_store16(RBX, slot(rd) + i * es, RAX); }
+                    _ => { buf.mov_load32(RAX, RBX, slot(rn) + oi); buf.mov_store8(RBX, slot(rd) + i * es, RAX); }
+                }
+                let n2 = n / (2 * es);
+                match esize {
+                                    8 => { buf.mov_load64(RAX, RBX, slot(rm) + oi); buf.mov_store64(RBX, slot(rd) + (n2 + i) * es, RAX); },
+                                    4 => { buf.mov_load32(RAX, RBX, slot(rm) + oi); buf.mov_store32(RBX, slot(rd) + (n2 + i) * es, RAX); },
+                                    2 => { buf.mov_load32(RAX, RBX, slot(rm) + oi); buf.mov_store16(RBX, slot(rd) + (n2 + i) * es, RAX); },
+                                    _ => { buf.mov_load32(RAX, RBX, slot(rm) + oi); buf.mov_store8(RBX, slot(rd) + (n2 + i) * es, RAX); },
                 }
             }
             Ok(())

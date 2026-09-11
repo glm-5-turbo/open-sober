@@ -257,13 +257,12 @@ long long entry(void){
 }
 
 #[test]
-#[ignore = "open deterministic magic-division SIMD bug (see body comment)"]
-fn diff_magic_div_known_broken() {
+fn diff_magic_div() {
     // The gcc magic-division `%101` reducer (smull / smull2 / uzp2 / sshr /
-    // mls) is wrong: it yields m[0] = -101 (k*7=0 should be remainder 0), i.e.
-    // the quotient is off-by-one because of the rounding step. Deterministic
-    // (was intermittent only before the nop/scvtf fix). TODO: root-cause the
-    // rounding in the duzzer chain.
+    // mls). Root-caused & fixed: `mls` (multiply-subtract) was decoded as a
+    // plain Simd4s SUBTRACT (losing the multiply) and `uzp2` (unpack-high,
+    // gathers the product's high 32-bit words) was misdecoded as rev64. Both
+    // are now proper ops; the remainder rounds correctly (m[0]=0 for k=0).
     assert_diff(
         "magicdiv",
         "-O2",
@@ -278,7 +277,6 @@ long long entry(void){
 }
 
 #[test]
-#[ignore = "struct_arr aggregates the open magic-division %101 bug (see note)"]
 fn diff_struct_array_fields() {
     // struct-field offsets + register-offset LDR/STR + 2D-array pointer
     // indexing, plus a real vectorized %101 array — the combined case that
@@ -303,7 +301,6 @@ long long entry(void){
 }
 
 #[test]
-#[ignore = "-O3 vectorized reduction still wrong (addp/smulh magic rounding); see note"]
 fn diff_mixed_arith_accumulate() {
     // The -O3 optimizer-vectorized i64 reduction (+addp/smulh/mls) — previously
     // `#[ignore]`d as intermittent; the nop fix makes it deterministic.
