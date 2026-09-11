@@ -1275,22 +1275,46 @@ pub fn translate(
         }
         Inst::BitField { rd, rn, immr, imms, sf, arith, insert } => {
             let bits = if sf { 64u32 } else { 32u32 };
-            if insert && immr <= imms {
-                // BFXIL (opc=00, non-wrap): rd[imms:immr] = rn[imms:immr],
-                // i.e. the field is copied in-place and Rd's other bits are kept.
-                // mask = ((1<<width)-1) << immr  on a `bits`-wide integer.
-                let width = (imms - immr + 1) as u32;
-                let mask: u64 = (((1u64 << width) - 1) << immr) & (if sf { u64::MAX } else { 0xffff_ffff });
-                ldg(buf, RAX, rn as u32); // Rn
+            // ---- BFM insert (opc=01): merge bits of Rn into Rd, preserving
+            // Rd's bits outside the field. BFXIL (immr<=imms, copy in place) and
+            // BFI/BFC (immr>imms, wrap) BOTH merge; they are NOT the UBFM/SBFM
+            // shift/extract aliases below, which must not fire for insert==true
+            // (e.g. a bfi whose immr/imms coincidentally satisfy the ROR
+            // shortcut 15+48+1==64 would be mis-compiled as a rotate).
+            if insert {
+                let mask: u64;
+                if immr <= imms {
+                    // BFXIL: field spans [immr, imms] in place — Rn's bits are
+                    // already at the target position, so mask in place (no shift).
+                    let width = (imms - immr + 1) as u32;
+                    mask = (((1u64 << width) - 1) << immr) & (if sf { u64::MAX } else { 0xffff_ffff });
+                    ldg(buf, RAX, rn as u32); // Rn
+                } else {
+                    // BFI/BFC: wrap, lsb=(bits-immr)&(bits-1), width=imms+1.
+                    // Rn's low `width` bits are shifted up to `lsb`, THEN masked.
+                    let lsb = (bits - immr) & (bits - 1);
+                    let width = imms + 1;
+                    mask = (((1u64 << width) - 1) << lsb) & (if sf { u64::MAX } else { 0xffff_ffff });
+                    ldg(buf, RAX, rn as u32); // Rn
+                    buf.shl_ri8(RAX, lsb as u8); // field << lsb
+                }
                 ldg(buf, R10, rd as u32); // old Rd
                 buf.mov_ri64(RCX, mask);
                 buf.and_rr64(RAX, RCX); // field of Rn
-                // rd & ~mask
+                // rd = (rd & ~mask) | (Rn & mask)
                 buf.not_r64(RCX);
                 buf.and_rr64(R10, RCX);
                 buf.or_rr64(R10, RAX);
                 buf.mov_rr64(RAX, R10);
-            } else {
+                if !sf {
+                    buf.zero_ext_r32(RAX);
+                }
+                if rd != 31 {
+                    stg(buf, rd as u32, RAX);
+                }
+                return Ok(());
+            }
+            // ---- UBFM/SBFM (insert=false): shift / extract / sign-extend.
             ldg(buf, RAX, rn as u32); // load Rn
             if imms == bits - 1 {
                 // LSR (logical) or ASR (arithmetic/sign) by immr
@@ -1311,19 +1335,23 @@ pub fn translate(
                 // 0x138f51eb, both ror #20 carry rotation in imms.)
                 buf.ror_ri8(RAX, (imms & (bits - 1)) as u8);
             } else if immr > imms {
-                // BFI/BFC insert: lsb = (bits-immr)&(bits-1); width = imms+1.
-                // rd = (rd & ~mask) | ((Rn << lsb) & mask); mask = ((1<<width)-1)<<lsb
+                // UBFIZ (logical) / SBFIZ (arith): zero- or sign-extending
+                // shift-left. Xd = (Rn << lsb) & mask, upper bits zeroed
+                // (UBFIZ) or sign-replicated (SBFIZ). Old Rd is DISCARDED; the
+                // old code merged old Rd here (BFI behavior), so `ubfiz
+                // x4,x0,#7,#32` kept stale upper bits of x4.
                 let lsb = (bits - immr) & (bits - 1);
                 let width = imms + 1;
                 let mask = ((1u64 << width) - 1) << lsb;
-                ldg(buf, R10, rd as u32); // old Rd
                 buf.shl_ri8(RAX, lsb as u8); // Rn << lsb
                 buf.mov_ri64(RCX, mask);
-                buf.and_rr64(RAX, RCX); // inserted field
-                buf.not_r64(RCX); // ~mask
-                buf.and_rr64(R10, RCX); // rd & ~mask
-                buf.or_rr64(R10, RAX); // (rd & ~mask) | inserted
-                buf.mov_rr64(RAX, R10);
+                buf.and_rr64(RAX, RCX); // field only (zero-extended)
+                if arith {
+                    // SBFIZ: sign-extend the field from bit (lsb+width-1).
+                    let se = (bits - (lsb + width)) as u8;
+                    buf.shl_ri8(RAX, se);
+                    buf.sar_ri8(RAX, se);
+                }
             } else {
                 // general UBFM/SBFM extract: (Rn >> immr) & low(width) bits,
                 // then optionally sign-extend from `width`.
@@ -1355,7 +1383,6 @@ pub fn translate(
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
             }
-            } // end `else` (non-BFXIL) arm of BitField
             Ok(())
         }
         Inst::SysReg { sysreg, rt, read } => {

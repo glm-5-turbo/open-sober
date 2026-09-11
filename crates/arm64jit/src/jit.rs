@@ -1399,6 +1399,44 @@ mod tests {
     }
 
     #[test]
+    fn ubfiz_zero_extends_field_and_discards_old_rd() {
+        // Regression: `ubfiz x4, x0, #7, #32` (0xd3797c04) is a ZERO-extending
+        // shift-left. With x0=0x18 the result must be (0x18<<7) = 0xC00 and the
+        // upper 32 bits of x4 must be ZERO, regardless of x4's old value. The
+        // translate previously routed immr>imms through the BFI/merge path, so a
+        // stale x4 (e.g. 0x7f8000000000 | ...) kept garbage high bits — a silent
+        // miscompile that corrupted glibc's `__tunable_get_val` (x4.addr became
+        // 0x7f800048e888 instead of 0x48e888, then ldr w6,[x4,#48] segfaulted).
+        // Real word from modmain: ubfiz x4,x0,#7,#32 = d3797c04.
+        let code = [0x04u8, 0x7c, 0x79, 0xd3];
+        let mut st = CpuState::new();
+        st.x[0] = 0x18;
+        // Old x4 carries a high garbage prefix; it must be fully discarded.
+        st.x[4] = 0x7f80_0000_0000_0000 | 0xDEAD_DEAD;
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[4], 0xC00, "ubfiz x4,x0,#7,#32 = 0xC00, upper zeroed");
+    }
+
+    #[test]
+    fn bfi_still_merges_into_old_rd() {
+        // Guard: genuine BFI (Bfm insert, insert=true, immr>imms) MUST still
+        // preserve Rd's bits outside the field, unlike UBFIZ.
+        // bfi x4, x0, #16, #16  (verified via objdump: 0xb3703c04).
+        // BFM X4,X0,#immr=48,#imms=15 (immr>imms => wrap insert,
+        // lsb=(64-48)&63=16, w=imms+1=16), rn=0, rd=4.
+        // BFM Xd,Xn,#immr,#imms: 0xB340_0000 base | imms<<10 | immr<<16 |
+        //   rn<<5 | rd. immr=0x30 -> 0x300000, imms=0x0f -> 0x3c00.
+        let word = 0xB340_0000u32 | (0x0f << 10) | (0x30 << 16) | (0x0 << 5) | 0x4;
+        let code = word.to_le_bytes();
+        let mut st = CpuState::new();
+        st.x[0] = 0x00FF; // field value; shifted <<16
+        st.x[4] = 0xF000_0000_0000_0000; // Rd bits OUTSIDE field must stay
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        // field: (0x00FF<<16) = 0x00FF0000; rd keeps other bits.
+        assert_eq!(st.x[4], 0xF000_0000_00ff_0000, "BFI merges into old Rd");
+    }
+
+    #[test]
     fn mrs_dczid_el0_returns_block_size() {
         // Regression: `mrs x0, dczid_el0` (0xd53b00e0) — read by glibc's CRT to
         // size its DC ZVA memset path — was previously Unsupported, halting any
