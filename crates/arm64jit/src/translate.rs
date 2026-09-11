@@ -4537,6 +4537,36 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+                Inst::VecFcvtl { rd, rn, upper } => {
+            // fcvtl Vd.2D, Vn.2S / fcvtl2 Vd.2D, Vn.4S: widen two single-precision
+            // float lanes of Vn to doubles in Vd. fcvtl reads Vn bytes 0..7,
+            // fcvtl2 (upper) reads Vn bytes 8..15. Both write all 16 bytes of Vd.
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let soff = if upper { 8i32 } else { 0i32 };
+            for lane in 0..2 {
+                buf.mov_load32(RAX, RBX, src + soff + lane * 4); // f32 lane
+                buf.movd_xmm_r32(0, RAX); // to xmm0 low 32
+                buf.cvtss2sd(0, 0); // widen f64
+                buf.movq_store(RBX, dst + lane * 8, 0); // store f64 lane
+            }
+            Ok(())
+        }
+                Inst::VecFcvtn { rd, rn, upper } => {
+            // fcvtn Vd.2S, Vn.2D / fcvtn2 Vd.4S, Vn.2D: narrow two double lanes
+            // of Vn to floats in Vd. fcvtn writes Vd bytes 0..7, fcvtn2 (upper)
+            // writes Vd bytes 8..15. Source is always the full 2 doubles.
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let doff = if upper { 8i32 } else { 0i32 };
+            for lane in 0..2 {
+                buf.movq_load(0, RBX, src + lane * 8); // f64 lane -> xmm0
+                buf.cvtsd2ss(0, 0); // narrow f32 in xmm0 low
+                buf.movd_r32_xmm(RAX, 0); // low32 -> RAX
+                buf.mov_store32(RBX, dst + doff + lane * 4, RAX); // store f32
+            }
+            Ok(())
+        }
                 Inst::SimDup { rd, rn, esize, src_idx, q } => {
                     // dup Vd.T, Vn.T[src]: broadcast element at Vn[src_idx*esize] across
                     // all q?16:8 bytes of Vd (all lanes identical).
@@ -5022,12 +5052,17 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             // Scalar pre/post-index ldr/str with base writeback.
             //   pre:  addr = x[rn] + imm9, then Xn += imm9
             //   post: addr = x[rn],        then Xn += imm9
-            ldg(buf, RAX, rn as u32);
+            // NOTE: address must live in RDX (NOT RAX) — fp_scalar_xfer uses RAX
+            // as its value scratch, so a store with addr==RAX would clobber the
+            // base with the value being stored and write to [value] (a latent
+            // pre/post-index scalar STORE miscompile, e.g. `str s30,[x4],#4`
+            // faulting at 0x41480000 = the float bits). Mirrors FpLdStImmUnscaled.
+            ldg(buf, RDX, rn as u32);
             if pre && imm9 != 0 {
-                buf.lea64(RAX, RAX, imm9); // pre-add the offset into the address
+                buf.lea64(RDX, RDX, imm9); // pre-add the offset into the address
             }
             let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
-            fp_scalar_xfer(buf, RAX, vslot, size, ld)?;
+            fp_scalar_xfer(buf, RDX, vslot, size, ld)?;
             // base register advances by imm9 for both pre and post index.
             ldg(buf, RCX, rn as u32);
             if imm9 != 0 {

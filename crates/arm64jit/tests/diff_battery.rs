@@ -1597,3 +1597,34 @@ long long entry(void){
 "#,
     );
 }
+
+
+#[test]
+fn diff_fcvtl_widen_and_fcvtn_narrow() {
+    // Guard for SIMD float<->double widening/narrowing: gcc -O2 emits
+    // fcvtl/fcvtl2 (float->double, low & upper source half) and fcvtn/fcvtn2
+    // (double->float, low & upper dest half) when a program round-trips
+    // float[] <-> double[] elementwise. Distinct per-lane values + upper-half
+    // use catch any fcvtl/fcvtn lane-offset or width slip (the JIT's fcvtl/
+    // fcvtn gates land Unsupported without the feature; a decode collision =
+    // silent wrong values). Also trips the latent pre/post-index scalar
+    // single-precision store bug (str s30,[x4],#4 -> stored to the float's
+    // bit pattern), since widened/narrowed lanes are written back with
+    // post-indexed scalar stores.
+    assert_diff(
+        "fcvtl_fcvtn",
+        "-O2",
+        r#"
+long long entry(void){
+    long long seed = 3847481;
+    float f[16]; double d[16];
+    for(int i=0;i<16;i++) f[i] = (float)((seed*(i+3))%97) * 0.5f;
+    for(int i=0;i<16;i++) d[i] = (double)f[i];       // fcvtl / fcvtl2
+    for(int i=0;i<16;i++) f[i] = (float)d[i];        // fcvtn / fcvtn2
+    long long acc = 0;
+    for(int i=0;i<16;i++) acc += (long long)(f[i]*4.0f);
+    return acc;
+}
+"#,
+    );
+}

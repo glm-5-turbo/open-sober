@@ -4119,6 +4119,54 @@ mod tests {
         let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
         assert_eq!(r, 15, "host call times_3(5) via blr-through-dispatcher");
     }
+    #[test]
+    fn fp_scalar_postindex_store_uses_base_not_value() {
+        // str s30, [x4], #4 = 0xbc00449e (post-index single store). FpLdStImmWb
+        // must write the float to [x4] and advance x4 -- NOT write to [s30's
+        // bit pattern]. Regression for the latent bug where fp_scalar_xfer's RAX
+        // value scratch clobbered the base register (addr==RAX), so a store
+        // stored to [0x41480000] = the float bits and faulted. That bug surfaced
+        // only once fcvtl/fcvtn let a gcc float<->double array loop compile fully.
+        let code = [
+            0x9eu8, 0x44, 0x00, 0xbc, // str s30, [x4], #4
+            0xe0, 0x03, 0x04, 0xaa, // mov x0, x4
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut buf = [0u32; 4];
+        let mut st = CpuState::new();
+        let orig = buf.as_ptr() as u64;
+        st.x[4] = orig;
+        // s30 = guest v[30] (slot VECTOR_BASE+30*16 => st.v[60]); bits = 12.5f.
+        st.v[60] = 0x4148_0000;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(buf[0], 0x4148_0000, "float stored to [x4], not to [0x4148_0000]");
+        assert_eq!(r, orig + 4, "x0 = advanced x4 (returned ptr)");
+        assert_eq!(st.x[4], orig + 4, "post-index writeback advanced x4 by 4");
+    }
+
+    #[test]
+    fn fcvtl_fcvtn_decode_and_lane_widen_exec() {
+        use crate::decode::decode;
+        // fcvtl v1.2d, v0.2s = 0x0e617801, fcvtl2 v29.2d, v29.4s = 0x4e617bbd,
+        // fcvtn v27.2s, v27.2d = 0x0e616b7b, fcvtn2 v27.4s, v26.2d = 0x4e616b5b
+        // must decode to their own Inst (not be swallowed by an int->fp/widen-mul
+        // gate). Exec: v0 = [1.0f, 2.0f]; fcvtl v1.2d,v0.2s; fcvtzs x0,d1 => 1.
+        assert!(matches!(decode(0x0e617801), Inst::VecFcvtl { upper: false, .. }));
+        assert!(matches!(decode(0x4e617bbd), Inst::VecFcvtl { upper: true, .. }));
+        assert!(matches!(decode(0x0e616b7b), Inst::VecFcvtn { upper: false, .. }));
+        assert!(matches!(decode(0x4e616b5b), Inst::VecFcvtn { upper: true, .. }));
+        // exec: [1.0f, 2.0f] in v0 -> fcvtl -> d1 = 1.0 -> scalar fcvtzs => 1.
+        let code = [
+            0x01u8, 0x78, 0x61, 0x0e, // fcvtl v1.2d, v0.2s
+            0x22, 0x40, 0x60, 0x1e, // fmov d2, d1
+            0x40, 0x00, 0x78, 0x9e, // fcvtzs x0, d2
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.v[0] = 0x4000_0000_3f80_0000; // lane0=1.0f, lane1=2.0f
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 1, "fcvtl widens 1.0f -> (double)1.0 -> fcvtzs 1");
+    }
 
     #[test]
     fn host_float_call_bridge_atan2_via_blr() {

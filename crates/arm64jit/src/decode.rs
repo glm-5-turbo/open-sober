@@ -417,6 +417,15 @@ pub enum Inst {
     SimdFmovImm { rd: u8, esize: u8, value_bits: u64, q: bool },
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T ----
     FcvVec { rd: u8, rn: u8, signed: bool, esize: u8, q: bool },
+    // ---- SIMD float widen/narrow: fcvtl/Vd.2D (f32->f64) & fcvtn/Vd.2S
+    // (f64->f32), 2 lanes. fcvtl reads Vn low (upper=false) or high half
+    // (upper=true); fcvtn writes Vd low (upper=false) or high half
+    // (upper=true). Gates (insn & 0xffff_fc00): fcvtl == 0x0e617800 /
+    // 0x4e617800, fcvtn == 0x0e616800 / 0x4e616800 (asm+objdump verified).
+    // (Half-precision fcvtl Vd.4s,Vn.4h / fcvtn Vd.4h,Vn.4s are byte2 0x21
+    // and stay Unsupported -- the JIT has no fp16 yet.)
+    VecFcvtl { rd: u8, rn: u8, upper: bool },
+    VecFcvtn { rd: u8, rn: u8, upper: bool },
     // ---- variable shift by register (LSLV/LSRV/ASRV/RORV) ----
     VarShiftVar { rd: u8, rn: u8, rm: u8, op: u8, sf: bool },
     // ---- SIMD FP unary: fneg/fabs/fsqrt Vd.T, Vn.T - op 0=neg 1=abs 2=sqrt ----
@@ -1158,6 +1167,19 @@ pub fn decode(insn: u32) -> Inst {
         let signed = (insn >> 29) & 1 == 0;
         let q = (insn >> 30) & 1 == 1;
         return Inst::FcvVec { rd, rn, signed, esize: e, q };
+    }
+    // ---- SIMD float widen/narrow: fcvtl Vd.2D,Vn.2S (f32->f64) & fcvtn
+    // Vd.2S,Vn.2D (f64->f32). Asm+objdump verified: fcvtl 0x0e617820 /
+    // fcvtl2 0x4e617820, fcvtn 0x0e6168a4 / fcvtn2 0x4e6168a4. upper = bit30
+    // (Q): fcvtl reads Vn upper half when set (fcvtl2); fcvtn writes Vd upper
+    // half when set (fcvtn2). The byte2-0x21 (half-precision) forms are NOT
+    // matched here and stay Unsupported. Placed before VecIntToFp/SimdMull
+    // (which would otherwise swallow these as int->fp/widen-mul).
+    if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
+        return Inst::VecFcvtl { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1 };
+    }
+    if matches!(insn & 0xffff_fc00, 0x0e61_6800 | 0x4e61_6800) {
+        return Inst::VecFcvtn { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1 };
     }
     // ---- SIMD int->FP (vector): scvtf/ucvtf Vd.T, Vn.T (s32/u32->f32, s64->f64) ----
     // Reverse of FcvVec. Encodings assembled & objdump-verified:
