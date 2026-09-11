@@ -734,6 +734,12 @@ pub enum Inst {
     SimdMovEl { rd: u8, rn: u8, esize: u8, index: u8, signed: bool, is_x: bool },
     // ---- SIMD integer add/sub 2D (64-bit lanes): add Vd.2D, Vn.2D, Vm.2D ----
     SimdAddD { rd: u8, rn: u8, rm: u8, sub: bool },
+    // ---- SIMD int 3-same pairwise max/min: smaxp/sminp/umaxp/uminp
+    // Vd.T, Vn.T, Vm.T ---- pairwise reduce each source into halves of Vd
+    // (same structure as ADDP but max/min, signed when bit29 clear). b2
+    // 0xa4 (max) / 0xac (min); prefix 0x0e/0x2e/0x4e/0x6e. Distinct from
+    // plain 3-same add via b2 bit4 (0x10): add uses 0x84/0x8c.
+    SimdMaxMinP { rd: u8, rn: u8, rm: u8, min: bool, unsigned: bool, esize: u8, q: bool },
     // ---- SIMD int add/sub byte lanes 16B/8B: add Vd.16b, Vn.16b, Vm.16b ----
     SimdAddB { rd: u8, rn: u8, rm: u8, sub: bool, q: bool },
     // ---- SIMD int add/sub halfword 8H/4H (16-bit) lanes: add Vd.8h, Vn.8h, Vm.8h ----
@@ -3688,6 +3694,25 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                                     }
 
                                     // ---- NEON int multiply-accumulate/subtract (32-bit lanes): mla/mls ----
+                                    // ---- SIMD int 3-same pairwise max/min: smaxp/sminp/umaxp/uminp
+                                    // Vd.T,Vn.T,Vm.T ---- pairwise reduce each source into halves
+                                    // of Vd. b2 0xa4(max)/0xac(min); prefix 0x0e/0x2e/0x4e/0x6e;
+                                    // esize=1<<size(bits[23:22]). Placed before the mla/add gates
+                                    // so they can't swallow via 0x20_0c00==0x0400.
+                                    if matches!((insn >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e)
+                                        && matches!(((insn >> 8) & 0xff) & 0xfc, 0xa4 | 0xac)
+                                    {
+                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                        let rd = (insn & 0x1f) as u8;
+                                        let min = (insn & 0x800) != 0; // b2 bit3: 0xa4(max)/0xac(min)
+                                        let unsigned = (insn >> 29) & 1 == 1;
+                                        let q = (insn >> 30) & 1 == 1;
+                                        let sz = (insn >> 22) & 3;
+                                        let esize = 1u8 << sz;
+                                        return Inst::SimdMaxMinP { rd, rn, rm, min, unsigned, esize, q };
+                                    }
+
                                     // mla  Vd = Vd + Vn*Vm ; mls Vd = Vd - Vn*Vm (per 32-bit lane).
                                     // Gates (insn & 0xffe0_fc00): 0x0ea0_9400 (mla .2s), 0x2ea0_9400
                                     // (mls .2s), 0x4ea0_9400 (mla .4s), 0x6ea0_9400 (mls .4s). sub=bit29.
@@ -6240,6 +6265,22 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x4f4c7441), Inst::SimdSatShl { esize: 8, .. }), "got {:?}", decode(0x4f4c7441));
         // plain shl v1.4h,v2.4h,#1 must NOT be captured as SatShl
         let _ = decode(0x0f117441); // this IS sqshl #1; plain shl uses bits[14:12]=5
+    }
+
+    #[test]
+    fn int_pairwise_maxmin_smaxp_decodes() {
+        use crate::decode::{decode, Inst};
+        // smaxp v30.8b, v31.8b, v30.8b = 0x0e3ea7fe (self-aliased, high regs)
+        assert!(matches!(decode(0x0e3ea7fe), Inst::SimdMaxMinP { rd: 30, rn: 31, rm: 30, min: false, unsigned: false, esize: 1, .. }), "got {:?}", decode(0x0e3ea7fe));
+        // umaxp v30.8b, v31.8b, v30.8b = 0x2e3ea7fe
+        assert!(matches!(decode(0x2e3ea7fe), Inst::SimdMaxMinP { unsigned: true, min: false, .. }), "got {:?}", decode(0x2e3ea7fe));
+        // sminp v1.4h, v2, v3 = 0x0e63ac41
+        assert!(matches!(decode(0x0e63ac41), Inst::SimdMaxMinP { min: true, esize: 2, q: false, .. }), "got {:?}", decode(0x0e63ac41));
+        // smaxp v1.4s, v2, v3 = 0x4ea3a441 (q=1, esize 4)
+        assert!(matches!(decode(0x4ea3a441), Inst::SimdMaxMinP { esize: 4, q: true, .. }), "got {:?}", decode(0x4ea3a441));
+        // plain byte add v1.8b,v2,v3 (0x0e23a441 is MAXP; real add 0x0ea28421-ish) must not be captured:
+        // 0x0e218421 add v1.8b,v2,v3 ... verify still SimdAddB
+        assert!(matches!(decode(0x0e218421), Inst::SimdAddB { .. }), "got {:?}", decode(0x0e218421));
     }
 
     #[test]

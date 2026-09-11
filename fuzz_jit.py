@@ -916,6 +916,27 @@ long long entry(void){{
     return acc & 0x3fffffff;
 }}
 """
+def gen_int_pairwise_maxmin():
+    op = random.choice(['smaxp','sminp','umaxp','uminp'])
+    fn = {'smaxp':'vpmax_s8','sminp':'vpmin_s8','umaxp':'vpmax_u8','uminp':'vpmin_u8'}[op]
+    st = 'int' if op[0]=='s' else 'uint'
+    x = random.randrange(1<<64)
+    a = []
+    for i in range(8):
+        x = (x*6364136223846793005+1) & ((1<<64)-1)
+        a.append((x>>48)&0xff)
+    return f"""
+#include <arm_neon.h>
+long long entry(void){{
+    {st}8_t va_[8] = {{{a[0]},{a[1]},{a[2]},{a[3]},{a[4]},{a[5]},{a[6]},{a[7]}}};
+    {st}8_t vb_[8] = {{{a[7]},{a[6]},{a[5]},{a[4]},{a[3]},{a[2]},{a[1]},{a[0]}}};
+    {st}8x8_t r = {fn}(vld1_{'s' if op[0]=='s' else 'u'}8(va_), vld1_{'s' if op[0]=='s' else 'u'}8(vb_));
+    {st}8_t o[8]; vst1_{'s' if op[0]=='s' else 'u'}8(o, r);
+    long long acc=0; for(int i=0;i<8;i++) acc += (long long)o[i]*(1+(i%5));
+    return acc & 0x3fffffff;
+}}
+"""
+
 def gen_sat_left_shift():
     # saturating LEFT shift by immediate: vqshl_n_s16/s32 (sqshl), vqshl_n_u, and
     # sqshlu (shift-left-unsigned-sat) variants. Operates on the low lanes
@@ -1061,7 +1082,7 @@ long long entry(void){{
 }}
 """
 
-gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift, gen_fp_pairwise, gen_sat_left_shift]
+gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift, gen_fp_pairwise, gen_sat_left_shift, gen_int_pairwise_maxmin]
 
 def gen_sat_narrow():
     # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on

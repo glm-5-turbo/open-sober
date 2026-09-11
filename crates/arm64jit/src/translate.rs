@@ -3540,6 +3540,58 @@ Inst::SimdAddB { rd, rn, rm, sub, q } => {
             buf.movdqu_store(RBX, vslot(rd), RAX);
             Ok(())
 }
+Inst::SimdMaxMinP { rd, rn, rm, min, unsigned, esize, q } => {
+            // smaxp/sminp/umaxp/uminp Vd.T,Vn.T,Vm.T: halves of Vd = pairwise
+            // reduce Vn (low half), then Vm. esize bytes per lane; signed/unsigned
+            // comparison; per-adjacent-pair max/min into dst lane.
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let es = esize as i32;
+            let lanes = if q { 16 / es } else { 8 / es };
+            // snapshot sources in case rd aliases rn/rm (gcc emits smaxp v30,v31,v30)
+            let src_rn = permute_source(buf, rd, rn, false);
+            let src_rm = permute_source(buf, rd, rm, false);
+            let mut d = 0;
+            for base in [src_rn, src_rm] {
+                for i in 0..lanes / 2 {
+                    // load pair (2i, 2i+1), choose max/min
+                    let lo = base + (2 * i) * es;
+                    let hi = lo + es;
+                    // load each into RAX/RCX extended by sign or zero
+                    match es {
+                        1 => {
+                            if unsigned { buf.movzx_byte_mem(RAX, RBX, lo); buf.movzx_byte_mem(RCX, RBX, hi); }
+                            else { buf.movsx_byte_mem(RAX, RBX, lo); buf.movsx_byte_mem(RCX, RBX, hi); }
+                        }
+                        2 => {
+                            if unsigned { buf.movzx_word_mem(RAX, RBX, lo); buf.movzx_word_mem(RCX, RBX, hi); }
+                            else { buf.movsx_word_mem(RAX, RBX, lo); buf.movsx_word_mem(RCX, RBX, hi); }
+                        }
+                        _ => {
+                            buf.mov_load32(RAX, RBX, lo);
+                            if !unsigned { buf.movsxd_r64_r32(RAX, RAX); }
+                            buf.mov_load32(RCX, RBX, hi);
+                            if !unsigned { buf.movsxd_r64_r32(RCX, RCX); }
+                        }
+                    }
+                    buf.cmp_rr64(RAX, RCX);
+                    // signed: L=0x4C (RAX<RCX), G=0x4F; unsigned: B=0x42, A=0x47
+                    let (lt, gt) = if unsigned { (0x42u8, 0x47u8) } else { (0x4c, 0x4f) };
+                    if min {
+                        buf.cmov_rr64(gt, RAX, RCX); // RAX=RCX if RAX>RCX (lo>hi: hi is smaller)
+                    } else {
+                        buf.cmov_rr64(lt, RAX, RCX); // RAX=RCX if RAX<RCX (hi is larger)
+                    }
+                    let dst = vslot(rd) + d * es;
+                    match es {
+                        1 => buf.mov_store8(RBX, dst, RAX),
+                        2 => buf.mov_store16(RBX, dst, RAX),
+                        _ => buf.mov_store32(RBX, dst, RAX),
+                    }
+                    d += 1;
+                }
+            }
+            Ok(())
+}
 Inst::SimdAddH { rd, rn, rm, sub, q } => {
             // add/sub Vd.8h, Vn.8h, Vm.8h (or 4h): 16-bit halfword lanes via paddw/psubw.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
