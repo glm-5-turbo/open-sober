@@ -3338,3 +3338,24 @@ boundary exponent bug corrupts both (the fdivf array used f32, dscale earlier
 used 3.0; the [16,30] band is where it bites).
 Next: keep pressing FP/SIMD (fma/compiler-contracted `fmla`, more div/compare
 edges, single-precision struct args) then libloader gaps. HARD GATE unchanged.
+
+## Session (Sep 11, 2026) — scalar FP multiply-accumulate fmadd/fmsub/fnmadd/fnmsub (commit 578faaf)
+Third FP milestone: the -O2 compiler contracts every a*b+c / fused a*x*x into
+`fmadd`, and fma1 (2x^2+3x+1 over x=1..5) returned 0x8000000000000000 garbage
+because 0x1f4.. was swallowed by a broad SIMD vector-immediate gate and
+mis-decoded as a bogus movi. Added Inst::Fma3 (scalar 3-source FP):
+- decode gate `(insn & 0xff000000)==0x1f000000` placed at the TOP of decode
+  (uniquely the scalar 3-source FP family), o1=bit21(fn*), o2=bit15(sub),
+  sz=bit22(double).
+- translate: mulsd/addsd/subsd with pxor-0 + subsd for the fnmadd negation;
+  single-precision via mulss/addss/subss. Semantics fmadd=ra+rn*rm,
+  fmsub=ra-rn*rm, fnmadd=-(ra+rn*rm), fnmsub=rn*rm-ra.
+- Verified vs assembler (fmadd/fmsub/fnmadd/fnmsub d0,d1,d2,d3 =
+  0x1f420c20/0x1f428c20/0x1f620c20/0x1f628c20) -> 17/-7/-17/7 with d1=3,d2=4,
+  d3=5; single fmadd s -> 11. fma1.elf 160 = native.
++scalar_fma3_all_four_variants (4 double + 1 single). arm64jit 124/124,
+workspace 173/0. Full 3-batch cross-gcc battery unchanged.
+This session net: 5 FP/SIMD correctness fixes (fsub-vs-shll, FP-compare N flag,
+ld1-2reg deinterleave, FMOV-imm [16,30], FMADD) + the FMADD feature. Next:
+keep pressing -O2/FP-contracted programs, single-precision struct args, more
+div/compare edges; then libloader gaps. HARD GATE unchanged.

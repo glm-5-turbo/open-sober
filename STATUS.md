@@ -382,3 +382,19 @@ divss/addss/fcvtzs verified OK; the constants were wrong). Fixed threshold
 `>=5` (verified vs assembler 0.125..30.0). +4 asserts (16,30,2,0.75). fdivf
 6→20; rest of battery matches native. arm64jit 123/123, workspace 172/0.
 Gate: build clean, tests 172/0, HEAD bc5ab89 local dev. HARD GATE unchanged.
+---
+## Cycle addendum — scalar FMA3 + prior FP fixes (workspace 173/0, commits a0465a0..578faaf)
+Two more cross-gcc FP layers this cycle:
+- **FMOV-immediate [16,30] decode bug** (bc5ab89): decode_fmov_imm exponent wrap
+  `>=4` wrongly mapped E=3 (true exp +4) to -4 — every FMOV-imm in [16,30] was
+  ~256x too small. Threshold `>=5`. fdivf 6→20.
+- **scalar FMA3** (578faaf): fmadd/fmsub/fnmadd/fnmsub (0x1f.. scalar 3-source
+  FP) was swallowed by a broad SIMD-immediate gate and mis-decoded as garbage;
+  -O2-contracted polynomials returned 0x8000000000000000. Now decoded at the top
+  of decode + translated (mulsd/addsd/subsd, pxor-negate), single & double.
+  fma1 160=native. Verified: fmadd/fmsub/fnmadd/fnmsub d0,d1,d2,d3 = 17/-7/-17/7.
+Cycle total: 5 FP/SIMD correctness fixes + FMADD feature; new cross-gcc FP
+battery as regression ground truth (dpoly/dsum/dmat/ddiv/dscale/dclamp/
+ddmat2 / fdivf/dloop/mixed/dstruct/dneg/fmat/drec / fma1). arm64jit 124/124,
+workspace 173/0. HEAD 578faaf local dev. HARD GATE unchanged (real libroblox.so
+boot on GPU/APK host).
