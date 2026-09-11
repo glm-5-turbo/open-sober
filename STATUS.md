@@ -552,3 +552,43 @@ temp root + create_dir_all before set_permissions) and passes.
 Roblox actually running (load -> JNI init -> main loop -> frame on a GPU host)
 is NOT met and cannot be on this GPU-less VPS without the real libroblox.so/APK.
 The gate stays `elfjit <libroblox.so> 0x1f0db20 --jni` on a capable host.
+---
+
+## Cycle 14 (Sep 11, 2026) — LogicImm DecodeBitMasks rotate-RIGHT fix (workspace 200/0)
+status: cycle_end (committed, tests green) HEAD 8c1706b
+last_agent_claim: fixed a severe silent miscompile in the commonest ARM64
+instruction path (logical-immediate MOV/AND/ORR masks).
+
+### The bug (would corrupt ANY guest that loads an asymmetric bitmask)
+`decode_logical_mask` applied a **LEFT**-rotate to the element
+(`ones << r | ones >> (esize-r)`) but ARM `DecodeBitMasks` (DDI0487) uses
+**ROR — rotate right**. Every rotation-ASYMMETRIC logical-immediate mask was
+miscompiled. Only symmetric masks happen to give the same value under both
+directions (<15% of encodings), so the whole prior test set stayed green while
+real compiler output was silently wrong:
+`mov x0,#0xffffffff80000001` (0xb26187e0) returned 0xfffffffe00000007 instead
+of 0xffffffff80000001.
+
+### Verification (quantified, not hand-waved)
+- Ground-truth cross-check vs the real `aarch64-linux-gnu-as` + `objdump` over
+  ~700 (N,immr,imms) encodings: the FIXED right-rotate agrees with the
+  assembler on **592/592 valid** masks (112 architecturally invalid). The OLD
+  left-rotate would have been wrong on **509** of those 592.
+- End-to-end elfjit (no QEMU): `mov x0,#0xffffffff80000001` -> 0xffffffff80000001
+  and `mov x0,#0x3ffffffc` (esize!=64) -> 0x3ffffffc, matching native x86-64.
+- New regression `logic_imm_rotation_asymmetric_mask_ror` locks both asymmetric
+  encodings + sanity that symmetric 0xCCCC/#1 stay correct.
+- Ad-hoc cross-gcc batteries (shifts, sign-ext, 64-bit math corners, 128-bit,
+  switch, SIMD reduce, bitfield, struct-by-value, FP conv, -O3 loops/arrays/
+  auto-vectorized SIMD) all PASS vs native.
+- `cargo build --workspace` clean (0 errors); `cargo test --workspace`
+  **200 passed / 0 failed** (arm64jit 131+6).
+
+### Commit
+- 8c1706b  arm64jit: fix LogicImm DecodeBitMasks to rotate RIGHT (ROR), not left
+
+### Next (ordered)
+1. Continue ISA-surface probing via cross-gcc battery to flush out more silent
+   miscompiles (this ROR bug was #12-class: silent, symmetric-mask-masked).
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. HARD GATE (real Roblox boot + run log on a GPU/APK host) stays unmet here.

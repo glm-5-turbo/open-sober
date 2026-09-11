@@ -3663,3 +3663,38 @@ sober-services 15; libloader; others). HEAD `2a9c6eb`, tree clean.
    the HARD GATE — blocked until a capable host + the real binary/APK exist.
 2. Continue hardening: next ISA/loader/emulator gaps as discovered (adb/emulate
    surface), then the remaining sober-core/sober-services integration.
+
+---
+
+## Session 2026-09-11 — LogicImm DecodeBitMasks rotate-RIGHT fix (workspace 200/0)
+
+### The bug (severe, silent, commonest-instruction-class)
+`decode_logical_mask` (crates/arm64jit/src/decode.rs) applied a **LEFT**-rotate
+to the immediate element (`ones << r | ones >> (esize-r)`) but ARM
+`DecodeBitMasks` (DDI0487) uses **ROR — rotate right**. Every rotation-
+ASYMMETRIC logical-immediate mask was silently miscompiled (any `mov/and/orr/
+eor/tst/ands xD,#<asym-mask>`). Symmetric masks (alternating 0xCCCC/0x5555,
+single-bit, all-ones) give the same value under both directions, which is why
+the whole prior test set stayed green for months despite the wrong code —
+<15% of encodings are rotation-invariant.
+
+Real failure: `mov x0,#0xffffffff80000001` = `0xb26187e0` (immr=imms=33)
+returned `0xfffffffe00000007` instead of `0xffffffff80000001`, caught by a
+cross-gcc probe run through elfjit (no QEMU) vs native x86-64.
+
+### Fix + quantified verification
+- Rotate right in the esize-bit domain: `(ones >> r | ones << (esize - r)) & em`.
+- Ground-truth cross-check vs the real `aarch64-linux-gnu-as`+`objdump` over
+  ~700 (N,immr,imms): fixed right-rotate agrees **592/592 valid**; old
+  left-rotate would have been wrong on **509**.
+- End-to-end elfjit: `mov x0,#0xffffffff80000001` -> exact value; the
+  esize-64! case `mov w0/x0,#0x3ffffffc` (`0xb27e6fe0`) exact too.
+- Regression `logic_imm_rotation_asymmetric_mask_ror` (both asymmetric
+  encodings + symmetric 0xCCCC/#1 unchanged).
+- `cargo build --workspace` clean; `cargo test --workspace` **200/0**.
+- Commit `8c1706b`.
+
+### Next
+Continue the cross-gcc ISA-surface battery for more silent-miscompile classes;
+libloader/libbadcpu/services gaps; HARD GATE (real Roblox boot, GPU/APK host)
+unmet on this box.
