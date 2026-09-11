@@ -1,5 +1,44 @@
 # Open Sober — Agent Handoff
 
+## 🟢 REAL-BINARY JNI_OnLoad SUCCESS (latest frontier — this cycle)
+
+**The real `libroblox.so` (2.738.1397, extracted via `sober-core::apk::extract_libs`
+to `~/.cache/open-sober/robbox/libroblox.so`) now boots through `arm64jit`
+(`elfjit <libroblox.so> 0x2173ff4 --jni`) and main-thread `JNI_OnLoad` returns
+`0x10006` (JNI_VERSION_1_6) — the canonical success value — reproducibly.**
+
+Milestone commits this cycle (all `dev`, workspace green):
+- `6de9a2d` libloader: reserve writable guest tail past image end (crashpad
+  telemetry static table walks ~36MB past the last PT_LOAD bss).
+- `8033d04` arm64jit: route LSM map bucket allocator (0x1d97744, size in x0) to
+  host calloc; seed the LocalStorageManager static hash-map global (0x726f8c0)
+  with a two-level empty map + NOP its lazy-init store (0x1d975f8); generalized
+  the TLS-pool calloc thunk into a param'd `place_calloc_patch` (two slots:
+  0x62d9000 x1-size, 0x62d9800 x0-size).
+- `5ba69aa` elfjit: seed JNICallProtocol refcounted-singleton ptr (0x7333948 ->
+  0x7333950, zeroed bss == PTHREAD_MUTEX_INITIALIZER at +8).
+
+**Current wall:** after main `entry()` returns 0x10006, a *worker guest thread*
+spawned during JNI_OnLoad (`pthread_create(start_routine=0x284d168)`, tid=1)
+crashes; the SIGSEGV handler reports CpuState registers that decode to ASCII
+libc symbol-name strings ("pthread_setspecific", "memset", "pthread_cond_*",
+"broadcast"), i.e. it appears to execute/read `.dynstr` string data. Hypothesis:
+the spawned thread's per-thread guest TLS is only a bare zeroed buffer (the
+known "per-thread PT_TLS init-image copies for clone/pthread children" gap), so
+`__tls_get_addr`/`pthread_getspecific` on the child reads garbage
+(function-pointer table entries land on symbol-name strings). TODO: give
+`spawn_pthread` children a real `setup_guest_tls` TLS block + TCB (copy PT_TLS
+init image) like the main thread, and confirm the child then runs cleanly.
+
+Repro:
+```
+cd /home/hermes-worker/runs/open-sober
+cargo build -p arm64jit --example elfjit
+timeout 150 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni
+```
+Expect: `[lsm-map]`/`[JNICall-singleton]` seeds, JNIMain logs, `JIT(no-QEMU)
+entry() -> 65542 (0x10006)`, then the worker-thread SIGSEGV.
+
 ## ⚠️ CRITICAL RULES — READ FIRST
 
 1. **NO WORKTREES.** Do NOT create git worktrees. Ever.
