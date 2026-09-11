@@ -1,6 +1,41 @@
 # Open Sober — Agent Handoff
 
-## 🟢 REAL-BINARY JNI_OnLoad SUCCESS + `.dynstr`-call vector closed (this cycle)
+## 🟢 STABLE HEADLESS BOOT of real libroblox.so (exit 0, reproducible)
+
+**The real `libroblox.so` (2.738.1397) now boots to a stable state headlessly
+through `arm64jit` + `libloader` and exits cleanly (`exit 0`, no SIGSEGV) —
+verified 3/3. JNI_OnLoad returns `0x10006`, real engine JNIMain code runs, the
+worker guest thread runs clean, teardown is clean.** This is the boot
+stabilization milestone on this VPS.
+
+Two fixes this session (commits `6e9fd4e`, `1639899`, workspace 388/0):
+1. **`plt::bind_glob_dat`** — unresolved *function* GLOB_DAT/ABS64 slots were
+   left at stale values (0 or a `.dynstr` symbol-name pointer); a guest `blr`
+   through them jumped INTO `.dynstr` (SIGSEGV, register file = ASCII symbol
+   strings). Now bound to a benign host-call stub. Real lib: 63 -> 67 bound.
+2. **`__cxa_thread_atexit_impl` no-op shim** — was resolved to real glibc,
+   which stored the guest AArch64 TLS-destructor pointer and invoked it NATIVELY
+   as x86 when the worker guest thread exited -> SIGSEGV executing guest ARM64
+   .text (the post-boot "worker/teardown" crash). Now a no-op, so glibc never
+   runs a guest functor natively. This fixed the crash and gave the clean exit.
+
+Repro:
+```
+cd /home/hermes-worker/runs/open-sober
+cargo build -p arm64jit --example elfjit
+timeout 120 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni
+```
+Expect: seeds + `Test TelemetryProtocol` + `DeviceStaticParams is null`, then
+`jit_run returned Ok(0x10006)` / `JIT(no-QEMU) entry() -> 65542 (0x10006)`,
+clean `exit 0`.
+
+**NEXT (advance the boot / graphics):** JNI_OnLoad now succeeds and the process
+exits cleanly; push toward a real main loop that doesn't exit. Graphics
+wrappers already point at Mesa llvmpipe; the egl/glesv2 stubs exist. Use
+`GRAPHICS_RECOMMENDATION.md`: surface a window/surfaceless EGL context, have
+the guest render a frame, and confirm with a run log. Also consider whether
+JNI_OnLoad's spawned worker should be joined/looped instead of the process
+exiting when the main dispatch returns.
 
 **The real `libroblox.so` (2.738.1397) boots through `arm64jit`
 (`elfjit <libroblox.so> 0x2173ff4 --jni`) and main-thread `JNI_OnLoad` returns
