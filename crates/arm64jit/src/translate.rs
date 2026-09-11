@@ -3921,13 +3921,65 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
-        Inst::FpLdStImm {
-            vt,
-            rn,
-            imm,
-            size,
-            ld,
-        } => {
+        Inst::VecLdStrReg { vt, rn, rm, ld } => {
+            // addr = x[rn] + x[rm] ; transfer 16 bytes via XMM0. Vector-file
+            // register-offset ld/st; the GPR base/index are unaffected (this
+            // must NOT write back into either — the old mis-decode stored a
+            // byte INTO x[rn]'s register and corrupted the caller's state).
+            ldg(buf, RAX, rn as u32); // base
+            ldg(buf, RCX, rm as u32); // index
+            buf.add_rr64(RAX, RCX); // RAX = addr
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            if ld {
+                buf.movdqu_load(0, RAX, 0);
+                buf.movdqu_store(RBX, vslot, 0);
+            } else {
+                buf.movdqu_load(0, RBX, vslot);
+                buf.movdqu_store(RAX, 0, 0);
+            }
+            Ok(())
+        }
+        Inst::VecLdStImmUnscaled { vt, rn, imm9, ld } => {
+            // addr = x[rn] + imm9 (signed) ; transfer 16 bytes via XMM0.
+            ldg(buf, RAX, rn as u32);
+            if imm9 != 0 {
+                buf.lea64(RAX, RAX, imm9);
+            }
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            if ld {
+                buf.movdqu_load(0, RAX, 0);
+                buf.movdqu_store(RBX, vslot, 0);
+            } else {
+                buf.movdqu_load(0, RBX, vslot);
+                buf.movdqu_store(RAX, 0, 0);
+            }
+            Ok(())
+        }
+        Inst::VecLdStIndexed { vt, rn, imm9, ld, pre } => {
+            // pre:  addr = x[rn]+imm9, then x[rn] += imm9
+            // post: addr = x[rn],     then x[rn] += imm9
+            // 16-byte transfer via XMM0, then write back the advanced pointer.
+            ldg(buf, RAX, rn as u32); // x[rn]
+            if pre && imm9 != 0 {
+                buf.lea64(RAX, RAX, imm9); // addr = x[rn]+imm9 (pre)
+            }
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            if ld {
+                buf.movdqu_load(0, RAX, 0);
+                buf.movdqu_store(RBX, vslot, 0);
+            } else {
+                buf.movdqu_load(0, RBX, vslot);
+                buf.movdqu_store(RAX, 0, 0);
+            }
+            // Xn += imm9 (pre and post both advance the base register).
+            ldg(buf, RCX, rn as u32);
+            if imm9 != 0 {
+                buf.lea64(RCX, RCX, imm9);
+            }
+            stg(buf, rn as u32, RCX);
+            Ok(())
+        }
+        Inst::FpLdStImm { vt, rn, imm, size, ld } => {
             // Transfer `size` bytes (B/H/S/D) between the low bytes of the guest
             // vector slot v[vt] and [rn + imm*size]. Upper lanes of the 16-byte
             // slot are untouched (ARM `ldr d0` preserves the high 64 bits, and a

@@ -2883,4 +2883,97 @@ mod tests {
                     "f32 bridge atan2f(1,0) = {got} != pi/2"
                 );
             }
+
+        #[test]
+        fn vec128_reg_offset_store_preserves_base_and_writes_16b() {
+            // str q0,[x0,x3] = 0x3ca36800 must write 16 bytes at [x0+x3] and NOT
+            // modify x0. Pre-fix it mis-decoded as `ldrsb x0,[x0,x3]` (a byte
+            // sign-extend load INTO x0), silently corrupting the caller (memset
+            // clobbered x0, then `str w5,[x0,#4]` faulted at 0x4).
+            let code = [
+                0x00, 0x68, 0xa3, 0x3c, // str q0, [x0, x3]
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut mem = [0u8; 64];
+            let base = mem.as_ptr() as u64;
+            let mut st = CpuState::new();
+            st.x[0] = base;
+            st.x[3] = 0x10;
+            st.v[0] = 0x1122334455667788; // v0 low 64
+            st.v[1] = 0x99aabbccddeeff00; // v0 high 64
+            let r = exec_bytes(&mut st, &code, 0).expect("exec");
+            assert_eq!(r, base, "x0 (store base) must be preserved, not written back");
+            let lo = u64::from_le_bytes(mem[16..24].try_into().unwrap());
+            let hi = u64::from_le_bytes(mem[24..32].try_into().unwrap());
+            assert_eq!(lo, 0x1122334455667788, "v0 low lane stored at [x0+x3]");
+            assert_eq!(hi, 0x99aabbccddeeff00, "v0 high lane stored at [x0+x3]");
+        }
+
+        #[test]
+        fn vec128_unscaled_store_preserves_pointer() {
+            // stur q0,[x5,#-16] = 0x3c9f00a0 (unscaled, no writeback): x5 must
+            // stay put and 16 bytes land at [x5-16].
+            let code = [
+                0xa0, 0x00, 0x9f, 0x3c, // stur q0, [x5, #-16]
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut mem = [0u8; 64];
+            let base = mem.as_ptr() as u64;
+            let mut st = CpuState::new();
+            st.x[5] = base + 0x20; // [base+0x20 - 0x10] = [base+0x10]
+            st.v[0] = 0xfedcba9876543210;
+            st.v[1] = 0x0123456789abcdef;
+            let r = exec_bytes(&mut st, &code, 0).expect("exec");
+            let _ = r;
+            assert_eq!(st.x[5], base + 0x20, "unscaled stur must not write back the pointer");
+            let lo = u64::from_le_bytes(mem[0x10..0x18].try_into().unwrap());
+            let hi = u64::from_le_bytes(mem[0x18..0x20].try_into().unwrap());
+            assert_eq!(lo, 0xfedcba9876543210);
+            assert_eq!(hi, 0x0123456789abcdef);
+        }
+
+        #[test]
+        fn vec128_pre_index_relocates_base_after_load() {
+            // ldr q4,[x0,#64]! = 0x3cc40c04 (pre-index writeback): loads 16 bytes
+            // from [x0+64] AND advances x0 by +64.
+            let code = [
+                0x04, 0x0c, 0xc4, 0x3c, // ldr q4, [x0, #64]!
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let mut mem = [0u8; 96];
+            let base = mem.as_ptr() as u64;
+            let mut st = CpuState::new();
+            st.x[0] = base;
+            mem[64..72].copy_from_slice(&0x0102030405060708u64.to_le_bytes());
+            mem[72..80].copy_from_slice(&0x1112131415161718u64.to_le_bytes());
+            let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+            assert_eq!(st.x[0], base + 64, "pre-index ldr q advances Xn by imm9");
+            assert_eq!(st.v[8], 0x0102030405060708, "q4 = v slots 8..9 low");
+            assert_eq!(st.v[9], 0x1112131415161718, "q4 high lane");
+        }
+
+        #[test]
+        fn vec128_ldst_decode_not_gpr_and_scalar_b_untouched() {
+            use crate::decode::{decode, Inst};
+            // 128-bit vector register-offset / unscaled / indexed forms route to
+            // the vector classes, NOT GPR LdStrReg/LdStrImmWb (which would write
+            // INTO a GPR register).
+            assert!(matches!(decode(0x3ca36800), Inst::VecLdStrReg { ld: false, .. }));
+            assert!(matches!(decode(0x3ce46841), Inst::VecLdStrReg { ld: true, .. }));
+            assert!(matches!(decode(0x3c9f00a0), Inst::VecLdStImmUnscaled { ld: false, .. }));
+            assert!(matches!(decode(0x3cc200c1), Inst::VecLdStImmUnscaled { ld: true, .. }));
+            assert!(matches!(
+                decode(0x3cc40c04),
+                Inst::VecLdStIndexed { ld: true, pre: true, .. }
+            ));
+            assert!(matches!(
+                decode(0x3c9e0404),
+                Inst::VecLdStIndexed { ld: false, pre: false, .. }
+            ));
+            // A scalar byte unscaled (stur b0 = 0x3c1fc100) must NOT be a 128-bit
+            // vector class.
+            assert!(!matches!(decode(0x3c1fc100), Inst::VecLdStImmUnscaled { .. }));
+            // A real GPR register-offset load still decodes as LdStrReg.
+            assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
+        }
         }

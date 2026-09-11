@@ -210,6 +210,33 @@ pub enum Inst {
         imm: u32, // scaled-by-16 byte offset
         ld: bool,
     },
+    // ---- SIMD/NEON 128-bit vector load/store with a REGISTER offset ----
+    // (ldr q0,[xN,xM] / str q0,[xN,xM]). AArch64 bit26=1 selects the vector file. Before
+    // this class these matched the GPR register-offset gate (no bit26 check)
+    // and a `str q` was mis-decoded as a 1-byte sign-extend GPR load INTO rn's
+    // register (e.g. memset's str q0,[x0,x3] became `ldrsb x0,[x0,x3]`,
+    // silently clobbering guest x0). Option/S bitfields are ignored (the real
+    // forms use LSL #0); addr = x[rn] + x[rm].
+    VecLdStrReg { vt: u8, rn: u8, rm: u8, ld: bool },
+    // ---- SIMD/NEON 128-bit vector load/store, unscaled SIGNED imm9 ----
+    // (ldur q0,[xN,#imm9] / stur q0,[xN,#imm9]). Same bit26=1 class hazard: the
+    // stale unscaled GPR gate (0x38000000) mis-read these as 1-byte GPR ops.
+    VecLdStImmUnscaled {
+        vt: u8,
+        rn: u8,
+        imm9: i32,
+        ld: bool,
+    },
+    // ---- SIMD/NEON 128-bit vector load/store, PRE/POST-index writeback ----
+    // (ldr/str q0,[xN,#imm9]! and [xN],#imm9). Xn is advanced by the signed
+    // imm9 after the transfer (a real side effect). bit26=1 (vector file).
+    VecLdStIndexed {
+        vt: u8,
+        rn: u8,
+        imm9: i32,
+        ld: bool,
+        pre: bool, // pre-index (advance then access) vs post-index
+    },
     // ---- FP/SIMD scalar-register load/store (ldr/str d0,s0,h0,b0,[xN,#imm]) ----
     // bit26=1 selects the vector/FP register file; width = size (1/2/4/8 bytes:
     // B/H/S/D). Unlike a GPR store there is no XZR quirk — all 32 vector regs
@@ -1915,6 +1942,66 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
+    // ---- SIMD/NEON 128-bit REGISTER-offset load/store (ldr/str q0,[xN,xM]) ----
+    // bit26=1 (vector file) + bit21=1 (Q 128-bit) selects this class. MUST
+    // precede the GPR register-offset gate below: that gate (0x38200800) does
+    // not mask bit26, so a `str q0,[x0,x3]` (0x3ca36800) would otherwise decode
+    // as `ldrsb x0,[x0,x3]` — silently clobbering guest x0. Register + option
+    // (0x3ca0_0800/0x3ce0_0800 after masking rt/rn/rm/option) key on ld=bit22.
+    {
+        let m = insn & 0xffe0_0c00;
+        if m == 0x3ca0_0800 || m == 0x3ce0_0800 {
+            return Inst::VecLdStrReg {
+                vt: (insn & 0x1f) as u8,
+                rn: b(insn, 5, 9) as u8,
+                rm: b(insn, 16, 20) as u8,
+                ld: (insn >> 22) & 1 == 1,
+            };
+        }
+    }
+
+    // ---- SIMD/NEON 128-bit UNSCALED load/store (ldur/stur q0,[xN,#imm9]) ----
+    // bit26=1 + bit21=0 (unscaled, not register-offset). (insn & 0xffe00c00) is
+    // 0x3c80_0000 for stur and 0x3cc0_0000 for ldur (the signed imm9 lives in
+    // bits[20:12], outside the masked rm/suffix region — verified: stur q0,[x5,
+    // #-16]=0x3c9f00a0). Must NOT collide with the scalar-B unscaled form
+    // (stur b0=0x3c1fc100, which masks to 0x3c00_0000, bit23 clear).
+    {
+        let m = insn & 0xffe0_0c00;
+        if m == 0x3c80_0000 || m == 0x3cc0_0000 {
+            let imm9 = (((insn >> 12) & 0x1ff) as i32) << 23 >> 23; // sign-ext 9 bits
+            return Inst::VecLdStImmUnscaled {
+                vt: (insn & 0x1f) as u8,
+                rn: b(insn, 5, 9) as u8,
+                imm9,
+                ld: (insn >> 22) & 1 == 1,
+            };
+        }
+    }
+
+    // ---- SIMD/NEON 128-bit PRE/POST-index writeback load/store (ldr/str q) ----
+    // (insn & 0xffe00c00) in {0x3cc00c00 (ldr pre), 0x3cc00400 (ldr post),
+    // 0x3c800c00 (str pre), 0x3c800400 (str post)}. bit26=1 + the 0x0c00/0x0400
+    // suffix distinguishes writeback from unscaled (0x0800) / register-offset
+    // (bit21=1). Xn advances by signed imm9 after the transfer.
+    {
+        let m = insn & 0xffe0_0c00;
+        if m == 0x3cc0_0c00
+            || m == 0x3cc0_0400
+            || m == 0x3c80_0c00
+            || m == 0x3c80_0400
+        {
+            let imm9 = (((insn >> 12) & 0x1ff) as i32) << 23 >> 23; // sign-ext 9 bits
+            return Inst::VecLdStIndexed {
+                vt: (insn & 0x1f) as u8,
+                rn: b(insn, 5, 9) as u8,
+                imm9,
+                ld: (insn >> 22) & 1 == 1,
+                pre: (insn >> 11) & 1 == 1,
+            };
+        }
+    }
+
     // ---- load/store (register offset) ---- ONLY the register-offset form.
     // The old gate (insn & 0x3b00_0000)==0x3800_0000 was too broad: it also
     // swallowed the pre/post-index and unscaled IMMEDIATE forms (0xf84x/0x78x/
@@ -1923,8 +2010,11 @@ pub fn decode(insn: u32) -> Inst {
     // register-offset test is (insn & 0x3b200c00) == 0x38200800 (option bits:
     // real LdStrReg sxtw/lsl forms like 0xf8627803 and 0xb862d803 match; the
     // immediate forms 0x38000c00/0x38000400/0x38000000 fall through to the
-    // LdStrImmWb decoder below).
-    if (insn & 0x3b20_0c00) == 0x3820_0800 {
+    // LdStrImmWb decoder below). bit26 must be 0 (GPR file): a SIMD/FP
+    // register-offset ld/st (bit26=1, e.g. str q0,[x0,x3]) is a vector op
+    // handled above — without this mask it mis-decoded as a byte GPR store/
+    // sign-extend load into the base register.
+    if (insn & 0x3b20_0c00) == 0x3820_0800 && (insn & 0x0400_0000) == 0 {
         let size = match (insn >> 30) & 0x3 {
             0 => 1,
             1 => 2,
@@ -1960,8 +2050,13 @@ pub fn decode(insn: u32) -> Inst {
     // 0x38000400, unscaled=0x38000000 (register-offset 0x38200800 already
     // returned above). Before this decoder these forms were mis-read as
     // register-offset LdStrReg with garbage `rm` (a real NULL-deref bug in
-    // glibc's auxv/env scan `ldr x3,[x0],#8`).
-    if matches!(insn & 0x3b20_0c00, 0x3800_0c00 | 0x3800_0400) || (insn & 0x3b20_0c00) == 0x3800_0000 {
+    // glibc's auxv/env scan `ldr x3,[x0],#8`). bit26 must be 0 (GPR file): the
+    // SIMD/FP vector unscaled forms (stur/ldur q, bit26=1) are handled above by
+    // VecLdStImmUnscaled — without the mask an (old) broad gate mis-read a
+    // `stur q0,[x5,#-16]` as a 1-byte GPR op writing the base register.
+    if (matches!(insn & 0x3b20_0c00, 0x3800_0c00 | 0x3800_0400) || (insn & 0x3b20_0c00) == 0x3800_0000)
+        && (insn & 0x0400_0000) == 0
+    {
         let size = match (insn >> 30) & 0x3 {
             0 => 1,
             1 => 2,
