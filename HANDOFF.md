@@ -3970,3 +3970,46 @@ branch tables, recursion) matches the native oracle at both -O2 and -O3.
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — SIMD INS lane-index decode FIX + Extr/unpack/zip batch folded (workspace 243/0)
+
+Commit `b93e89d` on `dev` (all `cargo build --workspace` + `cargo test
+--workspace` green). Two threads:
+
+1. **Closed the persistent `diff_float_vector_reduced` (fv4, -O3) miscompile —
+   jit 153 vs native oracle 175.** Root cause was NOT the permute snapshot:
+   the INS (vector, element) lane-index decode read `dst_idx = bit20` and
+   `src_idx = bit14` — two single bits that only coincided with the true lane
+   index for S lane 0->1. Every S lane beyond 0 and every H/B lane silently
+   copied into the wrong vector element. gcc -O3 emits `mov v3.s[1], v28.s[0]`
+   and `mov v31.s[1], v4.s[0]` in the float tight loop fv4 exercises, so a wrong
+   `dst_idx` put the seed/accumulator f32 lanes in the wrong V slots. Correct
+   packing (verified against the aarch64 assembler for all 4x4 S, 8x8 H, 16x16
+   B, 2x2 D lane pairs — 340 encodings, 0 mismatches):
+   `l = log2(esize); dst = imm5 >> (l+1); src = (insn>>(11+l)) & ((1<<(4-l))-1)`.
+   fv4 now returns 175 == oracle. Locked with `simd_insd_sets_correct_lane_with_multi_byte_indices`
+   (mov v3.s[2],v5.s[1] copies 3.5f into lane 2; move-back bytes assembler-verified).
+
+2. **Folded in the earlier uncommitted arm64jit batch** (verified green so HEAD
+   stays clean): general EXTR with `rm != rn` (`extr x0,x0,x1,#51`, gcc's shift-
+   rotate idiom) now decodes as `Inst::Extr` instead of falling through to the
+   UBFM/SBFM gate; uzp1/uzp2/zip1/zip2 snapshot their rd-aliased source to a
+   `permscratch` buffer in CpuState (gcc's ubiquitous `uzp1 v31.8h,v31.8h,v26.8h`
+   and `zip1 v31.4s,v3.4s,v31.4s`); and REX.B on shl/shr/ror/not/neg emitters so
+   guest regs >= 8 (R10+) are addressed correctly. Regression tests:
+   `extr_general_two_operand_rotate`, `uzp1_rd_aliases_rn_does_not_corrupt_source`,
+   `csel_family_op_discriminates_neg_not_inc_identity`, plus diff_battery
+   canaries `diff_integer_signed_division_negative_edge`,
+   `diff_rotate_extract_and_byte_accum`, and `diff_float_vector_reduced` (now green).
+
+**Verification:** `cargo test --workspace` **243/0** (146 arm64jit lib incl. the
+new ins test; 26 diff_battery incl. fv4). HEAD `b93e89d`.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery driving ISA/correctness breadth (more SIMD
+   lane/permute/wide paths, FP reduction/reassociation shapes).
+2. Move up to the runtime side: the FMOD "divert guest bl-to-once through the
+   dispatcher" task and JNI function-table stubs per RECOMMENDATION.md.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).
