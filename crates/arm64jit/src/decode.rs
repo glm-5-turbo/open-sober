@@ -330,9 +330,9 @@ pub enum Inst {
     // bit29 (0x2f/0x6f). These previously fell into the broad VecMovi gate.
     SimdShr { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
-    Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
+    Ld2 { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
     // ---- SIMD st2 (structure store of two vectors) ----
-    St2 { rd: u8, rn: u8, q: bool, post: i32 },
+    St2 { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
     // ---- SIMD ld1/st1 MULTIPLE structures (consecutive, NO deinterleave) ----
     // ld1/st1 {Vt.T, Vt2.T, ..} loads/stores `nreg` consecutive (q?16:8)-byte
     // vectors to/from V[rd], V[rd+1], .. — the plain array-copy idiom the
@@ -2187,9 +2187,9 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             // LD2 / ST2 — deinterleave 2 registers (existing behavior).
             let post = if wb { block * 2 } else { 0 };
             return if ld {
-                Inst::Ld2 { rd, rn, q, post }
+                Inst::Ld2 { rd, rn, q, post, esize }
             } else {
-                Inst::St2 { rd, rn, q, post }
+                Inst::St2 { rd, rn, q, post, esize }
             };
         }
         // LD4/ST4 (op=0b0000) and LD3/ST3 (op=0b0100) are structure

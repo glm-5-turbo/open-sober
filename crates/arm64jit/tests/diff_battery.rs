@@ -1697,3 +1697,32 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_ld2_halfword_strided_accumulate() {
+    // gcc -O3 vectorizes a u16 STRIDED accumulate (`for(i+=2) s += b[i]`) into
+    // `ld2 {v.8h, v.8h}` (structure DEINTERLEAVE at 2-byte element granularity)
+    // + zip/uaddw. Root cause of an open silent miscompile: the ld2 translate
+    // arm deinterleaved AT BYTE GRANULARITY regardless of element size, so the
+    // 2-byte strided even-index load read mem[2i], mem[2i+1] instead of the
+    // correct mem[4i], mem[4i+2] - the even-index sum registered the wrong
+    // memory elements (isolated repro: 311814 vs native 281606; and it
+    // contaminated a co-resident byte-acc loop to ~2x). Element size must
+    // scale the stride. Guards the ld2/st2 halfword path end-to-end.
+    assert_diff(
+        "ld2h_strided_even",
+        "-O3",
+        r#"
+long long entry(void){
+    unsigned short b[64];
+    volatile unsigned long long seedv = 0x9e3779b97f4a7c15ull;
+    unsigned long long x = seedv*1103515245u + 12345u;
+    for(int i=0;i<64;i++){ x = x*1103515245u + 12345u; b[i]=(unsigned short)((x>>16)^0x33); }
+    long long s1=0, s2=0;
+    for(int i=0;i<64;i+=1) s1 += (long long)b[i];
+    for(int i=0;i<64;i+=2) s2 += (long long)b[i];
+    return s1 + s2*1000;
+}
+"#,
+    );
+}

@@ -3882,17 +3882,23 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                         buf.mov_store64(RBX, slot(rd)+8, RAX);
                                         Ok(())
                                     }
-                                        Inst::Ld2 { rd, rn, q, post } => {
-                    // ld2 {Vt, Vt1}, [Xn]: load 2*q elements, deinterleave bytes.
-                    // Vt[i] = mem[2i], Vt1[i] = mem[2i+1], i in 0..n (n = q?16:8).
+                                        Inst::Ld2 { rd, rn, q, post, esize } => {
+                    // ld2 {Vt, Vt1}, [Xn]: load 2 structure vectors, DEINTERLEAVED.
+                    // Memory holds {V0.e0,V1.e0, V0.e1,V1.e1, ...}: element i of
+                    // reg j (j in 0..2) is at byte offset i*(2*es) + j*es, es =
+                    // element size. Vt[i]=mem[2*i*es], Vt1[i]=mem[2*i*es+es].
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                    let n = if q { 16 } else { 8 };
+                    let total = if q { 16 } else { 8 } as i32; // bytes per vector
+                    let es = esize as i32;
+                    let nelems = total / es;
                     ldg(buf, RDX, rn as u32); // RDX = base (host ptr)
-                    for i in 0..n {
-                        buf.movzx_byte_mem(RAX, RDX, 2 * i);   // mem[2i]  -> Vt[i]
-                        buf.mov_store8(RBX, vslot(rd) + i, RAX);
-                        buf.movzx_byte_mem(RAX, RDX, 2 * i + 1); // mem[2i+1] -> Vt1[i]
-                        buf.mov_store8(RBX, vslot(rd + 1) + i, RAX);
+                    for j in 0..2i32 {
+                        for i in 0..nelems {
+                            for b in 0..es {
+                                buf.movzx_byte_mem(RAX, RDX, i * 2 * es + j * es + b);
+                                buf.mov_store8(RBX, vslot((rd as i32 + j) as u8) + i * es + b, RAX);
+                            }
+                        }
                     }
                     if post != 0 {
                         buf.mov_load64(RAX, RBX, slot(rn as u32));
@@ -3901,16 +3907,22 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
-                Inst::St2 { rd, rn, q, post } => {
-                    // st2 {Vt, Vt1}, [Xn]: store Vt then Vt1 consecutively at base.
+                Inst::St2 { rd, rn, q, post, esize } => {
+                    // st2 {Vt, Vt1}, [Xn]: the inverse — store structure vectors
+                    // Vt..Vt1 to memory in the deinterleaved {V0.e0,V1.e0,...}
+                    // layout (element i of reg j at byte i*2*es + j*es).
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                    let bytes = if q { 16 } else { 8 } as i32;
+                    let total = if q { 16 } else { 8 } as i32;
+                    let es = esize as i32;
+                    let nelems = total / es;
                     ldg(buf, RDX, rn as u32); // RDX = base (host ptr)
-                    for i in 0..bytes {
-                        buf.movzx_byte_mem(RAX, RBX, vslot(rd) + i);   // Vt[i]   -> mem[i]
-                        buf.mov_store8(RDX, i, RAX);
-                        buf.movzx_byte_mem(RAX, RBX, vslot(rd + 1) + i); // Vt1[i] -> mem[bytes+i]
-                        buf.mov_store8(RDX, bytes + i, RAX);
+                    for j in 0..2i32 {
+                        for i in 0..nelems {
+                            for b in 0..es {
+                                buf.movzx_byte_mem(RAX, RBX, vslot((rd as i32 + j) as u8) + i * es + b);
+                                buf.mov_store8(RDX, i * 2 * es + j * es + b, RAX);
+                            }
+                        }
                     }
                     if post != 0 {
                         buf.mov_load64(RAX, RBX, slot(rn as u32));

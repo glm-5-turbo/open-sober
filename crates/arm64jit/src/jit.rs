@@ -2136,6 +2136,43 @@ mod tests {
     }
 
     #[test]
+    fn ld2_st2_halfword_deinterleave_respects_esize() {
+        // Regression: the ld2/st2 translate arm DEINTERLEAVED AT BYTE
+        // GRANULARITY regardless of element size, so `ld2 {v28.8h,v29.8h}`
+        // (2-byte elements) read mem[2i], mem[2i+1] instead of the correct
+        // mem[4i], mem[4i+2] — a u16 strided-accumulate loop (`for i+=2`)
+        // silently returned 311814 vs the native 281606 (the even-index Sum
+        // registered the wrong memory elements). Element size must scale the
+        // deinterleave stride: element i of reg j is at byte i*(2*es) + j*es.
+        use crate::decode::decode;
+        use crate::decode::Inst;
+        // Assemble-verified encodings (aarch64-linux-gnu-as):
+        //   ld2 {v30.8h-v31.8h},[x0] = 0x4c40841e ; st2 same = 0x4c00841e
+        //   ld2 {v30.8h-v31.8h},[x0],#32 = 0x4cdf841e ; st2 = 0x4c9f841e
+        //   ld2 {v30.16b-v31.16b},[x0] = 0x4c40801e (byte esize=1)
+        //   ld2 {v28.4s-v29.4s},[x0] = 0x4c40881c (word esize=4)
+        for w in [0x4c40841eu32, 0x4c00841e, 0x4cdf841e, 0x4c9f841e] {
+            let i = decode(w);
+            assert!(
+                matches!(i, Inst::Ld2 { esize: 2, .. } | Inst::St2 { esize: 2, .. }),
+                "halfword ld2/st2 word {w:#x} decoded {i:?}"
+            );
+        }
+        // The byte deinterleave (esize=1) still decodes: ld2 {v30.16b-v31.16b},[x0].
+        let i = decode(0x4c40801eu32);
+        assert!(
+            matches!(i, Inst::Ld2 { esize: 1, .. }),
+            "byte ld2 word decoded {i:?}"
+        );
+        // And the word (4-byte) deinterleave: ld2 {v28.4s-v29.4s},[x0].
+        let i = decode(0x4c40881cu32);
+        assert!(
+            matches!(i, Inst::Ld2 { esize: 4, .. }),
+            "word ld2 word decoded {i:?}"
+        );
+    }
+
+    #[test]
     fn ld4_st4_decode_to_structure_deinterleave() {
         // Regression: the structure-load gate folded opcode 0b0000 (ld4/st4)
         // into the single-register consecutive path (0x7|0x0 => nreg 1), so
