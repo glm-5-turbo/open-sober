@@ -1,0 +1,14 @@
+[package]
+name = "egl-wrapper"
+description = "Thin libEGL.so forwarding shim: dlopen Mesa libEGL.so.1 and forward each EGL entry point (GRAPHICS_RECOMMENDATION Phase 1 / 3.3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "EGL"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
+texture2ddecoder = "0.1.2"

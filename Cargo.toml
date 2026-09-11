@@ -6,6 +6,8 @@ members = [
     "crates/sober-services",
     "crates/sober-core",
     "crates/arm64jit",
+    "crates/egl-wrapper",
+    "crates/glesv2-wrapper",
 ]
 
 [workspace.package]

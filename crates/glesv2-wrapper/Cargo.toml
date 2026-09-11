@@ -1,0 +1,17 @@
+[package]
+name = "glesv2-wrapper"
+description = "Thin libGLESv2.so forwarding shim: dlopen Mesa libGLESv2.so.2, forward GLES entry points, and intercept glCompressedTexImage2D/SubImage for Android texture formats (ETC1/ETC2/EAC/ASTC) via texture2ddecoder (GRAPHICS_RECOMMENDATION Phase 1 / 3.3 + 4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "GLESv2"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
+texture2ddecoder = "0.1.2"
+
+[dev-dependencies]
+libc = "0.2"
