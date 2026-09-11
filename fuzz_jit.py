@@ -881,6 +881,54 @@ gens += [gen_widen_mul_acc]
 
 
 
+
+def gen_high_narrow():
+    # SIMD high-half narrowing addhn/subhn/raddhn/rsubhn (u16->u32 widen then
+    # keep top half) and pairwise-adjacent-long accumulate (vpaddl/vpadal).
+    # Empirically: the addhn-family decode gate was exact-match on byte2
+    # (missed real 0x43), fixed to masked &0xe0. Both families decoded but were
+    # never fuzzed; u16 data keeps sums exact.
+    n = random.choice([8, 16, 32])
+    which = random.choice(["addhn","subhn","raddhn","rsubhn","adalp"])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 314159ull;
+    unsigned long long x = seedv;
+    uint16_t a[{n}], b[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1ull; a[i]=(uint16_t)(x>>48); b[i]=(uint16_t)(a[i]*3+11); }}
+    long long acc=0;
+    if ("{which}"=="adalp") {{
+        uint32x4_t accv = vdupq_n_u32(0);
+        for(int i=0;i<{n}/4;i++){{
+            uint16x4_t va = vld1_u16(&a[i*4]);
+            uint16x4_t vb = vld1_u16(&b[i*4]);
+            uint32x2_t pa = vpaddl_u16(va);   // [a0+a1, a2+a3]
+            uint32x2_t pb = vpaddl_u16(vb);
+            uint32x2_t s = vadd_u32(pa, pb);
+            uint32x2_t lo = vget_low_u32(accv);
+            uint32x4_t nv = vcombine_u32(vadd_u32(lo, s), vget_high_u32(accv));
+            accv = nv;
+        }}
+        for(int k=0;k<2;k++) acc += (long long)vgetq_lane_u32(accv,k)*(1+(k%5));
+    }} else {{
+        for(int i=0;i<{n}/4;i++){{
+            uint16x4_t va = vld1_u16(&a[i*4]);
+            uint16x4_t vb = vld1_u16(&b[i*4]);
+            uint16x4_t s;
+            if ("{which}"=="addhn") s = vaddhn_u32(vmovl_u16(va), vmovl_u16(vb));
+            else if ("{which}"=="subhn") s = vsubhn_u32(vmovl_u16(va), vmovl_u16(vb));
+            else if ("{which}"=="raddhn") s = vraddhn_u32(vmovl_u16(va), vmovl_u16(vb));
+            else s = vrsubhn_u32(vmovl_u16(va), vmovl_u16(vb));
+            uint16_t out[4]; vst1_u16(out, s);
+            for(int k=0;k<4;k++) acc += (long long)out[k]*(1+((i*4+k)%7));
+        }}
+    }}
+    return acc & 0x3fffffff;
+}}
+"""
+
+gens += [gen_high_narrow]
+
 def gen_sat_narrow():
     # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on
     # the JIT): vqmovn_s32 (s32->s16), vqmovn_u32 (u32->u16), vqmovun_s32

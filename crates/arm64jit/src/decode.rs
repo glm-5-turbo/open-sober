@@ -2509,7 +2509,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
             // byte2 == 0x68; prefix 0x2e(u,q0)/0x4e(s,q0)/0x6e(u,q1)/0x0e(s,q1). For q=0 the
             // dst lanes n_pairs = 8/(2*... ) derived in translate from src_esize below.
-            if ((insn >> 8) & 0xff) == 0x68 && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e) {
+            if ((insn >> 8) & 0xff & 0xfc) == 0x68 && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e) {
                 let rd = (insn & 0x1f) as u8;
                 let rn = ((insn >> 5) & 0x1f) as u8;
                 let b1 = (insn >> 16) & 0xff;
@@ -3915,19 +3915,19 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                                                                                 // addhn/subhn/raddhn: dst = high half of src-width sum/diff, narrowed.
                                                                                                                                                                                                                                                                                 // byte2 {0x40(hn-add),0x60(hn-sub)}; prefix 0x0e/0x2e; dst_esize=1<<bits[23:22].
                                                                                                                                                                                                                                                                                 let hb0 = (insn >> 24) & 0xff;
-                                                                                                                                                                                                                                                                                let hb2 = (insn >> 8) & 0xff;
-                                                                                                                                                                                                                                                                                if (hb0 == 0x0e || hb0 == 0x2e) && (hb2 == 0x40 || hb2 == 0x60)
-                                                                                                                                                                                                                                                                                    && (insn & 0x2000) == 0 {
-                                                                                                                                                                                                                                                                                    let dst_esize: u8 = 1 << ((insn >> 22) & 3);
-                                                                                                                                                                                                                                                                                    return Inst::SimdHighNarrow {
-                                                                                                                                                                                                                                                                                        rd: (insn & 0x1f) as u8,
-                                                                                                                                                                                                                                                                                        rn: ((insn >> 5) & 0x1f) as u8,
-                                                                                                                                                                                                                                                                                        rm: ((insn >> 16) & 0x1f) as u8,
-                                                                                                                                                                                                                                                                                        dst_esize,
-                                                                                                                                                                                                                                                                                        sub: hb2 == 0x60,
-                                                                                                                                                                                                                                                                                        round: (insn >> 29 & 1) == 1, // raddhn/rsubhn (bit29 set)
-                                                                                                                                                                                                                                                                                    };
-                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                let hb2 = (insn >> 8) & 0xff;
+                                                                                                                                                                                                                                                                                                if (hb0 == 0x0e || hb0 == 0x2e) && ((hb2 & 0xe0) == 0x40 || (hb2 & 0xe0) == 0x60)
+                                                                                                                                                                                                                                                                                                                    && (insn & 0x400) == 0 { // bit10=0 marks three-different (addhn/subhn); 3-same min/max set it
+                                                                                                                                                                                                                                                                                                                    let dst_esize: u8 = 1 << ((insn >> 22) & 3);
+                                                                                                                                                                                                                                                                                                                    return Inst::SimdHighNarrow {
+                                                                                                                                                                                                                                                                                                                        rd: (insn & 0x1f) as u8,
+                                                                                                                                                                                                                                                                                                                        rn: ((insn >> 5) & 0x1f) as u8,
+                                                                                                                                                                                                                                                                                                                        rm: ((insn >> 16) & 0x1f) as u8,
+                                                                                                                                                                                                                                                                                                                        dst_esize,
+                                                                                                                                                                                                                                                                                                                        sub: (insn & 0x2000) != 0, // byte2 0x40=add,0x60=sub (this IS bit13)
+                                                                                                                                                                                                                                                                                                                        round: (insn >> 29 & 1) == 1, // raddhn/rsubhn (bit29 set)
+                                                                                                                                                                                                                                                                                                                    };
+                                                                                                                                                                                                                                                                                                                }
                                                                                                                                                                                                                                                                                 // Low-half truncation. Gate &0xffe0_fc00 residues (all Q=0, no
                                                                                                                                                                                                                                                                                 // collision): 0x0e202800 (8b<8h), 0x0e602800 (4h<4s), 0x0ea02800 (2s<2d).
                                                                                                                                                                                                                                                                                 let xe = insn & 0xffe0_fc00;
@@ -5980,6 +5980,31 @@ mod logical_imm_regressions {
         // genuine shifts stay shifts
         assert!(matches!(decode(0x4f2157bd), Inst::SimdShl { .. }), "shl v29.4s,#1");
         assert!(matches!(decode(0x6f580400), Inst::SimdShr { .. }), "ushr v0.2d,#40");
+    }
+
+    #[test]
+    fn addhn_family_not_colliding_with_three_same_minmax() {
+        // Session (cycle 44c): the SimdHighNarrow gate matched byte2 &0xe0 in
+        // {0x40,0x60} but that set also matched three-same smin(.2s=0x0ea16c00)/
+        // smax, silently miscompiling them. bit10(0x400)=0 marks addhn/subhn/
+        // raddhn/rsubhn (three-different); three-same ops set it.
+        assert!(matches!(decode(0x0e614000), Inst::SimdHighNarrow { sub: false, .. }));
+        assert!(matches!(decode(0x0e616000), Inst::SimdHighNarrow { sub: true, .. }));
+        assert!(matches!(decode(0x0ea14000), Inst::SimdHighNarrow { .. }));
+        assert!(!matches!(decode(0x0ea16c00), Inst::SimdHighNarrow { .. })); // smin .2s
+        assert!(!matches!(decode(0x0ea16400), Inst::SimdHighNarrow { .. })); // smax .2s
+        assert!(!matches!(decode(0x4ea16c00), Inst::SimdHighNarrow { .. })); // smin .4s q
+    }
+
+    #[test]
+    fn adalp_gate_masks_rn_low_bits_without_swallowing_smin() {
+        // Session (cycle 44c): adalp byte2 low bits carry rn[1:0] (0x68|reg -> 0x6b),
+        // so the gate must mask &0xfc; an earlier &0xf8 also caught smin(.2s byte2=0x6c)
+        // and smax, corrupting min/max math on real paths.
+        assert!(matches!(decode(0x2e606bfb), Inst::SimdAdalp { .. }));
+        assert!(matches!(decode(0x0e60681f), Inst::SimdAdalp { .. }));
+        assert!(!matches!(decode(0x0ea16c00), Inst::SimdAdalp { .. })); // smin .2s
+        assert!(!matches!(decode(0x6e216c00), Inst::SimdAdalp { .. })); // umin .16b
     }
 
     #[test]
