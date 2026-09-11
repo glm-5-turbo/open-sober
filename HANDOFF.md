@@ -5511,3 +5511,27 @@ the child exits.
   remaining: per-thread guest TLS block layout, clone3(435), tgkill/signal
   delivery. HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK
   host (none on this VPS).
+
+## Cycle 38c (Sep 11, 2026) — clone3(435) struct-args thread spawn (355/0)
+
+Commit landed on dev. Modern glibc/bionic prefers clone3(435) over clone(220),
+so a real boot needs it.
+
+- Refactored the shared-VM thread spawn from the clone(220) arm into
+  `spawn_guest_thread(s, flags, stack, parent_tid, tls, child_tid)` — one body,
+  two syscall shapes.
+- clone3(435): reads `struct clone_args` from guest memory (flags@0,
+  child_tid@16, parent_tid@24, stack@40, tls@56; -EINVAL if the guest's `size`
+  is too small for those fields) and spawns via the shared helper — same
+  CLONE_VM/SETTLS/PARENT_SETTID/CHILD_SETTID/CLEARTID semantics as clone(220).
+- +`loader_run_clone3_struct_args_spawns_guest_thread`: raw clone3 with a real
+  struct clone_args — child computes 10! (3628800) on its own stack, publishes a
+  result global, thread-exits (93); parent futex-joins on the child's clear-tid
+  word; asserts the factorial result, the zeroed clear-tid, and a clean wait.
+
+`cargo test --workspace` **355/0** (was 354), build clean. clone(220),
+clone3(435), and pthread_join (CLONE_CHILD_CLEARTID + futex) all verified
+headlessly. Remaining thread-model next: per-thread guest TLS block layout
+(beyond SETTLS pointer handoff), tgkill/signal delivery to a specific child.
+HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none
+on this VPS).
