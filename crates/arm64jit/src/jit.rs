@@ -1583,6 +1583,36 @@ mod tests {
     }
 
     #[test]
+    fn uaddw2_accumulate_lanes_correct_in_isolation() {
+        // Regression-guard: `uaddw v31.2d,v31.2d,v26.2s` then
+        // `uaddw2 v31.2d,v31.2d,v26.4s` must accumulate the two/4 word-lanes
+        // of v26 into the two 64-bit lanes of v31, no cross-lane contamination
+        // (encodings from aarch64-linux-gnu-as, see udw2.s). This isolates the
+        // accumulate arm from the pre-existing CO-RESIDENT two-loop bug (where
+        // the shared zero-widening register v29 is clobbered by the first
+        // loop's scalar tail `fmov d29,x` before the second loop's zip reads
+        // it) — the accumulate itself is correct when inputs are clean.
+        let code = [
+            0xffu8, 0x13, 0xba, 0x2e, // uaddw  v31.2d, v31.2d, v26.2s
+            0xff, 0x13, 0xba, 0x6e, // uaddw2 v31.2d, v31.2d, v26.4s
+            0xff, 0xbb, 0xf1, 0x5e, // addp   d31, v31.2d
+            0xe0, 0x03, 0x66, 0x9e, // fmov   x0, d31
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        // v26 = 4 word-lanes: [10, 20, 30, 40]  (v26 slot = VECTOR_BASE+26*16)
+        st.v[26 * 2] = (20u64 << 32) | 10;
+        st.v[26 * 2 + 1] = (40u64 << 32) | 30;
+        st.v[31 * 2] = 0; // v31.2d zeroed
+        st.v[31 * 2 + 1] = 0;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        // uaddw:  v31[0] += 10; v31[1] += 20
+        // uaddw2: v31[0] += 30; v31[1] += 40  => lane0=40 lane1=60
+        // addp:   d31 = 40 + 60 = 100
+        assert_eq!(r, 100, "uaddw/uaddw2 .2d accumulate should sum all four words");
+    }
+
+    #[test]
     fn real_arm64_objdump_sequence() {
         let code = [0x60u8, 0x00, 0x80, 0xd2];
         let mut st = CpuState::new();
