@@ -2541,3 +2541,34 @@ Both verified with new tests; arm64jit 69 -> 72, workspace 106/0, build clean.
 - int_only (loop w/ backward branch): still hangs — deeper loop/branch issue.
 - These are synthetic-program paths; next session should root-cause the inlined
   `ret`/dispatcher x30 interaction (high value for FP graphics/audio).
+
+## Session (Sep 11, 2026) — add/sub SP write + final JIT correctness sweep (commit 4301348)
+
+Root-caused and fixed the last of the XZR-vs-SP family: `AddSubImm`/`AddSubReg`
+suppressed rd==31 writes, but for ADD/SUB rd==31 means **SP** (unlike logical
+ops where it's XZR). So every function prologue `sub sp,sp,#N` did nothing and
+nested frames collided on the same SP — inlined `f()`'s `str d31,[sp+8]`
+overwrote the caller's saved x30 with 6.5's bit-pattern, and the final `ret`
+returned `pc = 0x401a000000000000` ("outside image"). cmp/cmn (s==1, rd==31)
+still discard correctly. Verified fp_only, C_fmovret, A_frame all return 42 now.
++`sub_add_sp_updates_stack_pointer` regression. arm64jit 73, workspace 107/0.
+
+Result after this session's 8 commits: the JIT's GPR load/store, FP/vector
+load/store, add/sub-SP, XZR handling and JNI table are all materially more
+correct; several would have corrupted the real Roblox runtime.
+
+### Honest remaining (next session — concrete, small tasks)
+- **`fcvtzs/fcvtzu Dd,Dn` and Sd,Sn (0x5E/0x7E)** — SIMD/vector FP->int writing
+  to an FP register lane. `fcvtzs d31,d31` (0x5ee1bbff, from B_fpstore) is
+  currently MIS-decoded as `WidenShl`; the plain 0x5ee1xxxx is Unsupported.
+  Add a class BEFORE the WidenShl gate and a translate converting Dn's double
+  to signed/unsigned int in Dd (this is a genuine silent-corruption risk for
+  FP code). B_fpstore segfaults at it (was hanging pre-sp-fix).
+- **Backwards-branch loop fidelity** — int_only (loop w/ `b.lt` back-edge)
+  still faults; jit_regress hangs. Verify the bounded compiler patches in-body
+  back-edge targets to the emitted block (host_of_guest) and that SP/offsets
+  stay stable across iterations.
+- SMOV/UMOV lane->GPR and remaining FP-vs-int lane ops.
+
+These are progressive ISA surface revealed by arbitrary compiled C, not
+blockers of the previously-validated Roblox boot path.
