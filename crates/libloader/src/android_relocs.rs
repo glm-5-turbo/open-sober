@@ -556,4 +556,99 @@ mod tests {
         let bad = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9]; // 9 bytes
         assert!(dt_relr_to_relatives(&bad).is_err());
     }
+
+    #[test]
+    fn read_elf_relocations_discovers_dt_relr_e2e() {
+        // Full discovery path (not just the decoder): build a minimal ELF on
+        // disk whose PT_DYNAMIC carries ONLY DT_RELR/DT_RELRSZ (no RELA), plus
+        // a PT_LOAD so vaddr->offset resolves, then confirm
+        // `read_elf_relocations` returns the correct RELATIVE hits.
+        // RELR stream: first word offset 0x2000 (low bit clear -> a reloc at
+        // 0x2000, next base 0x2008), then bitmap 0x6 -> offsets 0x2010, 0x2018.
+        // => relocs at vaddr 0x2000, 0x2010, 0x2018.
+        const PT_LOAD: u32 = 1;
+        const PT_DYNAMIC: u32 = 2;
+        const DT_NEEDED: u64 = 1;
+        const DT_RELR: u64 = 0x23;
+        const DT_RELRSZ: u64 = 0x24;
+        const DT_NULL: u64 = 0;
+
+        // Layout (offsets in the file):
+        //   0x0000 ehdr (64B)
+        //   0x0040 phdr[0] PT_LOAD { offset 0x1000, vaddr 0x1000, filesz 0x200 } (at 0x40)
+        //   0x0078 phdr[1] PT_DYNAMIC { offset 0x1200, vaddr 0x1200, filesz 0x30 } (at 0x78)
+        //   0x1000 .relr.dyn data start (inside PT_LOAD)
+        //   0x1200 dynamic entries
+        let relr_data = 0x1000u64;
+        let mut data: Vec<u8> = vec![0u8; 0x2000];
+
+        // ELF header.
+        data[0..4].copy_from_slice(b"\x7fELF");
+        data[4] = 2; // ELFCLASS64
+        data[5] = 1; // ELFDATA2LSB
+        data[6] = 1; // EV_CURRENT
+        data[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_DYN
+        data[18..20].copy_from_slice(&183u16.to_le_bytes()); // e_machine = EM_AARCH64
+        data[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+        data[32..40].copy_from_slice(&0x40u64.to_le_bytes()); // e_phoff
+        data[52..54].copy_from_slice(&1u16.to_le_bytes()); // e_ehsize
+        data[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        data[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+
+        // phdr[0] PT_LOAD.
+        let p0 = 0x40usize;
+        data[p0 + 0..p0 + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        data[p0 + 8..p0 + 16].copy_from_slice(&relr_data.to_le_bytes()); // p_offset
+        data[p0 + 16..p0 + 24].copy_from_slice(&relr_data.to_le_bytes()); // p_vaddr
+        data[p0 + 32..p0 + 40].copy_from_slice(&0x200u64.to_le_bytes()); // p_filesz
+
+        // phdr[1] PT_DYNAMIC.
+        let p1 = 0x78usize;
+        let dyn_off = 0x1200u64;
+        data[p1 + 0..p1 + 4].copy_from_slice(&PT_DYNAMIC.to_le_bytes());
+        data[p1 + 8..p1 + 16].copy_from_slice(&dyn_off.to_le_bytes()); // p_offset
+        data[p1 + 16..p1 + 24].copy_from_slice(&dyn_off.to_le_bytes()); // p_vaddr
+        data[p1 + 32..p1 + 40].copy_from_slice(&0x30u64.to_le_bytes()); // p_filesz
+
+        // .relr.dyn stream (an Elf64_Xword each). Two words:
+        //   0x2008 | 0 = 0x2008  -> low bit clear => a RELATIVE reloc at 0x2008,
+        //                             and sets base = 0x2008 + 8 = 0x2010.
+        //   0x5 (0b101)          -> low bit set => bitmap; bit2 (1-based) set =>
+        //                             a reloc at base + (2-1)*8 = 0x2010 + 8 = 0x2018.
+        // (bit1 of the bitmap is not set, so 0x2010 itself has no reloc.)
+        let d = relr_data as usize;
+        data[d..d + 8].copy_from_slice(&0x2008u64.to_le_bytes()); // offset word
+        data[d + 8..d + 16].copy_from_slice(&0x5u64.to_le_bytes()); // bitmap (bit2)
+
+        // Dynamic entries: two entries: DT_RELR -> 0x1000 (vaddr of stream),
+        // DT_RELRSZ -> 16, DT_NULL.
+        let dynseg = dyn_off as usize;
+        let mut entry = |i: usize, t: u64, v: u64| {
+            let o = dynseg + i * 16;
+            data[o..o + 8].copy_from_slice(&t.to_le_bytes());
+            data[o + 8..o + 16].copy_from_slice(&v.to_le_bytes());
+        };
+        entry(0, DT_RELR, relr_data);
+        entry(1, DT_RELRSZ, 16);
+        entry(2, DT_NULL, 0);
+
+        // Optional: include a DT_NEEDED-style tag to ensure generic tags are
+        // skipped without upsetting the scan (already covered by _ => {}).
+        let _ = DT_NEEDED;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("relr_e2e_{}.so", std::process::id()));
+        std::fs::write(&path, &data).unwrap();
+
+        let rels = read_elf_relocations(&path).unwrap().expect("found RELR source");
+        // Decode (glibc DO_RELR): word 0x2008 -> reloc at 0x2008, base := 0x2010;
+        // bitmap 0x5 -> bit2 (1-based) set -> reloc at 0x2010 + 8 = 0x2018.
+        let want: Vec<u64> = vec![0x2008, 0x2018];
+        let got: Vec<u64> = rels.iter().map(|r| r.r_offset).collect();
+        assert_eq!(got, want, "DT_RELR e2e offsets, got {got:?} want {want:?}");
+        for r in &rels {
+            assert_eq!(r.r_info, R_AARCH64_RELATIVE, "RELATIVE info");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
 }
