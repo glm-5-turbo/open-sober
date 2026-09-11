@@ -3040,26 +3040,35 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             Ok(())
         }
         Inst::FcvVec { rd, rn, signed, esize, q } => {
-            // fcvtzu/fcvtzs Vd.T, Vn.T: convert each FP lan e (esize bytes) to an
-            // int, truncating toward zero. Per-lane movq->cvttsd2si (signed), then
-            // clamp negatives to 0 for the unsigned fcvtzu (mirrors scalar FcvtToInt).
+            // fcvtzu/fcvtzs Vd.T, Vn.T: convert each FP lane (esize bytes) to an
+            // int, truncating toward zero; negative clamp for the unsigned form.
+            // The 4-byte (S) lane form is NOT a double: it must load the 32-bit
+            // float and promote (movq_load would read 8 bytes = lane + next lane),
+            // and the result lane is 32-bit (mov_store32, not mov_store64 which
+            // would clobber the neighbouring lane).
             let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
             let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
             let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
             let m = esize as i32;
             for l in 0..lanes {
-                buf.movq_load(0, RBX, src + l * m);
+                if esize == 8 {
+                    buf.movq_load(0, RBX, src + l * m); // 64-bit double lane
+                } else {
+                    buf.mov_load32(RAX, RBX, src + l * m); // 32-bit float lane
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.cvtss2sd(0, 0); // promote to double in xmm0
+                }
                 buf.cvttsd2si(RAX, 0);
                 if !signed {
                     buf.xor_rr64(RCX, RCX);
                     buf.test_rr64(RAX, RAX);
-                    buf.cmov_rr64(0x48, RAX, RCX);
+                    buf.cmov_rr64(0x48, RAX, RCX); // negative d -> 0
                 }
-                // The integer result is in RAX; xmm0 still holds the float. Move
-                // the int's bits back into xmm0 before storing, or the lane would
-                // be re-stored as the (unchanged) floating-point value.
-                buf.movq_xmm_r64(0, RAX);
-                buf.movq_store(RBX, dst + l * m, 0);
+                if esize == 8 {
+                    buf.mov_store64(RBX, dst + l * m, RAX); // 64-bit int lane
+                } else {
+                    buf.mov_store32(RBX, dst + l * m, RAX); // 32-bit int lane
+                }
             }
             Ok(())
         }

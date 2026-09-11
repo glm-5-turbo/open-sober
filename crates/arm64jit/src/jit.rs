@@ -1250,6 +1250,40 @@ mod tests {
     }
 
     #[test]
+    fn fcvt_vec_4s_lanes_are_32bit_and_independent() {
+        // Regression: `fcvtzs v0.4s, v1.4s` treats each lane as a 32-bit float and
+        // writes a 32-bit int per lane. It used movq_load (reads 8 bytes = lane +
+        // next lane) and movq_store (writes 8 bytes over the neighbour lane), so
+        // multi-lane vectors were corrupt. fcvtzs v0.4s,v1.4s=0x4ea1b820 ;
+        // fcvtzs v0.2d,v1.2d=0x4ee1b820 ; fcvtzu v2.2d,v3.2d=0x6ee1b862 ; ret
+        let code4 = [0x20u8, 0xb8, 0xa1, 0x4e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.v[2] = 1.5f32.to_bits() as u64 | ((2.5f32.to_bits() as u64) << 32); // v1.4s
+        st.v[3] = (-3.0f32).to_bits() as u64 | ((4.25f32.to_bits() as u64) << 32);
+        exec_bytes(&mut st, &code4, 0).expect("exec");
+        assert_eq!(st.v[0] & 0xffffffff, 1, "lane0 = trunc(1.5)");
+        assert_eq!((st.v[0] >> 32) & 0xffffffff, 2, "lane1 = trunc(2.5)");
+        assert_eq!(st.v[1] & 0xffffffff, (-3 as i64) as u32 as u64, "lane2 = trunc(-3.0)");
+        assert_eq!((st.v[1] >> 32) & 0xffffffff, 4, "lane3 = trunc(4.25)");
+        // 2d signed -> two i64 lanes
+        let code2 = [0x20u8, 0xb8, 0xe1, 0x4e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.v[2] = 7.7f64.to_bits(); // v1.d[0]
+        st.v[3] = (-2.2f64).to_bits(); // v1.d[1]
+        exec_bytes(&mut st, &code2, 0).expect("exec");
+        assert_eq!(st.v[0], 7, "d-lane0 = trunc(7.7)");
+        assert_eq!(st.v[1], (-2 as i64) as u64, "d-lane1 = trunc(-2.2)");
+        // 2d unsigned: negatives clamp to 0
+        let codeu = [0x62u8, 0xb8, 0xe1, 0x6e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.v[6] = 3.9f64.to_bits(); // v3.d[0]
+        st.v[7] = (-1.0f64).to_bits(); // v3.d[1]
+        exec_bytes(&mut st, &codeu, 0).expect("exec");
+        assert_eq!(st.v[4], 3, "unsigned d-lane0 = trunc(3.9)");
+        assert_eq!(st.v[5], 0, "unsigned d-lane1 negative -> 0");
+    }
+
+    #[test]
     fn str_d0_writes_vector_reg_not_gpr() {
         // Regression: `str d0,[x0]` must write the FP/vector register v[0]'s low
         // 64 bits to memory, not the GPR x0 slot (it used to be decoded as a GPR

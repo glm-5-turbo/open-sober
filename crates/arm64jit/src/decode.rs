@@ -723,7 +723,12 @@ pub fn decode(insn: u32) -> Inst {
     }
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T (FPI(FPc))----
     if matches!(insn & 0xffe0_fc00, 0x0ea0_b800 | 0x2ea0_b800 | 0x4ea0_b800 | 0x4ee0_b800 | 0x6ea0_b800 | 0x6ee0_b800) {
-        let e = if (insn >> 20) & 1 == 1 { 8u8 } else { 4u8 };
+        // esize discriminator is bit22: .2d (imm-64) has it set, .4s/.2s clear —
+        // e.g. fcvtzs v0.2d=0x4ee1b820 vs fcvtzs v0.4s=0x4ea1b820 differ by
+        // 0x400000 (bit22). (bit20 does NOT distinguish: both 0x4ee1b820 and
+        // 0x4ea1b820 have bit20=0, so the old `(insn>>20)&1` mis-decoded .2d as
+        // .4s and corrupted every double lane.)
+        let e = if (insn >> 22) & 1 == 1 { 8u8 } else { 4u8 };
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let signed = (insn >> 29) & 1 == 0;
