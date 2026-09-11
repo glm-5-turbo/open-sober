@@ -3608,3 +3608,58 @@ of the same "write symbol runtime-address" family that the loader also ignored.
    instructions), then services/auth.
 2. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK are available.
+
+## Session (Sep 11, 2026) — GLOB_DAT/ABS64 binding, libbadcpu BMI2 completion, auth identity (workspace 199/0)
+
+Ordered plan continued (no APK/GSI/GPU on this box; the android idempotent
+test is already fixed and green). Four focused commits, each closed by the
+real `cargo build --workspace` + `cargo test --workspace` gate:
+
+### 7f03937 — arm64jit: bind GLOB_DAT + ABS64 main-GOT relocations
+`bind_image_plt` only walked DT_JMPREL (JUMP_SLOT) and `load_elf_image` only
+applied RELATIVE, so `R_AARCH64_GLOB_DAT` (1025) — how `-shared -fPIC` code
+fetches an exported global's runtime address via the main GOT — was never
+bound: the guest `adrp;ldr x0,[GOT]` read 0 and deref'd/called NULL.
+New `bind_glob_dat(el)` walks DT_RELA for GLOB_DAT **and** R_AARCH64_ABS64
+(257, the sibling "write symbol value" data-initializer family, confirmed by
+cross-gcc that `gfp=&internal_fn` emits ABS64), writes `el.guest_of(st_value)
++ addend` for defined-in-module symbols, `dlsym` (OBJECT) / host-call thunk
+(FUNC) for imports. Runs in the normal path and the `pltrelsz==0` early-return
+(an exported-data-only module has zero JUMP_SLOT yet needs the main GOT).
+Real `-shared` fixture: SIGSEGV (fault=0x0) -> `entry() -> 37` (global_data 11
++ gfp(3)=15 + global_data 11). +`loader_run_shared_glob_dat_and_abs64_returns_37`.
+
+### b177f7c — libbadcpu: MULX (VEX.0F38.F6) + RORX (VEX.0F3A.F0)
+BMI2 gaps: MULX = unsigned RDX*rm, high->modrm.reg, low->vvvv (u128 product —
+a naive u64 `>>64` overflowed), flags cleared. RORX = rotate-right-by-imm8,
+flags untouched; added the VEX.0F3A dispatch (decoder stops after ModR/M, so
+read imm8 at RIP+len / advance len+1). +2 tests (values verified with -mbmi2:
+rorx64(1,4)=0x1000000000000000, rorx32(1,31)=0x2).
+
+### 2a9c6eb — libbadcpu: ADCX (66 0F38 F6) + ADOX (F3 0F38 F6)
+`emit_adcx_adox`: Dest=Dest+Src+flag, write only the working flag (CF/OF).
+Two real bugs found+fixed: width from REX.W not operand_size (the 66/F3 is a
+mandatory opcode prefix, not a size override — a 64-bit ADCX is 66 48 0F38 F6,
+operand_size folds 66->16); and 32-bit carry detected in the u32 domain
+(0xFFFFFFFF+1 wraps to 0 WITH carry). Ground truth from a real-BMI2 assembly
+driver confirmed the ADOX subtlety: OF is set to the *unsigned* carry-out, not
+signed overflow (adox(0x7fff..,1)=0x8000.. has OF=0). +2 tests.
+
+### a8249f4 — sober-services: forward full login result (services/auth)
+The OAuth webview's AuthResult declared user_id/username but the callback only
+extracted the token — IPC AuthToken always went out with both None, so the
+parent couldn't identify the account without a second Roblox API call.
+New extract_auth_result() parses token + user_id + username (query precedence,
+#fragment tolerant, URL-decoded); send_auth_result() forwards the identity;
+run_login_flow blocks on the token then sends the full result. +4 tests.
+
+### Gate
+`cargo build --workspace` clean (0 errors), `cargo test --workspace` **199/0**
+(arm64jit 120 + loader_run 7 incl. the glob_dat fixture; libbadcpu 22;
+sober-services 15; libloader; others). HEAD `2a9c6eb`, tree clean.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
+   the HARD GATE — blocked until a capable host + the real binary/APK exist.
+2. Continue hardening: next ISA/loader/emulator gaps as discovered (adb/emulate
+   surface), then the remaining sober-core/sober-services integration.
