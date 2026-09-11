@@ -1268,6 +1268,33 @@ mod tests {
     }
 
     #[test]
+    fn ldr_reg_sext_sign_extends_into_dest() {
+        // Regression: register-offset `ldrsh w0,[x1,x0]` (0x78e06820) loaded the
+        // signed value into RCX but wrote RAX (= the effective ADDRESS) into the
+        // dest reg, so a[i] read back garbage in short-array loops. Real encoding
+        // from aarch64-linux-gnu-gcc -O0 (sumh over `short a[]`). -13 as i16 =
+        // 0xfff3, sign-extended to 0xffff_ffff_ffff_fff3.
+        //   ldrsh w0,[x1,x0]=0x78e06820 ; ldr x2,[x1]=0xf9400022 ; ret=0xd65f03c0
+        let insn: &[u32] = &[0x78e06820, 0xf9400022, 0xd65f03c0];
+        let mut code = Vec::new();
+        for w in insn {
+            code.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut buf = [0x1234i16, -13, 0x7fff, -1];
+        let mut st = CpuState::new();
+        st.x[1] = buf.as_ptr() as u64; // x1 = &buf
+        st.x[0] = 1_u64 << 1; // x0 = i*2 = byte offset of buf[1]
+        let _r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(
+            st.x[0],
+            0xffff_ffff_ffff_fff3,
+            "ldrsh w0,[x1,x0] of buf[1] (-13) must sign-extend into x0, not hold the address"
+        );
+        // buf as a u64 (4×i16 little-endian: 1234 fff3 7fff ffff) -> 0xffff7ffffff31234
+        assert_eq!(st.x[2], 0xffff_7fff_fff3_1234, "ldr x2,[x1] read buf[0..8] as u64");
+    }
+
+    #[test]
     fn cbz_controls_branch() {
         // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
         //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;

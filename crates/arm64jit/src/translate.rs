@@ -3232,22 +3232,24 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             buf.add_rr64(RAX, RCX); // RAX = effective address
             if ld && sext {
                 // Sign-extending register-offset load (ldrsw/ldrsh/ldrsb).
+                // Load `size` bytes from [RAX] and sign-extend into RAX; the
+                // address is no longer needed, so RAX replaces the base.
                 match size {
                     4 => {
-                        buf.mov_load32(RCX, RAX, 0);
-                        buf.movsxd_r64_r32(RCX, RCX);
+                        buf.mov_load32(RAX, RAX, 0);
+                        buf.movsxd_r64_r32(RAX, RAX);
                         stg_if_writable(buf, rt as u32);
                     }
                     2 => {
-                        buf.movzx_word_mem(RCX, RAX, 0);
-                        buf.shl_ri8(RCX, 48);
-                        buf.sar_ri8(RCX, 48);
+                        buf.movzx_word_mem(RAX, RAX, 0);
+                        buf.shl_ri8(RAX, 48);
+                        buf.sar_ri8(RAX, 48);
                         stg_if_writable(buf, rt as u32);
                     }
                     1 => {
-                        buf.movzx_byte_mem(RCX, RAX, 0);
-                        buf.shl_ri8(RCX, 56);
-                        buf.sar_ri8(RCX, 56);
+                        buf.movzx_byte_mem(RAX, RAX, 0);
+                        buf.shl_ri8(RAX, 56);
+                        buf.sar_ri8(RAX, 56);
                         stg_if_writable(buf, rt as u32);
                     }
                     s => return Err(format!("LdStrReg sign-extend size {} not implemented", s)),
