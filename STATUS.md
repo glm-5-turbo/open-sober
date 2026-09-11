@@ -228,9 +228,36 @@ vtable 42, byvalue 44, bv2/iso_arith 300, signmod 12, iso_wrd 4321, arr/shacc/
 fact/ldrsw/fp_only/A/C 42) ALL unchanged.
 
 ### Honest remaining
-- modmain now SIGSEGVs deep in `_dl_determine_tlsoffset` (small-addr 0x2f load,
-  x4==sp coincidence) — the next glibc-CRT frontier. HANDOFF judges this
-  synthetic-glibc tangent NOT a Roblox boot blocker (real libroblox boot path
-  already fully decoded/exit 0); the __tunable_get_val blocker IS fixed.
+- modmain now boots through `_dl_determine_tlsoffset` (cleared by the udiv fix)
+  into glibc `__tls_init_tp` and segfaults inside `__memset_generic` on a small
+  address (x0=0 passed to memset by the caller) — the next glibc-CRT frontier.
+  HANDOFF judges this synthetic-glibc tail NOT a Roblox boot blocker (real
+  libroblox boot path already fully decoded/exit 0).
 - Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
   HARD GATE; blocked on a capable host + the real binary/APK (none on this box).
+
+## Cycle (Sep 11, 2026) — UNSIGNED DIV WRONG-RESULT BUG FIXED in arm64jit (152/0)
+status: session-end (committed, tests green)
+last_agent_claim: a silent, wide x86-emitter bug fixed — every UNSIGNED divide
+in the JIT returned 0. Commits 28dba32 (div), c1e41cb (svc additions).
+
+### The bug (would corrupt ANY guest integer mathematics, incl. Roblox)
+x86 group-3 `F7` uses /6 = DIV and /7 = IDIV, but `div_r64`/`div_r32` emitted
+modrm(3,0,..) = group-3 /0 = TEST — so `48 f7 c1` decoded as `test rcx,eax`
+and no quotient was ever produced. idiv_r64 already used /7 and was correct;
+ONLY the unsigned forms were broken. Found by driving glibc's
+`_dl_determine_tlsoffset` through modmain.elf (earlier battery only exercised
+signed div). Regression `udiv_computes_quotient` (100/10=10, 7/20=0), verified
+`48 f7 f1`=div rcx / `48 f7 f9`=idiv rcx via as+objdump.
+
+### svc table additions (c1e41cb)
+set_robust_list(99)->0 and membarrier(283)->no-op, surfaced by glibc
+`__tls_init_tp`. rseq(293) deliberately left -ENOSYS (no valid rseq area).
+
+modmain now reaches real AArch64 syscalls (unhandled-99 -> booted past) before
+a memset frontier. arm64jit 111/111; workspace 152/0; battery unchanged.
+
+### Honest remaining
+- modmain SIGSEGVs in glibc `__memset_generic` (caller passed x0=0) — glibc-CRT
+  tail, NOT a Roblox boot blocker (HANDOFF; libroblox boot already decoded).
+- HARD GATE unchanged.

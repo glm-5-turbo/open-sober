@@ -3003,12 +3003,42 @@ byvalue 44, bv2/iso_arith 300, signmod 12, iso_wrd 4321, arr/shacc/fact/ldrsw/
 fp_only/A/C 42).
 
 ### Honest remaining
-- modmain now SIGSEGVs in glibc `_dl_determine_tlsoffset` on a small-address
-  (0x2f/0x3f) load after the __tunable_get_val fix — the next glibc-CRT
-  frontier (handoff-flags this whole glibc tail as NOT a Roblox boot blocker;
-  the real libroblox.so boot path is already fully decoded / exit 0).
-- HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
-  GPU/APK-capable host (none on this box).
+- modmain now boots past its old `__tunable_get_val` crash; the udiv fix (below)
+  cleared `_dl_determine_tlsoffset` too. It now stops deep in the glibc-CRT tail
+  (`__memset_generic`, caller passed x0=0) — the HANDOFF-flagged synthetic-glibc
+  tangent that is NOT a Roblox boot blocker (real libroblox boot path already
+  fully decoded / exit 0).
+- Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+  HARD GATE; blocked on a capable host + the real binary/APK (none on this box).
+
+## Session (Sep 11, 2026) — UNSIGNED DIV WRONG-RESULT BUG FIXED in arm64jit (152/0)
+Commits `28dba32` (div), `c1e41cb` (svc additions).
+status: session-end (committed, tests green)
+
+### Silent, wide bug: every UNSIGNED division in the JIT returned 0
+The HANDOFF's open "small-address load in `_dl_determine_tlsoffset`" was the
+guest doing `udiv x0,x0,x1`. A focused `exec_bytes` test (`udiv x5,x0,x1` =
+0x9ac10805) left x5=0 for EVERY input (100/10, 7/1, 0/5), even in isolation.
+Byte-dumping the emitted host code showed `48 f7 c1` — x86 group-3 `F7` uses
+/6 = DIV and /7 = IDIV, but `div_r64`/`div_r32` emitted `modrm(3,0,..)` =
+group-3 /0 = TEST, so the instruction decoded as `test rcx,eax` and never
+produced a quotient. `idiv_r64` already used /7 and was correct — ONLY the
+unsigned forms were broken. Confirmed with as+objdump: `48 f7 f1` = div rcx /
+`48 f7 f9` = idiv rcx. Fixed both emitters to /6.
+Regression `udiv_computes_quotient` (100/10=10, 7/20=0). Silent, WIDE wrong-
+result class: any guest unsigned integer math (incl. Roblox) returned 0.
+
+### svc table additions (c1e41cb)
+glibc `__tls_init_tp` surfaced set_robust_list(99)->0 (no-op is valid; -ENOSYS
+made glibc retry) and membarrier(283)->no-op. rseq(293) left -ENOSYS (no valid
+rseq area). Verified vs aarch64-linux-gnu asm-generic/unistd.h.
+
+### Result
+modmain.elf booted THROUGH `_dl_determine_tlsoffset` (udiv fix), reached real
+AArch64 syscalls, then hit glibc `__memset_generic` (x0=0 passed by caller) —
+again the non-Roblox glibc-CRT tail. arm64jit 111/111; workspace 152/0; battery
+unchanged.
+- HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` on a GPU/APK host.
 
 ## Session (Sep 11 2026) — guest auxv bootstrap; SME/SVE/MulLong decodes; zero-extend fix (137/0)
 
