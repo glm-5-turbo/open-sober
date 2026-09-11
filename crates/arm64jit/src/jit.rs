@@ -548,6 +548,41 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         131 => unsafe { libc::tgkill(a[0] as c_int, a[1] as c_int, a[2] as c_int) as c_long },
         107 => unsafe { libc::timer_create(a[0] as libc::clockid_t, a[1] as *mut libc::sigevent, a[2] as *mut libc::timer_t) as c_long },
         110 => unsafe { libc::timer_settime(a[0] as libc::timer_t, a[1] as c_int, a[2] as *const libc::itimerspec, a[3] as *mut libc::itimerspec) as c_long },
+        // --- common Android boot-path gaps (ARGID asm-generic table) ---
+        115 => unsafe { // clock_nanosleep(115): clockid, flags, req, rem
+            libc::syscall(libc::SYS_clock_nanosleep, a[0] as usize, a[1] as c_int, a[2] as usize, a[3] as usize) as c_long
+        },
+        165 => unsafe { // getrusage(165): who, struct rusage* (layout-identical u64/i64 pairs + timeval)
+            libc::getrusage(a[0] as c_int, a[1] as *mut libc::rusage) as c_long
+        },
+        154 => unsafe { libc::setpgid(a[0] as libc::pid_t, a[1] as libc::pid_t) as c_long },
+        25 => unsafe { // fcntl(25): fd, cmd, [arg]. AArch64 uses argfd semantics; the
+            // 2- and 3-arg forms cover F_GETFL/F_SETFL/F_SETFD/F_DUPFD/F_GETFD.
+            // fcntl is variadic at the ABI level; call through the raw syscall with
+            // a3 as the optional arg so both shapes land correctly on x86-64.
+            libc::syscall(libc::SYS_fcntl, a[0] as usize, a[1] as usize, a[2] as usize) as c_long
+        },
+        134 => unsafe { // rt_sigaction(134): sig, act, oact, sigsetsize. We cannot
+            // actually install a *guest* trampoline handler in the host, so we
+            // accept the register (return 0) and do NOT invoke one — matching the
+            // treatment of signals elsewhere in this shim (signals return 0/ignored).
+            // oact (a2, non-null) is cleared to keep guest callers from derefing
+            // garbage; a null oact is tolerated.
+            if a[2] != 0 {
+                unsafe { std::ptr::write_bytes(a[2] as *mut u8, 0, 128); }
+            }
+            0
+        },
+        135 => unsafe { // rt_sigprocmask(135): how, set, oset, sigsetsize. No-op: we
+            // do not dispatch signals, so accept and report an empty old-set.
+            if a[2] != 0 {
+                unsafe { std::ptr::write_bytes(a[2] as *mut u8, 0, 8); }
+            }
+            0
+        },
+        223 => unsafe { // fadvise64(223): fd, off, len, advice (aarch64 __NR3264_fadvise64)
+            libc::syscall(libc::SYS_fadvise64, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize) as c_long
+        },
         _ => {
             eprintln!(
                 "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (a0={:#x} a1={:#x} a2={:#x})",
@@ -4039,6 +4074,66 @@ mod tests {
         st.x[8] = 172;
         let pid = guest_svc(&mut st as *mut CpuState);
         assert_eq!(pid as u32, std::process::id());
+    }
+
+    #[test]
+    fn guest_svc_common_boot_gaps_roundtrip() {
+        // Exercise the newly-added boot-path syscalls: fcntl(25), setpgid(154),
+        // getrusage(165), clock_nanosleep(115), rt_sigaction(134),
+        // rt_sigprocmask(135), fadvise64(223). All must return without crashing
+        // and with sane semantics (no -ENOSYS).
+        let mut st = CpuState::new();
+
+        // fcntl(25) on a fresh dup of a pipe write end: F_GETFD (1) must be 0.
+        let mut pfd = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(pfd.as_mut_ptr()) }, 0);
+        st.x[8] = 25; st.x[0] = pfd[1] as u64; st.x[1] = libc::F_GETFD as u64; st.x[2] = 0;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "fcntl F_GETFD on pipe write end");
+        // F_SETFL(4) with O_NONBLOCK must succeed.
+        st.x[1] = libc::F_SETFL as u64; st.x[2] = libc::O_NONBLOCK as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "fcntl F_SETFL O_NONBLOCK");
+        unsafe { libc::close(pfd[0]); libc::close(pfd[1]); }
+
+        // getrusage(165) RUSAGE_SELF (0) -> guest rusage buffer, returns 0.
+        st.x[8] = 165; st.x[0] = 0; let mut ru = [0u8; 144]; st.x[1] = ru.as_mut_ptr() as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "getrusage RUSAGE_SELF");
+
+        // clock_nanosleep(115) with zero time must return immediately, 0.
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        st.x[8] = 115; st.x[0] = libc::CLOCK_MONOTONIC as u64; st.x[1] = 0;
+        st.x[2] = (&ts as *const libc::timespec) as u64; st.x[3] = 0;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "clock_nanosleep 0-time");
+
+        // rt_sigaction(134): installing a handler succeeds (returns 0) and a
+        // non-null oact output is zeroed, not left as garbage.
+        let act = [0u8; 128]; let mut oact = [0xabu8; 128];
+        st.x[8] = 134; st.x[0] = 2 /*SIGINT*/; st.x[1] = act.as_ptr() as u64;
+        st.x[2] = oact.as_mut_ptr() as u64; st.x[3] = 8;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "rt_sigaction register ok");
+        assert_eq!(oact.iter().all(|&b| b == 0), true, "rt_sigaction oact zeroed");
+
+        // rt_sigprocmask(135): reports empty old set.
+        let mut oset = [0xffu8; 8];
+        st.x[8] = 135; st.x[0] = 0 /*SIG_BLOCK*/; st.x[1] = 0; st.x[2] = oset.as_mut_ptr() as u64; st.x[3] = 8;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "rt_sigprocmask ok");
+        assert_eq!(oset, [0u8; 8], "rt_sigprocmask empty old set");
+
+        // fadvise64(223) on an fd: POSIX_FADV_NORMAL(0) must not fault.
+        let file = std::env::temp_dir().join(format!("svc_fadv_{}.tmp", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        let c = std::ffi::CString::new(file.to_str().unwrap()).unwrap();
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
+        st.x[8] = 223; st.x[0] = fd as u64; st.x[1] = 0; st.x[2] = 0; st.x[3] = 0;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "fadvise64 ok");
+        unsafe { libc::close(fd); }
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
