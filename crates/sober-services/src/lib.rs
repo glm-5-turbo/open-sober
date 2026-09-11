@@ -84,20 +84,23 @@ impl Service {
 
         info!("Waiting for authentication...");
         let timeout_secs = 300; // 5 minutes
-        match webview.wait_for_token(timeout_secs) {
-            Some(token) => {
-                info!("Authentication successful, sending token via IPC");
-                crate::ipc::send_auth_token(
+        // Block on the token (as before); then pull the full result (which the
+        // callback populated — token + user_id + username) for the parent.
+        if webview.wait_for_token(timeout_secs).is_some() {
+            if let Some(result) = webview.get_auth_result() {
+                info!("Authentication successful, sending result via IPC");
+                crate::ipc::send_auth_result(
                     self.config.ipc_socket_path.to_str().unwrap_or("/tmp/open-sober-auth.sock"),
-                    &token,
+                    &result,
                 )?;
-                info!("Auth token sent to parent process");
-                Ok(())
-            }
-            None => {
-                anyhow::bail!("Authentication timed out after {} seconds", timeout_secs);
+                info!(
+                    "Auth result sent to parent process (user_id={:?})",
+                    result.user_id
+                );
+                return Ok(());
             }
         }
+        anyhow::bail!("Authentication timed out after {} seconds", timeout_secs);
     }
 
     /// Return the current user configuration.

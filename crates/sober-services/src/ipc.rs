@@ -9,6 +9,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::webview::AuthResult;
+
 /// A typed message exchanged over the IPC socket.
 ///
 /// The parent sober process and the services GUI communicate by sending
@@ -55,13 +57,29 @@ pub enum IpcMessage {
 /// an `AuthToken` message. Returns once the message has been written (but
 /// does not wait for an acknowledgment).
 pub fn send_auth_token(socket_path: &str, token: &str) -> Result<()> {
+    send_auth_result(
+        socket_path,
+        &AuthResult {
+            token: token.to_string(),
+            user_id: None,
+            username: None,
+        },
+    )
+}
+
+/// Send a full authentication result (token + optional identity) to the parent.
+///
+/// Same as [`send_auth_token`] but carries the `user_id` / `username` the
+/// login callback captured, so the parent never has to hit the Roblox API
+/// again to identify the account.
+pub fn send_auth_result(socket_path: &str, result: &AuthResult) -> Result<()> {
     let stream = UnixStream::connect(socket_path)
         .with_context(|| format!("Failed to connect to IPC socket at {}", socket_path))?;
 
     let msg = IpcMessage::AuthToken {
-        token: token.to_string(),
-        user_id: None,
-        username: None,
+        token: result.token.clone(),
+        user_id: result.user_id,
+        username: result.username.clone(),
     };
 
     send_message(&stream, &msg)

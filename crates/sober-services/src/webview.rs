@@ -27,7 +27,7 @@ pub struct AuthResult {
 
 /// Manages browser-based OAuth login.
 pub struct LoginWebview {
-    auth_token: Arc<std::sync::Mutex<Option<String>>>,
+    auth_result: Arc<std::sync::Mutex<Option<AuthResult>>>,
     server_running: Arc<AtomicBool>,
     port: u16,
 }
@@ -37,7 +37,7 @@ impl LoginWebview {
     /// This does NOT start the server yet — call `start_server()` first.
     pub fn new(_config: &ServiceConfig) -> Result<Self> {
         Ok(Self {
-            auth_token: Arc::new(std::sync::Mutex::new(None)),
+            auth_result: Arc::new(std::sync::Mutex::new(None)),
             server_running: Arc::new(AtomicBool::new(false)),
             port: 0,
         })
@@ -51,10 +51,13 @@ impl LoginWebview {
         let port = listener.local_addr()?.port();
         self.port = port;
 
-        info!("OAuth callback server listening on http://127.0.0.1:{}", port);
+        info!(
+            "OAuth callback server listening on http://127.0.0.1:{}",
+            port
+        );
 
         let server_running = self.server_running.clone();
-        let token = self.auth_token.clone();
+        let result = self.auth_result.clone();
 
         thread::spawn(move || {
             server_running.store(true, Ordering::SeqCst);
@@ -64,10 +67,10 @@ impl LoginWebview {
                 }
                 match stream {
                     Ok(stream) => {
-                        if let Ok(Some(t)) = Self::handle_callback(stream) {
-                            info!("OAuth callback received token");
-                            let mut tok = token.lock().unwrap();
-                            *tok = Some(t);
+                        if let Ok(Some(r)) = Self::handle_callback(stream) {
+                            info!("OAuth callback received result");
+                            let mut res = result.lock().unwrap();
+                            *res = Some(r);
                         }
                     }
                     Err(e) => {
@@ -105,8 +108,9 @@ impl LoginWebview {
         Ok(())
     }
 
-    /// Handle an HTTP callback request. Parses the redirect URI for the token.
-    fn handle_callback(mut stream: TcpStream) -> Result<Option<String>> {
+    /// Handle an HTTP callback request. Parses the redirect URI for the token
+    /// and any identifying metadata (user id / username) Roblox includes.
+    fn handle_callback(mut stream: TcpStream) -> Result<Option<AuthResult>> {
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf)?;
         let request = String::from_utf8_lossy(&buf[..n]);
@@ -119,19 +123,28 @@ impl LoginWebview {
             return Ok(None);
         }
 
-        // Extract token from query parameters
-        let token = extract_auth_token(path);
-        debug!("OAuth callback path: {} -> token: {:?}", path, token.is_some());
+        // Extract token and identity from query/fragment parameters
+        let result = extract_auth_result(path);
+        debug!(
+            "OAuth callback path: {} -> token: {:?}",
+            path,
+            result.as_ref().map(|r| r.token.is_empty())
+        );
 
-        if let Some(ref t) = token {
+        if let Some(ref r) = result {
             let html = format!(
                 "<html><body><h1>Authentication successful!</h1>\
                  <p>You can close this window and return to Open Sober.</p>\
                  <script>window.close()</script></body></html>"
             );
             send_http_response(&stream, 200, &html)?;
-            info!("Auth token captured successfully: {}...{}", &t[..t.len().min(8)], &t[t.len().saturating_sub(4)..]);
-            Ok(token)
+            info!(
+                "Auth token captured successfully: {}...{} (user={:?})",
+                &r.token[..r.token.len().min(8)],
+                &r.token[r.token.len().saturating_sub(4)..],
+                r.user_id
+            );
+            Ok(result)
         } else {
             let html = format!(
                 "<html><body><h1>Waiting for authentication...</h1>\
@@ -144,22 +157,27 @@ impl LoginWebview {
         }
     }
 
-    /// Check if a token has been received.
+    /// Check if a result has been received.
     pub fn has_token(&self) -> bool {
-        self.auth_token.lock().unwrap().is_some()
+        self.auth_result.lock().unwrap().is_some()
+    }
+
+    /// Get the received result, if any.
+    pub fn get_auth_result(&self) -> Option<AuthResult> {
+        self.auth_result.lock().unwrap().clone()
     }
 
     /// Get the received token, if any.
     pub fn get_token(&self) -> Option<String> {
-        self.auth_token.lock().unwrap().clone()
+        self.auth_result.lock().unwrap().as_ref().map(|r| r.token.clone())
     }
 
-    /// Block until a token is received (with configurable timeout).
+    /// Block until a result is received (with configurable timeout).
     pub fn wait_for_token(&self, timeout_secs: u64) -> Option<String> {
         let start = std::time::Instant::now();
         while start.elapsed().as_secs() < timeout_secs {
-            if let Some(token) = self.get_token() {
-                return Some(token);
+            if let Some(r) = self.get_auth_result() {
+                return Some(r.token);
             }
             thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -233,6 +251,70 @@ fn extract_auth_token(path: &str) -> Option<String> {
     None
 }
 
+/// Parse the full login callback: the `.ROBLOSECURITY`-style token plus any
+/// `user_id` / `username` Roblox appends so the parent process can identify
+/// which account logged in without a second API round-trip. Query params take
+/// precedence over the OAuth implicit `#access_token=` fragment (fragments are
+/// obscured to the HTTP server but kept for compatibility with in-page flows).
+fn extract_auth_result(path: &str) -> Option<AuthResult> {
+    let mut token: Option<String> = None;
+    let mut user_id: Option<u64> = None;
+    let mut username: Option<String> = None;
+
+    // Fragment form: `#access_token=TOKEN&user_id=...` — the parser reads the
+    // fragment as an extension of the query for tolerant handling.
+    let mut rest = path;
+    if let Some(pos) = path.find('#') {
+        let frag = &path[pos + 1..];
+        collect_params(frag, &mut token, &mut user_id, &mut username);
+        rest = &path[..pos];
+    }
+
+    if let Some(pos) = rest.find('?') {
+        collect_params(&rest[pos + 1..], &mut token, &mut user_id, &mut username);
+    }
+
+    token.filter(|t| !t.is_empty()).map(|t| AuthResult {
+        token: t,
+        user_id,
+        username,
+    })
+}
+
+/// Parse one `k=v&k2=v2` param string into the token/user identity fields.
+fn collect_params(
+    query: &str,
+    token: &mut Option<String>,
+    user_id: &mut Option<u64>,
+    username: &mut Option<String>,
+) {
+    for param in query.split('&') {
+        let mut parts = param.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        match key {
+            "code" | "access_token" | "token" | "robllsecurity" => {
+                let v = urlencoding_decode(value);
+                if !v.is_empty() && token.is_none() {
+                    *token = Some(v);
+                }
+            }
+            "user_id" | "userId" | "id" => {
+                if let Ok(id) = urlencoding_decode(value).parse::<u64>() {
+                    *user_id = Some(id);
+                }
+            }
+            "username" | "name" => {
+                let v = urlencoding_decode(value);
+                if !v.is_empty() {
+                    *username = Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn send_http_response(mut stream: &TcpStream, status: u16, body: &str) -> Result<()> {
     let status_line = match status {
         200 => "200 OK",
@@ -303,6 +385,43 @@ mod tests {
     fn test_no_token() {
         let token = extract_auth_token("/home");
         assert!(token.is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_result_full_identity() {
+        // Roblox post-login callbacks carry the security token AND the user_id
+        // / username so the parent can identify the account without a second
+        // API call; the old code dropped the latter two (always None).
+        let r = extract_auth_result(
+            "/callback?token=abc&user_id=12345&username=Robloxian",
+        )
+        .expect("should parse");
+        assert_eq!(r.token, "abc");
+        assert_eq!(r.user_id, Some(12345));
+        assert_eq!(r.username.as_deref(), Some("Robloxian"));
+    }
+
+    #[test]
+    fn test_extract_auth_result_fragment_identity() {
+        let r = extract_auth_result("/callback#access_token=tok&user_id=99&username=Builderman")
+            .expect("should parse fragment form");
+        assert_eq!(r.token, "tok");
+        assert_eq!(r.user_id, Some(99));
+        assert_eq!(r.username.as_deref(), Some("Builderman"));
+    }
+
+    #[test]
+    fn test_extract_auth_result_urlencoded_value() {
+        // Username with a space gets URL-encoded; must be decoded.
+        let r = extract_auth_result("/callback?token=x&username=Sonic%20Fan")
+            .expect("should parse");
+        assert_eq!(r.username.as_deref(), Some("Sonic Fan"));
+    }
+
+    #[test]
+    fn test_extract_auth_result_no_token_is_none() {
+        // user_id alone (no token) is not a successful login.
+        assert!(extract_auth_result("/callback?user_id=5").is_none());
     }
 
     #[test]
