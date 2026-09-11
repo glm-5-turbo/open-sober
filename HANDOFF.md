@@ -3558,3 +3558,53 @@ link address (NULL page) and faults; with it, `gptr = base+0x20000` and
 `loader_run_pie_relative_global_returns_42` in `crates/arm64jit/tests/
 loader_run.rs` (new `compile_pie` helper; asserts the fixture really carries a
 RELATIVE reloc). `cargo test --workspace` **190/0**.
+
+## Session (Sep 11, 2026) — bind GLOB_DAT + ABS64 main-GOT relocations (commit 7f03937, workspace 191/0)
+
+Continuing the ordered "libloader ELF/loader gaps" step. `bind_image_plt` only
+walked `DT_JMPREL` (JUMP_SLOT) and `load_elf_image` only applied RELATIVE;
+**R_AARCH64_GLOB_DAT (1025)** in the main `DT_RELA` was never bound. A
+`-shared -fPIC` module referencing an exported global (data or function
+pointer) goes through its **main GOT** via GLOB_DAT: the guest does
+`adrp x0,GOT; ldr x0,[x0,#off]` to fetch the symbol's *runtime address*, then
+derefs/calls through it. Unbound, the slot read 0 → SIGSEGV on NULL / call to
+address 0.
+
+Empirically confirmed (cross-gcc `-shared`): `global_data` and `gfp=&internal_fn`
+produce two GLOB_DAT relocs at GOT offsets 0x1ffd8/0x1ffe0 (both 0 in file), and
+`gfp = &internal_fn`'s initializer is **R_AARCH64_ABS64 (257)** — a second member
+of the same "write symbol runtime-address" family that the loader also ignored.
+
+### New `bind_glob_dat` (crates/arm64jit/src/plt.rs)
+- Walks the main `DT_RELA`/`DT_RELASZ` for GLOB_DAT (1025) **and** ABS64 (257).
+- **Defined-in-module** symbol → writes `el.guest_of(st_value) + addend` (ABS64
+  carries the symbol offset as addend; GLOB_DAT addend 0). The loader maps
+  guest==host, so `ldr xN,[GOT]` then `[xN]`/`blr xN` resolves back into the
+  mapped image.
+- **Undefined/imported** symbol → `STT_OBJECT` uses `dlsym` raw (guest==host
+  addressable); FUNC/NOTYPE uses the resolver's host-call thunk (callable).
+- Called from `bind_image_plt` (end of the normal path) **and** from the
+  `pltrelsz == 0` early-return — an exported-data-only module has zero JUMP_SLOT
+  yet still depends on the main GOT.
+- Fixed en route: the `?` operator can't be used in a `(usize,usize)`-returning
+  fn (switched the import branch to a match).
+
+### Verification
+- `elfjit /tmp/gdtest/self.so 0x360` (real `-shared` aarch64):
+  ```
+  [plt] (no JUMP_SLOT) bound 2 GLOB_DAT, 0 unresolved  -> then ABS64 added: 3
+  JIT(no-QEMU) entry() -> 37 (0x25)     # global_data(11) + gfp(3)=internal_fn(3)=15 + global_data(11)
+  ```
+  Before the fix it SIGSEGV'd at fault=0x0 (guest GOT loaded 0).
+- **+`loader_run_shared_glob_dat_and_abs64_returns_37`** in
+  `crates/arm64jit/tests/loader_run.rs` — cross-gcc `-shared -fPIC -nostdlib
+  -Wl,-e,entry` fixture with the exact two-global GOT pattern; runs the full
+  load→RELATIVE→GLOB_DAT/ABS64→jit_run pipeline and asserts 37. Skips without
+  the cross toolchain.
+- `cargo build --workspace` clean; `cargo test --workspace` **191/0**.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Continue libbadcpu ISA gaps (the SIGILL emulator's remaining VEX/legacy
+   instructions), then services/auth.
+2. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK are available.
