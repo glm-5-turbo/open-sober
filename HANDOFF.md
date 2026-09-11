@@ -4626,6 +4626,25 @@ shl-imm decode, ubfx mask, ubfx-vs-ror). Next: keep fuzzing with more diverse
 generators (fp, structure loads, saturating arith), then libloader ELF/loader
 gaps per RECOMMENDATION order. HARD GATE unchanged (no GPU/APK/libroblox.so).
 
+## Session (Sep 11, 2026) — co-resident two-loop widening bug RESOLVED (was the documented OPEN BUG)
+
+After the 8 JIT correctness fixes this session (ld2/st2 esize deinterleave,
+W-form bitfield high-32 mask, shrn/shrn2 narrow decode, rbit 64-bit mask width,
+clz REX.W byte order, shl#imm decode, UBFM extract mask sign-extension, and
+ubfx-vs-ror discriminator), the LONG-DOCUMENTED co-resident two-loop widening
+bug — and the "intermittent SIMD-loop block-liveness" bug it subsumed — are
+both resolved. The original reproducers now pass exactly:
+  twov2.c    JIT 18788  == oracle 18788   (was JIT 7465833 / garbage 0x375)
+  twoloopp.c JIT 3776   == oracle 3776
+  maskf.c    JIT 2416   == oracle 2416    (documented intermittent lane corruption)
+Both were SYMPTOMS of the same underlying shift/immediate-mask miscompiles
+(high-32 contamination leaking through sign-extended `and` imm32 masks and
+wrong shift amounts), not a separate co-resident register-liveness fault. ~700
+differential fuzz cases green including PIE+reloc loader-mode (elfjit vs qemu
+oracle). This removes the last known-open JIT correctness item on this box.
+
+Next (ordered, all still open): libloader ELF/loader gaps, libbadcpu ISA gaps,
+services/auth — or more fuzz coverage. HARD GATE unchanged (no GPU/APK).
 ## Session (Sep 11, 2026) — fuzz_jit loader-mode: PIE + reloc shapes end-to-end (100+ cases)
 
 Extended the differential fuzzer with a loader-mode: gen_globals_pie /
