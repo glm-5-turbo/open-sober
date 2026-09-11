@@ -2137,26 +2137,32 @@ pub fn translate(
                                                                                                                                                 let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
                                                                                                                                                 let lanes = if el64 { 2 } else if q { 4 } else { 2 };
                                                                                                                                                 for l in 0..lanes {
-                                                                                                                                                    if el64 {
-                                                                                                                                                        buf.movq_load(0, RBX, nb + 8 * l); // Vn[l] dbl
-                                                                                                                                                        buf.movq_load(1, RBX, mb + 8 * l); // Vm[l] dbl
-                                                                                                                                                        buf.mulsd(0, 1);                   // xmm0 = Vn*Vm
-                                                                                                                                                        buf.movq_load(1, RBX, db + 8 * l); // Vd[l]
-                                                                                                                                                        if sub { buf.subsd(0, 1); } else { buf.addsd(0, 1); }
-                                                                                                                                                        buf.movq_store(RBX, db + 8 * l, 0); // Vd[l] = result
-                                                                                                                                                    } else {
-                                                                                                                                                        buf.mov_load32(RAX, RBX, nb + 4 * l);
-                                                                                                                                                        buf.movd_xmm_r32(0, RAX);
-                                                                                                                                                        buf.mov_load32(RAX, RBX, mb + 4 * l);
-                                                                                                                                                        buf.movd_xmm_r32(1, RAX);
-                                                                                                                                                        buf.mulss(0, 1);                    // xmm0 = Vn*Vm
-                                                                                                                                                        buf.mov_load32(RAX, RBX, db + 4 * l);
-                                                                                                                                                        buf.movd_xmm_r32(1, RAX);
-                                                                                                                                                        if sub { buf.subss(0, 1); } else { buf.addss(0, 1); }
-                                                                                                                                                        buf.movd_r32_xmm(RAX, 0);
-                                                                                                                                                        buf.mov_store32(RBX, db + 4 * l, RAX);
-                                                                                                                                                    }
-                                                                                                                                                }
+                                                                                                                                                                    if el64 {
+                                                                                                                                                                        // xmm0=Vn[l]; xmm1=Vm[l]; xmm1=Vn*Vm; xmm0=Vd[l];
+                                                                                                                                                                        // Vd +- Vn*Vm via addss/subss(0,1) => correct sign for
+                                                                                                                                                                        // fmls (Vd - Vn*Vm), NOT Vn*Vm - Vd.
+                                                                                                                                                                        buf.movq_load(0, RBX, nb + 8 * l); // Vn[l] dbl
+                                                                                                                                                                        buf.movq_load(1, RBX, mb + 8 * l); // Vm[l] dbl
+                                                                                                                                                                        buf.mulsd(1, 0);                   // xmm1 = Vn*Vm
+                                                                                                                                                                        buf.movq_load(0, RBX, db + 8 * l); // Vd[l]
+                                                                                                                                                                        if sub { buf.subsd(0, 1); } else { buf.addsd(0, 1); }
+                                                                                                                                                                        buf.movq_store(RBX, db + 8 * l, 0); // Vd[l] = result
+                                                                                                                                                                    } else {
+                                                                                                                                                                        // Same ordering for the .4s/.2s single-precision path:
+                                                                                                                                                                        // product in xmm1, accumulator Vd in xmm0, so the
+                                                                                                                                                                        // subtract has the correct operand order.
+                                                                                                                                                                        buf.mov_load32(RAX, RBX, nb + 4 * l);
+                                                                                                                                                                        buf.movd_xmm_r32(0, RAX);           // xmm0 = Vn[l]
+                                                                                                                                                                        buf.mov_load32(RAX, RBX, mb + 4 * l);
+                                                                                                                                                                        buf.movd_xmm_r32(1, RAX);           // xmm1 = Vm[l]
+                                                                                                                                                                        buf.mulss(1, 0);                    // xmm1 = Vn*Vm
+                                                                                                                                                                        buf.mov_load32(RAX, RBX, db + 4 * l);
+                                                                                                                                                                        buf.movd_xmm_r32(0, RAX);           // xmm0 = Vd[l]
+                                                                                                                                                                        if sub { buf.subss(0, 1); } else { buf.addss(0, 1); }
+                                                                                                                                                                        buf.movd_r32_xmm(RAX, 0);
+                                                                                                                                                                        buf.mov_store32(RBX, db + 4 * l, RAX);
+                                                                                                                                                                    }
+                                                                                                                                                                }
                                                                                                                                                 Ok(())
                                                                                                                                             }
                                                                                                                                             Inst::FmlaEl { rd, rn, vlm, idx, el64, q, sub } => {

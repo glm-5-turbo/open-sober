@@ -1859,6 +1859,38 @@ mod tests {
     }
 
     #[test]
+    fn fmls_vector_subtract_has_correct_operand_order() {
+        // Regression: vector fmls (Vd = Vd - Vn*Vm) emitted `Vn*Vm - Vd` (the
+        // same mul/op ordering as the commutative fmla add), so every
+        // accumulate-subtract produced the right magnitude but WRONG SIGN —
+        // `fmls v0.4s,v1.4s,v2.4s` on {100,..} - {1,..}*{10,..} gave +90 for
+        // lane0 (should've been correct sign) but lanes were Vn*Vm-Vd. Fixed by
+        // loading Vd into xmm0 and the product into xmm1 so subss(0,1) = Vd -
+        // Vn*Vm.
+        // fmls v31.4s, v1.4s, v26.4s = 0x4ebacc3f (rd=31,rn=1,rm=26) — the
+        // gcc -O3 accumulator idiom. V31={100,200,300,400}; V1={1,2,3,4};
+        // V26={10,20,30,40} => V31 = {90,160,210,240}.
+        let mut st = CpuState::new();
+        // v31 .4s lanes {100,200,300,400}: lo={200,100} hi={400,300}
+        st.set_v(31, 0x42c80000_42c80000, 0x43c80000_43960000);
+        // v1 .4s lanes {1,2,3,4}: lo={2,1} hi={4,3}
+        st.set_v(1, 0x40000000_3f800000, 0x40800000_40400000);
+        // v26 .4s lanes {10,20,30,40}: lo={20,10} hi={40,30}
+        st.set_v(26, 0x41c00000_41200000, 0x42200000_41f00000);
+        let code = [
+            0x3f, 0xcc, 0xba, 0x4e, // fmls v31.4s, v1.4s, v26.4s
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        let (lo, _hi) = st.get_v(31);
+        assert_eq!(
+            lo & 0xffff_ffff,
+            0x42b4_0000,
+            "lane0 = 100 - 1*10 = 90 (fmls must be Vd - Vn*Vm, not reversed)"
+        );
+    }
+
+    #[test]
     fn ld4_st4_decode_to_structure_deinterleave() {
         // Regression: the structure-load gate folded opcode 0b0000 (ld4/st4)
         // into the single-register consecutive path (0x7|0x0 => nreg 1), so
@@ -1883,6 +1915,35 @@ mod tests {
                 "ld3" => assert!(name.starts_with("Ld3N"), "ld3 word {w:#x} decoded {i:?}"),
                 _ => assert!(name.starts_with("Ld1N"), "ld1-1reg word {w:#x} decoded {i:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn dup_from_gpr_not_swallowed_by_sqadd_gate() {
+        // Regression: the SIMD saturating-add gate also matched `dup Vd.T,Wn`
+        // (byte2==0x0c), so gcc's `dup v30.4s, w1` matrix-init broadcast
+        // decoded as sqadd(v1,v4) and every -O2 matrix/fill loop corrupted the
+        // array (init_O2 returned huge garbage vs 96). Discriminator: sat-add
+        // always sets bit21, dup-from-GPR always clears it (assembler-verified).
+        // dup v30.4s, w1 = 0x4e040c3e ; sqadd v30.4s, v1.4s, v4.4s = 0x4ea40c3e.
+        use crate::decode::decode;
+        assert!(
+            matches!(decode(0x4e040c3e), Inst::SimdDupGp { rd: 30, rn: 1, .. }),
+            "dup v30.4s,w1 must decode SimdDupGp, got {:?}",
+            decode(0x4e040c3e)
+        );
+        assert!(
+            matches!(decode(0x4ea40c3e), Inst::SimdSatAdd { rd: 30, rn: 1, rm: 4, .. }),
+            "sqadd v30.4s,v1.4s,v4.4s must decode SimdSatAdd, got {:?}",
+            decode(0x4ea40c3e)
+        );
+        // dup other widths still decode to SimdDupGp.
+        for w in [0x4e020c3eu32 /*8h*/, 0x4e010c3e /*16b*/, 0x0e040c3e /*2s*/] {
+            assert!(
+                matches!(decode(w), Inst::SimdDupGp { .. }),
+                "dup width word {w:#x} decoded {:?}",
+                decode(w)
+            );
         }
     }
 

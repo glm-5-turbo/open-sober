@@ -2213,8 +2213,18 @@ pub fn decode(insn: u32) -> Inst {
             }
             // ---- SIMD saturating add/sub: sqadd/uqadd/sqsub/uqsub Vd.T, Vn, Vm -----
             // byte2 {0x0c (add), 0x2c (sub)}; prefix 0x0e/2e/4e/6e (signed 0e/4e, unsigned 2e/6e).
+            // NOTE bit21 must be SET: a clear bit21 + byte2==0x0c is NOT a
+            // sat-add but `dup Vd.T, Wn/Xn` (GPR broadcast, e.g. 0x4e040c3e),
+            // which the SimdDupGp gate below handles. Checked against the
+            // assembler: all 14 sat-add widths/forms set bit21; all 6 dup-from-
+            // GPR forms clear it. (Without this the dup fell through and the
+            // JIT computed a saturating add of Vn,Vm, silently corrupting every
+            // gcc -O2 matrix-init loop that broadcasts an index into a vector.)
             let b2s = (insn >> 8) & 0xff;
-            if ((b2s == 0x0c || b2s == 0x2c) && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e)) {
+            if (b2s == 0x0c || b2s == 0x2c)
+                && (insn & 0x200000) != 0
+                && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e)
+            {
                 let b1 = (insn >> 16) & 0xff;
                 let esize: u8 = 1u8 << ((insn >> 22) & 0x3);
                 return Inst::SimdSatAdd {

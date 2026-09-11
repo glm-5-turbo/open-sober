@@ -970,6 +970,75 @@ long long entry(void){
 }
 
 #[test]
+fn diff_fmls_vector_subtract_accumulate() {
+    // Vector fmls (Vd = Vd - Vn*Vm) inverted its operands: the Fmla translate
+    // computed Vn*Vm - Vd (only correct because add is commutative), so every
+    // accumulate-subtract fmls came out with the wrong sign but same magnitude —
+    // a 4x4 complex matmul (heavy fmls) returned 10688 vs oracle 13504, and an
+    // acc - broadcast*acc loop returned 20 (positive) vs oracle -100.
+    // gcc -O3 emits `fmls v30.4s, v1.4s, v2.4s` (rd==rm accumulator).
+    assert_diff(
+        "fmls_accum_sub",
+        "-O3",
+        r#"
+long long entry(void){
+    double acc[2]={0,0}; float fm[2]={1.5f,2.5f};
+    for(int it=0;it<4;it++){ for(int i=0;i<2;i++) acc[i]=acc[i]-fm[it%2]*fm[(it+1)%2]; }
+    long long s=(long long)acc[0]+(long long)acc[1];
+    return s;
+}
+"#,
+    );
+    assert_diff(
+        "fmls_cmat4",
+        "-O3",
+        r#"
+long long entry(void){
+    float ar[4][4],ai[4][4],br[4][4],bi[4][4],cr[4][4];
+    for(int i=0;i<4;i++)for(int j=0;j<4;j++){ar[i][j]=(float)(i*3+j); ai[i][j]=(float)(i+j); br[i][j]=(float)(i*2+j+1); bi[i][j]=(float)(i*4+j-1); cr[i][j]=0;}
+    for(int i=0;i<4;i++)for(int k=0;k<4;k++)for(int j=0;j<4;j++) cr[i][j]+=ar[i][k]*br[k][j]-ai[i][k]*bi[k][j];
+    float s=0; for(int i=0;i<4;i++)for(int j=0;j<4;j++) s+=cr[i][j];
+    return (long long)(s*2);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_dup_from_gpr_matrix_init() {
+    // `dup Vd.T, Wn` (GPR broadcast) was swallowed by the SIMD square/diff
+    // saturating-add gate (both byte2==0x0c), so gcc's -O2 matrix fill loops
+    // (`dup v30.4s, w1; add v30,v30,v31; scvtf; str q30,[x],#16`) decoded the
+    // dup as sqadd(v1,v4): the array held sat-add garbage and init returned a
+    // huge value (init_O2: 18446744039484557312 vs 96). The discriminator is
+    // bit21 (sat-add sets it, dup-from-GPR clears it).
+    assert_diff(
+        "dup_gpr_2d_fill",
+        "-O2",
+        r#"
+long long entry(void){
+    float a[4][4];
+    for(int i=0;i<4;i++) for(int j=0;j<4;j++) a[i][j]=(float)(i*3+j);
+    float s=0; for(int i=0;i<4;i++) for(int j=0;j<4;j++) s+=a[i][j];
+    return (long long)s;
+}
+"#,
+    );
+    assert_diff(
+        "dup_gpr_linear_fill",
+        "-O2",
+        r#"
+long long entry(void){
+    float a[16];
+    for(int i=0;i<16;i++) a[i]=(float)(i*7-3);
+    float s=0; for(int i=0;i<16;i++) s+=a[i];
+    return (long long)(s*3);
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_double_vector_arith() {
     // The .2d double-lane vector family (fmla v.2d / fmul v.2d / fcvtzs v.2d),
     // the double sibling of the .4s group above.
