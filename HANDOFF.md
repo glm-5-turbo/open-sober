@@ -5567,7 +5567,10 @@ both 32/64-bit lanes) exposed **two real silent miscompiles**, both fixed on
 
 Both bugs are silent (no crash — wrong values). Fuzz generator now bounds shift
 counts below element width so the native-gcc oracle and ARM agree (ARM left-shift
-by ≥width = 0, x86 masks `cl` mod-width — UB region differs by ISA).
+by ≥width = 0, x86 masks `cl` mod-width — UB region differs by ISA). A follow-on
+generator `gen_scalar_varshift` now covers the scalar lslv/lsrv/asrv path (the
+SIMD gen_varshift vectorizes to NEON ushl/sshl; the scalar arm was unfuzzed) —
+40/40 differential clean, plus a 600-case confirmation campaign.
 
 **`cargo test --workspace` 359/0** (was 355). New cross-lane fuzz campaign clean
 (8 seeds × 40, all pass). `cargo build --workspace` clean. HARD GATE unchanged:
