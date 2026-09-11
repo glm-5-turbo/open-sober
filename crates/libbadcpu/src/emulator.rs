@@ -68,6 +68,10 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
     if inst.opcode[0] == 0x0F && inst.opcode[1] == 0x38 {
         let src2 = get_rm_value(inst, ctx);
 
+        // BMI-non-destructive ops that set a carry flag must set it AFTER
+        // update_flags_common (which clears flags). Captured here, applied below.
+        let mut cf_pending = false;
+
         let result: u64 = match op3 {
             // ANDN dest, src1, src2: dest = NOT(src2) AND src1, where src1 is
             // the VEX vvvv field (the NDS/non-destructive source), NOT modrm.reg.
@@ -78,21 +82,55 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
             0xF3 => src2.wrapping_neg() & src2,
             0xF1 => src2 ^ (src2.wrapping_sub(1)),
             0xF4 => src2 & (src2.wrapping_sub(1)),
-            // BZHI dest, src1(rm), control(vvvv): DEST = src1 & (2^ctrl - 1);
-            // if ctrl >= operand size, DEST = src1 with CF=1.
+            // 0F38 F5 is shared by BZHI / PEXT / PDEP, disambiguated by the VEX
+            // pp bits (assembler ground truth: bzhi=pp0, pext=pp2, pdep=pp3):
+            //   BZHI dest, src1(rm), control(vvvv): DEST = src1 & (2^ctrl - 1);
+            //       if ctrl >= operand size, DEST = src1 with CF=1.
+            //   PEXT dest, source(vvvv), mask(rm): gather source bits at mask
+            //       positions into the low bits of dest; CF = last bit gathered.
+            //   PDEP dest, source(vvvv), mask(rm): deposit source bit i into the
+            //       i-th *set* mask position; CF = last bit deposited.
             0xF5 => {
-                let control = get_reg(ctx, inst.vex_vvvv);
-                let bits = if wide { 64u64 } else { 32u64 };
-                if control >= bits {
-                    set_cf(ctx);
-                    src2
+                if inst.has_f3 || inst.has_f2 {
+                    let data = get_reg(ctx, inst.vex_vvvv); // source (vvvv)
+                    let mask = src2;                        // mask (rm)
+                    let nbits = if wide { 64 } else { 32 };
+                    let mut dst: u64 = 0;
+                    let mut cnt: u32 = 0;
+                    let mut last: u64 = 0;
+                    for bit in 0..nbits {
+                        let bmask = 1u64 << bit;
+                        if mask & bmask != 0 {
+                            let sb = if inst.has_f3 {
+                                // PDEP: take the next source bit, place at mask pos.
+                                (data >> cnt) & 1
+                            } else {
+                                // PEXT: take the source bit at this position, pack low.
+                                (data >> bit) & 1
+                            };
+                            last = sb;
+                            if inst.has_f3 {
+                                dst |= sb << bit;
+                            } else {
+                                dst |= sb << cnt;
+                            }
+                            cnt += 1;
+                        }
+                    }
+                    cf_pending = last != 0;
+                    dst
                 } else {
-                    let mask = if wide {
-                        (1u64 << control) - 1
+                    // BZHI
+                    let control = get_reg(ctx, inst.vex_vvvv);
+                    let bits = if wide { 64u64 } else { 32u64 };
+                    if control >= bits {
+                        cf_pending = true;
+                        src2
+                    } else if wide {
+                        src2 & ((1u64 << control) - 1)
                     } else {
-                        (1u32 << (control as u32)) as u64 - 1
-                    };
-                    src2 & mask
+                        src2 & ((1u32 << control as u32) as u64 - 1)
+                    }
                 }
             }
             // 0F38 F7: BEXTR (pp=0) or the BMI2 shifts SHRX/SARX/SHLX
@@ -162,6 +200,11 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
         // The BMI integer ops set ZF (and for BZHI carry already handled);
         // the shifts leave flags untouched (CF unset, ZF cleared).
         update_flags_common(ctx, result, wide);
+        // BZHI (ctrl >= bits), PEXT and PDEP set CF to the last bit; apply it
+        // now that update_flags_common has cleared the flags.
+        if cf_pending {
+            set_cf(ctx);
+        }
         advance_rip(ctx, inst.len);
         return EmulationResult::Success;
     }
@@ -657,5 +700,36 @@ mod tests {
                 run_one(&[0xC4, 0xE2, 0x72, 0xF7, 0xC2], 1, 0xFFFF_FFF0),
                 0xFFFF_FFF8
             );
+        }
+
+        /// PEXT and PDEP share opcode byte 0F38 F5 with BZHI and must be
+        /// disambiguated by the VEX pp bits (pext=pp2 -> has_f2, pdep=pp3 ->
+        /// has_f3). run_one's rcx=vvvv (the bit SOURCE), rdx=rm (the MASK),
+        /// result in rax. Encodings verified with `gcc -c + objdump -d -M
+        /// intel`; expected RESULTS verified against real hardware `_pext_u64`
+        /// / `_pdep_u64` (this host has BMI2).
+        #[test]
+        fn pext_gathering_matches_hardware() {
+            // pext rax, rcx, rdx (64-bit) = C4 E2 F2 F5 C2. pp=2.
+            // pext(0xFF, 0b1010) = 3 ; pext(8, 0b1010) = 2.
+            assert_eq!(run_one(&[0xC4, 0xE2, 0xF2, 0xF5, 0xC2], 0xFF, 0b1010), 3);
+            assert_eq!(run_one(&[0xC4, 0xE2, 0xF2, 0xF5, 0xC2], 8, 0b1010), 2);
+            // 32-bit (W=0) form C4 E2 72 F5 C2: pext32(0xFF,0b1010)=3.
+            assert_eq!(run_one(&[0xC4, 0xE2, 0x72, 0xF5, 0xC2], 0xFF, 0b1010), 3);
+            // A case that distinguishes PEXT from a mis-decoded BZHI: had it
+            // been decoded as BZHI, control=vvvv=source=5 would yield
+            // 0xF5 & 0x1F = 0x15; the real PEXT(5, 0xF5) = 3 (bits 0,2 of src).
+            assert_eq!(run_one(&[0xC4, 0xE2, 0xF2, 0xF5, 0xC2], 0x5, 0b1111_0101), 3);
+        }
+
+        #[test]
+        fn pdep_depositing_matches_hardware() {
+            // pdep rax, rcx, rdx (64-bit) = C4 E2 F3 F5 C2. pp=3.
+            // pdep(3, 0b1010)=10 ; pdep(0xFF,0b10101010)=170 ; pdep(1,0b100)=4.
+            assert_eq!(run_one(&[0xC4, 0xE2, 0xF3, 0xF5, 0xC2], 3, 0b1010), 10);
+            assert_eq!(run_one(&[0xC4, 0xE2, 0xF3, 0xF5, 0xC2], 0xFF, 0b1010_1010), 170);
+            assert_eq!(run_one(&[0xC4, 0xE2, 0xF3, 0xF5, 0xC2], 1, 0b100), 4);
+            // 32-bit (W=0) form C4 E2 73 F5 C2: pdep32(3, 0b1010)=10.
+            assert_eq!(run_one(&[0xC4, 0xE2, 0x73, 0xF5, 0xC2], 3, 0b1010), 10);
         }
 }

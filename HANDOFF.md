@@ -3530,3 +3530,19 @@ a GLOB_DAT/JUMP_SLOT resolver for the main dynamic (arm64jit's `bind_image_plt`
 already covers JUMP_SLOT), then libbadcpu ISA gaps, then services/auth. HARD
 GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
 GPU + real-binary host (no APK/libroblox.so/GPU on this VPS).
+
+### Addendum (same cycle) — libbadcpu: PEXT/PDEP were mis-emulated as BZHI
+The VEX.0F38.F5 opcode byte is shared by **BZHI / PEXT / PDEP**, disambiguated
+only by the VEX pp bits (assembler ground truth `gcc -c + objdump -d`:
+bzhi=pp0, **pext=pp2, pdep=pp3**). The emulator's 0xF5 branch treated every
+case as BZHI, so both **PEXT and PDEP silently produced wrong results** (a bit
+extract became a low-bit mask). Fixed in `emulator.rs`: pp3/f3 → PDEP
+(deposit source bit i into the i-th set mask position), pp2/f2 → PEXT (gather
+source bits at mask positions into the low bits), else BZHI. Operands:
+dest=ModRM.reg, source=vvvv, mask=rm. Also fixed a latent flag-ordering bug —
+the BZHI/PEXT/PDEP carry flag was set *before* `update_flags_common` cleared
+it, so CF never survived; now `cf_pending` is applied after. +2 tests with
+expected values **verified on real hardware** `_pext_u64`/`_pdep_u64` (this
+host has BMI2): pext(0xFF,0b1010)=3, pext(8,0b1010)=2, pdep(3,0b1010)=10,
+pdep(0xFF,0b10101010)=170, plus 32-bit forms and a PEXT-vs-BZHI discriminating
+case. `cargo test --workspace` **189/0** (libbadcpu 16 → 18).
