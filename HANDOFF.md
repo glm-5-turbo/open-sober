@@ -2638,4 +2638,17 @@ arrays, AND-immediates, MOVK constants, SP prologues). arm64jit 78/78, workspace
   resolves it). Worth a focused session.
 - FcvVec 4S lane uses movq/cvttsd2si on 4-byte lanes (possibly wrong); fcvtzu
   for >= 2^63; ADD/SUB rn==31-as-XZR reads SP (assembler prefers movz/orr, low
-  priority).
+  priority).## Session (Sep 11, 2026) — LdStrReg sign-extend stored address, not value (commit 7b6b19e)
+
+Post-battery hardening: a register-offset sign-extend exec test surfaced a
+translate bug in the bit23/sext path added in 716876c. `ldrsh w0,[x1,x0]`
+(0x78e06820, register offset, W dest, no shift) loaded the signed value into
+RCX but stg_if_writable stores RAX — i.e. it stored the *effective address*
+into the dest register. Every a[i] in a short-array loop via register-offset
+LDRSH silently corrupted the accumulator. The session battery passed only
+because arrays used ldr w / unsigned-offset forms.
+
+Fix: the LdStrReg sext branch now loads the value into RAX (address no longer
+needed), mirroring the LdStrImm sext arm. sumh over `short a[]` (register-offset
+ldrsh) = 26 -> 42. arm64jit 79/79, workspace 113/0. +regression
+ldr_reg_sext_sign_extends_into_dest.
