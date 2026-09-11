@@ -5268,3 +5268,31 @@ libwayland-dev/mesa-utils first; input deps use pure-Rust x11rb.
 run log on a GPU/APK host (none on this VPS). Next: wire the wrapper sonames into the
 guest loader's NEEDED resolution and add a GLES float-ABI host bridge, then continue
 the ordered RECOMMENDATION list (JNI fake-object backing, libbadcpu ISA, services/auth).
+
+## Session (cycle 35b, Sep 11, 2026) — integer-ABI GLES routed to real Mesa in JIT resolver + JNI array offset bug fixed (341/0)
+Two follow-on commits on the graphics/JNI surface:
+
+1. **de5fed1 — `resolver::resolve_gles_int`**: mirroring the EGL wiring, 107 GLES
+   entry points with a pure integer/pointer ABI AND at most 8 integer args (all the
+   texture/state/draw pipeline calls Roblox makes — bind/gen/delete, shader compile,
+   draw arrays/elements, buffer data, stencil/blend/depth, uniform*i, viewport) are
+   now resolved to real Mesa via a whitelist (GLES_INT_NAME_LIST, generated from the
+   exact headers). `gles_handle()` dlopens libGLESv2.so.2 with **RTLD_LOCAL** (NOT
+   GLOBAL: a global load would leak float-taking `gl*` into the general resolve()
+   RTLD_DEFAULT scan and corrupt their xmm args through the integer bridge). Float-
+   taking GLES (glClearColor) and >8-arg forms (glTexImage2D) are deliberately kept
+   on the NULL/0 stub — they need a dedicated float-ABI bridge, not wired here.
+2. **6ba6104 — JNI primitive-array accessors + a REAL offset bug**: verified every
+   JNINativeInterface offset against the authoritative Android NDK r26b jni.h
+   (extracted from the official NDK zip). Found REGISTER_NATIVES was 199 and
+   GET_JAVA_VM 203 but the NDK places them at **215 and 219** (the 175..214
+   New<Prim>Array/Get/Release/Get/Set<Prim>ArrayRegion block was skipped), so a
+   guest's RegisterNatives/GetJavaVM table index read the wrong (NULL) slot and
+   JNI_OnLoad native registration was silently dropped in the real boot path. Fixed
+   the offsets and implemented the missing JNI primitive-array surface (jbyteArray /
+   jintArray = guest-addressable buffer + byte-length registry; new/get/release/
+   region ops, bounds-checked), wired at the corrected slots; GetArrayLength now real.
+   +3 regressions (NDK offset assertions, ByteArrayRegion round-trip, Elements->backing).
+
+cargo build --workspace clean; `cargo test --workspace` **341/0** (was 336). HARD GATE
+unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
