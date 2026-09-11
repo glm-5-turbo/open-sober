@@ -2845,6 +2845,32 @@ mod tests {
     }
 
     #[test]
+    fn widen_in_place_smull_fcvtl_snapshot_source() {
+        // Regression (same in-place widening-alias class found by gen_signed_div
+        // fuzz): smull/fcvtl/fcvtn2 with rd aliasing the narrow source clobber
+        // their own operand — the wide write of lane i at i*res_esize overwrites
+        // the narrow source bytes lane i+1 reads. gcc -O3 in-place-vectorizes
+        // these. Now snapshots the source to permscratch when it aliases rd.
+        // Vector n lives at st.v[2n] (lo) / st.v[2n+1] (hi).
+        // smull v0.2d, v0.2s, v1.2s (0x0ea1c000): v0.2s={1,2} * v1.2s={3,4}
+        //   = {1*3, 2*4} = {3,8}.
+        let mut st = CpuState::new();
+        st.v[0] = (2u64 << 32) | 1; // v0 s-lanes 0,1
+        st.v[1] = 0;                // v0 s-lanes 2,3 (unused, must be zeroed by write)
+        st.v[2] = (4u64 << 32) | 3; // v1 s-lanes 0,1
+        exec_bytes(&mut st, &0x0ea1c000u32.to_le_bytes(), 0).expect("exec smull in-place");
+        assert_eq!(st.v[0], 3, "smull lane0 = 1*3");
+        assert_eq!(st.v[1], 8, "smull lane1 = 2*4 (was clobbered by src overwrite)");
+        // fcvtl v5.2d, v5.2s (0x0e6178a5): widen f32 {1.0, 2.0} -> f64 {1.0, 2.0}
+        let mut st = CpuState::new();
+        st.v[10] = (0x4000_0000u64 << 32) | 0x3f80_0000u64; // v5 s-lanes = 1.0f, 2.0f
+        st.v[11] = 0; // v5 s-lanes 2,3 (unused)
+        exec_bytes(&mut st, &0x0e6178a5u32.to_le_bytes(), 0).expect("exec fcvtl in-place");
+        assert_eq!(st.v[10], 0x3ff0_0000_0000_0000, "fcvtl lane0 = 1.0 f64");
+        assert_eq!(st.v[11], 0x4000_0000_0000_0000, "fcvtl lane1 = 2.0 f64");
+    }
+
+    #[test]
     fn simd_stp_q_preindex_store_and_writeback() {
         // REBUILD maskf's real instruction stream END-TO-END (no seeded
         // v-registers): movi v30.4s,#4 / movi v29.4s,#0xf, ldr q31=[init],

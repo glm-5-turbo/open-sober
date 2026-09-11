@@ -3129,12 +3129,17 @@ pub fn translate(
                                                                                                         let src_es: i32 = (res_esize as i32) / 2;
                                                                                                         let lanes = (16 / res_esize as i32) as usize;
                                                                                                         let uphalf = if q { 8 } else { 0 }; // smull2 reads the upper reg half
+                                                                                                        // In-place widening alias: the wide (res_esize) write of lane i at
+                                                                                                        // i*res_esize clobbers the narrow (src_es) operand bytes lane i+1 reads
+                                                                                                        // at (i+1)*src_es when rd aliases a source (`smull v0.2d, v0.2s, …`).
+                                                                                                        let rn_base = if rn == rd { permute_source(buf, rd, rn, false) } else { slot(rn) };
+                                                                                                        let rm_base = if rm == rd { permute_source(buf, rd, rm, true) } else { slot(rm) };
                                                                                                         for i in 0..lanes {
                                                                                                             let soff = uphalf + (i as i32) * src_es;
                                                                                                             match src_es {
-                                                                                                                4 => { buf.mov_load32(RAX, RBX, slot(rn)+soff); buf.mov_load32(RCX, RBX, slot(rm)+soff); }
-                                                                                                                2 => { buf.movzx_word_mem(RAX, RBX, slot(rn)+soff); buf.movzx_word_mem(RCX, RBX, slot(rm)+soff); }
-                                                                                                                _ => { buf.movzx_byte_mem(RAX, RBX, slot(rn)+soff); buf.movzx_byte_mem(RCX, RBX, slot(rm)+soff); }
+                                                                                                                4 => { buf.mov_load32(RAX, RBX, rn_base+soff); buf.mov_load32(RCX, RBX, rm_base+soff); }
+                                                                                                                2 => { buf.movzx_word_mem(RAX, RBX, rn_base+soff); buf.movzx_word_mem(RCX, RBX, rm_base+soff); }
+                                                                                                                _ => { buf.movzx_byte_mem(RAX, RBX, rn_base+soff); buf.movzx_byte_mem(RCX, RBX, rm_base+soff); }
                                                                                                             }
                                                                                                             if !unsigned {
                                                                                                                 // sign-extend the zero-extended operand up to 64 bits (shift by (64-8*src))
@@ -4654,8 +4659,10 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             // fcvtl Vd.2D, Vn.2S / fcvtl2 Vd.2D, Vn.4S: widen two single-precision
             // float lanes of Vn to doubles in Vd. fcvtl reads Vn bytes 0..7,
             // fcvtl2 (upper) reads Vn bytes 8..15. Both write all 16 bytes of Vd.
-            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            // In-place: fcvtl (lower) writing the 8-byte f64 lane0 at Vd byte 0
+            // would clobber Vn's f32 lane1 at byte 4 when rd==rn; snapshot Vn.
             let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let src = permute_source(buf, rd, rn, false);
             let soff = if upper { 8i32 } else { 0i32 };
             for lane in 0..2 {
                 buf.mov_load32(RAX, RBX, src + soff + lane * 4); // f32 lane
@@ -4669,8 +4676,10 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             // fcvtn Vd.2S, Vn.2D / fcvtn2 Vd.4S, Vn.2D: narrow two double lanes
             // of Vn to floats in Vd. fcvtn writes Vd bytes 0..7, fcvtn2 (upper)
             // writes Vd bytes 8..15. Source is always the full 2 doubles.
-            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            // In-place: fcvtn2 (upper) writing the f32 lane0 at Vd byte 8 would
+            // clobber Vn's f64 lane1 at byte 8 before it's read when rd==rn.
             let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let src = permute_source(buf, rd, rn, false);
             let doff = if upper { 8i32 } else { 0i32 };
             for lane in 0..2 {
                 buf.movq_load(0, RBX, src + lane * 8); // f64 lane -> xmm0
