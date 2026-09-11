@@ -111,8 +111,12 @@ const EXCEPTION_CHECK: usize = 228;
 const NEW_DIRECT_BYTE_BUFFER: usize = 229;
 const GET_DIRECT_BUFFER_ADDRESS: usize = 230;
 const GET_DIRECT_BUFFER_CAPACITY: usize = 231;
-// Official JNIVMInterface word offsets.
-const VM_GET_ENV: usize = 7;
+// Official JNIVMInterface (JNIInvokeInterface) word offsets. The struct:
+//   reserved0..2 = 0..2, DestroyJavaVM=3, AttachCurrentThread=4,
+//   DetachCurrentThread=5, GetEnv=6, AttachCurrentThreadAsDaemon=7.
+// Verified against host java-21 jni.h AND the guest disasm (JNI_OnLoad does
+// `ldr x8,[vm] ; ldr x8,[x8,#48] ; blr x8` = byte 48 = word 6 = GetEnv).
+const VM_GET_ENV: usize = 6;
 
 /// Registry of interned UTF-8 byte strings: `str_handle` allocates a readable,
 /// null-terminated copy in guest-addressable memory (guest==host) and returns a
@@ -1013,7 +1017,7 @@ mod tests {
     /// End-to-end: JIT-execute guest aarch64 that does the `JNI_OnLoad` preamble —
     /// `JavaVM*` in x0, call vm->GetEnv(&env, 0x10006), then env->GetVersion(),
     /// then env->NewStringUTF — and verify the results land in registers. Uses the
-    /// OFFICIAL slot offsets (vm GetEnv=7, env GetVersion=4, NewStringUTF=167).
+    /// OFFICIAL slot offsets (vm GetEnv=6, env GetVersion=4, NewStringUTF=167).
     #[test]
     fn jit_jni_onload_getenv_getversion() {
         use crate::jit::{jit_run, CpuState};
@@ -1028,7 +1032,7 @@ mod tests {
 
         // aarch64 (official ABI offsets):
         //   ldr x10,[x0]         ; x10 = vm function table
-        //   ldr x9,[x10,#56]     ; x9  = vm_table[7] = GetEnv
+        //   ldr x9,[x10,#48]     ; x9  = vm_table[6] = GetEnv (JNIInvokeInterface)
         //   blr x9               ; GetEnv(vm,&penv,version)
         //   ldr x13,[x1]         ; x13 = env (JNIEnv*)
         //   ldr x13,[x13]        ; x13 = env->functions (JNIEnv fn table)
@@ -1037,7 +1041,7 @@ mod tests {
         let mut code: Vec<u8> = Vec::new();
         let mut w = |i: u32| code.extend_from_slice(&i.to_le_bytes());
         w(0xf940000a); // ldr x10,[x0]
-        w(0xf9401d49); // ldr x9,[x10,#56]  (vm_table[7] = GetEnv)
+        w(0xf9401949); // ldr x9,[x10,#48]  (vm_table[6] = GetEnv, byte 48)
         w(0xd63f0120); // blr x9
         w(0xf940002d); // ldr x13,[x1]      -> x13 = env
         w(0xf94001ad); // ldr x13,[x13]     -> x13 = env->functions
