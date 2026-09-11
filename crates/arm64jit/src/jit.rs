@@ -746,6 +746,27 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         // --- session / process group ---
         156 => unsafe { libc::getsid(a[0] as c_int) as c_long },
         157 => unsafe { libc::setsid() as c_long },
+        // --- timerfd (85/86/87): Android/libutils/ALooper wait on timerfds for
+        // timeouts (SystemClock, trace, watchdog). itimerspec is two timespecs =
+        // byte-identical across aarch64/x86-64, so forward directly. ---
+        85 => unsafe { // timerfd_create(clockid, flags)
+            libc::syscall(libc::SYS_timerfd_create, a[0] as usize, a[1] as usize) as c_long
+        },
+        86 => unsafe { // timerfd_settime(fd, flags, new_value*, old_value*)
+            libc::syscall(libc::SYS_timerfd_settime, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize) as c_long
+        },
+        87 => unsafe { // timerfd_gettime(fd, curr_value*)
+            libc::syscall(libc::SYS_timerfd_gettime, a[0] as usize, a[1] as usize) as c_long
+        },
+        // --- signalfd4 (74): guest signal *dispatch* isn't supported here (rt_sigaction
+        // is a no-op), so a signalfd would never fire. Return a real host signalfd but
+        // with an EMPTY sigset (never wakes) so an app that requires signalfd succeeds
+        // on the call instead of aborting on -ENOSYS, while honoring the no-dispatch
+        // stance. fd==-1 creates a new one, else it just (re)arms the given fd. ---
+        74 => unsafe {
+            let mut empty: libc::sigset_t = core::mem::zeroed();
+            libc::signalfd(a[0] as c_int, &empty, a[3] as c_int) as c_long
+        },
         _ => {
             eprintln!(
                 "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (a0={:#x} a1={:#x} a2={:#x})",
@@ -4640,6 +4661,58 @@ mod tests {
         st.x[8] = 35; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = fc2.as_ptr() as u64; st.x[2] = 0;
         assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "unlinkat");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// timerfd (85/86/87) and signalfd4 (74) — the ALooper/libutils timeout &
+    /// signal-fd primitives Roblox's event loop waits on. timerfd_create must
+    /// return a real fd, settime arms it, gettime reflects the pending value, and
+    /// a read returns after the interval expires. signalfd must return a valid
+    /// host fd (empty mask -> never fires, matching the no-signal-dispatch stance)
+    /// rather than -ENOSYS.
+    #[test]
+    fn guest_svc_timerfd_and_signalfd_roundtrip() {
+        let mut st = CpuState::new();
+        let svc = |st: &mut CpuState| -> i64 { guest_svc(st as *mut CpuState) as i64 };
+
+        // timerfd_create(CLOCK_MONOTONIC=1, flags=0).
+        st.x[8] = 85; st.x[0] = libc::CLOCK_MONOTONIC as u64; st.x[1] = 0;
+        let tfd = svc(&mut st);
+        assert!(tfd >= 0, "timerfd_create returns a real fd, got {tfd}");
+        let tfd = tfd as i32;
+
+        // timerfd_settime(fd, 0, new={it_value 5ms}, NULL): arm an absolute-free
+        // one-shot timer that expires in 5ms.
+        let new = libc::itimerspec {
+            it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: libc::timespec { tv_sec: 0, tv_nsec: 5_000_000 },
+        };
+        st.x[8] = 86; st.x[0] = tfd as u64; st.x[1] = 0;
+        st.x[2] = (&new as *const libc::itimerspec) as u64; st.x[3] = 0;
+        assert_eq!(svc(&mut st), 0, "timerfd_settime arms the timer");
+
+        // timerfd_gettime(fd, curr) reflects a pending (non-zero) remaining time.
+        let mut curr = libc::itimerspec { it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 }, it_value: libc::timespec { tv_sec: 0, tv_nsec: 0 } };
+        st.x[8] = 87; st.x[0] = tfd as u64; st.x[1] = (&mut curr as *mut libc::itimerspec) as u64;
+        assert_eq!(svc(&mut st), 0, "timerfd_gettime ok");
+        let pending = curr.it_value.tv_sec > 0 || curr.it_value.tv_nsec > 0;
+        assert!(pending, "timerfd_gettime reports a pending timer (got {:?})", curr.it_value);
+
+        // Sleep past expiry, then read(): returns 8 (one u64 expiration count).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut exp = 0u64;
+        st.x[8] = 63; st.x[0] = tfd as u64; st.x[1] = (&mut exp as *mut u64) as u64; st.x[2] = 8;
+        assert_eq!(svc(&mut st), 8, "read on expired timerfd returns 8 bytes");
+        if exp > 0 {
+            // No requirement on the count, just that events were delivered.
+        }
+        unsafe { libc::close(tfd); }
+
+        // signalfd4(-1, mask, 8, 0): an empty-mask signalfd is never woken by our
+        // no-signal stance, but the call must succeed with a valid fd.
+        st.x[8] = 74; st.x[0] = !0u64 as u64; st.x[1] = 0; st.x[2] = 8; st.x[3] = 0;
+        let sfd = svc(&mut st);
+        assert!(sfd >= 0, "signalfd4 returns a real fd, got {sfd}");
+        unsafe { libc::close(sfd as i32); }
     }
 
     #[test]
