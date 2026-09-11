@@ -4949,6 +4949,22 @@ mod tests {
             .map(|x| x.to_bits())
             .collect();
         for i in 0..4 { assert_eq!(lanes[i], exp[i], "fmla-el lane {}", i); }
+
+        // fmla v29.4s, v21.4s, v2.s[1] (0x4fa212bd): index 1 must use Vm.s[1].
+        // v2.s[1]=50. Acc=0, v21=[1,2,3,4] => v29=[50,100,150,200].
+        let mut st2 = CpuState::new();
+        st2.v[42] = ((f(2.0) as u64) << 32) | f(1.0) as u64;
+        st2.v[43] = ((f(4.0) as u64) << 32) | f(3.0) as u64;
+        st2.v[4] = ((f(50.0) as u64) << 32) | f(10.0) as u64; // v2.s[1]=50, s[0]=10
+        st2.v[58] = 0; st2.v[59] = 0;
+        let mut code2 = Vec::new();
+        code2.extend_from_slice(&0x4fa2_12bdu32.to_le_bytes()); // fmla v29.4s,v21,v2.s[1]
+        code2.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st2, &code2, 0).expect("exec fmla v2.s[1]");
+        let lanes2 = [(st2.v[58]&0xffff_ffff) as u32,(st2.v[58]>>32) as u32,
+                      (st2.v[59]&0xffff_ffff) as u32,(st2.v[59]>>32) as u32];
+        let exp2: Vec<u32> = [50.0f32, 100.0, 150.0, 200.0].iter().map(|x| x.to_bits()).collect();
+        for i in 0..4 { assert_eq!(lanes2[i], exp2[i], "fmla-el idx1 lane {}", i); }
     }
 
     #[test]
@@ -5256,6 +5272,22 @@ mod tests {
         let lo2 = st2.v[62];
         let lanes2 = vec![lo2 & 0xffff, (lo2>>16)&0xffff, (lo2>>32)&0xffff, lo2>>48];
         assert_eq!(lanes2, vec![0xff00, 0xff00, 0xff00, 0xff00], "orr v.4h");
+    }
+
+    #[test]
+    fn fmul_by_element_index_and_rm_per_esize() {
+        use crate::decode::{decode, Inst};
+        // Session (cycle 44g): fmul Vd.4s, Vn.4s, Vm.s[1] was decoded with
+        // index=0 (the gate read bit11|bit13<<1, but 32-bit by-element index is
+        // bit21; 64-bit is bit11). Every .4s s[1] fmul silently used element 0.
+        // fmul v1.4s,v2.4s,v0.s[0] (idx 00), s[1] (01=b21), s[2] (10=b11), s[3] (11)
+        assert!(matches!(decode(0x4fa09041), Inst::SimdFmulEl { index: 1, rm: 0, esize: 4, .. }));
+        assert!(matches!(decode(0x4f809041), Inst::SimdFmulEl { index: 0, rm: 0, esize: 4, .. }));
+        assert!(matches!(decode(0x4f809841), Inst::SimdFmulEl { index: 2, rm: 0, esize: 4, .. }));
+        assert!(matches!(decode(0x4fa09841), Inst::SimdFmulEl { index: 3, rm: 0, esize: 4, .. }));
+        // fmul v1.2d,v2.2d,v8.d[1] (idx b11=1)
+        assert!(matches!(decode(0x4fc89841), Inst::SimdFmulEl { index: 1, rm: 8, esize: 8, .. }));
+        assert!(matches!(decode(0x4fc89041), Inst::SimdFmulEl { index: 0, rm: 8, esize: 8, .. }));
     }
 
     #[test]
@@ -5984,10 +6016,10 @@ mod tests {
         // fcvtn v27.2s, v27.2d = 0x0e616b7b, fcvtn2 v27.4s, v26.2d = 0x4e616b5b
         // must decode to their own Inst (not be swallowed by an int->fp/widen-mul
         // gate). Exec: v0 = [1.0f, 2.0f]; fcvtl v1.2d,v0.2s; fcvtzs x0,d1 => 1.
-        assert!(matches!(decode(0x0e617801), Inst::VecFcvtl { upper: false, .. }));
-        assert!(matches!(decode(0x4e617bbd), Inst::VecFcvtl { upper: true, .. }));
-        assert!(matches!(decode(0x0e616b7b), Inst::VecFcvtn { upper: false, .. }));
-        assert!(matches!(decode(0x4e616b5b), Inst::VecFcvtn { upper: true, .. }));
+        assert!(matches!(crate::decode::decode(0x0e617801), Inst::VecFcvtl { upper: false, .. }));
+        assert!(matches!(crate::decode::decode(0x4e617bbd), Inst::VecFcvtl { upper: true, .. }));
+        assert!(matches!(crate::decode::decode(0x0e616b7b), Inst::VecFcvtn { upper: false, .. }));
+        assert!(matches!(crate::decode::decode(0x4e616b5b), Inst::VecFcvtn { upper: true, .. }));
         // exec: [1.0f, 2.0f] in v0 -> fcvtl -> d1 = 1.0 -> scalar fcvtzs => 1.
         let code = [
             0x01u8, 0x78, 0x61, 0x0e, // fcvtl v1.2d, v0.2s
@@ -6071,10 +6103,10 @@ mod tests {
         // BIT/BIF (both bit23=1) to SimdBit with the bif flag (bit14).
         use crate::decode::decode;
         // bit v15.16b,v16.16b,v17.16b = 0x6eb11e0f ; bif = 0x6ef11e0f (asm-verified)
-        assert!(matches!(decode(0x6eb11e0f), Inst::SimdBit { bif: false, .. }));
-        assert!(matches!(decode(0x6ef11e0f), Inst::SimdBit { bif: true, .. }));
+        assert!(matches!(crate::decode::decode(0x6eb11e0f), Inst::SimdBit { bif: false, .. }));
+        assert!(matches!(crate::decode::decode(0x6ef11e0f), Inst::SimdBit { bif: true, .. }));
         // bsl v6.16b,v7.16b,v8.16b = 0x6e681ce6 stays a select.
-        assert!(matches!(decode(0x6e681ce6), Inst::SimdSel { .. }));
+        assert!(matches!(crate::decode::decode(0x6e681ce6), Inst::SimdSel { .. }));
 
         // v15_in (dest) = 0x1122334455667788 ; v16 (mask) = 0x00FF00FF00FF00FF ;
         // v17 (source) = 0xAABBCCDDEEFF0011.
@@ -6193,10 +6225,10 @@ mod tests {
             // 128-bit vector register-offset / unscaled / indexed forms route to
             // the vector classes, NOT GPR LdStrReg/LdStrImmWb (which would write
             // INTO a GPR register).
-            assert!(matches!(decode(0x3ca36800), Inst::VecLdStrReg { ld: false, .. }));
-            assert!(matches!(decode(0x3ce46841), Inst::VecLdStrReg { ld: true, .. }));
-            assert!(matches!(decode(0x3c9f00a0), Inst::VecLdStImmUnscaled { ld: false, .. }));
-            assert!(matches!(decode(0x3cc200c1), Inst::VecLdStImmUnscaled { ld: true, .. }));
+            assert!(matches!(crate::decode::decode(0x3ca36800), Inst::VecLdStrReg { ld: false, .. }));
+            assert!(matches!(crate::decode::decode(0x3ce46841), Inst::VecLdStrReg { ld: true, .. }));
+            assert!(matches!(crate::decode::decode(0x3c9f00a0), Inst::VecLdStImmUnscaled { ld: false, .. }));
+            assert!(matches!(crate::decode::decode(0x3cc200c1), Inst::VecLdStImmUnscaled { ld: true, .. }));
             assert!(matches!(
                 decode(0x3cc40c04),
                 Inst::VecLdStIndexed { ld: true, pre: true, .. }
@@ -6209,7 +6241,7 @@ mod tests {
             // vector class.
             assert!(!matches!(decode(0x3c1fc100), Inst::VecLdStImmUnscaled { .. }));
             // A real GPR register-offset load still decodes as LdStrReg.
-            assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
+            assert!(matches!(crate::decode::decode(0xf8626803), Inst::LdStrReg { .. }));
         }
         }
 
@@ -6233,12 +6265,12 @@ mod isa_regress_tests {
         // mask where the signed byte<0. v1=0xf0000ffe01ff7f00 -> mem bytes
         // [00,7f,ff,01,fe,0f,00,f0]: negatives at 0xff(=-1),0xfe(=-2),0xf0(=-16)
         // -> mask bytes [00,00,ff,00,ff,00,00,ff] = 0xff_00_00_ff_00_ff_00_00.
-        assert!(matches!(decode(0x4e20a820), Inst::SimdCmpZero { cond: 3, esize: 1, q: true, .. }));
-        assert!(matches!(decode(0x4e209820), Inst::SimdCmpZero { cond: 0, esize: 1, q: true, .. }));
-        assert!(matches!(decode(0x4e208820), Inst::SimdCmpZero { cond: 1, .. }));
-        assert!(matches!(decode(0x6e208820), Inst::SimdCmpZero { cond: 2, .. }));
-        assert!(matches!(decode(0x6e209820), Inst::SimdCmpZero { cond: 4, .. }));
-        assert!(matches!(decode(0x4ea0a820), Inst::SimdCmpZero { esize: 4, .. }));
+        assert!(matches!(crate::decode::decode(0x4e20a820), Inst::SimdCmpZero { cond: 3, esize: 1, q: true, .. }));
+        assert!(matches!(crate::decode::decode(0x4e209820), Inst::SimdCmpZero { cond: 0, esize: 1, q: true, .. }));
+        assert!(matches!(crate::decode::decode(0x4e208820), Inst::SimdCmpZero { cond: 1, .. }));
+        assert!(matches!(crate::decode::decode(0x6e208820), Inst::SimdCmpZero { cond: 2, .. }));
+        assert!(matches!(crate::decode::decode(0x6e209820), Inst::SimdCmpZero { cond: 4, .. }));
+        assert!(matches!(crate::decode::decode(0x4ea0a820), Inst::SimdCmpZero { esize: 4, .. }));
         let code = [0x20u8, 0xa8, 0x20, 0x4e, 0xc0, 0x03, 0x5f, 0xd6]; // cmlt v0,v1,#0 = 0x4e20a820 ; ret
         let mut st = CpuState::new();
         st.v[2] = 0xf000_0ffe_01ff_7f00; // v1
@@ -6252,8 +6284,8 @@ mod isa_regress_tests {
     fn simd_ssubw_subtracts_widened_not_adds() {
         // ssubw v0.4s, v0.4s, v1.4h = 0x0e613000 (bit13 set => sub-wide).
         // saddw v0.4s,v0.4s,v1.4h = 0x0e611000 (bit13 clear => add-wide).
-        assert!(matches!(decode(0x0e613000), Inst::SimdAddw { sub: true, .. }));
-        assert!(matches!(decode(0x0e611000), Inst::SimdAddw { sub: false, .. }));
+        assert!(matches!(crate::decode::decode(0x0e613000), Inst::SimdAddw { sub: true, .. }));
+        assert!(matches!(crate::decode::decode(0x0e611000), Inst::SimdAddw { sub: false, .. }));
         let code = [0x00u8, 0x30, 0x61, 0x0e, 0xc0, 0x03, 0x5f, 0xd6]; // ssubw v0,v0,v1 ; ret
         let mut st = CpuState::new();
         st.v[0] = (20u64 << 32) | 10;      // v0 4s lanes: [10,20,30,40]

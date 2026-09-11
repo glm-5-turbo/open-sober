@@ -2216,14 +2216,26 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // ---- SIMD FP multiply by element: fmul Vd.T, Vn.T, Vm.T[L] ----
     // Gate (insn & 0x3f00_f000)==0x0f00_9000. Must precede the broad MOVI gate
     // (0x0F|0x6F prefix) which would otherwise swallow 0x0fa29044. esize from
-    // size field; index = bit11 low | bit13 high.
+    // size field; the indexed element index and the Vm register field share the
+    // bits above the 5-bit Vm, per element size (A64 by-element encoding):
+    //   16-bit: Vm=bits[19:16], index=bits[21:20] (4 subelements)
+    //   32-bit: Vm=bits[20:16], index=bits[21]    (2 subelements)
+    //   64-bit: Vm=bits[20:16], index=bits[11]    (2 subelements)
     if insn & 0x3f00_f000 == 0x0f00_9000 {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
-        let rm = ((insn >> 16) & 0x1f) as u8;
         let q = (insn >> 30) & 1 == 1;
-        let esize: u8 = match (insn >> 22) & 0x3 { 1 => 2, 2 => 4, _ => 8 };
-        let index = (((insn >> 11) & 1) | (((insn >> 13) & 1) << 1)) as u8;
+        let size = (insn >> 22) & 0x3;
+        let (esize, rm, index): (u8, u8, u8) = match size {
+            // 32-bit (2S/4S): index = H:L = bit11:bit21 (2 subelements? NO — 4).
+            // A64 by-element: for 32-bit elements the index is bits [21] and [11],
+            // in order index = bit11<<1 | bit21 (ground truth: s[0]=00, s[1]=01
+            // (b21), s[2]=10 (b11), s[3]=11). Verified via asm: 0x4f809041 s[0],
+            // 0x4fa09041 s[1], 0x4f809841 s[2], 0x4fa09841 s[3].
+            2 => (4, ((insn >> 16) & 0x1f) as u8,
+                  ((((insn >> 11) & 1) << 1) | ((insn >> 21) & 1)) as u8),
+            _ => (8, ((insn >> 16) & 0x1f) as u8, ((insn >> 11) & 1) as u8),
+        };
         return Inst::SimdFmulEl { rd, rn, rm, esize, index, q };
     }
 
@@ -2439,7 +2451,9 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         let idx = if (insn & 0x0040_0000) != 0 {
             ((insn >> 11) & 1) as u8            // .2d: index is L(bit11) only
         } else {
-            ((((insn >> 21) & 1) << 1) | ((insn >> 11) & 1)) as u8 // .s: H21<<1|L11
+            // .s: index = bit11<<1 | bit21 (ground truth: s[1]=b21, s[2]=b11,
+            // s[3]=both). Same layout as SimdFmulEl.
+            ((((insn >> 11) & 1) << 1) | ((insn >> 21) & 1)) as u8
         };
         let el32 = (insn & 0x0040_0000) != 0;
         let q = (insn & 0x4000_0000) != 0;
