@@ -186,6 +186,71 @@ def gen_loop_branch():
     return c;
 }"""
 
+def gen_globals_pie():
+    # PIE + exported globals: forces GLOB_DAT / R_AARCH64_RELATIVE / ABS64
+    # relocs in .data.rel.ro, exercising load_elf_image's in-process reloc
+    # application + bind_image_plt before JIT. Omitted-nostdlib so the data
+    # section with the function-pointer initializer is exercised.
+    n=random.choice([4,8,16])
+    muls=" / ".join(f"x=x*1103515245ull+12345ull; g{i}[(int)(x>>56)&7]=((int)(x>>{random.choice([16,24,32,40,48])})^(int)(x));" for i in range(2))
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 9037ull;
+    unsigned long long x = seedv;
+    static int s_glob = {random.choice([11,17,23,31])};
+    static int s_arr[{n}] = {{ {', '.join(str(random.choice([2,3,5,7,9])) for _ in range(n))} }};
+    static int *s_ptr = 0;
+    long long acc = s_glob; int g0[8]={{0}}; int *gp = s_arr;
+    for(int i=0;i<{n};i++){{ x=x*1103515245ull+12345ull; g0[i]=(int)((x>>{random.choice([16,24,32,40])})^(int)x); }}
+    for(int i=0;i<{n};i++) acc += (long long)g0[i] + gp[i];
+    return acc * {random.choice([3,7,13])} + s_glob;
+}}"""
+
+# A "loader" generator requires the :pie PIE path (not -static -nostdlib).
+def gen_pie_callchain():
+    n=random.choice([3,5,7])
+    # nested caller/callee over globals (no libc), forces abs64 fn ptrs
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 5566ull;
+    unsigned long long x = seedv;
+    static long long gsum = 0;
+    long long a[({n}+1)*4];
+    for(int i=0;i<({n}+1)*4;i++){{ x=x*1103515245ull+12345ull; a[i]=(long long)((int)x^i); }}
+    long long s=0;
+    for(int r=0;r<{n};r++){{ for(int c=0;c<4;c++) s=s*31+a[r*4+c]; }}
+    return s;
+}}"""
+
+_gen_compiler = {"static": "-static -nostdlib -Wl,-e,entry", "pie": "-fPIE -pie -nostdlib -Wl,-e,entry"}
+
+def build_pair_mode(src, tag, mode):
+    open(f"fx_{tag}.c","w").write(src)
+    r=subprocess.run(["aarch64-linux-gnu-gcc","-O3","-w"]+_gen_compiler[mode].split()+
+                     [f"fx_{tag}.c","-o",f"fx_{tag}.elf"],
+                     capture_output=True,text=True)
+    if r.returncode!=0:
+        return None,None,None
+    e=getentry(f"fx_{tag}.elf")
+    j=run_elfjit(f"fx_{tag}.elf", e) if e else None
+    q=run_qemu_nostdlib(src,tag) if mode=="static" else run_qemu_pie(src,tag)
+    return e, j, q
+
+def run_qemu_nostdlib(src, tag):
+    # oracle: run the same entry via qemu-aarch64 on the static ELF
+    o=open(f"or_{tag}.c","w"); o.write(src+"\n#include <stdio.h>\nint main(){printf(\"%llu\\n\",(unsigned long long)entry());}\n"); o.close()
+    subprocess.run(["gcc","-O3","-w",f"or_{tag}.c","-o",f"or_{tag}"],capture_output=True,text=True)
+    r=subprocess.run([f"./or_{tag}"],capture_output=True,text=True,timeout=30)
+    return r.stdout.strip()
+
+def run_qemu_pie(src, tag):
+    # qemu can't run nostdlib PIE without crt; use a full C main wrapper compiled
+    # for aarch64 and run under qemu for the oracle.
+    o=open(f"or_{tag}.c","w"); o.write(src+"\n#include <stdio.h>\nint main(){printf(\"%llu\\n\",(unsigned long long)entry());}\n"); o.close()
+    r=subprocess.run(["aarch64-linux-gnu-gcc","-O3","-w",f"or_{tag}.c","-o",f"or_{tag}.elf"],capture_output=True,text=True)
+    if r.returncode!=0:
+        return None
+    r=subprocess.run(["qemu-aarch64","-L","/usr/aarch64-linux-gnu",f"or_{tag}.elf"],capture_output=True,text=True,timeout=30)
+    return r.stdout.strip()
+
 def gen_bfield_extract():
     # heavy UBFM/UBFX/SBFX extract patterns over the high half of a 64-bit LCG
     n=random.choice([8,16,24])
@@ -235,8 +300,13 @@ def main():
     fails=0; ok=0; skip=0
     for i in range(N):
         tag=f"{seed0}_{i}"
-        src=random.choice(gens)()
-        e,j,q=build_pair(src,tag)
+        # mix static JIT-only generators with loader-mode (PIE+globals) ones
+        if random.random() < 0.35:
+            src=random.choice([gen_globals_pie, gen_pie_callchain])()
+            e,j,q=build_pair_mode(src,tag,"pie")
+        else:
+            src=random.choice(gens)()
+            e,j,q=build_pair(src,tag)
         if e is None:
             skip+=1; continue
         if j is None or q is None:
