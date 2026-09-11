@@ -2970,6 +2970,46 @@ through elfjit exposed real bugs on the syscall path:
 
 ---
 
+## Session (Sep 11, 2026) — libbadcpu gregs register-map fix + arm64jit BitField disarm (151/0)
+Two crates hardened against silent miscompiles; the HANDOFF's documented open
+arm64jit bug (`__tunable_get_val` x4 corruption) is FIXED. Commits `8325edc`,
+`9081bfc`, `17e449b` on `dev`.
+
+### libbadcpu (8325edc): the emulator wrote the WRONG registers
+`ucontext_t.uc_mcontext.gregs` is `greg_t[23]` with R8..R15,RDI,RSI,RBP,RBX,
+RDX,RAX,RCX,RSP in slots 0..15 (only RIP=16/EFL=17 match the x86 reg number).
+The old table indexed gregs[0] as RAX etc., so every emulated POPCNT/MOVBE/
+LZCNT/TZCNT/BMI1 read/wrote the wrong register and corrupted guest state.
+Now GREGS_IDX maps x86 reg number -> true slot. Also fixed: VEX `vvvv` was
+never decoded (3-byte C4 + 2-byte C5) — ANDN used the DEST register as its
+first source; and the VEX opcode byte was read from the C4/C5 prefix position,
+so no 0F38/0F3A-map VEX instruction ever decoded correctly. 6 new tests;
+libbadcpu 6->12.
+
+### arm64jit (9081bfc): BitField dispatches by class — modmain boots PAST its old crash
+Driving `modmain.elf` (full static glibc, qemu=12) through elfjit:
+1. UBFIZ/SBFIZ (insert=false, immr>imms) went through the BFI/merge path and
+   PRESERVED old Rd's bits. `ubfiz x4,x0,#7,#32` kept a stale 0x7f8000000000
+   prefix, so glibc's `__tunable_get_val` ldr'd [x4,#48] at 0x7f800048e888
+   (should be 0x48e888) -> SIGSEGV. UBFIZ zero-fills; SBFIZ sign-fills.
+2. Genuine BFI (insert=true) was swallowed by the ROR shortcut
+   (imms+immr+1==bits: 15+48+1==64) and compiled as a rotate. The LSR/LSL/ROR
+   shortcuts are UBFM/SBFM aliases; BFM inserts now handled first (BFXIL
+   in-place mask, BFI shifted merge).
+Regressions `ubfiz_zero_extends_field_and_discards_old_rd` +
+`bfi_still_merges_into_old_rd`. arm64jit 108->110; workspace 151/0; full
+cross-gcc battery unchanged (loop1 45, structs/dispatch/fpfun/vtable 42,
+byvalue 44, bv2/iso_arith 300, signmod 12, iso_wrd 4321, arr/shacc/fact/ldrsw/
+fp_only/A/C 42).
+
+### Honest remaining
+- modmain now SIGSEGVs in glibc `_dl_determine_tlsoffset` on a small-address
+  (0x2f/0x3f) load after the __tunable_get_val fix — the next glibc-CRT
+  frontier (handoff-flags this whole glibc tail as NOT a Roblox boot blocker;
+  the real libroblox.so boot path is already fully decoded / exit 0).
+- HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
+  GPU/APK-capable host (none on this box).
+
 ## Session (Sep 11 2026) — guest auxv bootstrap; SME/SVE/MulLong decodes; zero-extend fix (137/0)
 
 Goal: prove the JIT boots a full statically-linked glibc aarch64 binary.
