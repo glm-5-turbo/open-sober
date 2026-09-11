@@ -1400,3 +1400,22 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_int_simd_minmax_reduction() {
+    // Signed integer SIMD min/max (smin/smax v.4s/v.2d) + running acc — a
+    // particle / collision / alpha-culling pattern. Not previously a canary.
+    assert_diff(
+        "im_running_minmax",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile int s0=7; int a[8];
+    for(int i=0;i<8;i++) a[i]= (i*i-5*(i%2))*s0;
+    int mn=1<<30, mx=-(1<<30), acc=0;
+    for(int i=0;i<8;i++){ if(a[i]<mn) mn=a[i]; if(a[i]>mx) mx=a[i]; acc+=a[i]; }
+    return (long long)(mn)*1000 + (long long)mx*100 + (long long)acc;
+}
+"#,
+    );
+}

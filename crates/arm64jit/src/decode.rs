@@ -675,6 +675,14 @@ pub enum Inst {
     // ADDV Dd,Vn.T : horizontal sum of sign-extended vector elements -> bottom
     // element of Vd. size = element width in bytes (1=B,2=H,4=S), q = 128-bit.
     Addv { rd: u8, rn: u8, size: u8, q: bool },
+    // ---- SIMD across-lanes min/max: SMINV/SMAXV/UMINV/UMAXV Sd/Hd/Bd, Vn.T ----
+    // Horizontal (tree) reduce of min or max over ALL lanes to the bottom scalar
+    // element of Vd (upper bits cleared). signed = bit29 CLR (smin/smax) /
+    // SET (umin/umax); min = byte2 bit0 (b1/b0); size = element width.
+    // Encodings (objdump): sminv s0,v1.4s=0x4eb1a820, smaxv=0x4eb0a820,
+    // uminv=0x6eb1a820, umaxv=0x6eb0a820, .8h=0x4e71a820, .16b=0x4e31a820,
+    // q=0 forms 0x0e*/0x2e* (8b/4h).
+    SimdReduceMinMax { rd: u8, rn: u8, size: u8, signed: bool, is_min: bool, q: bool },
     // ---- SIMD scalar-64 pairwise add: addp Dd, Vn.2D (sum of the two 64-bit
     // lanes of Vn into the low 64 bits of Vd). gcc emits this for reductions.
     // Encoded 0x5ee0_b800/0x7ee0_b800 with bit20 SET (fcvtzs scalar uses the
@@ -1023,6 +1031,40 @@ pub fn decode(insn: u32) -> Inst {
                 size,
                 q,
             };
+        }
+    }
+
+    // ---- SIMD across-lanes min/max: SMINV/SMAXV/UMINV/UMAXV Sd/Hd/Bd, Vn.T ----
+    // Sibling of ADDV (same 0x..a820 lane / byte1 family, distinct byte2):
+    // reduce min or max over all lanes to the bottom scalar. Encodings
+    // (objdump): sminv s0,v1.4s=0x4eb1a820 smaxv=0x4eb0a820 uminv=0x6eb1a820
+    // umaxv=0x6eb0a820, .8h=0x4e71a820/0x4e70a820, .16b=0x4e31a820/0x4e30a820,
+    // q=0 (8b/4h) in the 0x0e/0x2e top. byte1 low = 0xa8; byte2 high nibble =
+    // esize (0x3=8b, 0x7=16b, 0xb=32b), byte2 bit0 = min(1)/max(0), bit29 = U.
+    // byte1 0xa8 distinguishes from ADDV's 0x..b800.
+    {
+        let m = insn & 0xffff_fc00;
+        if (m & 0x0000_ff00) == 0x0000_a800
+            && matches!((m >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e)
+        {
+            let b2 = ((m >> 16) & 0xff) as u8;
+            let size = match b2 & 0xfe {
+                0x30 => 1u8, // 8b
+                0x70 => 2,   // 8h / 4h
+                0xb0 => 4,   // 4s
+                _ => 0,
+            };
+            if size != 0 {
+                let signed = ((insn >> 29) & 1) == 0; // bit29 CLR = smin/smax
+                return Inst::SimdReduceMinMax {
+                    rd: (insn & 0x1f) as u8,
+                    rn: ((insn >> 5) & 0x1f) as u8,
+                    size,
+                    signed,
+                    is_min: b2 & 1 == 1,
+                    q: ((insn >> 30) & 1) == 1,
+                };
+            }
         }
     }
 
@@ -2340,7 +2382,7 @@ pub fn decode(insn: u32) -> Inst {
             rd,
             rn,
             rm,
-            max: b2 == 0x64,
+            max: (b2 & 0xfc) == 0x64, // mask the 2 low bits (they carry Rn) — exact == wrongly decoded real smax (b2=0x67) as min
             unsigned: (insn & 0x2000_0000) != 0,
             esize: if (insn & 0x0080_0000) != 0 { 4 } else { 1 }, // .s vs .b
             q: (insn & 0x4000_0000) != 0,

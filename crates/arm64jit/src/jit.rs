@@ -3779,6 +3779,63 @@ mod tests {
     }
 
     #[test]
+    fn simd_reduce_minmax_across_lanes() {
+        // SMINV/SMAXV/UMINV/UMAXV Sd/Hd/Bd, Vn.T: horizontal min/max off ALL
+        // lanes -> bottom scalar (upper cleared). Signed 16-bit lanes need a
+        // 64-bit sign-extension on the load — which surfaced a latent emitter
+        // bug: movsx_word_mem/movsx_byte_mem emitted REX without W (0F BF/BE
+        // wrote only a 32-bit dest), so a negative 8/16-bit lane compared as a
+        // huge positive u64 (sminv.8h of {-9,-2,..} picked 4, not -9). Fixed
+        // both to REX.W.
+        let l32 = |v: u64| -> i32 { (v & 0xffffffff) as u32 as i32 };
+        // sminv s0,v1.4s = 0x4eb1a820 on v1.4s = {-3,5,42,7} -> -3
+        let mut st = CpuState::new();
+        st.v[2] = (-3i32 as u32 as u64) | ((5u32 as u64) << 32);
+        st.v[3] = (42u32 as u64) | ((7u32 as u64) << 32);
+        exec_bytes(&mut st, &0x4eb1a820u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(l32(st.v[0]), -3, "sminv.4s");
+        // smaxv s0,v1.4s = 0x4eb0a820 -> 42
+        let mut st = CpuState::new();
+        st.v[2] = (-3i32 as u32 as u64) | ((5u32 as u64) << 32);
+        st.v[3] = (42u32 as u64) | ((7u32 as u64) << 32);
+        exec_bytes(&mut st, &0x4eb0a820u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(l32(st.v[0]), 42, "smaxv.4s");
+        let mk16 = |vals: &[i16]| {
+            let mut s = CpuState::new();
+            for i in 0..vals.len() {
+                s.v[2 + i / 4] |= ((vals[i] as u16 as u64) << ((i % 4) * 16));
+            }
+            s
+        };
+        let mut st = mk16(&[-9, -2, 4, 6, 8, 10, 12, 14]);
+        exec_bytes(&mut st, &0x4e71a820u32.to_le_bytes(), 0).unwrap();
+        assert_eq!((st.v[0] & 0xffff) as i16, -9, "sminv.8h (sign-extend)");
+        let mut st = mk16(&[-9, -2, 4, 6, 8, 10, 12, 14]);
+        exec_bytes(&mut st, &0x4e70a820u32.to_le_bytes(), 0).unwrap();
+        assert_eq!((st.v[0] & 0xffff) as i16, 14, "smaxv.8h");
+    }
+
+    #[test]
+    fn smin_smax_element_high_register_b2_mask() {
+        // `smin`/`smax` Vd.4s decode: the gate tests `(b2 & 0xfc) == 0x64`
+        // (max) but ASSIGNED `max: b2 == 0x64` exactly. b2's low 2 bits carry
+        // Rn (bits[9:8]), so a real gcc `smax v30.4s, v29.4s, v28.4s`
+        // (0x4ebc67be, b2=0x67) decoded as MIN and returned the Vn operands
+        // verbatim (max of {-28} and {308} -> -28). Only register 0..3 hid it
+        // (b2 stayed 0x64/0x6c). Fixed assignment to mask like the gate.
+        // smax v30.4s, v29.4s, v28.4s = 0x4ebc67be (rd=30, rn=29, rm=28):
+        //   Vn=v29 = <140,308,7,9> ; Vm=v28 = <-28,5,3,2> -> Vd=v30 = <140,308,7,9>
+        let mut st = CpuState::new();
+        st.v[58] = (140u32 as u64) | ((308u32 as u64) << 32); // v29 (rn)
+        st.v[59] = (7u32 as u64) | ((9u32 as u64) << 32);
+        st.v[56] = (-28i32 as u32 as u64) | ((5u32 as u64) << 32); // v28 (rm)
+        st.v[57] = (3u32 as u64) | ((2u32 as u64) << 32);
+        exec_bytes(&mut st, &0x4ebc67beu32.to_le_bytes(), 0).unwrap();
+        assert_eq!((st.v[60] & 0xffffffff) as u32 as i32, 140, "smax lane0");
+        assert_eq!(((st.v[60] >> 32) & 0xffffffff) as u32 as i32, 308, "smax lane1");
+    }
+
+    #[test]
     fn guest_svc_routes_write_and_mmap() {
         // Directly exercise the AArch64->host syscall dispatcher (AArch64 numbers):
         //   nr=64 write(fd, buf, n) to a pipe, and nr=222 mmap(len,...) returning real mem.

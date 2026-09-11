@@ -181,20 +181,24 @@ impl CodeBuf {
         self.emit_mem(rd, base, disp);
     }
 
-    /// movsx r64 <- [mem (base+disp)] (byte load, sign-extend)
+    /// movsx r64 <- [mem (base+disp)] (byte load, sign-extend to 64)
     pub fn movsx_byte_mem(&mut self, rd: u8, base: u8, disp: i32) {
         if rd >= 8 || base >= 8 {
-            self.b(rex(false, rd, 0, base));
+            self.b(rex(true, rd, 0, base)); // REX.W: write the full 64-bit r64
+        } else {
+            self.b(0x48);
         }
         self.b(0x0F);
         self.b(0xBE);
         self.emit_mem(rd, base, disp);
     }
 
-    /// movsx r64 <- [mem (base+disp)] (16-bit load, sign-extend)
+    /// movsx r64 <- [mem (base+disp)] (16-bit load, sign-extend to 64)
     pub fn movsx_word_mem(&mut self, rd: u8, base: u8, disp: i32) {
         if rd >= 8 || base >= 8 {
-            self.b(rex(false, rd, 0, base));
+            self.b(rex(true, rd, 0, base)); // REX.W: write the full 64-bit r64
+        } else {
+            self.b(0x48);
         }
         self.b(0x0F);
         self.b(0xBF);

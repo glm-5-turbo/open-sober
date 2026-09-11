@@ -3403,6 +3403,56 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+        Inst::SimdReduceMinMax { rd, rn, size, signed, is_min, q } => {
+            // SMINV/SMAXV/UMINV/UMAXV Sd/Hd/Bd, Vn.T: reduce min/max over ALL
+            // lanes to the bottom scalar. RAX = each lane (sign/zero-extended to
+            // 64), RDX = running extrema (init to lane 0), CMOVcc per later lane.
+            // cc: signed min < (JL 0x0C), signed max > (JG 0x0F);
+            //     unsigned min < (JB 0x02), unsigned max > (JA 0x07).
+            let lanes: u32 = match (size, q) {
+                (1, false) => 8,
+                (1, true) => 16,
+                (2, false) => 4,
+                (2, true) => 8,
+                (4, true) => 4,
+                _ => return Err(format!("SimdReduceMinMax unsupported size={size} q={q}")),
+            };
+            let cc = if is_min {
+                if signed { 0x4F } else { 0x47 } // CMOVG / CMOVA (update when candidate < current)
+            } else {
+                if signed { 0x4C } else { 0x42 } // CMOVL / CMOVB (update when candidate > current)
+            };
+            let vsrc = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let load = |buf: &mut CodeBuf, off: i32| match size {
+                1 => {
+                    if signed { buf.movsx_byte_mem(RAX, RBX, off) } else { buf.movzx_byte_mem(RAX, RBX, off) }
+                }
+                2 => {
+                    if signed { buf.movsx_word_mem(RAX, RBX, off) } else { buf.movzx_word_mem(RAX, RBX, off) }
+                }
+                4 => {
+                    buf.mov_load32(RAX, RBX, off);
+                    if signed { buf.movsxd_r64_r32(RAX, RAX); }
+                }
+                _ => unreachable!(),
+            };
+            load(buf, vsrc);
+            buf.mov_rr64(RDX, RAX); // running extrema = lane 0
+            for i in 1..lanes {
+                let off = vsrc + (i as i32) * (size as i32);
+                load(buf, off);
+                // cmp RAX(new) vs RDX(cur): RAX < RDX for min / RAX > RDX for max.
+                buf.cmp_rr64(RDX, RAX);
+                buf.cmov_rr64(cc, RDX, RAX);
+            }
+            let vdst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            match size {
+                1 => buf.mov_store8(RBX, vdst, RDX),   // low byte; upper bits past it
+                2 => buf.mov_store16(RBX, vdst, RDX),
+                _ => buf.mov_store32(RBX, vdst, RDX), // 32-bit store zeroes upper 32
+            }
+            Ok(())
+        }
         Inst::SimdPairAddD { rd, rn, unsigned: _u } => {
             // ADDP Dd, Vn.2D : pairwise-add the two 64-bit lanes of Vn into the
             // low 64 bits of Vd. Plain 64-bit add (signed/unsigned same result).
