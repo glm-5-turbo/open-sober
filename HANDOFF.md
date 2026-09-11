@@ -4072,3 +4072,40 @@ cargo build clean; `cargo test --workspace` 249/0. HEAD `7fef13e`.
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — sat-add lane-width/sign + ubfiz-vs-ror fixes (workspace 251/0)
+
+Commits `e3f12be` (SimdSatAdd) and `3696d89` (UBFM). The differential battery
+kept finding real silent SIMD miscompiles:
+
+1. **Saturating add/sub treated >=32-bit lanes as 64-bit ops.** SimdSatAdd used a
+   64-bit load for any lane esize>=4, so `.4s` loaded 8 bytes as ONE value and
+   clamped both s-lanes together (10+5 -> 0x80000000 smin sentinel; qemu 15).
+   This path was only reachable after the dup-from-GPR gate fix (it had been
+   silently masked by the same gate collision). Fixed with per-lane width loads,
+   sign-extension (movsx/movsxd) so 64-bit clamps judge negatives correctly,
+   SIGN-EXTENDED smin constants (0xFFFFFFFF80000000 for .4s — the raw lane-width
+   0x80000000 as u64 is positive, so 15 < 0x80000000 and every non-negative
+   result clamped), and .2d 1<<64/1<<63 guard shifts. Verified vs qemu across 8
+   widths x signed/unsigned x add/sub.
+2. **ubfiz/sbfiz with immr>imms hit the UBFM ROR shortcut.** `ubfiz w4,w2,#3,#3`
+   (immr=29, imms=2; 29+2+1==32==bits) matched the `imms+immr+1==bits` rotate
+   gate BEFORE the shift-extend branch, so it rotated right by imms=2 instead of
+   computing (w2&7)<<3. A -O2 mix/shuffle-hash (`h ^= msg[i]<<((i%8)*8)`)
+   returned 13680984341602923654 vs oracle 13072640789477207222. A genuine ror
+   always has immr<=imms; gated the ROR branch on `!(immr > imms)` so ubfiz/
+   sbfiz fall through to their shift path. mix now = oracle; real ror/extr tests
+   stay green.
+
+Regression: `sqadd_uqadd_respect_lane_width_and_sign`,
+`ubfiz_immr_gt_imms_does_not_rotate` (exec); differential canary
+`mix_hash_ubfiz`. cargo build clean; `cargo test --workspace` 251/0. HEAD `3696d89`.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping ISA/correctness breadth (structure
+   load/store widths, more SIMD lane/permute/wide paths, FP reduction shapes).
+2. Move up to the runtime side: FMOD "divert guest bl-to-once through the
+   dispatcher" and JNI function-table stubs per RECOMMENDATION.md.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).
