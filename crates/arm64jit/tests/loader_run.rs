@@ -34,6 +34,15 @@ fn run_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Lock `run_lock`, tolerating a poisoned guard: if one test panics while
+/// holding the lock (e.g. its cross-gcc compile fails), that mutex becomes
+/// poisoned and `.unwrap()` on subsequent acquires would cascade-fail every
+/// other test with `PoisonError`, hiding the real per-test result. Recovering
+/// the poisoned guard keeps each test independently reporting its own outcome.
+fn lock_run() -> std::sync::MutexGuard<'static, ()> {
+    run_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn cross_gcc() -> Option<String> {
     let out = Command::new("aarch64-linux-gnu-gcc")
         .arg("--version")
@@ -159,7 +168,7 @@ fn assert_runs(tag: &str, src: &str, expected: u64) {
         }
     };
     let _ = gcc;
-    let _guard = run_lock().lock().unwrap();
+    let _guard = lock_run();
     let wd = workdir(tag);
     let elf = compile(&wd, tag, src);
     match run_elf(&elf) {
@@ -222,7 +231,7 @@ fn loader_run_pie_relative_global_returns_42() {
         }
     };
     let _ = gcc;
-    let _guard = run_lock().lock().unwrap();
+    let _guard = lock_run();
     let wd = workdir("pie-rel");
     // A REAL PIE (ET_DYN): `gptr = &shared_static` is an R_AARCH64_RELATIVE
     // data reloc in .data.rel.ro that `load_elf_image` must apply (write
@@ -298,7 +307,7 @@ fn loader_run_shared_glob_dat_and_abs64_returns_37() {
         }
     };
     let _ = gcc;
-    let _guard = run_lock().lock().unwrap();
+    let _guard = lock_run();
     let wd = workdir("globdat");
     // Two exported globals referenced through the module's own GOT:
     //   global_data (1 GLOB_DAT slot + must bind base+0x20000),
@@ -360,6 +369,37 @@ fn loader_run_pairwise_add_reduction_returns_76() {
         // -O3 forces the SIMD pairwise-add reduction path (addp).
         "int entry(void){ int a[16]; for(int i=0;i<16;i++)a[i]=i*i; long long s=0; for(int i=0;i<16;i++) s+=a[i]; return (int)(s%97); }\n",
         76,
+    );
+}
+
+#[test]
+fn loader_run_neon_byelem_fmla_lane_returns_504() {
+    // NEON *by-element* fmla (vmlaq_n_f32 -> `fmla v.4s, v.4s, v.s[l]`) — the
+    // scalar-broadcast multiply-accumulate class gcc's auto-vectorizer rarely
+    // emits but a 3D/audio engine uses heavily. Lane insert/extract is done via
+    // memory (vst1q/vld1q) so this compiles at -O0 (the harness has no -O flag
+    // and const-index vgetq_lane/vsetq_lane need -O to fold). Binary-exact
+    // lanes keep the accumulated value exact in float32; expected 504 is the
+    // qemu-aarch64 architectural oracle (host x86 can't compile <arm_neon.h>,
+    // so loader_run's hardcoded-value + cross-gcc model is the right seal).
+    assert_runs(
+        "byelem",
+        "#include <arm_neon.h>\n\
+         long long entry(void){\n\
+         volatile unsigned long long seedv = 777333ull;\n\
+         unsigned long long x = seedv;\n\
+         float fa[8];\n\
+         for(int i=0;i<8;i++){ x=x*1664525ull+1013904223ull; fa[i]=(float)(int)(((x>>40)&0x3f)-32); }\n\
+         float32x4_t v = vdupq_n_f32(0.0f);\n\
+         float scalar_acc = 0.0f;\n\
+         for(int i=0;i<8;i++){ v = vmlaq_n_f32(v, vdupq_n_f32(fa[i]), 2.0f); scalar_acc += fa[i]*2.0f; }\n\
+         float buf[4]; vst1q_f32(buf, v);\n\
+         float l1 = buf[1] + 1.0f; buf[2] = l1;\n\
+         float32x4_t w = vld1q_f32(buf);\n\
+         v = vaddq_f32(v, w);\n\
+         float s = 0; vst1q_f32(buf, v); for(int l=0;l<4;l++) s += buf[l];\n\
+         return (long long)(s - (scalar_acc + 1.0));\n}\n",
+        504,
     );
 }
 
