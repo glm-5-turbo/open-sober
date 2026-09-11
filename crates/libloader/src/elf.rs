@@ -476,6 +476,39 @@ pub fn load_elf_image_at(path: &Path, jit_base: Option<usize>) -> Result<LoadedE
     })
 }
 
+/// Reserve a writable anonymous guest region immediately after the loaded
+/// image so the guest's large static tables that walk past the ELF's last
+/// PT_LOAD `.bss` have real backing, matching how a real Android loader leaves
+/// adjacent anonymous memory mapped. guest==host so the returned address is
+/// directly dereferenceable by translated code. Returns the region start.
+///
+/// Rationale (real Roblox libroblox.so): `nativeInitCrashpad` computes a
+/// telemetry/crashpad slot address as a link-time `.bss` table base plus an
+/// index walk (`base + row<<17 + col<<6`) that can land tens of MB past the
+/// last PT_LOAD's `p_memsz` end; on Android that memory is mapped anonymous,
+/// here the loader maps only the ELF span, so the deep write SIGSEGVs. Call
+/// this after `load_elf_image[_at]` with the image's end + a headroom size.
+#[allow(unused)]
+pub fn reserve_guest_tail(base_end: usize, size: usize) -> Result<usize> {
+    let addr = unsafe {
+        libc::mmap(
+            base_end as *mut libc::c_void,
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        anyhow::bail!(
+            "reserve_guest_tail({size}B @0x{base_end:x}): {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(addr as usize)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

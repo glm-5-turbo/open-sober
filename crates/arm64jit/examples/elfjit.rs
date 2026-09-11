@@ -156,6 +156,21 @@ fn main() {
         .fold(0u64, |m, s| m.max(s.guest_vaddr + s.memsz));
     let len = (full_end - base) as usize;
 
+    // Reserve a writable guest tail past the ELF's mapped span. Real Roblox
+    // `nativeInitCrashpad` walks a link-time `& bss` telemetry table base by a
+    // slot index that reaches tens of MB past the last PT_LOAD `.bss` end; on
+    // real Android that adjacent memory is mapped anonymous, our loader maps
+    // only the ELF span. Reserve 384MB of RW headroom so the deep table writes
+    // (and other large guest tables/arenas) have real backing instead of
+    // SIGSEGV. MAP_FIXED at a page-aligned address after base+len is safe
+    // (host heap/stack live elsewhere); must start page-aligned or mmap EINVALs.
+    let tail_start = (full_end as usize + 0xfff) & !0xfff;
+    const TAIL_SIZE: usize = 384 * 1024 * 1024;
+    match libloader::elf::reserve_guest_tail(tail_start, TAIL_SIZE) {
+        Ok(s) => println!("[tail] reserved {TAIL_SIZE}B guest RW tail @0x{s:x}"),
+        Err(e) => eprintln!("[tail] warn: guest-tail reserve skipped: {e}"),
+    }
+
     println!(
         "running entry guest=0x{:x} host=0x{:x} (segment base guest=0x{:x} size=0x{:x})",
         entry, entry, base, len
