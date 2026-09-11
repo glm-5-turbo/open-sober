@@ -65,6 +65,29 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
     let op3 = inst.opcode[2];
     let wide = inst.vex_w;
 
+    // VEX.0F3A.F0: RORX dest(reg), src(rm), imm8 — rotate right by imm8,
+    // flags NOT affected, VEX vvvv field unused (must be 0b1111). The decoder
+    // stops after ModR/M (it does not collect an immediate), so the imm8 lives
+    // at RIP+inst.len and we must advance by len+1.
+    if inst.opcode[0] == 0x0F && inst.opcode[1] == 0x3A {
+        if op3 == 0xF0 {
+            let src = get_rm_value(inst, ctx);
+            let gregs = &(*ctx).uc_mcontext.gregs;
+            let rip = gregs[REG_RIP] as u64;
+            let imm = unsafe { *(rip as *const u8).add(inst.len as usize) as u32 };
+            let amt = imm & if wide { 63 } else { 31 };
+            let rotated = if wide {
+                src.rotate_right(amt)
+            } else {
+                ((src as u32).rotate_right(amt)) as u64
+            };
+            *get_reg_ptr(ctx, inst.reg) = rotated as i64;
+            advance_rip(ctx, inst.len + 1);
+            return EmulationResult::Success;
+        }
+        return EmulationResult::UnrecognizedInstruction;
+    }
+
     if inst.opcode[0] == 0x0F && inst.opcode[1] == 0x38 {
         let src2 = get_rm_value(inst, ctx);
 
@@ -190,6 +213,30 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
                         }) as u64
                     }
                 }
+            }
+            // 0F38 F6: MULX dest_hi(reg), dest_lo(vvvv), src(rm) — unsigned
+            // multiply of RDX * rm. operands: the source is rm, the LOWER
+            // product half goes to the VEX vvvv register, the UPPER half to
+            // MODRM.reg. Implicit multiplier is RDX (not RAX, unlike MUL).
+            // Flags: CF and OF cleared, others untouched.
+            0xF6 => {
+                let src = src2;
+                let rdx = get_reg(ctx, 2); // RDX = GREGS_IDX[2] = slot 12
+                // Implicit multiplier is RDX. Wide: 64x64->128 split at 64;
+                // narrow: 32-bit operands (EDX, low 32 of src) -> 64-bit product,
+                // high half written to reg, low half to vvvv (both 32-bit regs).
+                let (hi, lo) = if wide {
+                    let p = (rdx as u128) * (src as u128);
+                    ((p >> 64) as u64, p as u64)
+                } else {
+                    let p = (rdx as u32 as u64) * (src as u32 as u64);
+                    ((p >> 32) & 0xFFFF_FFFF, p & 0xFFFF_FFFF)
+                };
+                *get_reg_ptr(ctx, inst.reg) = hi as i64;      // MODRM.reg = high
+                *get_reg_ptr(ctx, inst.vex_vvvv) = lo as i64; // vvvv = low
+                set_flags_clear_all(ctx);
+                advance_rip(ctx, inst.len);
+                return EmulationResult::Success;
             }
             _ => return EmulationResult::UnrecognizedInstruction,
         };
@@ -731,5 +778,79 @@ mod tests {
             assert_eq!(run_one(&[0xC4, 0xE2, 0xF3, 0xF5, 0xC2], 1, 0b100), 4);
             // 32-bit (W=0) form C4 E2 73 F5 C2: pdep32(3, 0b1010)=10.
             assert_eq!(run_one(&[0xC4, 0xE2, 0x73, 0xF5, 0xC2], 3, 0b1010), 10);
+        }
+
+        /// Run one MULX into a hand-set context, returning (high, low) written
+        /// to reg and vvvv. Encoding verified by `gcc -c + objdump -d`:
+        ///   mulx %rbx,%rax,%rcx = C4 E2 FB F6 CB (W=1): reg=rcx(high),
+        ///   vvvv=rax(low), rm=rbx(src); implicit multiplier = RDX.
+        fn run_mulx(code: &[u8], rdx: u64, rbx: u64) -> (i64, i64) {
+            unsafe {
+                let mut ctx: libc::ucontext_t = std::mem::zeroed();
+                let mut backing = code.to_vec();
+                backing.resize(8, 0xcc);
+                ctx.uc_mcontext.gregs[REG_RIP] = backing.as_ptr() as i64;
+                ctx.uc_mcontext.gregs[12] = rdx as i64; // RDX = multiplier
+                ctx.uc_mcontext.gregs[11] = rbx as i64; // RBX = rm source (slot 3)
+                let features = crate::cpuid::CpuFeatures::default();
+                let inst = decode_instruction(backing.as_ptr());
+                let res = emulate(&inst, &features, &mut ctx);
+                assert_eq!(res, EmulationResult::Success);
+                // RCX (slot 14) = high (reg), RAX (slot 13) = low (vvvv).
+                (ctx.uc_mcontext.gregs[14], ctx.uc_mcontext.gregs[13])
+            }
+        }
+
+        #[test]
+        fn mulx_writes_high_and_low_product_halves() {
+            // 5 * 6 = 30 -> high 0, low 30.
+            let (hi, lo) = run_mulx(&[0xC4, 0xE2, 0xFB, 0xF6, 0xCB], 5, 6);
+            assert_eq!((hi as u64, lo as u64), (0, 30), "5*6=30 -> (0,30)");
+            // (2^64-1) * 2 = 2^65 - 2 -> high 1, low 0xFFFFFFFFFFFFFFFE.
+            let (hi, lo) = run_mulx(
+                &[0xC4, 0xE2, 0xFB, 0xF6, 0xCB],
+                0xFFFF_FFFF_FFFF_FFFF,
+                2,
+            );
+            assert_eq!(
+                (hi as u64, lo as u64),
+                (1, 0xFFFF_FFFF_FFFF_FFFE),
+                "2^64-1 * 2 -> (1, 0xFFFF..FFFE)"
+            );
+        }
+
+        /// Run one RORX into a hand-set context: dest=RBX-src rotated right.
+        /// Encoding verified by objdump: rorx $4,%rbx,%rcx = C4 E3 FB F0 CB 04
+        /// and rorx $0x1f,%ebx,%ecx = C4 E3 7B F0 CB 1F. Returns the new RCX.
+        fn run_rorx(code: &[u8], rbx: u64) -> i64 {
+            unsafe {
+                let mut ctx: libc::ucontext_t = std::mem::zeroed();
+                let mut backing = code.to_vec();
+                backing.resize(8, 0xcc);
+                ctx.uc_mcontext.gregs[REG_RIP] = backing.as_ptr() as i64;
+                ctx.uc_mcontext.gregs[11] = rbx as i64; // RBX = rm source (slot 3)
+                let features = crate::cpuid::CpuFeatures::default();
+                let inst = decode_instruction(backing.as_ptr());
+                let res = emulate(&inst, &features, &mut ctx);
+                assert_eq!(res, EmulationResult::Success);
+                ctx.uc_mcontext.gregs[14] // RCX (slot 14) = dest (reg field)
+            }
+        }
+
+        #[test]
+        fn rorx_rotates_right_without_flags() {
+            // Expected values verified on real hardware (this host has BMI2):
+            //   rorx64(1,4)=0x1000000000000000 (right-rotate moves bit0->bit63)
+            //   rorx64(0xf0,4)=0xf
+            //   rorx32(1,31)=0x2 (bit0 -> bit1 over a 32-bit width)
+            assert_eq!(
+                run_rorx(&[0xC4, 0xE3, 0xFB, 0xF0, 0xCB, 0x04], 1),
+                0x1000_0000_0000_0000
+            );
+            assert_eq!(run_rorx(&[0xC4, 0xE3, 0xFB, 0xF0, 0xCB, 0x04], 0xF0), 0x0F);
+            // 32-bit form: rotate the 32-bit value, zero-extend.
+            let v = run_rorx(&[0xC4, 0xE3, 0x7B, 0xF0, 0xCB, 0x1F], 1);
+            assert_eq!(v as u64, 0x2, "32-bit rorx 1 by 31 -> 0x2 (5 moves to bit1)");
+            // Flags untouched (RORX never modifies EFLAGS): CF still 0 here.
         }
 }
