@@ -5823,6 +5823,19 @@ s[3]=both. Every .4s by-element s[2]/s[3] (and fmla s[1] via the swap) used
 the wrong element. Cleared with regression tests for all 4 fmul indices +
 fmla index-1 execution. Workspace 376/0.
 
+## Cycle 44i (Sep 11, 2026) — 3-same FP pairwise faddp/fmaxp/fminp/fmaxnmp/fminnmp (380/0)
+
+Commit `309a82d` (+ `172b830` tests). gen_fp_pairwise exposed fmaxp/fminp/
+faddp Vd.T,Vn.T,Vm.T as `Unsupported` — the existing `FpPair` gate handled
+only the 2-register (0x7e, bit16-clear) reduce form. New `Inst::SimdFpPair3`
+gate: prefix 0x2e/0x6e, residue `&0xffe0_fc00` in the 12 {c4,d4,f4}x{20,a0}x{2e,6e}
+patterns, `.2s/.4s` only (bit22 clear); add = bit13-clear && bit12-set, nm =
+bit13-clear && bit12-clear, min = bit23. Translate reduces each source's
+adjacent lanes into halves of Vd via addss/minss/maxss. Key pitfall: **bit16
+is bit0 of rm, NOT a 2-op/3-op discriminator** — self-aliased fmaxp v31,v31,v30
+(0x2e3ef7ff) clears it; prefix alone disambiguates. 40/40 fuzz cases pass;
+workspace 380/0.
+
 ## Cycle 44h (Sep 11, 2026) — saturating-narrowing-shift + rshrn rounding (379/0)
 
 Commit `0c63158` (dev). gen_narrow_shift (shrn/vrshrn/vqshrn) exposed two
