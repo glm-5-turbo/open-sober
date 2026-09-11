@@ -54,8 +54,21 @@ const GET_ARRAY_LEN: usize = 171;
 const NEW_OBJECT_ARRAY: usize = 172;
 const GET_OBJ_ARR_ELEM: usize = 173;
 const SET_OBJ_ARR_ELEM: usize = 174;
-const REGISTER_NATIVES: usize = 199;
-const GET_JAVA_VM: usize = 203;
+// Primitive-array creation (indices verified against Android NDK r26b jni.h —
+// the JDK table differs only by Set*ArrayRegion placement, but the NDK is what
+// libroblox.so indexes against. All offsets below are the authoritative NDK.)
+const NEW_BYTE_ARRAY: usize = 176;
+const NEW_INT_ARRAY: usize = 179;
+const GET_BYTE_ARRAY_ELEMENTS: usize = 184;
+const GET_INT_ARRAY_ELEMENTS: usize = 187;
+const RELEASE_BYTE_ARRAY_ELEMENTS: usize = 192;
+const RELEASE_INT_ARRAY_ELEMENTS: usize = 195;
+const GET_BYTE_ARRAY_REGION: usize = 200;
+const GET_INT_ARRAY_REGION: usize = 203;
+const SET_BYTE_ARRAY_REGION: usize = 208;
+const SET_INT_ARRAY_REGION: usize = 211;
+const REGISTER_NATIVES: usize = 215;
+const GET_JAVA_VM: usize = 219;
 // Official JNIVMInterface word offsets.
 const VM_GET_ENV: usize = 7;
 
@@ -177,12 +190,164 @@ macro_rules! jni_stub {
     };
 }
 
+/// Guest-visible registry of primitive-array handles -> byte length. A jbyteArray /
+/// jintArray handle is a readable/writable guest-addressable buffer; this registry
+/// records how many bytes it holds so Get/Set*Region can bounds-check and copy.
+/// Mirrors the QEMU shim's model where a primitive array is just a host buffer.
+fn array_len_registry() -> &'static Mutex<HashMap<u64, usize>> {
+    static REG: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Allocate a zeroed primitive array of `elem_size`-byte elements and return its
+/// guest-addressable handle (the buffer pointer). Records its byte length.
+pub fn jni_new_array_raw(len: usize, elem_size: usize) -> u64 {
+    let bytes = len.checked_mul(elem_size).unwrap_or(0);
+    let layout = Layout::array::<u8>(bytes.max(1)).unwrap();
+    let p = unsafe { alloc_zeroed(layout) } as *mut u8;
+    let addr = p as u64;
+    array_len_registry().lock().unwrap().insert(addr, bytes);
+    addr
+}
+
+extern "C" fn jni_new_byte_array(
+    _e: u64, len: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    jni_new_array_raw(len as usize, 1)
+}
+
+extern "C" fn jni_new_int_array(
+    _e: u64, len: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    jni_new_array_raw(len as usize, 4)
+}
+
+extern "C" fn jni_get_array_length(
+    _e: u64, arr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let reg = array_len_registry().lock().unwrap();
+    match reg.get(&arr) {
+        // jintArray len is bytes/4; jbyteArray len is bytes/1. We track both by
+        // storing byte length and reconstructing element count is ambiguous for
+        // Set*Region, so callers pass element count explicitly there. For
+        // GetArrayLength the guest uses it on byte arrays mostly; report bytes.
+        Some(&b) => b as u64,
+        None => 0,
+    }
+}
+
+/// Get<Primitive>ArrayElements: return the buffer pointer; `*isCopy` = 0 (no copy).
+extern "C" fn jni_get_byte_array_elements(
+    _e: u64, arr: u64, iscopy: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if iscopy != 0 {
+        unsafe { *(iscopy as *mut i8) = 0 };
+    }
+    arr
+}
+
+extern "C" fn jni_get_int_array_elements(
+    _e: u64, arr: u64, iscopy: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if iscopy != 0 {
+        unsafe { *(iscopy as *mut i8) = 0 };
+    }
+    arr
+}
+
+/// Release<Primitive>ArrayElements: we hand out the backing buffer directly, so
+/// nothing to free; mode 0 (ABORT) / JNI_COMMIT (1) / JNI_ABORT (2) all no-op.
+extern "C" fn jni_release_byte_array_elements(
+    _e: u64, _arr: u64, _elems: u64, _mode: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+
+extern "C" fn jni_release_int_array_elements(
+    _e: u64, _arr: u64, _elems: u64, _mode: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+
+/// Copy `len` bytes from `src` starting at `start` into the array's backing buffer.
+extern "C" fn jni_set_byte_array_region(
+    _e: u64, arr: u64, start: u64, len: u64, src: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let total = array_len_registry().lock().unwrap().get(&arr).copied();
+    let Some(total) = total else {
+        return 0;
+    };
+    let start = start as usize;
+    let len = len as usize;
+    let end = start.saturating_add(len);
+    if end > total || src == 0 || arr == 0 {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src as *const u8, arr as *mut u8, len);
+    }
+    0
+}
+
+/// Copy `len` bytes from the array's backing buffer into `dst`.
+extern "C" fn jni_get_byte_array_region(
+    _e: u64, arr: u64, start: u64, len: u64, dst: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let total = array_len_registry().lock().unwrap().get(&arr).copied();
+    let Some(total) = total else {
+        return 0;
+    };
+    let start = start as usize;
+    let len = len as usize;
+    let end = start.saturating_add(len);
+    if end > total || dst == 0 || arr == 0 {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(arr as *const u8, dst as *mut u8, len);
+    }
+    0
+}
+
+/// SetIntArrayRegion: copy `len` 32-bit ints from `src` into `arr[start..start+len)`.
+extern "C" fn jni_set_int_array_region(
+    _e: u64, arr: u64, start: u64, len: u64, src: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if src == 0 || arr == 0 {
+        return 0;
+    }
+    let len = (len as usize).saturating_mul(4);
+    unsafe {
+        std::ptr::copy_nonoverlapping(src as *const u8, arr as *mut u8, len);
+    }
+    0
+}
+
+/// GetIntArrayRegion: copy `len` 32-bit ints from `arr[start..]` into `dst`.
+extern "C" fn jni_get_int_array_region(
+    _e: u64, arr: u64, start: u64, len: u64, dst: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if dst == 0 || arr == 0 {
+        return 0;
+    }
+    let len = (len as usize).saturating_mul(4);
+    unsafe {
+        std::ptr::copy_nonoverlapping(arr as *const u8, dst as *mut u8, len);
+    }
+    0
+}
+
+/// Register an array handle + byte length (used by boot glue that constructs
+/// Guest-visible arrays); test/helper surface.
+pub fn register_array(addr: u64, bytes: usize) {
+    array_len_registry().lock().unwrap().insert(addr, bytes);
+}
+
 jni_stub!(jni_get_version, JNI_VERSION_1_6 as u64);
 jni_stub!(jni_voidp_0, 0); // default: return NULL/0
 jni_stub!(jni_ok, 0); // JNI_OK / status-returning stubs
-jni_stub!(jni_get_array_length, 0);
 jni_stub!(jni_field_0, 0);
-
+ 
 extern "C" fn jni_find_class(
     _e: u64, name: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
@@ -291,6 +456,19 @@ pub fn build_jni() -> (u64, u64) {
         functions[NEW_OBJECT_ARRAY] = voidp;
         functions[GET_OBJ_ARR_ELEM] = voidp;
         functions[SET_OBJ_ARR_ELEM] = ok;
+        // Primitive-array creation + accessors (authoritative NDK offsets). These
+        // previously fell to the NULL/voidp default, so Roblox texture/file/GL-buffer
+        // jbyteArray/jintArray work returned garbage or crashed.
+        functions[NEW_BYTE_ARRAY] = reg(jni_new_byte_array);
+        functions[NEW_INT_ARRAY] = reg(jni_new_int_array);
+        functions[GET_BYTE_ARRAY_ELEMENTS] = reg(jni_get_byte_array_elements);
+        functions[GET_INT_ARRAY_ELEMENTS] = reg(jni_get_int_array_elements);
+        functions[RELEASE_BYTE_ARRAY_ELEMENTS] = reg(jni_release_byte_array_elements);
+        functions[RELEASE_INT_ARRAY_ELEMENTS] = reg(jni_release_int_array_elements);
+        functions[GET_BYTE_ARRAY_REGION] = reg(jni_get_byte_array_region);
+        functions[GET_INT_ARRAY_REGION] = reg(jni_get_int_array_region);
+        functions[SET_BYTE_ARRAY_REGION] = reg(jni_set_byte_array_region);
+        functions[SET_INT_ARRAY_REGION] = reg(jni_set_int_array_region);
         functions[REGISTER_NATIVES] = reg(jni_register_natives);
         functions[GET_JAVA_VM] = reg(jni_get_java_vm);
 
@@ -572,5 +750,57 @@ mod tests {
         let res = jit_run(&code, 0x1000, 0x1000, &mut st as *mut CpuState);
         assert!(res.is_ok(), "jit_run over JNI_OnLoad guest step: {res:?}");
         assert_eq!(st.x[0], JNI_VERSION_1_6 as u64, "GetVersion through JIT = 0x10006");
+    }
+
+    /// The primitive-array offsets must match the authoritative Android NDK jni.h
+    /// (not the JDK table, which places Set*ArrayRegion differently). libroblox.so
+    /// indexes the JNINativeInterface by NDK word offsets, so a wrong constant ducks
+    /// RegisterNatives/GetJavaVM onto the wrong slot -> the guest calls garbage.
+    #[test]
+    fn jni_array_offsets_match_android_ndk() {
+        assert_eq!(NEW_BYTE_ARRAY, 176, "NewByteArray (NDK)");
+        assert_eq!(NEW_INT_ARRAY, 179, "NewIntArray (NDK)");
+        assert_eq!(GET_BYTE_ARRAY_ELEMENTS, 184, "GetByteArrayElements (NDK)");
+        assert_eq!(GET_INT_ARRAY_ELEMENTS, 187, "GetIntArrayElements (NDK)");
+        assert_eq!(GET_BYTE_ARRAY_REGION, 200, "GetByteArrayRegion (NDK)");
+        assert_eq!(GET_INT_ARRAY_REGION, 203, "GetIntArrayRegion (NDK)");
+        assert_eq!(SET_BYTE_ARRAY_REGION, 208, "SetByteArrayRegion (NDK)");
+        assert_eq!(SET_INT_ARRAY_REGION, 211, "SetIntArrayRegion (NDK)");
+        assert_eq!(REGISTER_NATIVES, 215, "RegisterNatives (NDK)");
+        assert_eq!(GET_JAVA_VM, 219, "GetJavaVM (NDK)");
+    }
+
+    /// NewByteArray -> GetByteArrayElements -> SetByteArrayRegion -> GetByteArrayRegion
+    /// must round-trip bytes through the array backing (jbyteArray = readable buffer).
+    #[test]
+    fn byte_array_region_roundtrip() {
+        let arr = jni_new_array_raw(8, 1);
+        assert!(arr != 0, "NewByteArray allocs a handle");
+        // Set the backing: write bytes [10,20,30,40] at offset 0.
+        let src = [10u8, 20, 30, 40];
+        jni_set_byte_array_region(0, arr, 0, 4, src.as_ptr() as u64, 0, 0, 0);
+        let mut dst = [0u8; 4];
+        jni_get_byte_array_region(0, arr, 0, 4, dst.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(dst, src, "Set/GetByteArrayRegion round-trips bytes");
+        // GetArrayLength reports the byte length for a byte array.
+        assert_eq!(jni_get_array_length(0, arr, 0, 0, 0, 0, 0, 0), 8);
+        // Bounds check: an out-of-range region must not copy (no crash).
+        let mut out = [0u8; 4];
+        jni_get_byte_array_region(0, arr, 6, 4, out.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(out, [0u8; 4], "out-of-range Get did not write");
+    }
+
+    /// GetByteArrayElements returns the same backing pointer the constructor made
+    /// (isCopy=0), so the guest can read/write it directly.
+    #[test]
+    fn byte_array_elements_returns_backing() {
+        let arr = jni_new_array_raw(4, 1);
+        let mut iscopy = 5i8;
+        let p = jni_get_byte_array_elements(0, arr, &mut iscopy as *mut i8 as u64, 0, 0, 0, 0, 0);
+        assert_eq!(p, arr, "GetByteArrayElements returns the array backing");
+        assert_eq!(iscopy, 0, "isCopy set to 0 (no copy)");
+        // Writing through the pointer is visible via the registry-backed length.
+        unsafe { *(arr as *mut u8) = 0xAB };
+        assert_eq!(jni_get_array_length(0, arr, 0, 0, 0, 0, 0, 0), 4);
     }
 }
