@@ -4561,3 +4561,38 @@ session: trace which translate arm leaves permscratch / a host vector scratch
 dirty that the second loop's zip/uxtl reads; this subsumes the "byte-acc
 halved" 2x signature documented in the runs/STATUS ledger. HARD GATE unchanged
 (no GPU/APK/libroblox.so on this VPS).
+
+## Session (Sep 11, 2026) — differential-sweep JIT correctness: 6 silent SIMD/int miscompiles FIXED (288/0)
+
+Driving elfjit against qemu-aarch64 oracles on real static aarch64 builds caught
+and fixed SIX silent miscompiles (each regression-guarded + sensitivity-verified):
+
+1. ld2/st2 element-size deinterleave (commit 36813d1) — byte-granularity
+   regardless of element size; strided-u16 accum read mem[2i],mem[2i+1] instead
+   of mem[4i],mem[4i+2]. 282/0.
+2. W-form bitfield (Ubfm/LSR/LSL/ROR aliases) loaded Rn as u64 and shifted
+   without zeroing the high 32 bits (b739a6b) — `madd x; lsr w` pulled high
+   guest garbage into the byte (8652 -> 0x37562e2cc). 284/0.
+3. shrn/shrn2 (shift-right-NARROW) decoded as plain equal-size ushr/sshr
+   (04a1483) — wrong source stride + shift (x^(x>>16) -> 0x83f9b82e6). 286/0.
+4. rbit SWAR truncated every 64-bit mask to 32 bits (b83a1cf) — only the low
+   half of x reversed; ctz=198 vs 10.
+5. clz x (sf=true) emitted REX.W BEFORE the F3 prefix — CPU ran a 32-bit
+   lzcnt, so clz(x<2^32) returned 32-len not 64-len (clz(0x16136740)=3 vs 35).
+   Emit `F3 48 0F BD` (REX must be the last prefix).
+6. shl #imm decoded shift as immb-only + esize from trailing_zeros (dropped
+   bit22) — `shl v.4s,#25` ran as #1 on 1-byte lanes. shift = immh4:immb -
+   esize_bits.
+
+Tooling added: `sweep_wform.py` (in /tmp/combw) — static -nostdlib -Wl,-e,entry
+build, qemu-aarch64 oracle, elfjit run, diff. Expanded to rbit/clz/ctz/shl/
+shr/umulh families; all probes now match the oracle. Notebook: the entry-sym
+parse must split on whitespace (objdump '0000000000400120 <entry>:' includes
+the symbol), and native oracle must use gcc not cross-gcc.
+
+Workspace 288/0, build clean, 6 focused commits on dev. No repo push. The
+pre-existing co-resident two-loop widening bug remains open (documented;
+contamination at bits 32-63 of acc lanes when two widen loops share a block)
+and is independent of all six fixes. Next: keep sweeping SIMD/FP shapes; then
+libloader ELF/loader gaps per RECOMMENDATION order. HARD GATE unchanged (no
+GPU/APK/libroblox.so on this box).
