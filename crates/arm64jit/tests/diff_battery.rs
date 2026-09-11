@@ -1876,9 +1876,12 @@ long long entry(void){
 
 // KNOWN-OPEN: vectorized fused mul-add + division reduction pipeline.
 // `acc += a[i]*b[i]+c[i]; acc += a[i]/b[i]` with a/b/c computed by shifting a
-// 64-bit LCG (ushr v.2d #40/#24/#8 + and + uzp1 + scvtf v.2d + fmla/fmul/fdiv)
-// collapses the result (jit 2^63 / ~4 vs oracle 7.78e6). Every individual op
-// isolates correctly against qemu; the interaction is not yet pinned. Keep
+// 64-bit LCG collapses the result (jit ~4/2^63 vs oracle 7.78e6). Narrowed to
+// the vector `.2d` lane path: `fmul Vd.2D,Vn.2D,Vm.2D` (Simd2dFp) -> `fcvtn2`
+// (VecFcvtn) -> `fmla Vd.4S` acc. Every op passes qemu in isolation, so this is
+// an interaction bug (lane-offset or store/load coalescing between the .2d
+// producers and .4s consumer) that needs a per-instruction JIT tracer to pin.
+// Reproduces from the fuzz_jit gen_fma_chain next-el too (0x3 run). Keep
 // ignored so `cargo test` stays green while preserving the reproducer.
 #[test]
 #[ignore = "open FP pipeline bug: needs a per-instruction JIT tracer to pin"]
