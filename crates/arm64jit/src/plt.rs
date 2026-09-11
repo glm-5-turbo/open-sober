@@ -8,6 +8,7 @@
 //! x86-64 routine (or a benign graphics/audio/media fallback stub).
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use libloader::elf::LoadedElf;
 
@@ -642,6 +643,192 @@ fn patch_stack_canary(el: &LoadedElf, wr64: &impl Fn(usize, u64)) {
         wr64(host_addr, canary_addr);
         eprintln!("[plt] patched __stack_chk_guard GOT {:#x} ({:#x}) -> {:#x}", CANARY_GOT_LINK, cur, canary_addr);
     }
+}
+
+/// Host resolver installed in a TLSDESC descriptor: the guest does
+/// `ldr x1, [desc]; add x0, <desc>; blr x1` then `mrs tpidr_el0; add x0, tp, x0`.
+/// `a0` is the descriptor's (guest == host, since `libloader` maps guest==host)
+/// address; the loader pre-writes the symbol's TP-relative offset into
+/// descriptor[1] (at +8). Returning it makes `[TP + ret]` land on the variable.
+extern "C" fn tlsdesc_resolver(
+    a0: u64,
+    _a1: u64,
+    _a2: u64,
+    _a3: u64,
+    _a4: u64,
+    _a5: u64,
+    _a6: u64,
+    _a7: u64,
+) -> u64 {
+    unsafe { std::ptr::read_unaligned((a0 + 8) as *const u64) }
+}
+
+/// Register the TLSDESC resolver host call exactly once; return its guest
+/// (host-thunk) address, written into every TLSDESC descriptor's slot[0].
+fn tlsdesc_resolver_addr() -> u64 {
+    static RES: OnceLock<u64> = OnceLock::new();
+    *RES.get_or_init(|| crate::jit::register_host_call_auto(tlsdesc_resolver))
+}
+
+/// Bind AArch64 TLS GOT relocations for a whole `DT_NEEDED` module chain.
+///
+/// Modern GCC emits one of two models for `__thread` in a `-shared -fPIC`
+/// library (and for its own local accesses), both routed through the GOT:
+///
+///  - **initial-exec** — `mrs xN, tpidr_el0; adrp xN; ldr xN, [xN, #off];
+///    add xN, xN, <tpidr>` with an `R_AARCH64_TLS_TPREL64` (1030) GOT slot
+///    holding the symbol's TP-relative offset;
+///
+///  - **TLSDESC** (GCC 13+ default, even for the "global-dynamic" model) — a
+///    16-byte descriptor `{resolver_fn, value}` at the GOT slot; the access is
+///    `ldr x1, [desc]; add x0, <desc>; blr x1; mrs tpidr_el0; add x0, tp, x0`,
+///    i.e. it calls the resolver which returns `value` = the TP-relative offset.
+///
+/// Both need the module's *static-TLS block offset* in the per-thread image —
+/// the value `libloader::deps::setup_chain_tls` seeds and returns as
+/// `offsets[i]` (TP-relative, in load order). Before binding these the GOT held
+/// uninitialized bytes, so any `__thread` in a dependency read garbage/NULL.
+///
+/// `els[i]` must be the chain's `i`-th module and `offsets[i]` its TLS block
+/// offset. Returns the number of TLS relocation slots bound.
+#[allow(unused)]
+pub fn bind_chain_tls(els: &[&LoadedElf], offsets: &[u64]) -> usize {
+    const DT_NULL: i64 = 0;
+    const PT_DYNAMIC: u8 = 2; // NOT 6 (PT_PHDR)
+    const DT_RELA: i64 = 7;
+    const DT_RELASZ: i64 = 8;
+    const DT_RELAENT: i64 = 9;
+    const DT_SYMTAB: i64 = 6;
+    const DT_JMPREL: i64 = 23;
+    const DT_PLTRELSZ: i64 = 2;
+    const R_AARCH64_TLS_TPREL64: u64 = 1030;
+    const R_AARCH64_TLSDESC: u64 = 1031;
+
+    let resolver_addr = tlsdesc_resolver_addr();
+    let mut bound = 0usize;
+
+    for (el, &off) in els.iter().zip(offsets) {
+        let host = |g: u64| -> usize { el.host_addr_of(g).expect("guest not mapped") as usize };
+        #[inline]
+        fn rd64(p: usize) -> u64 {
+            unsafe { std::ptr::read_unaligned(p as *const u64) }
+        }
+        #[inline]
+        fn rd32(p: usize) -> u32 {
+            unsafe { std::ptr::read_unaligned(p as *const u32) }
+        }
+        #[inline]
+        fn rd16(p: usize) -> u16 {
+            unsafe { std::ptr::read_unaligned(p as *const u16) }
+        }
+        #[inline]
+        fn wr64(p: usize, v: u64) {
+            unsafe { std::ptr::write_unaligned(p as *mut u64, v) };
+        }
+
+        let min_guest = el
+            .segments
+            .iter()
+            .map(|s| s.guest_vaddr)
+            .min()
+            .expect("no segments");
+        let ehdr = host(min_guest);
+        let e_phoff = rd64(ehdr + 0x20) as usize;
+        let e_phentsize = rd16(ehdr + 0x36) as usize;
+        let e_phnum = rd16(ehdr + 0x38) as usize;
+
+        let mut dyn_link = 0u64;
+        for i in 0..e_phnum {
+            let ph = ehdr + e_phoff + i * e_phentsize;
+            if rd32(ph) == PT_DYNAMIC as u32 {
+                dyn_link = rd64(ph + 0x10); // p_vaddr
+                break;
+            }
+        }
+        if dyn_link == 0 {
+            continue; // static ELF: no GOT relocations to bind
+        }
+        let dynp = host(el.guest_of(dyn_link));
+        let (mut rela, mut relasz, mut relaent, mut symtab_ref) = (0u64, 0u64, 0u64, 0u64);
+        let (mut jmprel, mut pltrelsz) = (0u64, 0u64);
+        let mut i = 0usize;
+        loop {
+            let tag = rd64(dynp + i * 16) as i64;
+            let val = rd64(dynp + i * 16 + 8);
+            if tag == DT_NULL {
+                break;
+            }
+            match tag {
+                DT_RELA => rela = val,
+                DT_RELASZ => relasz = val,
+                DT_RELAENT => relaent = val,
+                DT_SYMTAB => symtab_ref = val,
+                DT_JMPREL => jmprel = val,
+                DT_PLTRELSZ => pltrelsz = val,
+                _ => {}
+            }
+            i += 1;
+            if i > 4096 {
+                break;
+            }
+        }
+        let entsz = if relaent != 0 { relaent as usize } else { 24 };
+        // TLS GOT relocations live in either table: initial-exec
+        // `R_AARCH64_TLS_TPREL64` is emitted into `.rela.dyn` (DT_RELA), while
+        // GCC's TLSDESC relocations are placed into `.rela.plt` (DT_JMPREL),
+        // alongside JUMP_SLOTs. Iterate both.
+        let mut tables: Vec<(u64 /*guest vaddr*/, u64 /*bytes*/)> = Vec::new();
+        if rela != 0 && relasz != 0 {
+            tables.push((rela, relasz));
+        }
+        if jmprel != 0 && pltrelsz != 0 {
+            tables.push((jmprel, pltrelsz));
+        }
+        let symtab_h = if symtab_ref != 0 {
+            host(el.guest_of(symtab_ref))
+        } else {
+            0
+        };
+
+        for (tbl, tblsz) in tables {
+            let tbl_h = host(el.guest_of(tbl));
+            let n = (tblsz as usize) / entsz;
+            for k in 0..n {
+                let r = tbl_h + k * entsz;
+                let r_offset = rd64(r);
+                let r_info = rd64(r + 8);
+                let r_addend = rd64(r + 16);
+                let stype = (r_info & 0xffff_ffff) as u64;
+                if stype != R_AARCH64_TLS_TPREL64 && stype != R_AARCH64_TLSDESC {
+                    continue;
+                }
+                // TP-relative offset = module block offset + symbol's offset within
+                // its block (`st_value`, baked by the linker relative to the block)
+                // + the reloc addend. For a module's own `__thread` (the common
+                // case) that is exactly where `setup_chain_tls` laid the block.
+                let sym_idx = (r_info >> 32) as usize;
+                let st_value = if symtab_h != 0 {
+                    rd64(symtab_h + sym_idx * 24 + 8)
+                } else {
+                    0
+                };
+                let tprel = off
+                    .wrapping_add(st_value)
+                    .wrapping_add(r_addend as u64);
+                let slot = host(el.guest_of(r_offset));
+                if stype == R_AARCH64_TLS_TPREL64 {
+                    wr64(slot, tprel);
+                } else {
+                    // 16-byte TLS descriptor: slot[0] = resolver fn (guest-thunk
+                    // addr), slot[1] = resolved TP-relative offset.
+                    wr64(slot, resolver_addr);
+                    wr64(slot + 8, tprel);
+                }
+                bound += 1;
+            }
+        }
+    }
+    bound
 }
 
 #[cfg(test)]

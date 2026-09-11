@@ -66,6 +66,90 @@ impl LoadedChain {
     }
 }
 
+/// Size of the AArch64 thread control block (the 16 bytes TP points at, before
+/// every module's TLS block). Any TLS block starts at `TP + AARCH64_TCB_SIZE`.
+const CHAIN_TCB_SIZE: u64 = 16;
+
+/// Compute each chain module's *static-TLS block offset* (TP-relative, in load
+/// order), so `bind_tls` can turn `R_AARCH64_TLS_TPREL64` / `R_AARCH64_TLSDESC`
+/// relocations into concrete thread-relative offsets.
+///
+/// AArch64 uses the TLS_TCB_AT_TP model: TP (the `tpidr_el0` value returned by
+/// `setup_chain_tls`) points at a 16-byte TCB, and every module's TLS block
+/// lives at a positive, alignment-padded offset from it. A module with no
+/// `PT_TLS` gets offset 0 (no block). The first TLS-bearing module's block
+/// starts immediately after the TCB at `TP + 16`; each later block is aligned
+/// to its `p_align` and placed after the previous block's end. This mirrors
+/// glibc's static-TLS layout for TLS_TCB_AT_TP targets.
+#[allow(unused)]
+pub fn layout_chain_tls(chain: &LoadedChain) -> Vec<u64> {
+    let mut offsets = Vec::with_capacity(chain.entries.len());
+    let mut next = CHAIN_TCB_SIZE;
+    for el in &chain.entries {
+        let tls = el
+            .info
+            .phdrs
+            .iter()
+            .find(|p| p.p_type == crate::elf::PT_TLS_PUB)
+            .map(|p| (p.p_memsz, p.p_align.max(1)));
+        match tls {
+            None | Some((0, _)) => {
+                offsets.push(0);
+            }
+            Some((memsz, align)) => {
+                let start = align_up_u64(next, align);
+                offsets.push(start);
+                next = start + memsz;
+            }
+        }
+    }
+    offsets
+}
+
+/// Initialise a single contiguous per-thread TLS region for the *whole
+/// chain*: copy each module's `PT_TLS` init image into `tls_region +
+/// layout_chain_tls(chain)[i]`, zero-fill its `.tbss`, and return `(TP,
+/// offsets)` — the thread pointer the guest's `mrs tpidr_el0` should yield,
+/// plus the per-module TP-relative block offsets the JIT needs to bind TLS
+/// relocations.
+///
+/// This is the multi-module generalisation of `elf::setup_guest_tls` (which
+/// seeds only the *main* image). A real `libroblox.so` chain's dependencies
+/// (libssl/libcrypto/...) carry `__thread` TLS of their own; without seeding
+/// every block, a dependency's `mrs tpidr_el0; :gottprel:` access lands on
+/// zeroed/foreign bytes.
+#[allow(unused)]
+pub fn setup_chain_tls(
+    chain: &LoadedChain,
+    tls_region: *mut u8,
+    tls_region_size: usize,
+) -> anyhow::Result<(u64, Vec<u64>)> {
+    let offsets = layout_chain_tls(chain);
+    for (el, &off) in chain.entries.iter().zip(&offsets) {
+        if off == 0 {
+            continue; // no PT_TLS block for this module
+        }
+        if let Some((p_offset, p_filesz, p_memsz)) = crate::elf::tls_layout(&el.info) {
+            anyhow::ensure!(
+                off as usize + p_memsz as usize <= tls_region_size,
+                "chain module {} PT_TLS does not fit in {}-byte TLS region",
+                el.info.path.display(),
+                tls_region_size
+            );
+            let block = unsafe { tls_region.add(off as usize) };
+            unsafe { std::ptr::write_bytes(block, 0, p_memsz as usize) };
+            if p_filesz > 0 {
+                let mut f = std::fs::File::open(&el.info.path)?;
+                use std::io::{Read as _, Seek as _};
+                f.seek(std::io::SeekFrom::Start(p_offset))?;
+                let dst = unsafe { std::slice::from_raw_parts_mut(block, p_filesz as usize) };
+                f.read_exact(dst)?;
+            }
+        }
+    }
+    Ok((tls_region as u64, offsets))
+}
+
 /// Highest mapped guest address across the chain so far — the next dependency
 /// is laid out right after it (page-aligned) to keep the whole chain one
 /// contiguous image.

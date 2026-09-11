@@ -58,6 +58,10 @@ const PT_GNU_STACK: u32 = 0x6474e551;
 const PT_GNU_RELRO: u32 = 0x6474e552;
 #[allow(unused)]
 const PT_TLS: u32 = 7;
+/// Public alias for [`PT_TLS`] so the cross-module chain loader can query each
+/// dependency's TLS segment without reaching into the private const.
+#[allow(unused)]
+pub const PT_TLS_PUB: u32 = PT_TLS;
 
 /// Size of the AArch64 thread control block that precedes a module's TLS data
 /// block in the per-thread image. The thread pointer (TP, the value tpidr_el0

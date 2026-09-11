@@ -616,13 +616,21 @@ fn loader_run_fixed_pt_fcvt_returns_99() {
 /// single image slice covering the whole contiguous chain.
 fn run_chain(
     chain: &libloader::deps::LoadedChain,
-    main_path: &std::path::Path,
+    _main_path: &std::path::Path,
 ) -> Result<u64, String> {
     let refs: Vec<&libloader::elf::LoadedElf> = chain.entries.iter().collect();
     let scope = arm64jit::plt::build_export_scope(&refs);
     for el in &chain.entries {
         arm64jit::plt::bind_image_plt(el, Some(&scope));
     }
+    // Cross-module TLS: seed every module's `__thread` block into one per-thread
+    // region (not just the main image's) and bind the chain's
+    // `R_AARCH64_TLS_TPREL64` / `R_AARCH64_TLSDESC` GOT slots to the resulting
+    // TP-relative offsets. Without this a dependency's `__thread` reads garbage.
+    let tls = Box::leak(vec![0u8; 64 * 1024].into_boxed_slice());
+    let (tp, tls_offsets) = libloader::deps::setup_chain_tls(&chain, tls.as_ptr() as *mut u8, 64 * 1024)
+        .map_err(|e| format!("setup_chain_tls: {e:#}"))?;
+    arm64jit::plt::bind_chain_tls(&refs, &tls_offsets);
 
     let main = chain.main();
     let base = chain.base();
@@ -649,14 +657,7 @@ fn run_chain(
         &mut auxv,
     );
     st.set(31, sp);
-    let tls = Box::leak(vec![0u8; 64 * 1024].into_boxed_slice());
-    st.tpidr = libloader::elf::setup_guest_tls(
-        &main.info,
-        main_path,
-        tls.as_ptr() as *mut u8,
-        64 * 1024,
-    )
-    .map_err(|e| format!("setup_guest_tls: {e:#}"))?;
+    st.tpidr = tp;
 
     jit_run(image, base, entry, &mut st as *mut CpuState)
 }
@@ -785,9 +786,144 @@ fn compile_dep(workdir: &std::path::Path, name: &str, src: &str, need: Option<&s
     so
 }
 
+/// Build a main+N-dep chain where the DEPENDENCY carries `__thread` TLS, run it
+/// through the full loader → cross-module binder → chain-TLS → `jit_run`
+/// pipeline, and assert `entry()` == `expected`.
+///
+/// `dep_src`, `main_src` are the C sources; `tls_flags` the extra gcc flags for
+/// the dep (the TLS model under test); `expected` the oracle return value. Both
+/// `mrs tpidr_el0`:gottprel (initial-exec) and the TLSDESC descriptor calls are
+/// exercised depending on `tls_flags` (GCC 13+ defaults to TLSDESC even for
+/// `-ftls-model=global-dynamic`).
+fn run_tls_chain_test(tag: &str, dep_src: &str, main_src: &str, tls_flags: &[&str], expected: u64) {
+    if cross_gcc().is_none() {
+        eprintln!("skipping {tag}: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir(tag);
+
+    let dep_c = wd.join("dep.c");
+    std::fs::write(&dep_c, dep_src).unwrap();
+    let dep_so = wd.join("libdep.so");
+    let mut cmd = Command::new("aarch64-linux-gnu-gcc");
+    cmd.args(["-shared", "-fPIC", "-nostdlib"]);
+    cmd.args(tls_flags);
+    cmd.arg(&dep_c).arg("-o").arg(&dep_so);
+    let out = cmd.output().unwrap_or_else(|e| panic!("failed to run cross-gcc (dep): {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc (dep) failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let main_c = wd.join("main.c");
+    std::fs::write(&main_c, main_src).unwrap();
+    let main_so = wd.join("libmain.so");
+    let out = Command::new("aarch64-linux-gnu-gcc")
+        .args(["-shared", "-fPIC", "-nostdlib", "-Wl,-e,entry", "-Wl,--no-as-needed"])
+        .arg("-L")
+        .arg(&wd)
+        .arg("-l")
+        .arg("dep")
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_so)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cross-gcc (main): {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc (main) failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Sanity: the dep really carries the TLS relocation under test.
+    let rel = Command::new("aarch64-linux-gnu-readelf")
+        .args(["-rW"])
+        .arg(&dep_so)
+        .output()
+        .unwrap();
+    let rel = String::from_utf8_lossy(&rel.stdout);
+    if tls_flags.contains(&"-ftls-model=initial-exec") {
+        assert!(
+            rel.contains("R_AARCH64_TLS_TPREL64"),
+            "dep should have an initial-exec TPREL64 reloc:\n{rel}"
+        );
+    } else {
+        assert!(
+            rel.contains("R_AARCH64_TLSDESC"),
+            "dep should have a TLSDESC reloc:\n{rel}"
+        );
+    }
+
+    let search = vec![wd.clone()];
+    let chain = libloader::deps::load_elf_with_deps(&main_so, &search)
+        .unwrap_or_else(|e| panic!("load_elf_with_deps: {e:#}"));
+    assert_eq!(
+        chain.entries.len(),
+        2,
+        "expected main + 1 dependency, got {}",
+        chain.entries.len()
+    );
+
+    match run_chain(&chain, &main_so) {
+        Ok(v) => assert_eq!(
+            v, expected,
+            "{tag}: entry() -> {v}, expected {expected} (dep __thread TLS not bound? GOT unbound? block not seeded?)"
+        ),
+        Err(e) => panic!("{tag}: jit_run failed: {e}"),
+    }
+    eprintln!(
+        "\x1b[32mPASS\x1b[0m {tag}: entry() -> {v} via cross-module dep TLS",
+        v = expected
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn loader_run_chain_dep_tls_tlsdesc_returns_1007() {
+    // Dependency-local `__thread` accessed with GCC's DEFAULT TLS model, which
+    // on this toolchain is TLSDESC (R_AARCH64_TLSDESC, 1031): the guest fetch is
+    // `adrp/ldr/add/blr <resolver>; mrs tpidr_el0; add x0,tp,x0`. bind_chain_tls
+    // plants the 16-byte descriptor {resolver, tprel} at the GOT slot and
+    // setup_chain_tls seeds the dep's TLS block. entry = dep_getx() (7) +
+    // dep_gety() (1000) = 1007. Before this fix the descriptor was uninitialized,
+    // so the resolver returned garbage.
+    run_tls_chain_test(
+        "chaintls_tlsdesc",
+        "__thread int dep_x = 7;\n\
+         __thread long long dep_y = 1000;\n\
+         int dep_getx(void){ return dep_x; }\n\
+         long long dep_gety(void){ return dep_y; }\n",
+        "extern int dep_getx(void); extern long long dep_gety(void);\n\
+         int entry(void){ return dep_getx() + (int)dep_gety(); }\n",
+        &[],
+        1007,
+    );
+}
+
+#[test]
+fn loader_run_chain_dep_tls_initial_exec_returns_53() {
+    // Dependency-local `__thread` with initial-exec (R_AARCH64_TLS_TPREL64,
+    // 1030): `mrs tpidr_el0; adrp; ldr x0,[GOT]; add x0,tp,x0`. The GOT slot
+    // must hold the TP-relative offset = dep block offset + symbol offset.
+    // entry = dep_getx() (5) * dep_gety() (10) + 3 = 53.
+    run_tls_chain_test(
+        "chaintls_ie",
+        "__thread int dep_x = 5;\n\
+         __thread long long dep_y = 10;\n\
+         int dep_getx(void){ return dep_x; }\n\
+         long long dep_gety(void){ return dep_y; }\n",
+        "extern int dep_getx(void); extern long long dep_gety(void);\n\
+         int entry(void){ return dep_getx() * (int)dep_gety() + 3; }\n",
+        &["-ftls-model=initial-exec"],
+        53,
+    );
+}
+    // Transitive DT_NEEDED closure: a NEW test header below.
 #[test]
 fn loader_run_deep_dep_chain_transitive_returns_44() {
-    // Transitive DT_NEEDED closure: libmain NEEDs libdep2, which NEEDs libdep3.
+    // libmain NEEDs libdep2, which NEEDs libdep3.
     // entry() → dep2_val() → dep3_val(): the loader must recursively resolve
     // BOTH edges, map all three modules contiguously, and bind libdep2's import
     // of dep3_val (its OWN NEEDED, one level down) through the scope to
