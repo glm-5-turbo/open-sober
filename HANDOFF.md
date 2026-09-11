@@ -5823,6 +5823,17 @@ s[3]=both. Every .4s by-element s[2]/s[3] (and fmla s[1] via the swap) used
 the wrong element. Cleared with regression tests for all 4 fmul indices +
 fmla index-1 execution. Workspace 376/0.
 
+## Cycle 44h (Sep 11, 2026) — saturating-narrowing-shift + rshrn rounding (379/0)
+
+Commit `0c63158` (dev). gen_narrow_shift (shrn/vrshrn/vqshrn) exposed two
+silent-miscompile families: sqshrn/uqshrn/sqshrun decoded as non-saturating
+SimdShrAcc (bad values), and rshrn decoded as shrn (no rounding half-add
+1<<(shift-1)). New `Inst::SatNarrowShift` with a disciplined gate (prefix
+0x0f/2f/4f/6f, bit15 narrowing marker, **bit19** immh guard so by-element
+widen-mul with immh4=0xc is NOT captured, bit12 OR bit29 for saturation, and
+sqshrun src_signed=byte2-bit4). Rounding-narrow now `round = bit11`; both
+translates self-alias via permute_source. Regression tests lock the 6 encodings.
+
 ## Cycle 44f (Sep 11, 2026) — 3-same ADDP + MODIMM ORR/BIC RMW (375/0)
 
 Commit `84e0d71` (dev). gen_pairwise_dot (addp/vpaddq/smaxv/sminv/umaxv/
