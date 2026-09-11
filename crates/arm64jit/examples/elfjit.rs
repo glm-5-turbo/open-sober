@@ -17,7 +17,41 @@
 
 use arm64jit::jit::{CpuState, jit_run};
 
+// Diagnostic: on a host SIGSEGV inside a translated block, print the guest PC
+// (CpuState.pc, offset 256) + a few guest regs read from the CpuState (RBX).
+// elfjit is a diagnostic binary, so this stays in.
+unsafe fn install_segv_debug() {
+    extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+        unsafe {
+            let uc = ctx as *const libc::ucontext_t;
+            let rbx = (*uc).uc_mcontext.gregs[libc::REG_RBX as usize];
+            let rip = (*uc).uc_mcontext.gregs[libc::REG_RIP as usize];
+            let pc = *(rbx.wrapping_add(256) as *const u64);
+            let x0 = *(rbx as *const u64);
+            let x1 = *(rbx.wrapping_add(8) as *const u64);
+            let x2 = *(rbx.wrapping_add(16) as *const u64);
+            let x3 = *(rbx.wrapping_add(24) as *const u64);
+            let sp = *(rbx.wrapping_add(248) as *const u64);
+            let fault = (*info).si_addr() as u64;
+            let s = format!(
+                "\n[SIGSEGV] fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} sp={sp:#x}\n"
+            );
+            let b = s.as_bytes();
+            libc::write(2, b.as_ptr() as *const libc::c_void, b.len());
+        }
+        std::process::abort();
+    }
+    let mut sa: libc::sigaction = std::mem::zeroed();
+    sa.sa_sigaction = handler as usize;
+    sa.sa_flags = libc::SA_SIGINFO;
+    libc::sigemptyset(&mut sa.sa_mask);
+    libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+}
+
 fn main() {
+    unsafe {
+        install_segv_debug();
+    }
     let path = std::env::args()
         .nth(1)
         .expect("usage: elfjit <aarch64-elf> [entry-guest-addr-hex]");

@@ -996,6 +996,57 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::LseAtomic { op, size64, rs, rn, rt } => {
+            // Single-threaded emulation: old = [Xn]; [Xn] = f(old, Rs); Rt = old.
+            // op: 0=LDADD 1=LDCLR 2=LDEOR 3=LDSET 4=SWP.
+            ldg(buf, RDX, rn as u32); // address
+            if size64 {
+                buf.mov_load64(RAX, RDX, 0);
+            } else {
+                buf.mov_load32(RAX, RDX, 0); // W: 32-bit load, zero-extends
+            }
+            buf.mov_rr64(RDI, RAX);      // RDI holds the old value -> Rt later
+            ldg(buf, RCX, rs as u32);
+            if size64 {
+                match op {
+                    0 => buf.add_rr64(RAX, RCX),
+                    1 => {
+                        buf.not_r64(RCX);
+                        buf.and_rr64(RAX, RCX);
+                    }
+                    2 => buf.xor_rr64(RAX, RCX),
+                    3 => buf.or_rr64(RAX, RCX),
+                    _ => buf.mov_rr64(RAX, RCX), // SWP
+                }
+            } else {
+                buf.zero_ext_r32(RCX);
+                match op {
+                    0 => buf.add_rr64(RAX, RCX),
+                    1 => {
+                        buf.not_r64(RCX);
+                        buf.and_rr64(RAX, RCX);
+                    }
+                    2 => buf.xor_rr64(RAX, RCX),
+                    3 => buf.or_rr64(RAX, RCX),
+                    _ => buf.mov_rr64(RAX, RCX),
+                }
+            }
+            // write the updated value back to [Xn]
+            if size64 {
+                buf.mov_store64(RDX, 0, RAX);
+            } else {
+                buf.mov_store32(RDX, 0, RAX);
+            }
+            // Rt = old value (zero-extended for W)
+            if rt != 31 {
+                if !size64 {
+                    zext_w(buf, RDI);
+                }
+                buf.mov_rr64(RAX, RDI);
+                stg(buf, rt as u32, RAX);
+            }
+            Ok(())
+        }
         Inst::LdStrImmWb {
             rt,
             rn,

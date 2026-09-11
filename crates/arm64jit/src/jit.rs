@@ -1217,6 +1217,39 @@ mod tests {
     }
 
     #[test]
+    fn lse_atomic_swp_and_ldadd_exec() {
+        // ldadd w3, w6, [x0] : Rs=w6(>>16), Rn=x0(>>5), Rt=w3(&0x1f). 0xb8260003.
+        // swp x3, x6, [x0]   : Rs=x6, Rn=x0, Rt=x3.             0xf8a68003.
+        let ldadd = [
+            0x03u8, 0x00, 0x26, 0xb8, // ldadd w3, w6, [x0]
+            0xe0, 0x03, 0x03, 0xaa, // mov x0, x3
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut mem = [0u64; 2];
+        let mut st = CpuState::new();
+        st.x[0] = mem.as_ptr() as u64;
+        st.x[6] = 5;
+        mem[0] = 100;
+        let r = exec_bytes(&mut st, &ldadd, 0).expect("exec");
+        assert_eq!(r, 100, "ldadd returns the OLD value");
+        assert_eq!(mem[0], 105, "ldadd adds into memory");
+        // swp: swap old value with Rs. swp x3, x6, [x0] = 0xf8a68003
+        let swp = [
+            0x03u8, 0x80, 0xa6, 0xf8, // swp x3, x6, [x0]
+            0xe0, 0x03, 0x03, 0xaa,
+            0xc0, 0x03, 0x5f, 0xd6,
+        ];
+        let mut mem = [0u64; 2];
+        let mut st = CpuState::new();
+        st.x[0] = mem.as_ptr() as u64;
+        st.x[6] = 42;
+        mem[0] = 7;
+        let r = exec_bytes(&mut st, &swp, 0).expect("exec");
+        assert_eq!(r, 7, "swp returns old");
+        assert_eq!(mem[0], 42, "swp stores Rs into memory");
+    }
+
+    #[test]
     fn mov_add_executes_to_7() {
         // aarch64: mov x0,#3 ; add x0,x0,#4  =>  x0 = 7
         // d2800060 (mov x0,#3), 91001000 (add x0,x0,#4)

@@ -166,6 +166,17 @@ pub enum Inst {
         writeback: bool, // pre/post write Xn back; false = unscaled
         pre: bool,      // pre-index (access at Xn+imm9); post accesses at Xn
     },
+    // ---- LSE atomics (ARMv8.1): ldadd/ldclr/ldeor/ldset/swp ----
+    // Rt = [Rn]; [Rn] = f(Rt, Rs); (single-threaded: a plain read-modify-write).
+    // op: 0=LDADD (add), 1=LDCLR (and-not), 2=LDEOR (xor), 3=LDSET (or),
+    // 4=SWP (replace). size via bit30 (0 = W/32-bit, 1 = X/64-bit).
+    LseAtomic {
+        op: u8,
+        size64: bool,
+        rs: u8,
+        rn: u8,
+        rt: u8,
+    },
     // ---- load/store (register offset) ----
     LdStrReg {
         rt: u8,
@@ -1876,6 +1887,34 @@ pub fn decode(insn: u32) -> Inst {
                             };
                         }
 
+    // ---- LSE atomics (ldadd/ldclr/ldeor/ldset/swp, ARMv8.1) ----
+    // gate: (insn & 0x3fe00000) in {0x38200000,0x38600000,0x38a00000,0x38e00000}
+    // (the 0x38 LSE prefix; bit30=size and the acquire/release ordering bits
+    // vary) AND op=bits[15:10] in {0x00,0x04,0x08,0x0c,0x20} (LDADD/LDCLR/
+    // LDEOR/LDSET/SWP). Disjoint from CAS (0x08/0xc8) and from the register-
+    // offset LDR/STR (whose option bits make op 0x18/0x1c/0x34...). Must come
+    // BEFORE the register-offset and LdStrImmWb gates (they share the 0xb8/0xf8
+    // top bytes). Rs=bits[20:16], Rn=bits[9:5], Rt=bits[4:0], size64=bit30.
+    // Verified vs real modmain.elf encodings (swpa/ldadda/ldseta/ldeorl/swpal).
+    if matches!(insn & 0x3fe0_0000, 0x3820_0000 | 0x3860_0000 | 0x38a0_0000 | 0x38e0_0000)
+        && matches!((insn >> 10) & 0x3f, 0x00 | 0x04 | 0x08 | 0x0c | 0x20)
+    {
+        let op = match (insn >> 10) & 0x3f {
+            0x04 => 1, // LDCLR
+            0x08 => 2, // LDEOR
+            0x0c => 3, // LDSET
+            0x20 => 4, // SWP
+            _ => 0,    // LDADD
+        };
+        return Inst::LseAtomic {
+            op,
+            size64: (insn & 0x4000_0000) != 0,
+            rs: b(insn, 16, 20) as u8,
+            rn: b(insn, 5, 9) as u8,
+            rt: b(insn, 0, 4) as u8,
+        };
+    }
+
     // ---- load/store (register offset) ---- ONLY the register-offset form.
     // The old gate (insn & 0x3b00_0000)==0x3800_0000 was too broad: it also
     // swallowed the pre/post-index and unscaled IMMEDIATE forms (0xf84x/0x78x/
@@ -3204,6 +3243,36 @@ mod tests {
         }
         // register-offset ldr x3,[x0,x2] = 0xf8626803 MUST stay LdStrReg.
         assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
+    }
+
+    #[test]
+    fn lse_atomic_ground_truth() {
+        // Real modmain.elf LSE atomics: op/bits/size/regs must decode.
+        // (have_lse=0 in this guest so glibc uses the ldxr/stxr fallback; these
+        // are decoded so the compile-time CFG past the IFUNC can build.)
+        for (w, op, size64, rt, rn, rs) in [
+            (0xb8200020u32, 0u8, false, 0u8, 1u8, 0u8), // ldadd w0,w0,[x1]
+            (0xb8208020u32, 4u8, false, 0u8, 1u8, 0u8), // swp   w0,w0,[x1]
+            (0xb8a00020u32, 0u8, false, 0u8, 1u8, 0u8), // ldadda
+            (0xb8a01020u32, 1u8, false, 0u8, 1u8, 0u8), // ldclra
+            (0xb8a03020u32, 3u8, false, 0u8, 1u8, 0u8), // ldseta
+            (0xf8602020u32, 2u8, true, 0u8, 1u8, 0u8),  // ldeorl x0,x0,[x1]
+            (0xf8a08020u32, 4u8, true, 0u8, 1u8, 0u8),  // swpa  x0,x0,[x1]
+            (0xf8e08020u32, 4u8, true, 0u8, 1u8, 0u8),  // swpal
+        ] {
+            match decode(w) {
+                Inst::LseAtomic {
+                    op: o, size64: s, rt: t, rn: n, rs: q,
+                } => {
+                    assert_eq!((o, s, t, n, q), (op, size64, rt, rn, rs), "{w:#x}");
+                }
+                other => panic!("expected LseAtomic for {w:#x}, got {other:?}"),
+            }
+        }
+        // CAS and register-offset LDR must NOT decode as LSE.
+        assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
+        assert!(!matches!(decode(0x88a07c41), Inst::LseAtomic { .. }));
+        assert!(!matches!(decode(0xc8e0fc41), Inst::LseAtomic { .. }));
     }
 
     #[test]

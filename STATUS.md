@@ -166,3 +166,15 @@ and replaced all 10 uses. Proven by new umull/smull/umsubl/addvl exec tests.
 Commit summary: new boot.rs (auxv), SmeNoop/AddVectorLen/SveCntd/MulLong decodes
 + translate, sysreg 8 (midr), zero_ext_r32 fix, auxv wired into elfjit + sober-core.
 ---
+
+### Continued (same session) — post commit 5d40fdd: three more real JIT bugs (142/0)
+- Inst::AddSubExt (extended-reg add/sub): bit21=1 was decoded as `lsl#<garbage>`;
+  proper opt/shift semantics + SP.
+- Inst::LdStrImmWb (pre/post-index + unscaled LDR/STR): the register-offset gate
+  too broad -> NULL deref on `ldr x,[x],#8`; narrowed + signed-imm9 writeback.
+- Inst::LseAtomic (ldadd/ldclr/ldeor/ldset/swp): glibc IFUNC atomics decoded +
+  single-threaded emulation.
+- modmain.elf now runs __libc_start_main into __tunable_get_val, then dies on a
+  run-varying-high-garbage address (next bug: a residual 32-bit/zero-extend leak).
+- cargo test --workspace 142/0; elfjit keeps a permanent SIGSEGV diagnostic.
+---

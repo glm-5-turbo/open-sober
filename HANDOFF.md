@@ -3005,3 +3005,33 @@ cause remains. qemu returns 12; JIT boot to completion NOT yet achieved.
 Next: (1) finish the glibc-startup corruption; (2) modmain->12 proves full
 static-glibc boot; (3) libloader gaps -> libbadcpu gaps -> services/auth;
 (4) HARD GATE = real libroblox.so + GPU host (`elfjit <lib> 0x1f0db20 --jni`).
+
+
+### Continued (Sep 11 2026) — after commit 5d40fdd, continued the same goal
+Three more real JIT bugs fixed, each verified + a regression test; modmain.elf
+(full static glibc, qemu returns 12) boot advances far into glibc startup.
+
+- **Extended-register add/sub** (`Inst::AddSubExt`): `add x3,x2,w20,sxtw #3`
+  (bit21=1) was decoded through the SHIFTED parser, mis-reading the option/
+  shift bits as `lsl #sh_amt` (=51) — corrupting guest x-registers with
+  `0x198...` garbage (a real glibc prologue corruption). New gate
+  `n==1 -> AddSubExt`, proper ext(Rm)<<shift with 8 options + SP semantics.
+- **Pre/post-index + unscaled immediate LDR/STR** (`Inst::LdStrImmWb`): the
+  register-offset gate `(insn&0x3b000000)==0x38000000` was too broad and
+  swallowed `ldr x3,[x0],#8` (0xf8408403), mis-reading imm9+writeback as an
+  `rm` register -> NULL deref (the glibc auxv/env-scan crash). Narrowed to
+  `(insn&0x3b200c00)==0x38200800`, added a proper signed-imm9 writeback path
+  (pre/post/unscaled). NOTE: also fixed a latent `b(insn,hi,lo)` arg-order
+  underflow panic in the new decode.
+- **LSE atomics** (`Inst::LseAtomic`): ldadd/ldclr/ldeor/ldset/swp (ARMv8.1),
+  hit in glibc's IFUNC `__aarch64_swp4_acq` (have_lse=0 so on a never-taken
+  path, but the block compiler must still build it). Gate: (insn&0x3fe00000)
+  in {0x382/0x386/0x38a/0x38e 00000} AND op=bits[15:10] in {0,4,8,0xc,0x20};
+  single-threaded emulation (old=[Xn]; [Xn]=f(old,Rs); Rt=old).
+
+Verification: cargo test --workspace 142/0 (arm64jit 108, +2 lse tests).
+modmain.elf now runs __libc_start_main fully and dies deep in
+`__tunable_get_val` on an address (0x48e8b8) with run-varying high garbage
+(another latent 32-bit/zero-extend leak) — the next debugging target.
+Also: elfjit now keeps a permanent SIGSEGV diagnostic handler (prints guest
+pc + regs from CpuState) — invaluable for localizing a real-code crash.
