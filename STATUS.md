@@ -422,3 +422,13 @@ Battery: m3 structfield bytes iloop shorts = 45/52/5/150/24, all = native.
 arm64jit 126/126, workspace **175/0**. Cycle total: 7 FP/SIMD miscompile fixes
 + scalar FMA3, all regression-locked. HEAD 1eb7c0a local dev. HARD GATE
 unchanged (real libroblox.so boot + GPU host).
+---
+## Cycle addendum — single-precision LdStPair + 5th -O2 battery (workspace 176/0, commit 8d2d57b)
+5th cross-gcc -O2 battery (float struct array, 2D float matmul det, float exp,
+string copy, unsigned arith) surfaced one more: byte3 0x2c/0x2d (single-precision
+FP pair) was treated as fp_d (scale 8) so `ldp s0,s1` read 8 bytes/reg and
+post-indexed 2x -> fstruct 0x391c0000 garbage (should 34), fmat2 det -108
+(should 0). Split fp_s (32-bit, 0x2d/0x2c, scale 4, low 4B of vector slot).
+fstruct 34, fmat2 0, fexp 649, str 0, uint 999 = native. +regression. arm64jit
+127/127, workspace **176/0**. Cycle total: 8 FP/SIMD miscompile fixes + scalar
+FMA3, regression-locked. HEAD 8d2d57b local dev. HARD GATE unchanged.

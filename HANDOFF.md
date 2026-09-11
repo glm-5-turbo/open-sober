@@ -3402,3 +3402,19 @@ excluded as degenerate.
 Session net: 7 FP/SIMD correctness fixes + FMADD feature, each regression-locked.
 Next: keep pressing -O2 arrays/structs (now unblocked), single-precision wider
 structs, then libloader gaps. HARD GATE unchanged.
+
+## Session (Sep 11, 2026) — single-precision LdStPair (s-pair) scale bug (commit 8d2d57b)
+Sixth FP milestone. 5th -O2 battery (float struct array, 2D float matmul det,
+float exp poly, string copy, unsigned arith) surfaced one more: fstruct returned
+0x391c0000 garbage (should be 34), fmat2's singular 3x3 float det returned -108
+(should be 0). Root cause: byte3 0x2c/0x2d (single-precision FP pair `ldp s0,s1`)
+was lumped into `fp_d` (scale 8), so each 32-bit s-reg was read as 8 bytes and
+post-indexed 2x. FP/vector pairs distinguish 64-bit d (0x6d/0x6c, bit30=1) from
+32-bit s (0x2d/0x2c, bit30=0). Split into a new `fp_s` flag: scale 4, 4-byte
+transfers into the low 4 bytes of each 16-byte vector slot (sN = VECTOR_BASE +
+N*16). fstruct 34, fmat2 0, fexp 649, str 0, uint 999 — all = native.
++regression ldst_pair_s_registers_use_4_byte_transfers. arm64jit 127/127,
+workspace 176/0; full 5-batch battery + core C all green.
+Session net: 8 FP/SIMD correctness fixes + FMADD, all regression-locked. Next:
+keep pressing -O2 float/struct coverage, then libloader gaps. HARD GATE
+unchanged (real libroblox.so boot + GPU host).
