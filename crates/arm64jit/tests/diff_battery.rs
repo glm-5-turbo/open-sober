@@ -1804,3 +1804,44 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_ubfx_masks_upper_bits_and_is_not_ror() {
+    // Two silent-miscompile guards for the Inst::BitField general-extract path:
+    // (a) a UBFM extract whose width makes the mask >= 2^31 (here ubfx x,#16,#32,
+    //     mask 0xffffffff) must NOT be emitted via `and_ri64(m as u32)`, which
+    //     SIGN-EXTENDS the imm32 to 0xffffffffffffffff (a no-op) leaving the high
+    //     32 bits of the shifted value corrupting the result.
+    // (b) such a UBFM (immr<=imms, imms+immr+1==bits) must NOT be mis-decoded as
+    //     a rotate: genuine `ror` is an EXTR alias, so a UBFM that satisfies
+    //     immr+imms+1==bits is a plain extract, not a rotation. Before both
+    //     fixes `(x>>16)` computed via ubfx returned garbage.
+    assert_diff(
+        "ubfx_hi_extract_mask",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv=424242ull;
+    unsigned long long x=seedv; unsigned int v[4];
+    for(int i=0;i<4;i++){ x=x*1103515245ull+12345ull; v[i]=(unsigned int)(x>>16); }
+    long long t=0; for(int i=0;i<4;i++) t=t*31+(long long)v[i]; return t;
+}
+"#,
+    );
+    // Double-guard with genuine rotate + high extracts in the same function,
+    // forcing gcc to emit both ror (EXTR) and ubfx so neither regresses.
+    assert_diff(
+        "ubfx_and_genuine_ror",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv=777888999ull;
+    unsigned long long x=seedv*1103515245ull+12345ull;
+    unsigned long long a=(x>>17)|(x<<47);        // ror x,#17 (EXTR)
+    unsigned long long b=(x >> 21);              // ubfx x,#21,#43
+    unsigned long long c=(x >> 45);              // ubfx x,#45,#19
+    return (long long)((a^(b<<2))+(c*31));
+}
+"#,
+    );
+}
