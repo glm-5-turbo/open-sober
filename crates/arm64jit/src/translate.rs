@@ -199,20 +199,37 @@ fn store_nzcv(buf: &mut CodeBuf) {
         buf.and_ri64(RCX, 1);
         buf.shl_ri8(RCX, 28);
         buf.or_rr64(RDX, RCX);
-        // C = (!CF) | PF -> bit29
-        buf.mov_rr64(RCX, RAX);
-        buf.and_ri64(RCX, 1); // CF
-        buf.xor_ri64(RCX, 1); // !CF
-        buf.mov_rr64(RDI, RAX);
+        // C = CF(bit0) && !PF(bit2) -> bit29. This is the BORROW convention that
+        // x86_cc_for_cond expects (HS=JAE=!CF, LS=JBE=CF||ZF, HI=JA, LO=JB),
+        // NOT the true ARM-FP carry value. ARM's FP compare sets C=1 for
+        // greater/equal/unordered, 0 for less; `ls` (= C==0 || Z==1) is how gcc
+        // encodes FP `<=`. After a subtraction the stored C is x86-CF (borrow)
+        // and JBE(CF||ZF) already works, so the FP C must be stored in the same
+        // borrow sense (= !ARM_FP_C = CF && !PF) for the ls/hi/lo/hs conditions
+        // to evaluate correctly. Fixes `nn<=0` on NaN (was true, must be false).
+        buf.mov_rr64(RCX, RAX);      // CF
+        buf.and_ri64(RCX, 1);
+        buf.mov_rr64(RDI, RAX);      // PF
         buf.shr_ri8(RDI, 2);
-        buf.and_ri64(RDI, 1); // PF
-        buf.or_rr64(RCX, RDI);
+        buf.and_ri64(RDI, 1);
+        buf.xor_ri64(RDI, 1);        // !PF
+        buf.and_rr64(RCX, RDI);      // CF && !PF (borrow-sense carry)
         buf.shl_ri8(RCX, 29);
         buf.or_rr64(RDX, RCX);
-        // Z = ZF(bit6) -> bit30
-        buf.mov_rr64(RCX, RAX);
+        // Z = ZF(bit6) && !PF(bit2) -> bit30. ARM FP-compare sets the Z flag
+        // (==) for ORDERED equality ONLY: for an unordered (NaN) compare the
+        // guest Z must be 0 so b.eq/csel.eq/b.gt/b.le all stay false (IEEE:
+        // every NaN comparison is "not equal"). x86 comisd sets ZF=1 for BOTH
+        // equality AND unordered, so ZF alone gives the wrong Z; mask PF (set
+        // exactly when unordered) back out.
+        buf.mov_rr64(RCX, RAX);      // ZF
         buf.shr_ri8(RCX, 6);
         buf.and_ri64(RCX, 1);
+        buf.mov_rr64(RDI, RAX);      // PF
+        buf.shr_ri8(RDI, 2);
+        buf.and_ri64(RDI, 1);
+        buf.xor_ri64(RDI, 1);        // !PF
+        buf.and_rr64(RCX, RDI);      // ZF && !PF
         buf.shl_ri8(RCX, 30);
         buf.or_rr64(RDX, RCX);
         // N = CF && !ZF -> bit31. AArch64 FP compare sets N=1 for the ordered
@@ -944,8 +961,19 @@ pub fn translate(
             // both before restoring the flags from NZCV (load_nzcv_to_eflags
             // sets them last, and cmovcc reads them immediately after).
             let _ = sf;
-            ldg(buf, RDI, rn as u32); // then: rn
-            ldg(buf, R10, rm as u32); // else: f(rm)
+            // CSEL is a data-processing family: register operand 31 is XZR (0),
+            // NEVER SP (that distinction only exists in the add/sub extended-
+            // register forms). `cset/cinc/csneg` rely on rn=rm=31 reading as 0.
+            if rn == 31 {
+                buf.mov_ri64(RDI, 0); // then: XZR
+            } else {
+                ldg(buf, RDI, rn as u32); // then: rn
+            }
+            if rm == 31 {
+                buf.mov_ri64(R10, 0); // else: XZR
+            } else {
+                ldg(buf, R10, rm as u32); // else: f(rm)
+            }
             match op {
                 0 => {}
                 1 => buf.add_ri64(R10, 1),   // csinc / cset / cinc
@@ -2396,19 +2424,27 @@ pub fn translate(
                                             }
                                             Ok(())
                                         }
-        Inst::Fcmp { rn, rm, sz } => {
-            // fcmp d{rn}, d{rm} / fcmp s{rn}, s{rm}: compare and set guest NZCV.
-            // Use comisd/comiss (CF=1 if a<b, ZF=1 if equal/unordered, PF=1 if
-            // unordered); store_nzcv_fp maps to AArch64 NZCV.
+        Inst::Fcmp { rn, rm, against_zero, sz } => {
+            // fcmp d{rn}, d{rm} / fcmp d{rn}, #0.0 / fcmp s{rn}, s{rm}:
+            // compare and set guest NZCV. Use comisd/comiss (CF=1 if a<b,
+            // ZF=1/PF=1 if unordered); store_nzcv_fp maps to AArch64 NZCV.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             if sz {
                 buf.movq_load(0, RBX, vslot(rn));
-                buf.movq_load(1, RBX, vslot(rm));
+                if against_zero {
+                    buf.pxor_xmm(1, 1); // xmm1 = +0.0
+                } else {
+                    buf.movq_load(1, RBX, vslot(rm));
+                }
             } else {
                 buf.mov_load32(RAX, RBX, vslot(rn));
                 buf.movd_xmm_r32(0, RAX);
-                buf.mov_load32(RAX, RBX, vslot(rm));
-                buf.movd_xmm_r32(1, RAX);
+                if against_zero {
+                    buf.pxor_xmm(1, 1); // xmm1 = +0.0f
+                } else {
+                    buf.mov_load32(RAX, RBX, vslot(rm));
+                    buf.movd_xmm_r32(1, RAX);
+                }
             }
             if sz {
                 buf.comisd(0, 1);

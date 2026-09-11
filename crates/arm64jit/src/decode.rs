@@ -516,10 +516,11 @@ pub enum Inst {
                            },
                            // ---- scalar FP compare to NZCV (fcmp Dn, Dm / fcmp Dn, #0.0) ----
                            Fcmp {
-                                   rn: u8, // first operand (source fp reg / d-reg)
-                                   rm: u8, // second fp reg (0 for the #0.0 form)
-                                   sz: bool, // true = double (fcmp Dn,Dm), false = single (fcmp Sn,Sm)
-                               },
+                                                              rn: u8,
+                                                              rm: u8, // second fp reg (0 for the #0.0 form)
+                                                              against_zero: bool, // true = FCMP Dn, #0.0 (rm field ignored)
+                                                              sz: bool, // true = double (fcmp Dn,Dm), false = single (fcmp Sn,Sm)
+                                                          },
     // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
             FcsSel {
                 rd: u8,   // destination FP reg
@@ -2968,8 +2969,12 @@ pub fn decode(insn: u32) -> Inst {
                     if fcmp_sz {
                         let sz = (insn & 0x400000) != 0; // 1 => double (0x1e6...), 0 => single
                         let rn = ((insn >> 5) & 0x1f) as u8;
+                        // bit3 (0x8): the `FCMP <Dn>, #0.0` IMMEDIATE form (rm field is
+                        // 0 there too, same as `fcmp Dn, D0`), so it's distinguished by
+                        // bit3, not by rm. When set, the operand is literal 0.0.
+                        let against_zero = (insn & 0x8) != 0 && ((insn >> 16) & 0x1f) == 0;
                         let rm = ((insn >> 16) & 0x1f) as u8;
-                        return Inst::Fcmp { rn, rm, sz };
+                        return Inst::Fcmp { rn, rm, against_zero, sz };
                     }
                     // ---- scalar FP conditional compare: fccmp Dn, Dm, #nzcv, <cond> ----
                     // Mask 0xfff0_fc03 (drops rn/rm/rd/cond/nzcv) yields 0x1e60_c400 (d)
@@ -3146,15 +3151,21 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                             if (insn & 0xffe0_fc00) == 0x7e60_d800 || (insn & 0xffe0_fc00) == 0x7e20_d800 {
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
-                                            return Inst::ScalarUcvtf { rd, rn, sng: (insn & 0x0040_0000) != 0 };
+                                            // bit22: 1 => D (f64), 0 => S (f32). `sng` is TRUE for the
+                                            // single form (0x7e20), so it reads bit22 CLEARED.
+                                            return Inst::ScalarUcvtf { rd, rn, sng: (insn & 0x0040_0000) == 0 };
                                         }
-                                        // ---- scalar Ssigned int64->double: scvtf Dd, Dn ----
+                                        // ---- scalar signed int64->double: scvtf Dd, Dn ----
                                         // Gate (insn & 0xffe0_fc00) == 0x5e60_d800. Sibling of the
                                         // 0x7e60_d800 (unsigned) form; bit23 distinguishes them.
                                         if (insn & 0xffe0_fc00) == 0x5e60_d800 || (insn & 0xffe0_fc00) == 0x5e20_d800 {
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
-                                            return Inst::ScalarScvtf { rd, rn, sng: (insn & 0x0040_0000) != 0};
+                                            // bit22: 1 => D (f64), 0 => S (f32). `sng` is TRUE for the
+                                            // single form (0x5e20), so it reads bit22 CLEARED (was
+                                            // inverted: a double scvtf took the i32->f32 path and
+                                            // truncated/corrupted the value).
+                                            return Inst::ScalarScvtf { rd, rn, sng: (insn & 0x0040_0000) == 0};
                                         }
                                             // ---- SIMD dup: dup Vd.2D, Vn.D[index] (broadcast one 64-bit lane) ----
                                                 // Gate `(insn & 0xffff_fc00)==0x4e180400`: the Q=1 vector `dup` (element from
@@ -4950,9 +4961,10 @@ mod logical_imm_regressions {
         }
         // fcmp d7, d6 = 0x1e6620e0 (real libroblox audio loop) => Fcmp sets NZCV.
         match decode(0x1e6620e0) {
-            Inst::Fcmp { rn, rm, sz } => {
+            Inst::Fcmp { rn, rm, against_zero, sz } => {
                 assert_eq!(rn, 7);
                 assert_eq!(rm, 6);
+                assert!(!against_zero);
                 assert!(sz);
             }
             other => panic!("fcmp d7,d6 -> {other:?}"),
@@ -4960,12 +4972,36 @@ mod logical_imm_regressions {
         // fcmp d6, d16 = 0x1e7020c0 (real libroblox; high rm reg folded into the
         // base nibble) → must still decode as Fcmp with rm=16.
         match decode(0x1e7020c0) {
-            Inst::Fcmp { rn, rm, sz } => {
+            Inst::Fcmp { rn, rm, against_zero, sz } => {
                 assert_eq!(rn, 6);
                 assert_eq!(rm, 16);
+                assert!(!against_zero);
                 assert!(sz);
             }
             other => panic!("fcmp d6,d16 -> {other:?}"),
+        }
+        // The `#0.0` immediate form (gcc codegen `fcmp d30, #0.0` = 0x1e6023c8,
+        // `fcmpe d31,#0.0` = 0x1e6023f8) has the SAME rm==0 field as a pure
+        // register compare `fcmp dN, d0` (0x1e6023c0) — bit3 (0x8) is the only
+        // discriminator. It must decode with against_zero=true.
+        match decode(0x1e6023c8) {
+            Inst::Fcmp { rn, against_zero, sz, .. } => {
+                assert_eq!(rn, 30);
+                assert!(against_zero);
+                assert!(sz);
+            }
+            other => panic!("fcmp d30,#0.0 -> {other:?}"),
+        }
+        match decode(0x1e6023c0) {
+            Inst::Fcmp { against_zero, .. } => assert!(!against_zero), // d0 reg form
+            other => panic!("fcmp d30,d0 -> {other:?}"),
+        }
+        match decode(0x1e6023f8) {
+            Inst::Fcmp { rn, against_zero, .. } => {
+                assert_eq!(rn, 31);
+                assert!(against_zero);
+            }
+            other => panic!("fcmpe d31,#0.0 -> {other:?}"),
         }
         // fcsel d6, d16, d6, mi = 0x1e664e06 (real libroblox) => conditional FP select.
         match decode(0x1e664e06) {

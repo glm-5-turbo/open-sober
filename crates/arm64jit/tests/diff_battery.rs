@@ -538,6 +538,75 @@ long long entry(void){
 }
 
 #[test]
+fn diff_fp_compare_zero_and_cset() {
+    // Three coupled correctness gaps flushed out together:
+    //  (a) `cset/cinc x0,wzr,eq` (csinc with rn=rm=31) read guest register 31
+    //      (the SP slot) instead of XZR=0 — any `x==0.0` result got sp+1.
+    //  (b) `fcmp dN, #0.0` was decoded/translated as a compare against vector
+    //      reg d0 (garbage) instead of literal zero (bit3 discriminator).
+    //  (c) scalar `scvtf Dd,Dn` (int stored in an FP reg back to float) had the
+    //      double/single `sng` discriminator inverted, truncating to an f32.
+    // fcvt_iso / fcvt_rt2 / eqzero each isolate one; this combines them.
+    assert_diff(
+        "fp_fcmp_zero_cset",
+        "-O2",
+        r#"
+long long entry(void){
+    volatile double z = 0.0;
+    volatile double f = 350.0;
+    double rt = (double)(long long)f;   // fcvtzs + scvtf via FP reg
+    long long acc = (long long)(rt + 0.0);  // scalar add, stays 350
+    acc += (z == 0.0) ? 1 : 0;          // fcmp dN,#0.0 + cset (wzr) -> +1
+    acc += (z != 0.0) ? 100 : 0;
+    acc += (rt < 351.0) ? 10 : 0;
+    return acc;                          // 350 + 1 + 10 = 361
+}
+"#,
+    );
+    assert_diff(
+        "fp_rt_cset_chain",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile double q=2.0, r=3.5, mult=100.0;
+    volatile double z=0.0;
+    double a = r*mult;                          // 350
+    double b = (double)(long long)a;            // fcvtzs d,d ; scvtf d,d round-trip
+    double c = b + q*mult;                      // 350 + 200 = 550
+    long long rv = (long long)c;                // 550
+    if (z == 0.0) rv += 1;                      // fcmp #0.0 + cinc(reg31)
+    return rv;                                  // 551
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_fp_nan_compare() {
+    // IEEE: all NaN comparisons are false. `store_nzcv_fp` set Z=ZF, but x86
+    // comisd sets ZF for unordered too, so `vnan==vnan` came out true (b.eq /
+    // csel.eq fired). ARM unordered NZCV = N0 Z0 C1 V1 (Z=0). Z must be ZF&&!PF.
+    assert_diff(
+        "fp_nan",
+        "-O2",
+        r#"
+long long entry(void){
+    volatile double nn = 0.0/0.0;   // NaN at runtime
+    long long acc = 0;
+    if (nn == nn) acc += 1;         // must be FALSE
+    if (nn > 0 || nn < 0) acc += 2; // false
+    if (nn >= 0 || nn <= 0) acc += 4; // false (ge/le on NaN)
+    if (nn != nn) acc += 8;         // TRUE (NaN != NaN)
+    volatile double x = 3.0;
+    if (x == x) acc += 16;          // true
+    if (x > 2.0) acc += 32;         // true
+    return acc;                      // 8 + 16 + 32 = 56
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_float_vector_arith() {
     // Elementwise vector fmla/fmul/fadd on .4s lanes + a final scalar sum.
     assert_diff(
