@@ -294,7 +294,34 @@ def gen_3d_accum():
     return s;
 }}"""
 
-gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum]
+def gen_128_struct():
+    # 128-bit struct array (STP/LDP q pairs) + swap + fold
+    n=random.choice([4,8,12,16])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 121212ull;
+    unsigned long long x = seedv;
+    unsigned long long a[{n*2}], b[{n*2}];
+    for(int i=0;i<{n*2};i++){{ x=x*1103515245ull+12345ull; a[i]=(x>>8)^x; }}
+    for(int i=0;i<{n*2};i+=2){{ b[i]=a[i+1]; b[i+1]=a[i]; }}
+    long long s=0;
+    for(int i=0;i<{n*2};i++) s=(s*33 + (long long)(b[i]^a[i]));
+    return s;
+}}"""
+
+def gen_float_reduce():
+    n=random.choice([8,16,32,64])
+    kind=random.choice(["float","double"])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 222333ull;
+    unsigned long long x = seedv;
+    {kind} a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1664525ull+1013904223ull; a[i]=({kind})(((x>>42)&0xfff)-512)*0.001f; }}
+    {kind} sum=0.5; {kind} mnm=1000000.0; {kind} mxm=-1000000.0;
+    for(int i=0;i<{n};i++){{ sum+=a[i]; if(a[i]<mnm)mnm=a[i]; if(a[i]>mxm)mxm=a[i]; }}
+    return (long long)((sum+mnm+mxm)*1000.0);
+}}"""
+
+gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce]
 
 def main():
     fails=0; ok=0; skip=0
