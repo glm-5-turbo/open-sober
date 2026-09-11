@@ -3817,13 +3817,23 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     // of Vm (byte 8..15), not the lower — a second loop pass
                     // accumulates the other half. `sub` (ssubw/usubw, bit13):
                     // Vd[i] = Vn[i] - extend(Vm[i]) -- the add/sub-wide family.
+                    // IN-PLACE ALIASING: when the narrow source rm aliases rd, the
+                    // widened (2*esrc) write of lane i at i*2*esrc overwrites the
+                    // narrow msrc bytes of lane i+1 (at (i+1)*esrc), so a naive
+                    // read-then-write loop clobbers the still-needed source — e.g.
+                    // gcc's `saddw v31.2d, v29.2d, v31.2s` (rd==rm) dropped the
+                    // second msrc lane and summed [1,0] instead of [2]. Snapshot
+                    // the source(s) that alias rd to permscratch first.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     let der = (esrc as i32) * 2;      // dest element width
                     let lanes = 8usize >> esrc.trailing_zeros() as usize;
                     let m_half: i32 = if upper { 8 } else { 0 };
+                    // Snapshot into scratch slot A (rn) / B (rm) when they alias rd.
+                    let nbase = if rn == rd { permute_source(buf, rd, rn, false) } else { vslot(rn) };
+                    let mbase = if rm == rd { permute_source(buf, rd, rm, true) } else { vslot(rm) };
                     for i in 0..lanes {
-                        let nsrc = vslot(rn) + (i as i32) * der;   // Vn wide elem
-                        let msrc = vslot(rm) + m_half + (i as i32) * (esrc as i32);
+                        let nsrc = nbase + (i as i32) * der;   // Vn wide elem
+                        let msrc = mbase + m_half + (i as i32) * (esrc as i32);
                         let dst = vslot(rd) + (i as i32) * der;
                         match der {
                             4 => buf.mov_load32(RAX, RBX, nsrc),

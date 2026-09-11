@@ -2813,6 +2813,38 @@ mod tests {
     }
 
     #[test]
+    fn saddw_in_place_aliasing_snapshots_narrow_source() {
+        // Regression (found by gen_signed_div differential fuzz): a widening
+        // `saddw/saddw2 Vd.2D, Vn.D, Vm.2S` whose NARROW source aliases the dest
+        // (rd==rm) clobbers its own source — the widened 8-byte write of lane 0
+        // at byte 0 overwrites the narrow msrc bytes lane 1 reads at byte 4,
+        // so lane 1 adds 0 instead of the real Vm.s[1]. gcc emits this for
+        // vector-reduced sum-of-quotients-and-remainders (`saddw v31.2d,
+        // v29.2d, v31.2s`). Fix: snapshot the (aliasing) source to permscratch.
+        // Vector n lives at st.v[2n] (lo) / st.v[2n+1] (hi).
+        // saddw v28.2d, v27.2d, v28.2s (0x0ebc137c): v28.2s={10,20} + v27.2d={30,40}
+        //   -> v28.2d = {40,60} (lane1 would wrongly be 40 without the snapshot).
+        let mut st = CpuState::new();
+        st.v[54] = 30; // v27 d-lane0
+        st.v[55] = 40; // v27 d-lane1
+        st.v[56] = (20u64 << 32) | 10; // v28 s-lanes 0,1
+        st.v[57] = (40u64 << 32) | 30; // v28 s-lanes 2,3
+        exec_bytes(&mut st, &0x0ebc137cu32.to_le_bytes(), 0).expect("exec saddw rd==rm");
+        assert_eq!(st.v[56], 40, "saddw lane0 = 30+10");
+        assert_eq!(st.v[57], 60, "saddw lane1 = 40+20 (was 40, src clobbered)");
+        // saddw2 v31.2d, v31.2d, v28.4s (0x4ebc13ff): rd==rn too, upper narrow src.
+        // v31.2d starts {0,0}; v28.4s = {1,2,3,4} upper = {3,4} -> v31.2d = {3,4}.
+        let mut st = CpuState::new();
+        st.v[62] = 0; // v31 lo
+        st.v[63] = 0; // v31 hi
+        st.v[56] = (2u64 << 32) | 1;
+        st.v[57] = (4u64 << 32) | 3;
+        exec_bytes(&mut st, &0x4ebc13ffu32.to_le_bytes(), 0).expect("exec saddw2 rd==rn upper");
+        assert_eq!(st.v[62], 3, "saddw2 lane0 += upper src[0]=3");
+        assert_eq!(st.v[63], 4, "saddw2 lane1 += upper src[1]=4");
+    }
+
+    #[test]
     fn simd_stp_q_preindex_store_and_writeback() {
         // REBUILD maskf's real instruction stream END-TO-END (no seeded
         // v-registers): movi v30.4s,#4 / movi v29.4s,#0xf, ldr q31=[init],
