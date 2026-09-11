@@ -5952,3 +5952,65 @@ the squared-byte2 0x2b forms) + movi-msl16/mvni-msl8 + shl/ushr-stay-shifts.
 Verified sat-narrow 40/40 (was 22/40), each variant 25/25, clean fuzz sweeps.
 cargo test --workspace **370/0** (arm64jit lib 208). Commit `7599867`.
 HARD GATE unchanged.
+
+---
+
+## Session (Sep 11, 2026, hermes-worker) — FIRST REAL-BINARY BOOT EXERCISE on this box; 3 boot-path JIT fixes (384/0)
+
+Milestone context change: the REAL Roblox 2.738.1397 APK is NOW present on this
+VPS (`~/.cache/open-sober/apks/roblox-android.apk`, 109MB arm64 `libroblox.so`
+extracted to `~/.cache/open-sober/robbox/libroblox.so`, ARM aarch64 Android 26
+NDK r28c stripped). The task's HARD GATE — exercising the actual Roblox binary
+through arm64jit+libloader headlessly with Mesa llvmpipe — is now a concrete,
+daily action on this box, no longer "impossible without APK/GPU". The boot is
+STILL not complete (main loop not reached), but the JIT now loads the real
+binary, binds ALL 534 JUMP_SLOT + 63 GLOB_DAT imports, and executes real
+JNI_OnLoad prologue+init code before faulting on the JNI fake-object vtable wall.
+
+### Three fixes (all committed to local `dev`, all boot-verifying):
+1. **`45f111b` — bind APS2-packed GLOB_DAT/ABS64 in `bind_glob_dat`.** This
+   release's `.rela.dyn` is `DT_ANDROID_RELA` (packed APS2, no stock DT_RELA),
+   so the old binder (which only walked plain DT_RELA) left every Android-
+   packed data GOT slot 0. The very first guest prologue instruction
+   `adrp x24,0x67d1000; ldr x24,[x24,#1776]` (the `__stack_chk_guard` data
+   GOT) read 0 and null-faulted BEFORE any real code ran. Decoded the APS2
+   stream via `libloader::android_relocs::decode_aps2` and bind GLOB_DAT/ABS64
+   entries; added a static-canary fallback for `__stack_chk_guard` (glibc
+   doesn't export it to RTLD_DEFAULT). Now 63 GLOB_DAT bind (was 0); the guest
+   executes past its prologue into real JNI init.
+2. **PRFM decode (`0xf98xxxxx`) → Hint.** `prfm pldl3keep,[x8]` = size-8
+   bit23-set, which the LdStrImm sign-extend decoder rejected as "size 8 not
+   implemented". PRFM is a pure hint; now a Hint/no-op. +regression
+   `prfm_prefetch_is_hint_not_size8_sext_load`.
+3. **JavaVM GetEnv ABI slot 7→6 (byte 48).** Guest dispatch does
+   `ldr x8,[vm]; ldr x8,[x8,#48]; blr` = JNIInvokeInterface slot 6 = GetEnv
+   (verified against host java-21 jni.h). Our table had GetEnv at slot 7/offset
+   56 (inherited QEMU guess), so `[x8,#48]` read the voidp default, `*penv`
+   was never written, and the guest's env stayed null → next dispatch null-
+   faulted. Updated the e2e JIT JNI test (`jit_jni_onload_getenv_getversion`).
+
+### Current boot frontier (verified via JIT_TRACE / JIT_STEP)
+The guest now loads, binds 597 imports, gets a live JavaVM* in x0, and
+executes the JNI_OnLoad prologue, `__stack_chk_guard` store, once-guard init,
+clock/time setup, and dispatches into real JNI code. It then faults on a
+`ldr x8,[x8,#48]` C++ virtual-method dispatch where the handle's word0 (method
+table) is 0 — the documented **JNI fake-object backing wall**: the guest
+builds a C++ object from JNI getters/results and virtual-dispatches on a null
+vtable slot, which the fake JNI objects (bare str_handle buffers, or GetEnv's
+env when the vm slot was wrong) don't safely back. Trace shows NONE of the
+FindClass/NewStringUTF/GetEnv stubs fire before the fault — it is pure guest
+code dispatching on an object its own init built. Real fix = JNI fake-object
+model (real vtable-backed handles the guest can dispatch on), a multi-session
+subsystem.
+
+Repro run-log artifact: `/home/hermes-worker/runs/real-boot-runlog.txt`.
+
+### Environment / assets now on this box
+- `~/.cache/open-sober/apks/roblox-android.apk` — real Roblox 2.738.1397 (229MB)
+- `~/.cache/open-sober/robbox/libroblox.so` — extracted arm64 lib (109MB)
+- elfjit command: `cargo run -p arm64jit --example elfjit -- <lib> 0x2173ff4 --jni`
+
+### Status
+`cargo test --workspace` **384/0** green (`cargo build --workspace` clean; the
+decode.rs/plt.rs edits surface only the pre-existing rustfmt-churn warnings —
+rustfmt isn't installed on this box). Local `dev` commits only (no push).
