@@ -3825,3 +3825,31 @@ fully green with every case a live gate.
   real-compiler idioms (-O3 reductions already live). Then brace for the real
   Roblox APK path (ELF/loader + JNI stubs) once an APK/GPU host is available.
   Blocked on this VPS only by the HARD GATE (no GPU/APK).
+
+### Addendum (same session, after the mls/uzp2/rev64 commit) — UNSIGNED magic-division closed (workspace 220/0, 0 ignored)
+Extending the battery to UNSIGNED `%const` (gcc emits the mul/umull/umull2/
+uzp2/ushr/zip1/zip2 reducer, the unsigned sibling of the signed smull one)
+immediately surfaced FOUR more misdecodes, all isolated against qemu-aarch64:
+1. **`mul` (NEON element-wise 32-bit multiply) decoded as SimdVLog (bitwise).**
+   The vector-logical AND/ORR/BIC gate checked byte1&0x1c00==0x1c00 but never
+   bit15: mul's byte1 (0x8c..0x9f) sets bit15, and/orr/bic (0x1c/0x1d) don't.
+   So EVERY NEON multiply became an AND/ORR — including the magic-division
+   dividend `mul v26.4s,v26,v28(97)`, which corrupted the quotient. The JIT's
+   full-loop m[] came out all-0 and acc=0. Fix: require (insn&0x8000)==0.
+2. **`uzp2` misdecoded as `rev64`, then as `uzp1`.** The rev64 gate dropped
+   bit12 (fixed earlier); the uzp1 gate's &0x3f mask dropped bit6, so uzp2
+   (byte1 0x58) was even-gathering. Added Inst::SimdUz2 (odd/upper gather);
+   both uzp gates now key on byte1 0x18-/0x58-family + byte3-low-0x0e +
+   bit28 clear (excludes bit/bif/bsl and rev64).
+3. **`zip2` Unsupported.** Added Inst::SimdZip2 (upper-half interleave, base
+   0x0e007800 vs trn2 0x0e006800). gcc uses zip1/zip2 with a zero lane to
+   widen a 4s quotient into 4 u64.
+4. **`mls` = plain Simd4s SUBTRACT (no multiply)** — added SimdMla {sub}.
+Also: WidenShl gate restored to the genuine shll long-shift family but made to
+exclude the permute ops via byte1 bits[1:0]==00 (shll 0x38 vs zip1 0x39/0x3b).
+Verification: diff_unsigned_magic_div_umull, diff_long_accumulate_widening,
+diff_byte_scan_strlen new; all green un-ignored; 3 decode regressions added
+(mls_and_uzp2..., mul_decodes_as_multiply_not_bitwise_logical, and 'and' still
+logical). Workspace 220/0, **0 ignored**. Commits ab24b32 (fix) — prior
+d239e8c/3b4ff25 (signed path). Difference: JIT and qemu-aarch64 now agree on
+both the signed and unsigned magic-division kernels exactly.
