@@ -804,6 +804,78 @@ long long entry(void){
 }
 
 #[test]
+fn diff_integer_signed_division_negative_edge() {
+    // gcc's INT_MIN/2 fast-path is `add w,w,w,lsr#31; asr w,w,#1` — the 32-bit
+    // arithmetic shift. A JIT that reads bit63 (=0) as the sign of the
+    // zero-extended 0x80000000 produced 0x40000000 (logical) not 0xc0000000.
+    // The remainder body (`cmp; and w,#1; cneg w,,lt`) separately exercises the
+    // CSEL-family op decode (csneg must NEGATE, and csinv must NOT) and the 32-
+    // bit W zero-extension of the not/neg results.
+    assert_diff(
+        "idiv_edge",
+        "-O2",
+        r#"
+unsigned long long entry(void){
+    volatile int a = -2147483647-1;   // INT_MIN
+    unsigned long long q = (unsigned long long)(a / 2);
+    unsigned long long r = (unsigned long long)(a % 2);
+    return q + r*1000000;
+}
+"#,
+    );
+    assert_diff(
+        "idiv_edge3",
+        "-O3",
+        r#"
+unsigned long long entry(void){
+    volatile int a = -2147483647-1;
+    volatile int b = 3000000;
+    long long acc = 0;
+    for (int i=0;i<3;i++) acc += (long long)(a/2) + (long long)(a%2) + b;
+    return (unsigned long long)acc;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_movn_w32_zero_extension_and_not() {
+    // A `return x & 0xffffffff` that folds to `movn w0,#2` (NOT of an imm into
+    // a W register) must ZERO-extend the result to 64 bits: 0xfffffffd, not
+    // 0xfffffffffffffffd. mov_guest_imm's imm32 short-cut (mov r32 sign-extends)
+    // left the upper half set before this fix.
+    assert_diff(
+        "movn_mask",
+        "-O2",
+        r#"
+unsigned long long entry(void){
+    unsigned long long x = 0xffffffffffffffffULL;
+    x = ~x;                       // 0
+    unsigned long long lo = x & 0xffffffff;
+    unsigned long long hi = (~0x2ULL) & 0xffffffff;  // 0xfffffffd
+    return lo*1000000 + hi;
+}
+"#,
+    );
+    assert_diff(
+        "not_neg_w",
+        "-O3",
+        r#"
+unsigned long long entry(void){
+    unsigned w = 5;
+    w = ~w;                        // csinv W: 0xfffffffa
+    int n = -5;
+    int m = 5;
+    n = -m;                        // csneg W
+    unsigned long long acc = (unsigned long long)w * 1000000
+        + (unsigned long long)(unsigned)n;   // ~5*1e6 + (-5 as u32)
+    return acc;
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_double_vector_arith() {
     // The .2d double-lane vector family (fmla v.2d / fmul v.2d / fcvtzs v.2d),
     // the double sibling of the .4s group above.

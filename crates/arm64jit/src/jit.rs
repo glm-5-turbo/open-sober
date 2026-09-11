@@ -1681,6 +1681,94 @@ mod tests {
     }
 
     #[test]
+    fn asr_w32_takes_sign_from_bit31_not_bit63() {
+        // Regression: `asr w2, w1, #1` (0x13017c22) with w1=0x80000000 must give
+        // 0xc0000000 (bit31 is the sign for a 32-bit arithmetic shift), NOT
+        // 0x40000000. The translate used 64-bit `sar rax,1`; RAX held the
+        // zero-extended guest value 0x0000000080000000, so bit63 (=0) was taken
+        // as the sign and the shift became logical. (Found via gcc's
+        // INT_MIN/2 fast-path: `add w2,w2,w2,lsr#31; asr w0,w2,#1`.)
+        let code = [
+            0x22u8, 0x7c, 0x01, 0x13, // asr w2, w1, #1
+            0xe0, 0x03, 0x02, 0xaa, // mov x0, x2
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[1] = 0x8000_0000; // w1 (zero-extended)
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0xc000_0000, "asr w2,w1,#1 of 0x80000000 = 0xc0000000");
+        // positive keeps clear
+        let mut st2 = CpuState::new();
+        st2.x[1] = 0x4000_0000;
+        let r = exec_bytes(&mut st2, &code, 0).expect("exec");
+        assert_eq!(r, 0x2000_0000, "asr of clear-bit31");
+    }
+
+    #[test]
+    fn csel_family_op_discriminates_neg_not_inc_identity() {
+        // Regression: the CSEL-family op field is `op = (bit30<<1)|bit10`, not
+        // bits[11:10]. The old decode collapsed csinv->CSEL (identity instead of
+        // NOT) and csneg->CSINC (+1 instead of NEG). All four variants with the
+        // SAME regs/cond, run with the condition TRUE and FALSE, must apply the
+        // right transform to rm on the false branch:
+        //   csel  rd = c ? rn :  rm
+        //   csinc rd = c ? rn :  rm+1
+        //   csinv rd = c ? rn : ~rm
+        //   csneg rd = c ? rn : -rm
+        // Real words (assembler): csel 0x1a82b020, csinc 0x1a82b420,
+        // csinv 0x5a82b020, csneg 0x5a82b420 (all W, rd0 rn1 rm2 cond lt).
+        // cmp w1,#0 = 0x7100003f. w1=5 -> lt false; w1=-1 -> lt true.
+        // The pre-fix op field (bits[11:10]) read csinv=0 (identity, so NOT was
+        // lost) and csneg=1 (+1), discovered via gcc's INT_MIN % 2 body
+        // `cmp; and w,#1; cneg w,,lt` returning 1 instead of 0.
+        let csel = 0x1a82b020u32;
+        let csinc = 0x1a82b420u32;
+        let csinv = 0x5a82b020u32;
+        let csneg = 0x5a82b420u32;
+        let cmpw = 0x7100003fu32;
+        let ret = 0xd65f03c0u32;
+        // run(insn): w1 = -1 (lt TRUE) or +5 (lt FALSE); w2=5; return w0.
+        let run = |word: u32, neg_w1: bool| -> u64 {
+            let mut code = Vec::new();
+            code.extend_from_slice(&cmpw.to_le_bytes());
+            code.extend_from_slice(&word.to_le_bytes());
+            code.extend_from_slice(&ret.to_le_bytes());
+            let mut st = CpuState::new();
+            st.x[1] = if neg_w1 { 0xFFFF_FFFF } else { 5 }; // w1
+            st.x[2] = 5; // w2 = 5
+            exec_bytes(&mut st, &code, 0).expect("exec")
+        };
+        // w1=5 -> cmp sets N=0,V=0 -> lt FALSE -> rd = f(rm) = f(5)
+        assert_eq!(run(csel, false), 5, "csel false -> rn? no: -> rm = 5");
+        // csinc: false -> rm+1 = 6
+        assert_eq!(run(csinc, false), 6, "csinc false -> rm+1 = 6");
+        // csinv: false -> ~5 = 0xfffffffa (w zero-extended)
+        assert_eq!(run(csinv, false), 0x0000_0000_ffff_fffa, "csinv false -> ~5");
+        // csneg: false -> -5 = 0xfffffffb
+        assert_eq!(run(csneg, false), 0x0000_0000_ffff_fffb, "csneg false -> -5");
+        // w1=-1 -> lt TRUE -> rd = rn = w1 = 0xffffffff
+        assert_eq!(run(csneg, true), 0xffff_ffff, "csneg true -> rn = w1");
+    }
+
+    #[test]
+    fn movn_w32_zero_extends_to_64_bits() {
+        // Regression: `movn w0, #2` = 0x12800040 writes w0 = ~2 = 0xfffffffd, and
+        // a 32-bit destination must ZERO-extend to the 64-bit register -> x0 =
+        // 0x00000000fffffffd, NOT 0xfffffffffffffffd. mov_guest_imm's imm32
+        // short-cut (`mov r32` sign-extends RAX) left the upper 32 bits set; the
+        // translate now truncates W-dest MOVN to 32 bits first. (Found via a
+        // `return x & 0xffffffff` folded to `movn w0,#2` returning
+        // 0xfffffffffffffffd instead of 0x00000000fffffffd.)
+        let code = [
+            0x40u8, 0x00, 0x80, 0x12, // movn w0, #2 (0x12800040)
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0x0000_0000_ffff_fffd, "movn w0,#2 zero-extends to x0");
+    }
+
+    #[test]
     fn mrs_dczid_el0_returns_block_size() {
         // Regression: `mrs x0, dczid_el0` (0xd53b00e0) — read by glibc's CRT to
         // size its DC ZVA memset path — was previously Unsupported, halting any

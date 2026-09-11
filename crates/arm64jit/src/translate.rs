@@ -376,7 +376,15 @@ pub fn translate(
         } => {
             let val = (imm16 as u64) << ((hw as u64) * 16);
             match opc {
-                2 => mov_guest_imm(buf, rd as u32, !val), // movn
+                2 => {
+                    // movn: NOT the immediate. For a 32-bit (W) dest ARM zero-
+                    // extends to the 64-bit register, so `movn w0,#2` writes
+                    // 0x00000000fffffffd, NOT 0xfffffffffffffffd. mov_guest_imm
+                    // would take the imm32 short-cut (`mov r32` sign-extends),
+                    // leaving the upper 32 bits set; truncate first.
+                    let v = !val;
+                    mov_guest_imm(buf, rd as u32, if sf { v } else { v & 0xffff_ffff });
+                }
                 1 => {
                     // movk: read-modify-write — OR `imm16<<shift` into bits
                     // [shift, shift+16), preserving all other bits. Multi-part
@@ -994,6 +1002,18 @@ pub fn translate(
                 3 => buf.neg_r64(R10),       // csneg
                 _ => return Err(format!("CSel op {} not implemented", op)),
             }
+            // 32-bit (W) destination: the result is the low 32 bits ZERO-
+            // extended to the 64-bit register. The not/neg/inc transforms and
+            // rn may carry high garbage (e.g. csinv ~5 = 0xfffffffffffffffa,
+            // csneg -5 = 0xfffffffffffffffb); without truncation the upper
+            // half silently leaks into x0.
+            if !sf {
+                // zero_ext_r32 (mov r32,r32, no REX.W): the high-register-aware
+                // way to clear the upper 32 bits. zext_w's shl/shr path uses
+                // 0x48-only (no REX.B) emitters and would corrupt R10.
+                buf.zero_ext_r32(RDI);
+                buf.zero_ext_r32(R10);
+            }
             if cond == 0xE {
                 // AL: unconditional — just rn
                 if rd != 31 {
@@ -1449,7 +1469,11 @@ pub fn translate(
                 // LSR (logical) or ASR (arithmetic/sign) by immr
                 let sh = (immr & (bits - 1)) as u8;
                 if arith {
-                    buf.sar_ri8(RAX, sh);
+                    if sf {
+                        buf.sar_ri8(RAX, sh);
+                    } else {
+                        buf.sar32_ri8(RAX, sh);
+                    }
                 } else {
                     buf.shr_ri8(RAX, sh);
                 }
@@ -1479,7 +1503,7 @@ pub fn translate(
                     // SBFIZ: sign-extend the field from bit (lsb+width-1).
                     let se = (bits - (lsb + width)) as u8;
                     buf.shl_ri8(RAX, se);
-                    buf.sar_ri8(RAX, se);
+                    if sf { buf.sar_ri8(RAX, se); } else { buf.sar32_ri8(RAX, se); }
                 }
             } else {
                 // general UBFM/SBFM extract: (Rn >> immr) & low(width) bits,
@@ -1500,10 +1524,12 @@ pub fn translate(
                 if arith {
                     // sign-extend the `width`-bit field to `bits`:
                     // shift left to push the sign bit to the top, then arithmetic
-                    // shift right back (replicates the sign).
+                    // shift right back (replicates the sign). For a 32-bit field
+                    // the sign must be taken from bit31, not bit63 (which a 64-bit
+                    // `sar` would read on a zero-extended value).
                     let se = (bits - width) as u8;
                     buf.shl_ri8(RAX, se);
-                    buf.sar_ri8(RAX, se);
+                    if sf { buf.sar_ri8(RAX, se); } else { buf.sar32_ri8(RAX, se); }
                 }
             }
             if !sf {

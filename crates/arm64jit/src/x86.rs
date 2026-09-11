@@ -832,15 +832,17 @@ impl CodeBuf {
     pub fn sub_ri64(&mut self, rd: u8, imm: u32) {
         self.ari_imm(5, rd, imm);
     }
-    /// neg r64 (0x48 F7 /3) — sets flags (CF/OF), fine before load_nzcv
+    /// neg r64 (0x48/49 F7 /3) — sets flags (CF/OF), fine before load_nzcv.
+    /// rd>=8 needs REX.B (0x49, not 0x48): without it `neg r10` operates on
+    /// RDX (rm = rd&7), silently not negating the intended register.
     pub fn neg_r64(&mut self, rd: u8) {
-        self.b(0x48);
+        self.b(if rd >= 8 { 0x49 } else { 0x48 });
         self.b(0xF7);
         self.b(modrm(3, 3, rd & 7));
     }
-    /// not r64 (0x48 F7 /2) — sets flags
+    /// not r64 (0x48/49 F7 /2) — sets flags.
     pub fn not_r64(&mut self, rd: u8) {
-        self.b(0x48);
+        self.b(if rd >= 8 { 0x49 } else { 0x48 });
         self.b(0xF7);
         self.b(modrm(3, 2, rd & 7));
     }
@@ -958,6 +960,18 @@ impl CodeBuf {
            self.b(modrm(3, 7, rd & 7));
            self.b(imm);
        }
+       /// sar r32, imm8  (C1 /7 ib, no REX.W) — 32-bit arithmetic shift, sign
+        /// taken from bit31. Used for `asr Wd` where the guest operand is a
+        /// zero-extended 32-bit value: a 64-bit `sar` would read bit63 (=0) as the
+        /// sign and turn `asr w,#1` of 0x80000000 into 0x40000000, not 0xc0000000.
+        pub fn sar32_ri8(&mut self, rd: u8, imm: u8) {
+            if rd & 8 != 0 {
+                self.b(0x41);
+            }
+            self.b(0xC1);
+            self.b(modrm(3, 7, rd & 7));
+            self.b(imm);
+        }
 
     /// ror r64, imm8  (48 C1 /1 ib) — rotate right
     pub fn ror_ri8(&mut self, rd: u8, imm: u8) {

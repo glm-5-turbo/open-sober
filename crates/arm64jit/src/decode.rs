@@ -1377,8 +1377,12 @@ pub fn decode(insn: u32) -> Inst {
         let rm = b(insn, 16, 20) as u8;
         let rn = b(insn, 5, 9) as u8;
         let rd = b(insn, 0, 4) as u8;
-        // op = bits[11:10]: 00=csel,01=csinc,10=csinv,11=csneg
-        let op = b(insn, 10, 11) as u8;
+        // op = (o1<<1 | o2), o1=bit30, o2=bit10. Verified against the assembler
+        // for all four forms at W/X: 0x1a80/0x9a80 (bit30=0) -> csel(o2=0)/
+        // csinc(o2=1); 0x5a80/0xda80 (bit30=1) -> csinv(o2=0)/csneg(o2=1).
+        // (Old code read only bits[11:10], collapsing csinv->CSEL identity and
+        // csneg->CSINC +1 — a silent wrong result for NOT and NEG.)
+        let op = (((insn >> 30) & 1) << 1 | (insn >> 10) & 1) as u8;
         return Inst::CSel { rd, rn, rm, cond, op, sf };
     }
 
