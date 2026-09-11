@@ -517,3 +517,38 @@ pointer globals/vtables.
   dependency chain needs from DT_RELA / DT_ANDROID_RELA(APS2) / DT_RELR; next
   ordered items: GLOB_DAT/JUMP_SLOT main-dynamic resolver (bind_image_plt
   already covers JUMP_SLOT), libbadcpu gaps, services/auth.
+cycle: 12
+status: cycle_end
+last_agent_claim: Ad-hoc verification complete and passing. (rc=0)
+updated: 2026-09-11T04:49:07Z
+---
+
+## Cycle (Sep 11, 2026) — GLOB_DAT/ABS64 binding + libbadcpu BMI2 completion + auth identity
+status: session-end (committed, tests green) HEAD 2a9c6eb
+last_agent_claim: workspace 199/0 (was 190). Four focused commits, each gated
+on `cargo build --workspace` + `cargo test --workspace`. The handoff-flagged
+android::test_setup_android_layout_idempotent is already fixed (8b72828, per-call
+temp root + create_dir_all before set_permissions) and passes.
+
+### Landed
+1. 7f03937 arm64jit `bind_glob_dat`: GLOB_DAT (1025) + ABS64 (257) main-GOT
+   symbol-address relocations were never bound (bind_image_plt only did
+   DT_JMPREL; load_elf_image only RELATIVE) -> guest `adrp;ldr x,[GOT]` read 0
+   and deref'd/called NULL. Now writes guest_of(st_value)+addend / dlsym /
+   host-thunk, in the normal path and the pltrelsz==0 early-return.
+   Cross-gcc -shared fixture: SIGSEGV -> entry()=37. +1 integration test.
+2. b177f7c libbadcpu MULX (VEX.0F38.F6, RDX*rm high->reg low->vvvv) + RORX
+   (VEX.0F3A.F0 rotate-right, new 0F3A dispatch, imm8 after ModR/M).
+   +2 hardware-verified tests.
+3. 2a9c6eb libbadcpu ADCX/ADOX (66/F3 0F38 F6): Dest+=Src+flag writing only
+   the working flag; width from REX.W not operand_size (mandatory 66), and
+   32-bit carry in u32 domain. Verified ADOX sets OF = unsigned carry-out
+   (not signed overflow). +2 hardware-verified tests.
+4. a8249f4 sober-services auth: AuthResult user_id/username were dead fields
+   (callback only captured token -> IPC always sent None). Now captures
+   token + user_id + username and forwards the full result. +4 tests.
+
+### HARD GATE (unchanged)
+Roblox actually running (load -> JNI init -> main loop -> frame on a GPU host)
+is NOT met and cannot be on this GPU-less VPS without the real libroblox.so/APK.
+The gate stays `elfjit <libroblox.so> 0x1f0db20 --jni` on a capable host.
