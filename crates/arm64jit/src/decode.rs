@@ -409,7 +409,7 @@ pub enum Inst {
         // ---- SIMD add/sub-long widening: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T ----
             SimdAddl { rd: u8, rn: u8, rm: u8, esrc: u8, sign: bool, sub: bool, upper: bool },
     // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
-    SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool },
+    SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool, upper: bool, acc: bool },
     // ---- SIMD saturating add/sub: sqadd/uqadd/sqsub/uqsub Vd.T, Vn, Vm ----
     SimdSatAdd { rd: u8, rn: u8, rm: u8, esize: u8, sub: bool, unsigned: bool, q: bool },
     // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
@@ -2509,13 +2509,32 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             // ---- SIMD add-adjacent-long pairwise accumulate: sadalp/uadalp Vd.Td, Vn.Ts ----
             // byte2 == 0x68; prefix 0x2e(u,q0)/0x4e(s,q0)/0x6e(u,q1)/0x0e(s,q1). For q=0 the
             // dst lanes n_pairs = 8/(2*... ) derived in translate from src_esize below.
-            if ((insn >> 8) & 0xff & 0xfc) == 0x68 && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e) {
+            if ((insn >> 8) & 0xff & 0xfc) == 0x68 && matches!((insn >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e) {
                 let rd = (insn & 0x1f) as u8;
                 let rn = ((insn >> 5) & 0x1f) as u8;
                 let b1 = (insn >> 16) & 0xff;
-                let src_esize: u8 = if b1 & 0x40 != 0 { 1 } else { 2 }; // byte1 bit6: 0x20=>.b, 0x60=>.h
+                let src_esize: u8 = 1 << ((insn >> 22) & 3); // size=bits[23:22]: 0=>.b(1),1=>.h(2),2=>.s(4)
                 let signed = (insn >> 29) & 1 == 0; // 0x4e/0x0e signed, 0x6e/0x2e unsigned
-                return Inst::SimdAdalp { rd, rn, src_esize, n_pairs: 0, signed };
+                let q = (insn >> 30) & 1 == 1; // 0x4e/0x6e upper half
+                let n_src_bytes = if q { 16 } else { 8 };
+                let n_pairs = (n_src_bytes / (2 * src_esize as usize)) as u8;
+                return Inst::SimdAdalp { rd, rn, src_esize, n_pairs, signed, upper: q, acc: true };
+            }
+            // ---- SIMD add-adjacent-long pairwise (non-accumulating): saddlp/uaddlp ----
+            // byte2&0xfc == 0x28 (bit2 distinguishes from uqsub 0x2c) with bit16(0x10000)
+            // CLEAR distinguishes paddl from sqxtun (bit16 SET). Prefix 0x0e/2e/4e/6e.
+            // This MUST precede the SaturatNarrow + sat-sub gates so
+            // vpaddl/saddlp aren't swallowed by them (uqsub 0x0e622c20 &0xf8==0x28).
+            if (((insn >> 8) & 0xff & 0xfc) == 0x28) && (insn & 0x10000) == 0
+                && matches!((insn >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e) {
+                let rd = (insn & 0x1f) as u8;
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let src_esize: u8 = 1 << ((insn >> 22) & 3);
+                let signed = (insn >> 29) & 1 == 0; // 0x4e/0x0e signed
+                let q = (insn >> 30) & 1 == 1;
+                let n_src_bytes = if q { 16 } else { 8 };
+                let n_pairs = (n_src_bytes / (2 * src_esize as usize)) as u8;
+                return Inst::SimdAdalp { rd, rn, src_esize, n_pairs, signed, upper: q, acc: false };
             }
             // ---- SIMD saturating add/sub: sqadd/uqadd/sqsub/uqsub Vd.T, Vn, Vm -----
             // byte2 {0x0c (add), 0x2c (sub)}; prefix 0x0e/2e/4e/6e (signed 0e/4e, unsigned 2e/6e).
@@ -2529,7 +2548,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             let b2s = (insn >> 8) & 0xff;
             if (b2s == 0x0c || b2s == 0x2c)
                 && (insn & 0x200000) != 0
-                && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e)
+                && matches!((insn >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e)
             {
                 let b1 = (insn >> 16) & 0xff;
                 let esize: u8 = 1u8 << ((insn >> 22) & 0x3);
@@ -3889,9 +3908,10 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                                                                                 let b0s = (insn >> 24) & 0xff;
                                                                                                                                                                                                                                                                                 let b2s = (insn >> 8) & 0xff;
                                                                                                                                                                                                                                                                                 if (b0s == 0x0e || b0s == 0x2e || b0s == 0x4e || b0s == 0x6e)
-                                                                                                                                                                                                                                                                                                    && ((b2s & 0xf8) == 0x28 || (b2s & 0xf8) == 0x48)
-                                                                                                                                                                                                                                                                                                    && !(b0s == 0x0e && (b2s & 0xf8) == 0x28)
-                                                                                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                                                                                                    && ((b2s & 0xf8) == 0x48
+                                                                                                                                                                                                                                                                                                                        || ((b2s & 0xf8) == 0x28 && (insn & 0x10000) != 0))
+                                                                                                                                                                                                                                                                                                                    && !(b0s == 0x0e && (b2s & 0xf8) == 0x28)
+                                                                                                                                                                                                                                                                                                                {
                                                                                                                                                                                                                                                                                     let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                                                                                                     let rd = (insn & 0x1f) as u8;
                                                                                                                                                                                                                                                                                     // dst_esize from byte1 top-nibble: 0x2 -> 8b dst(1), 0x6 -> 4h dst(2), 0xa -> 2s dst(4)

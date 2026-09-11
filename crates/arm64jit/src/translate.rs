@@ -2459,12 +2459,13 @@ pub fn translate(
                                 }
                                 Ok(())
                             }
-                            Inst::SimdAdalp { rd, rn, src_esize, n_pairs, signed } => {
-                                // sadalp/uadalp Vd.Td, Vn.Ts: for each adjacent pair (2i,2i+1) of
-                                // src_esize-byte srcs, accumulate their (unsigned) sum into the
-                                // dst lane of width 2*src_esize. src is in the low 8 bytes (q=0).
+                            Inst::SimdAdalp { rd, rn, src_esize, n_pairs, signed, upper, acc } => {
+                                // sadalp/uadalp (acc=true) or saddlp/uaddlp (acc=false,
+                                // pairwise-add-long) Vd.Td, Vn.Ts: for each adjacent pair
+                                // (2i,2i+1) of src_esize-byte srcs, write (acc=false) or add
+                                // into (acc=true) the dst lane of width 2*src_esize.
                                 let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
-                                let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16 + if upper { 8 } else { 0 };
                                 let se = src_esize as i32;
                                 let np = n_pairs as i32;
                                 let de = 2 * se;
@@ -2472,18 +2473,28 @@ pub fn translate(
                                     let ss = nb + 2 * i * se;
                                     let dd = db + i * de;
                                     // RAX = widened(Vn[2i]); RCX = widened(Vn[2i+1])
-                                    if se == 4 { buf.mov_load64(RAX, RBX, ss); buf.mov_load64(RCX, RBX, ss + 4); }
+                                    if se == 4 { buf.mov_load32(RAX, RBX, ss); buf.mov_load32(RCX, RBX, ss + 4); }
                                     else if se == 2 {
                                         if signed { buf.movsx_word_mem(RAX, RBX, ss); buf.movsx_word_mem(RCX, RBX, ss + 2); }
-                                        else { buf.mov_load32(RAX, RBX, ss); buf.mov_load32(RCX, RBX, ss + 2); }
+                                        else { buf.movzx_word_mem(RAX, RBX, ss); buf.movzx_word_mem(RCX, RBX, ss + 2); }
                                     } else {
                                         if signed { buf.movsx_byte_mem(RAX, RBX, ss); buf.movsx_byte_mem(RCX, RBX, ss + 1); }
                                         else { buf.movzx_byte_mem(RAX, RBX, ss); buf.movzx_byte_mem(RCX, RBX, ss + 1); }
                                     }
                                     buf.add_rr64(RAX, RCX);
-                                    // accumulate into dst: RAX += Vd lane
-                                    if de >= 4 { buf.mov_load64(R10, RBX, dd); buf.add_rr64(RAX, R10); buf.mov_store64(RBX, dd, RAX); }
-                                    else { buf.mov_load32(R10, RBX, dd); buf.add_rr64(RAX, R10); buf.mov_store32(RBX, dd, RAX); }
+                                    // Write EXACTLY `de` (dst lane) bytes — never overrun the
+                                    // neighbouring lane (store64 on a 4-byte lane clobbers lane+1).
+                                    if acc {
+                                        if de >= 4 { buf.mov_load64(R10, RBX, dd); buf.add_rr64(RAX, R10); }
+                                        else { buf.mov_load32(R10, RBX, dd); buf.add_rr64(RAX, R10); }
+                                        if de == 8 { buf.mov_store64(RBX, dd, RAX); }
+                                        else if de == 4 { buf.mov_store32(RBX, dd, RAX); }
+                                        else { buf.mov_store16(RBX, dd, RAX); }
+                                    } else {
+                                        if de == 8 { buf.mov_store64(RBX, dd, RAX); }
+                                        else if de == 4 { buf.mov_store32(RBX, dd, RAX); }
+                                        else { buf.mov_store16(RBX, dd, RAX); }
+                                    }
                                 }
                                 Ok(())
                             }
