@@ -1,6 +1,72 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep XX, 2026, hermes-worker) — block cache + nanosleep fix; main-loop wall characterized as slow init, not deadlock (workspace 389/0)
+## Session (Sep 12, 2026, hermes-worker) — pinned main-loop wall as a recursive-mutex rendezvous; reverted a mutex-weakening regression; graphics "first frame" gates verified (workspace green)
+
+Commit `6bc57a6` (dev). The real `libroblox.so` boot keeps advancing: JNI_OnLoad →
+`--startapp` drives `nativeAppBridgeV2StartAppWithParams` →
+`GameActivity_initializeNativeCode`, reaches the engine main loop, and **idles
+stably** (exit 124, no SIGSEGV/SIGABRT — same as the last milestone). This cycle
+identified EXACTLY what the loop waits on and why the naive fix was wrong.
+
+### 1. The wall, now precise
+New per-thread `current_guest_pc()` (set to the guest x30 return address around
+every integer-HostCall bridge) lets the `pthread` bridges name the guest caller
+of a blocking wait. With `JIT_TRACE`:
+```
+[mutex_lock] 0x106edae60 kind=0x1 held_by=0 ... gpcreq=0x102b53bb0
+```
+- The main loop parks in `pthread_mutex_lock` on a **RECURSIVE** mutex
+  (`pthread_mutexattr_settype(attr,#1)` → kind=1) at guest `0x6edae60`.
+- Requested from `GameActivity_initializeNativeCode+0x2f8488` (guest `0x2b53bac`;
+  the code there does `pthread_mutexattr_init → settype(#1 RECURSIVE) →
+  pthread_mutex_init`).
+- Contended across two guest threads (t=2994935 and t=2995007) with `held_by=0`.
+
+**Root mechanism:** the guest manages its own bionic `pthread_mutex` via its own
+fast-path atomics (lock word + recursion count in the bionic layout). When it
+calls our bridge's glibc `pthread_mutex_lock`, glibc reads the guest-set lock
+word as "held" but sees no glibc `__owner`, so it futex-blocks forever while the
+holder (also a guest thread) clears the lock directly. A bionic-layout-vs-glibc
+cross-ABI collision on the guest's own lock word — NOT an ALooper wait, and **NOT
+a decoder gap**.
+
+### 2. An experiment proved the mutex is real — do NOT weaken it
+Sampling showed the boot is genuinely idle (all guest threads in
+`futex_wait_queue` / `hrtimer_nanosleep`, 0% CPU). Trying to "fix" it with an
+optimistic non-blocking acquire (`pthread_mutex_trylock`, return 0 even on EBUSY)
+made a second guest thread enter the same critical section and SIGSEGV on garbage
+memory. **Reverted to blocking acquire.** This is genuine shared-memory mutual
+exclusion (a rendezvous at lifecycle handoff), not a spurious block.
+
+### 3. Graphics "first frame" gates both pass (headless, this VPS)
+- `glesv2-wrapper` `headless_graphics.rs`: surfaceless ES3 context on Mesa
+  llvmpipe `LIBGL_ALWAYS_SOFTWARE=1`, ETC2 compressed-texture interception
+  decompresses+uploads, BC1 passes through, `eglGetProcAddress` forwards. ✓
+- `arm64jit` `egl_window_present.rs`: under Xvfb, opens a real X11 window, drives
+  `eglGetDisplay→Initialize→ChooseConfig→CreateWindowSurface→CreateContext→
+  MakeCurrent→glClearColor→glClear→eglSwapBuffers` entirely **through the JIT
+  guest-bridge slots**, returns EGL_TRUE. ✓ This is a real frame presented
+  through the resolver bridges, headless.
+
+### 4. Next (the ordered path to a boot that doesn't idle)
+(a) **Implement bionic recursive-mutex acquire/release in the `pthread` bridge on
+the guest's own lock word** (state@+0, recursive owner/count in the bionic
+layout, owner = the guest thread) so a guest thread re-locking a recursive mutex
+it already holds is recognized as owned-by-self instead of handed to glibc (which
+misreads bionic word state and blocks). Real exclusion via CAS on the guest word;
+NOT a no-op and NOT `trylock-returns-0`. This is the precise unblock.
+(b) OR drive the awaited looper/app-command state so the engine dispatches a
+frame (the graphics stack is proven ready; the guest just hasn't reached EGL yet
+because it idles pre-graphics in the mutex rendezvous).
+Keep the stable idle boot as the base either way.
+
+Repro (unchanged):
+```bash
+cd /home/hermes-worker/runs/open-sober
+cargo build -p arm64jit --example elfjit
+timeout 30 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144
+JIT_TRACE=1 ... | grep -E "mutex_lock|cond_wait" | tail   # pin the blocking mutex/caller
+```
 
 Commit `152dce9` (dev). Two real bottlenecks to StartApp forward-speed removed:
 
