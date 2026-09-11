@@ -2915,6 +2915,10 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.test_rr64(RAX, RAX);
                     buf.cmov_rr64(0x48, RAX, RCX);
                 }
+                // The integer result is in RAX; xmm0 still holds the float. Move
+                // the int's bits back into xmm0 before storing, or the lane would
+                // be re-stored as the (unchanged) floating-point value.
+                buf.movq_xmm_r64(0, RAX);
                 buf.movq_store(RBX, dst + l * m, 0);
             }
             Ok(())

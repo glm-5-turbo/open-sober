@@ -702,6 +702,18 @@ pub fn decode(insn: u32) -> Inst {
         let value_bits = decode_fmov_imm(imm8, esize == 8);
         return Inst::SimdFmovImm { rd: (insn & 0x1f) as u8, esize, value_bits, q };
     }
+    // ---- scalar FP-to-int into an FP register: fcvtzs/fcvtzu Dd, Dn / Sd, Sn ----
+    // Converts the FP value in Vn to an integer stored back into a vector reg.
+    // Scalar D form (double -> 64-bit int): residues 0x5ee0_b800 (fcvtzs, signed)
+    // / 0x7ee0_b800 (fcvtzu, unsigned). One 64-bit lane, q=false — matches the
+    // FcvVec translate with esize=8 (cvttsd2si). Must precede both the FcvVec
+    // vector gate and the SIMD widen gate (which wrongly matched 0x5ee1bbff).
+    if (insn & 0xffe0_fc00) == 0x5ee0_b800 || (insn & 0xffe0_fc00) == 0x7ee0_b800 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let signed = (insn >> 29) & 1 == 0;
+        return Inst::FcvVec { rd, rn, signed, esize: 8, q: false };
+    }
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T (FPI(FPc))----
     if matches!(insn & 0xffe0_fc00, 0x0ea0_b800 | 0x2ea0_b800 | 0x4ea0_b800 | 0x4ee0_b800 | 0x6ea0_b800 | 0x6ee0_b800) {
         let e = if (insn >> 20) & 1 == 1 { 8u8 } else { 4u8 };
@@ -3010,6 +3022,20 @@ mod tests {
         }
         // Plain GPR unchanged.
         assert!(matches!(decode(0xf9000c01), Inst::LdStrImm { rt: 1, rn: 0, .. }));
+        // Scalar FP->int into an FP register must be FcvVec (scalar D, single 64-bit
+        // lane), NOT the SIMD widen gate which used to mis-catch 0x5ee1bbff.
+        match decode(0x5ee1bbff) {
+            Inst::FcvVec { rd, rn, signed, esize, q } => {
+                assert_eq!((rd, rn, signed, esize, q), (31, 31, true, 8, false));
+            }
+            other => panic!("fcvtzs d31,d31 -> FcvVec scalar, got {other:?}"),
+        }
+        match decode(0x7ee1b8e0) {
+            Inst::FcvVec { rd, signed, .. } => {
+                assert_eq!((rd, signed), (0, false)); // fcvtzu -> unsigned
+            }
+            other => panic!("fcvtzu d0,d7 -> FcvVec unsigned, got {other:?}"),
+        }
     }
     #[test]
     fn ldr_w_reg_ground_truth() {

@@ -1178,6 +1178,28 @@ mod tests {
     }
 
     #[test]
+    fn fcvtzs_to_fp_reg_converts_and_stores_int() {
+        // Regression: scalar `fcvtzs d0,d0` converts the double in v0 to an int
+        // and stores the INTEGER (not the original float). The FcvVec translate
+        // sent cvttsd2si's result to RAX but stored xmm0 (still the float),
+        // so fcvtzs(d0=3.5) left 3.5 instead of 3.
+        //   fcvtzs d0,d0=0x5ee1b800 ; str d0,[x1]=0xfd000020
+        //   ldr x0,[x1]=0xf9400020 ; ret=0xd65f03c0
+        let insn: &[u32] = &[0x5ee1b800, 0xfd000020, 0xf9400020, 0xd65f03c0];
+        let mut code = Vec::new();
+        for w in insn {
+            code.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut buf = [0u64; 2];
+        let mut st = CpuState::new();
+        st.v[0] = 3.5f64.to_bits();
+        st.x[1] = buf.as_ptr() as u64;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(buf[0], 3, "fcvtzs d0,d0 stores the int 3, not the float 3.5");
+        assert_eq!(r, 3, "x0 = converted integer");
+    }
+
+    #[test]
     fn str_xzr_stores_zero_not_sp() {
         // Regression: `str xzr,[x0]` must write 0, never the stack pointer.
         // AArch64 stores read the source field x31 as XZR (zero); the JIT used to
