@@ -5823,6 +5823,19 @@ s[3]=both. Every .4s by-element s[2]/s[3] (and fmla s[1] via the swap) used
 the wrong element. Cleared with regression tests for all 4 fmul indices +
 fmla index-1 execution. Workspace 376/0.
 
+## Cycle 44j (Sep 11, 2026) — SIMD saturating shift-left sqshl/uqshl/sqshlu (382/0)
+
+Commit `f3dd4d7` (dev). gen_sat_left_shift exposed sqshl (emitted by
+vqshl_n_s16) as `Unsupported`. New `Inst::SimdSatShl`: gate prefix
+0x0f/2f/4f/6f + bits[14:12] in {0b110=sqshlu, 0b111=sqshl/uqshl}, placed
+BEFORE the plain shl gate (which uses bits[14:12]=0b101). shift/esize from
+immh like shl. sat: 0=sqshl signed src/dst, 1=uqshl unsigned, 2=sqshlu
+(signed src → unsigned dst, byte2 0x64 vs 0x74 → discriminator is **bit12
+(0x1000)**). Translate: sign/zero-extend src, shl in the 64-bit reg, THEN
+clamp to the element range — must NOT pre-truncate to elem width first,
+else a negative src (e.g. 0xCBB2<<15 becomes huge-positive) wrongly
+saturates to max instead of min. 220 arm64jit + 382 workspace, all swept clean.
+
 ## Cycle 44i (Sep 11, 2026) — 3-same FP pairwise faddp/fmaxp/fminp/fmaxnmp/fminnmp (380/0)
 
 Commit `309a82d` (+ `172b830` tests). gen_fp_pairwise exposed fmaxp/fminp/
