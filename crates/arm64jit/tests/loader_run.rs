@@ -258,3 +258,71 @@ fn loader_run_pie_relative_global_returns_42() {
     }
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// Compile `src` (a C program with `int entry(void)`) to a **shared library**
+/// (`-shared -fPIC`, ET_DYN) with entry exported — the shape of a real Android
+/// `.so`. Unlike the PIE compile, `-shared` makes exported globals referenced
+/// from module code go through the main GOT via `R_AARCH64_GLOB_DAT` (and
+/// function-pointer/data initializers become `R_AARCH64_ABS64`); both are the
+/// "symbol runtime-address into a location" family `bind_glob_dat` resolves.
+fn compile_shared(workdir: &std::path::Path, name: &str, src: &str) -> PathBuf {
+    let c = workdir.join(format!("{name}.c"));
+    std::fs::write(&c, src).unwrap();
+    let elf = workdir.join(format!("{name}.so"));
+    let out = Command::new("aarch64-linux-gnu-gcc")
+        .args(["-shared", "-fPIC", "-nostdlib", "-Wl,-e,entry"])
+        .arg(&c)
+        .arg("-o")
+        .arg(&elf)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cross-gcc: {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    elf
+}
+
+#[test]
+fn loader_run_shared_glob_dat_and_abs64_returns_37() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_glob_dat: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = run_lock().lock().unwrap();
+    let wd = workdir("globdat");
+    // Two exported globals referenced through the module's own GOT:
+    //   global_data (1 GLOB_DAT slot + must bind base+0x20000),
+    //   gfp = &internal_fn (1 GLOB_DAT slot -> base+0x20008) whose initializer
+    //   is an R_AARCH64_ABS64 (write &internal_fn = base+0x340).
+    // entry() reads global_data via GOT, calls gfp(3) through GOT (-> 3*5=15),
+    // then adds global_data again: 11 + 15 + 11 = 37. Without GLOB_DAT/ABS64
+    // binding the guest GOT loads 0 and calls/derefs NULL (SIGSEGV or 0).
+    let elf = compile_shared(
+        &wd,
+        "sh",
+        "int internal_fn(int x){ return x*5; }\n\
+         int global_data = 11;\n\
+         int (*gfp)(int) = internal_fn;\n\
+         int entry(void){ int acc = global_data; acc += gfp(3); return acc + global_data; }\n",
+    );
+
+    // The real run_elf pipeline applies RELATIVE only; GLOB_DAT/ABS64 must be
+    // bound by bind_image_plt before jit_run. Confirm jit_run returns 37.
+    match run_elf(&elf) {
+        Ok(v) => {
+            assert_eq!(
+                v, 37,
+                "globdat: entry() -> {v}, expected 37 (GLOB_DAT/ABS64 not bound?)"
+            );
+            eprintln!("\x1b[32mPASS\x1b[0m globdat: entry() -> {v} via GLOB_DAT + ABS64-bound globals");
+        }
+        Err(e) => panic!("globdat: jit_run failed: {e}"),
+    }
+    let _ = std::fs::remove_dir_all(&wd);
+}

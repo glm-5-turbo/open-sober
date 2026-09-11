@@ -91,6 +91,14 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
     }
     if pltrelsz == 0 {
         // Dynamic segment present but no PLT/JUMP_SLOT relocations at all.
+        // GLOB_DAT relocations may still exist in the main DT_RELA, so bind
+        // them before bailing (a module with only exported-data globals has
+        // zero PLT calls yet depends on the main GOT for correctness).
+        let glob = bind_glob_dat(el);
+        eprintln!(
+            "[plt] (no JUMP_SLOT) bound {} GLOB_DAT/ABS64, {} unresolved",
+            glob.0, glob.1
+        );
         return (0, 0);
     }
 
@@ -167,7 +175,205 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
     // writing a live canary address into the GOT; mirror it here.
     patch_stack_canary(el, &wr64);
 
+    // Bind GLOB_DAT relocations in the main DT_RELA section. Jump-slot (PLT)
+    // handling above only covers DT_JMPREL; exported-data / function-pointer
+    // globals referenced from `-fPIC` module code go through the *main* GOT via
+    // R_AARCH64_GLOB_DAT, and if left un-patched the guest `adrp;ldr x,[GOT]`
+    // reads 0 and derefs/calls NULL. See bind_glob_dat for the exact semantics.
+    let glob = bind_glob_dat(el);
+    eprintln!(
+        "[plt] bound {resolved} JUMP_SLOT + {} GLOB_DAT/ABS64 ({} unresolved), {} unresolved",
+        glob.0, unresolved, glob.1
+    );
+
     (resolved, unresolved)
+}
+
+/// Bind `R_AARCH64_GLOB_DAT` (1025) relocations in the main `DT_RELA` section.
+///
+/// JUMP_SLOT (DT_JMPREL) covers PLT *function calls*; but `-fPIC` module code
+/// that references an *exported* global (a data variable or a function pointer)
+/// goes through the main GOT via GLOB_DAT: the compiler emits
+/// `adrp x0,GOT; ldr x0,[x0,#off]` to fetch the symbol's *runtime address*,
+/// then dereferences or calls through it. `R_AARCH64_GLOB_DAT` says
+/// `*(r_offset) = S` (S = the symbol's load address). Left un-patched the guest
+/// loads 0 and either calls address 0 or null-derefs.
+///
+/// The symbol's runtime value for *this* module = `el.guest_of(st_value)` (the
+/// loader maps guest==host, so `ldr xN,[GOT]` then `[xN]`/`blr xN` resolves back
+/// into the mapped image). For an *undefined/imported* symbol, the value is the
+/// host address: for a data object use `dlsym` raw (guest==host addressable); for
+/// a function/notype use the resolver's host-call thunk so a guest call to the
+/// slot dispatches to the real host fn. Returns `(bound, unresolved)`.
+fn bind_glob_dat(el: &LoadedElf) -> (usize, usize) {
+    const DT_NULL: i64 = 0;
+    const PT_DYNAMIC: u8 = 2;
+    const DT_RELA: i64 = 7;
+    const DT_RELASZ: i64 = 8;
+    const DT_SYMTAB: i64 = 6;
+    const DT_STRTAB: i64 = 5;
+    const DT_RELAENT: i64 = 9;
+    const R_AARCH64_GLOB_DAT: u64 = 1025;
+    const R_AARCH64_ABS64: u64 = 257;
+    const SHN_UNDEF: u16 = 0;
+    // ELF symbol type bits (st_info & 0xf).
+    const STT_OBJECT: u8 = 1;
+
+    let host = |g: u64| -> usize { el.host_addr_of(g).expect("guest not mapped") as usize };
+    #[inline]
+    fn rd64(p: usize) -> u64 {
+        unsafe { std::ptr::read_unaligned(p as *const u64) }
+    }
+    #[inline]
+    fn rd32(p: usize) -> u32 {
+        unsafe { std::ptr::read_unaligned(p as *const u32) }
+    }
+    #[inline]
+    fn rd16(p: usize) -> u16 {
+        unsafe { std::ptr::read_unaligned(p as *const u16) }
+    }
+    #[inline]
+    fn wr64(p: usize, v: u64) {
+        unsafe { std::ptr::write_unaligned(p as *mut u64, v) };
+    }
+
+    let min_guest = el
+        .segments
+        .iter()
+        .map(|s| s.guest_vaddr)
+        .min()
+        .expect("no segments");
+    let ehdr = host(min_guest);
+    let e_phoff = rd64(ehdr + 0x20) as usize;
+    let e_phentsize = rd16(ehdr + 0x36) as usize;
+    let e_phnum = rd16(ehdr + 0x38) as usize;
+
+    let mut dyn_link = 0u64;
+    for i in 0..e_phnum {
+        let ph = ehdr + e_phoff + i * e_phentsize;
+        if rd32(ph) == PT_DYNAMIC as u32 {
+            dyn_link = rd64(ph + 0x10); // p_vaddr
+            break;
+        }
+    }
+    if dyn_link == 0 {
+        return (0, 0); // static ELF
+    }
+
+    let dynp = host(el.guest_of(dyn_link));
+    let (mut rela, mut relasz, mut relaent, mut symtab_ref, mut strtab_ref) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut i = 0usize;
+    loop {
+        let tag = rd64(dynp + i * 16) as i64;
+        let val = rd64(dynp + i * 16 + 8);
+        if tag == DT_NULL {
+            break;
+        }
+        match tag {
+            DT_RELA => rela = val,
+            DT_RELASZ => relasz = val,
+            DT_RELAENT => relaent = val,
+            DT_SYMTAB => symtab_ref = val,
+            DT_STRTAB => strtab_ref = val,
+            _ => {}
+        }
+        i += 1;
+        if i > 4096 {
+            break;
+        }
+    }
+    if rela == 0 || relasz == 0 || symtab_ref == 0 {
+        return (0, 0);
+    }
+    let entsz = if relaent != 0 { relaent as usize } else { 24 };
+
+    // GLOB_DAT lives in the *main* reloc table, which also holds the RELATIVE
+    // entries the loader already applied. We only process GLOB_DAT here.
+    let rela_h = host(el.guest_of(rela));
+    let symtab_h = host(el.guest_of(symtab_ref));
+    let strtab_h = host(el.guest_of(strtab_ref));
+
+    let n = (relasz as usize) / entsz;
+    let (mut bound, mut unresolved) = (0usize, 0usize);
+    for k in 0..n {
+        let r = rela_h + k * entsz;
+        let r_offset = rd64(r);
+        let r_info = rd64(r + 8);
+        let r_addend = rd64(r + 16) as i64; // Elf64_Rela.r_addend @ +16
+        let stype = (r_info & 0xffff_ffff) as u64;
+        // R_AARCH64_GLOB_DAT (1025) and R_AARCH64_ABS64 (257) are both
+        // "write the symbol's runtime address here". GLOB_DAT is the GOT-slot
+        // form (addend 0), ABS64 the data-initializer form (addend = symbol
+        // offset for a defined symbol). Both belong to the same resolver
+        // family and are left unbound by the loader (which only applies
+        // RELATIVE), so a guest global/function-pointer reads link-time
+        // garbage. Handle both.
+        if stype != R_AARCH64_GLOB_DAT && stype != R_AARCH64_ABS64 {
+            continue;
+        }
+        let sym_idx = (r_info >> 32) as usize;
+        let sym = symtab_h + sym_idx * 24;
+        let st_info = unsafe { *(sym as *const u8).add(4) };
+        let st_shndx = rd16(sym + 6); // Elf64_Sym.st_shndx @ +6
+        let st_value = rd64(sym + 8); // Elf64_Sym.st_value @ +8
+        let st_name = rd32(sym) as usize;
+
+        let slot_guest = el.guest_of(r_offset) as usize;
+        if slot_guest == 0 {
+            unresolved += 1;
+            continue;
+        }
+
+        let value: Option<u64> = if st_shndx != SHN_UNDEF {
+            // Defined in this module: runtime address = guest addr of st_value
+            // plus the addend (ABS64 has addend = offset to the symbol; GLOB_DAT
+            // typically 0).
+            let va = el.guest_of(st_value);
+            if va == 0 { None } else { Some(va.wrapping_add(r_addend as u64)) }
+        } else {
+            // Imported symbol: resolve its host address.
+            let mut name = Vec::new();
+            {
+                let mut p = strtab_h + st_name;
+                for _ in 0..256 {
+                    let c = unsafe { *(p as *const u8) };
+                    if c == 0 {
+                        break;
+                    }
+                    name.push(c);
+                    p += 1;
+                }
+            }
+            if st_info & 0xf == STT_OBJECT {
+                // Data object: dlsym gives the raw host (guest==host) addr.
+                match std::ffi::CString::new(name) {
+                    Ok(c) => {
+                        let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
+                        if p.is_null() { None } else { Some((p as u64).wrapping_add(r_addend as u64)) }
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                // Function / notype import: host-call thunk (callable).
+                crate::resolver::resolve(&name).map(|a| a.wrapping_add(r_addend as u64))
+            }
+        };
+
+        match value {
+            Some(v) => {
+                wr64(slot_guest, v);
+                bound += 1;
+            }
+            None => {
+                unresolved += 1;
+                if std::env::var_os("JIT_TRACE").is_some() {
+                    eprintln!("[plt:glob_dat] unresolved {:#x}", r_offset);
+                }
+            }
+        }
+    }
+    (bound, unresolved)
 }
 
 /// Write a live canary pointer into the guest `__stack_chk_guard` GOT slot.
