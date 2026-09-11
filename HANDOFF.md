@@ -4365,3 +4365,52 @@ Bisected to TWO distinct arm64jit bugs, both fixed + native-verified:
 2. ADC/SBC borrow-convention carry — see STATUS.
 Files: crates/arm64jit/src/translate.rs (Extr + AddCarry), jit.rs
 (add_carry_reference), tests/diff_battery.rs (+math128 canary). Commit 912eff8.
+
+
+---
+
+# Session (Sep 11, 2026) — SIMD fcvtl/fcvtn float<->double conversion + latent scalar store fix (workspace 275/0)
+
+Commit `3718824` (dev). Opened at 272/0 green; drove the differential battery
+into the mixed-precision float<->double vector path and it surfaced BOTH a
+missing ISA wall and a latent miscompile:
+
+## 1. New ISA: fcvtl/fcvtl2 + fcvtn/fcvtn2 (SIMD float<->double width conversion)
+gcc -O2 emits these for any `float[]` <-> `double[]` elementwise round-trip; the
+JIT previously stopped `Unsupported` at the first fcvtl in such code.
+- Gates (asm+objdump verified): `(insn & 0xffff_fc00)` in {0x0e617800,
+  0x4e617800} = fcvtl (f32->f64, 2 lanes), {0x0e616800, 0x4e616800} = fcvtn
+  (f64->f32). Placed BEFORE VecIntToFp/SimdMull (which swallow these as int->fp /
+  widening-multiply). `upper` = bit30 (Q): fcvtl2 reads Vn's upper half;
+  fcvtn2 writes Vd's upper half. Half-precision byte2-0x21 (fcvtl Vd.4s,Vn.4h /
+  fcvtn Vd.4h,Vn.4s) stays Unsupported (no fp16 in the JIT).
+- Translate: per-lane cvtss2sd/movq_store (widen), movq_load/cvtsd2ss/narrow
+  store (fcvtn). Guest v-lane = VECTOR_BASE + reg*16 confirmed.
+
+## 2. LATENT MISCOMPILE exposed by the new ISA (the important find)
+Once a gcc float<->double loop can compile fully (previously it always aborted
+`Unsupported` at fcvtl during compile, so NOTHING after it ever executed), the
+JIT segfaulted at fault=0x41480000. Root cause: `FpLdStImmWb` (scalar pre/post-
+index ld/st) passed RAX as the address register into `fp_scalar_xfer`, which
+uses RAX as its value scratch -- so a scalar pre/post-index STORE clobbered the
+base with the value and wrote to [value bits] instead of [base]
+(`str s30,[x4],#4` stored to 0x41480000 = float 12.5). Now computes the address
+in RDX (mirrors the correct FpLdStImmUnscaled). This would have corrupted
+single-precision array/matrix writes in any real graphics/audio math.
+
+## Verification
+- Differential canary `diff_fcvtl_widen_and_fcvtn_narrow` (round-trip 16
+  floats<->doubles, distinct values, upper-half use): jit==oracle==1248.
+- Decode/exec: `fcvtl_fcvtn_decode_and_lane_widen_exec`; store fix:
+  `fp_scalar_postindex_store_uses_base_not_value`.
+- `cargo build --workspace` clean; `cargo test --workspace` 275/0 (arm64jit
+  162 lib + 42 diff + 8 loader_run; libbadcpu 22; libloader 23; +others).
+
+## Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping mixed FP width / vector breadth
+   (fcvtl half-precision forms, f2d long forms, pmull, sat-ops, more -O3
+   reduction shapes) -- this ISA-assertion loop keeps flushing real latent
+   miscompiles (this cycle: fcvtl + the scalar-store RAX clobber).
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
+   the HARD GATE, blocked until a capable host + the real binary/APK (none here).
