@@ -9,6 +9,8 @@
 //! subset worth materializing immediately.
 
 use crate::jit::HostCall;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 unsafe extern "C" {
     fn strlen(s: *const std::ffi::c_char) -> usize;
@@ -223,6 +225,42 @@ extern "C" fn cxa_atexit(
     0
 }
 
+/// pthread_once(once_control, init_routine).
+///
+/// A guest `bl pthread_once@plt` passes a *guest* `init_routine` address. The
+/// real glibc pthread_once would `call` it natively — executing guest ARM64
+/// bytes as x86 (SIGILL on the first `paciasp`). Interpose it host-side: run
+/// the guest routine once (per once_control, via `jit_run`) and mark done.
+/// Single-threaded-conservative once semantics are sufficient for boot (a
+/// second call sees "done" and skips).
+fn once_guard_done() -> &'static Mutex<HashSet<u64>> {
+    static DONE: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+    DONE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+extern "C" fn bionic_pthread_once(
+    once: u64, routine: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if routine == 0 || once == 0 {
+        return 0;
+    }
+    // Nested reentry on the SAME guard would re-run the body; detect and skip.
+    if once_guard_done().lock().unwrap().contains(&once) {
+        return 0;
+    }
+    // Mark "in progress" before running so a reentrant pthread_once on this
+    // guard (rare, but possible via a guest callback) does not recurse forever.
+    once_guard_done().lock().unwrap().insert(once);
+    let tp = crate::jit::current_guest_tp();
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[shim] pthread_once(once={once:#x}) runs guest routine {routine:#x}");
+    }
+    // The standard pthread_once init_routine takes no arguments.
+    if let Err(e) = crate::jit::run_guest_callback(routine, [0; 8], tp) {
+        eprintln!("[shim] pthread_once routine {routine:#x} failed: {e}");
+    }
+    0
+}
+
 /// Register all guest C++ runtime shims (__cxa_guard_*, __cxa_atexit).
 pub fn register_cxx_shims() -> usize {
     let shims: &[(&[u8], HostCall)] = &[
@@ -230,6 +268,7 @@ pub fn register_cxx_shims() -> usize {
         (b"__cxa_guard_release\0", cxa_guard_release),
         (b"__cxa_guard_abort\0", cxa_guard_abort),
         (b"__cxa_atexit\0", cxa_atexit),
+        (b"pthread_once\0", bionic_pthread_once),
     ];
     for (name, f) in shims {
         crate::resolver::register_named(name, *f);

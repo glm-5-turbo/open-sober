@@ -1696,14 +1696,50 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         }
         if std::env::var_os("JIT_TRACE").is_some() {
             println!(
-                "  block@0x{pc:x} -> pc=0x{:x} x0=0x{:x} x1=0x{:x} x30=0x{:x}",
+                "  block@0x{pc:x} -> pc=0x{:x} x0=0x{:x} x1=0x{:x} x19=0x{:x} x20=0x{:x} x30=0x{:x}",
                 unsafe { (*state).pc },
                 unsafe { (*state).x[0] },
                 unsafe { (*state).x[1] },
+                unsafe { (*state).x[19] },
+                unsafe { (*state).x[20] },
                 unsafe { (*state).x[30] }
             );
         }
     }
+}
+
+/// Run a guest function at `fn_addr` as a nested JIT call on the current guest
+/// thread, with `args` in x0..x7.
+///
+/// Host shims that receive a *guest* function pointer from guest code must not
+/// let the host call it natively — the guest bytes are ARM64, not x86 (a real
+/// `pthread_once`/`pthread_create` start routine would SIGILL on `paciasp`).
+/// This runs `fn_addr` through `jit_run` against the process-lifetime image
+/// (EXEC_CTX), on a fresh 1 MiB guest stack, seeded with the given tpidr.
+/// Returns the guest x0 after the callback's `ret`.
+pub fn run_guest_callback(fn_addr: u64, args: [u64; 8], tpidr: u64) -> Result<u64, String> {
+    let (image_addr, image_len, base) = {
+        let guard = EXEC_CTX.lock().unwrap();
+        let ctx = guard.as_ref().ok_or("run_guest_callback: no active guest image")?;
+        (ctx.image_addr, ctx.image_len, ctx.base)
+    };
+    if fn_addr < base || fn_addr - base >= image_len as u64 {
+        return Err(format!(
+            "run_guest_callback: fn {fn_addr:#x} outside image [{base:#x}, {:#x})",
+            base + image_len as u64
+        ));
+    }
+    let image = unsafe { std::slice::from_raw_parts(image_addr as *const u8, image_len) };
+    // A fresh 1 MiB guest stack for the callback frame (leaked for lifetime —
+    // the guest keeps using it across nested hostcalls during the callback).
+    const STACK: usize = 1 << 20;
+    let stack = Box::leak(vec![0u8; STACK].into_boxed_slice());
+    let mut st = CpuState::new();
+    st.tpidr = tpidr;
+    st.x[..8].copy_from_slice(&args);
+    st.x[31] = (stack.as_ptr() as u64) + (STACK as u64) - 16; // aligned top
+    jit_run(image, base, fn_addr, &mut st as *mut CpuState)?;
+    Ok(st.x[0])
 }
 
 /// Translate every instruction of the guest image `image` (a full program
@@ -1884,6 +1920,75 @@ fn body_contains_svc(image: &[u8], base: u64, entry: u64) -> bool {
     false
 }
 
+/// Detect whether the body reachable from guest `entry` contains a `blr` or
+/// `br` (an *indirect* branch/call, transitively following guest `bl`/`b`).
+///
+/// This is the inlining-safety core for the JNI / import-dispatched boot path.
+/// `blr`/`br` are translated to `mov_store64(pc_off, target); ret` — they hand
+/// the target to `jit_run`'s dispatcher so a *hostcall* (GetEnv, a bound PLT
+/// import) or a guest-indirect callee can be dispatched. That is only valid
+/// when the `blr`/`br` runs at **top-level block scope**. If its containing
+/// guest function is inlined via `bl` into a larger block, the `ret` pops the
+/// inlined-call return address and returns into the caller block instead of
+/// `jit_run` — so the hostcall is silently skipped (its `*penv`/result never
+/// written) AND the inlined callee's epilogue that restores callee-saved
+/// registers (x19-x28) never runs, leaving stale corrupt guest registers. The
+/// existing divert machinery (`body_contains_host_plt_bl`, `body_contains_svc`)
+/// catches direct `bl` to a PLT stub and `svc`, but a C++ vtable dispatch /
+/// `GetEnv` is a `blr` to a *runtime-computed* address, which neither catches.
+///
+/// Following guest `bl` transitively is conservative-but-correct: diverting a
+/// `bl` is semantically identical (set x30, pc=callee, dispatcher re-enters at
+/// the callee), just a few more dispatcher round-trips. We follow into callees
+/// because an outer inlined function pulls its inner `bl`-target (which `blr`s)
+/// into the same block, re-triggering the bug.
+fn body_contains_indirect(image: &[u8], base: u64, entry: u64) -> bool {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut frontier: Vec<u64> = vec![entry];
+    let mut scanned = 0usize;
+    while let Some(start) = frontier.pop() {
+        if !seen.insert(start) {
+            continue;
+        }
+        if scanned > BODY_SCAN_BUDGET {
+            return true; // give up conservatively: treat as indirect-bearing
+        }
+        let mut cur = start;
+        loop {
+            if cur != start && seen.contains(&cur) {
+                break;
+            }
+            let Some(word) = word_at(image, base, cur) else { break };
+            let inst = decode::decode(word);
+            scanned += 1;
+            if scanned > BODY_SCAN_BUDGET {
+                return true;
+            }
+            match inst {
+                Inst::Br { .. } | Inst::Blr { .. } => return true,
+                Inst::B { imm, link } => {
+                    let target = cur.wrapping_add(imm as u64);
+                    frontier.push(target);
+                    if link {
+                        frontier.push(cur + 4); // continue after the call
+                    }
+                    break;
+                }
+                Inst::BCond { imm, .. } | Inst::Cbz { imm, .. } | Inst::Tbz { imm, .. } => {
+                    frontier.push(cur.wrapping_add(imm as u64));
+                }
+                Inst::Ret
+                | Inst::Unsupported(_)
+                | Inst::Brk { .. }
+                | Inst::Udf { .. } => break,
+                _ => {}
+            }
+            cur += 4;
+        }
+    }
+    false
+}
+
 /// Detect whether the instructions at guest address `addr` (within `image`
 /// mapped at `base`) are a PLT stub
 /// (`adrp xd,P; ldr xc,[xd,#imm]; add xd,xd,#off; br xc`) whose GOT slot holds a
@@ -2007,6 +2112,11 @@ pub fn compile_image_bounded(
     // `svc` must run as its own top-level block so the Svc-arm yield is a real
     // block-level yield, not a nested-call `ret`).
     let mut memo_svc: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+    // Memo of body_contains_indirect() per guest-bl target (a callee whose body
+    // does a `blr`/`br` must run at top-level block scope so the indirect call
+    // reaches jit_run's hostcall bridge instead of returning into an inlined
+    // caller — see the body_contains_indirect doc).
+    let mut memo_indirect: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
     // Truncation fall-through tracking: when the budget cuts a straight-line
     // body short (no terminal instruction writes pc), the last emitted
     // instruction falls through to `trunc_next_pc` with nothing updating
@@ -2087,6 +2197,22 @@ pub fn compile_image_bounded(
                             // corrupt nested-call return). See body_contains_svc.
                             let b = body_contains_svc(image, base, target);
                             memo_svc.insert(target, b);
+                            b
+                        }) || memo_indirect.get(&target).copied().unwrap_or_else(|| {
+                            // A callee whose body does a `blr`/`br` (an indirect
+                            // branch/call — a C++ vtable dispatch, a computed
+                            // `GetEnv`, a PLT import reached via a register)
+                            // must run at TOP-LEVEL block scope. The `blr`/`br`
+                            // translation `ret`s to hand its target to jit_run's
+                            // hostcall bridge; inlined, that `ret` pops the
+                            // inline-call return and the hostcall is silently
+                            // skipped (its output never written) while the
+                            // inlined callee's x19-x28-restoring epilogue never
+                            // runs. Divert so the callee is a fresh top-level
+                            // block where every indirect transfer hits the
+                            // dispatcher correctly. See body_contains_indirect.
+                            let b = body_contains_indirect(image, base, target);
+                            memo_indirect.insert(target, b);
                             b
                         });
                         #[cfg(debug_assertions)]
@@ -5832,6 +5958,38 @@ mod tests {
 
         let _ = std::fs::remove_file(&f);
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn body_contains_indirect_detects_blr_not_ret_only() {
+        // A body with a `blr` (indirect call) must be flagged: an inlined
+        // `blr` would `ret` back into the caller block instead of reaching the
+        // dispatcher's hostcall bridge, silently skipping GetEnv etc.
+        //   mov x0, #1      (d2800020)
+        //   blr x1          (d63f0020)
+        //   ret             (d65f03c0)
+        let with_blr = [0x20u8, 0x00, 0x80, 0xd2, 0x20, 0x00, 0x3f, 0xd6, 0xc0, 0x03, 0x5f, 0xd6];
+        assert!(body_contains_indirect(&with_blr, 0, 0), "blr body flagged");
+        // A plain leaf body (mov; ret) with no indirect transfer must NOT flag.
+        let plain = [0x20u8, 0x00, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6];
+        assert!(!body_contains_indirect(&plain, 0, 0), "ret-only leaf not flagged");
+        // Following a guest `bl` into a callee that `blr`s must flag transitively.
+        //   mov x0,#1 ; bl +12 ; ret   (bl imm26: (12-4)>>2=2 -> 0x94000002; callee at 12)
+        let mut caller = vec![0x20u8, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x00, 0x94, 0xc0, 0x03, 0x5f, 0xd6];
+        caller.extend_from_slice(&[0x20, 0x00, 0x3f, 0xd6, 0xc0, 0x03, 0x5f, 0xd6]);
+        assert!(body_contains_indirect(&caller, 0, 0), "transitive bl->blr flagged");
+    }
+
+    #[test]
+    fn run_guest_callback_executes_guest_fn_via_jit() {
+        // A guest fn `mov x0,#0x2a ; ret` = 42. Prime EXEC_CTX with a jit_run,
+        // then run_guest_callback at that address and assert x0==42.
+        let code: [u8; 8] = [0x40, 0x05, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        // jit_run publishes EXEC_CTX(image_addr, len, base).
+        jit_run(&code, 0x1000, 0x1000, &mut st as *mut CpuState).unwrap();
+        let r = run_guest_callback(0x1000, [0; 8], 0).expect("run_guest_callback");
+        assert_eq!(r, 42, "guest callback returned 42");
     }
 
     #[test]

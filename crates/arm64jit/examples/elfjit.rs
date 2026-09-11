@@ -20,8 +20,8 @@ use arm64jit::jit::{CpuState, jit_run};
 // Diagnostic: on a host SIGSEGV inside a translated block, print the guest PC
 // (CpuState.pc, offset 256) + a few guest regs read from the CpuState (RBX).
 // elfjit is a diagnostic binary, so this stays in.
-unsafe fn install_segv_debug() {
-    extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+unsafe fn install_fault_debug() {
+    extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
         unsafe {
             let uc = ctx as *const libc::ucontext_t;
             let rbx = (*uc).uc_mcontext.gregs[libc::REG_RBX as usize];
@@ -39,24 +39,42 @@ unsafe fn install_segv_debug() {
             let x9 = *(rbx.wrapping_add(72) as *const u64);
             let sp = *(rbx.wrapping_add(248) as *const u64);
             let fault = (*info).si_addr() as u64;
+            // Dump the raw host bytes around the faulting translated x86 so the
+            // memory-op (e.g. a `mov rax,[rax+0x30]` = guest `ldr x8,[x8,#48]`)
+            // can be identified precisely even though CpuState.pc is coarse.
+            let mut raw = [0u8; 48];
+            std::ptr::copy_nonoverlapping(rip.wrapping_sub(24) as *const u8, raw.as_mut_ptr(), 48);
+            let hex = raw.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+            let x10 = *(rbx.wrapping_add(80) as *const u64);
+            let x19 = *(rbx.wrapping_add(152) as *const u64);
+            let x20 = *(rbx.wrapping_add(160) as *const u64);
+            let x21 = *(rbx.wrapping_add(168) as *const u64);
+            let x22 = *(rbx.wrapping_add(176) as *const u64);
+            let x23 = *(rbx.wrapping_add(184) as *const u64);
+            let x28 = *(rbx.wrapping_add(224) as *const u64);
+            let x29 = *(rbx.wrapping_add(232) as *const u64);
+            let x30 = *(rbx.wrapping_add(240) as *const u64);
+            let name = if sig == libc::SIGSEGV { "SIGSEGV" } else if sig == libc::SIGILL { "SIGILL" } else { "SIGFAULT" };
             let s = format!(
-                "\n[SIGSEGV] fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n"
+                "\n[{name}] fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x}\n  raw[]= {hex}\n"
             );
             let b = s.as_bytes();
             libc::write(2, b.as_ptr() as *const libc::c_void, b.len());
         }
         std::process::abort();
     }
-    let mut sa: libc::sigaction = std::mem::zeroed();
-    sa.sa_sigaction = handler as usize;
-    sa.sa_flags = libc::SA_SIGINFO;
-    libc::sigemptyset(&mut sa.sa_mask);
-    libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+    for sig in [libc::SIGSEGV, libc::SIGILL] {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handler as usize;
+        sa.sa_flags = libc::SA_SIGINFO;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(sig, &sa, std::ptr::null_mut());
+    }
 }
 
 fn main() {
     unsafe {
-        install_segv_debug();
+        install_fault_debug();
     }
     let path = std::env::args()
         .nth(1)
