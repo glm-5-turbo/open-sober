@@ -4013,3 +4013,31 @@ new ins test; 26 diff_battery incl. fv4). HEAD `b93e89d`.
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — ld3/st3/ld4/st4 structure DEINTERLEAVE implemented (workspace 245/0)
+
+Commit `1c5f69e` on `dev`. Continued the differential-battery ISA sweep. A 4x4
+float matmul (`C[i][j] += A[i][k]*B[k][j]`, gcc -O3) returned **20 vs oracle
+5248**. Root cause: the structure-load opcode field (insn bits15:12) was folded
+wrong — **0b0000 (ld4/st4) mapped into the single-register ld1 placeholder and
+0b0100 (ld3/st3) to Unsupported**, so both ran the ld1-multiple
+CONSECUTIVE-load path. AArch64 ld4/ld3 are structure **deinterleave** loads
+(`Vd[j][i] = mem[base + i*N*es + j*es]`); loading them consecutively read the
+wrong memory. gcc -O3 emits `ld4 {v24.4s-v27.4s},[sp]` to load matrices.
+
+Fix: new `Inst::Ld3N/St3N/Ld4N/St4N` with true, element-size-aware
+deinterleave; decode maps op=0b0000->Ld4N/St4N and op=0b0100->Ld3N/St3N
+(ld1-multiple keeps only 0b0010/0b0110/0b0111/0b1010). Byte-verified against
+qemu for ld3/ld4 q=0 & q=1 and st4 — all match. matmul now = 5248, transpose =
+684, complex = 288 (all = native oracle). Regression: decode unit test
+`ld4_st4_decode_to_structure_deinterleave`; differential canaries
+`diff_ld4_st4_matrix_transpose` (ld4_matmul + st4_transpose). Workspace 245/0.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping ISA/correctness breadth (structure
+   load/store widths, more SIMD lane/permute/wide paths, FP reduction shapes).
+2. Move up to the runtime side: FMOD "divert guest bl-to-once through the
+   dispatcher" and JNI function-table stubs per RECOMMENDATION.md.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).
