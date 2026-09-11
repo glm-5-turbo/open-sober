@@ -926,7 +926,12 @@ pub fn translate(
                 buf.zero_ext_r32(RAX);
             }
             if sf {
-                buf.bytes.extend_from_slice(&[0x48, 0xf3, 0x0f, 0xbd, 0xc0]); // lzcnt rax, rax
+                // lzcnt rax, rax. REX.W (0x48) MUST come AFTER the F3 prefix and
+                // immediately before the 0F opcode: emitted as `48 F3 0F BD` the
+                // CPU ignores REX.W (it must be the last prefix) and executes a
+                // 32-bit lzcnt eax — clz(x) with x<2^32 returns 32-len(x), not
+                // 64-len(x) (real repro: clz(0x16136740) returned 3, oracle 35).
+                buf.bytes.extend_from_slice(&[0xf3, 0x48, 0x0f, 0xbd, 0xc0]);
             } else {
                 buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0xbd, 0xc0]); // lzcnt eax, eax
                                                                         // lzcnt eax zeroes the upper 32 (correct W zero-extend)
@@ -988,12 +993,20 @@ pub fn translate(
                     let width = if sf { 6usize } else { 4usize };
                     for (k, (sh, m)) in steps.iter().take(width).enumerate() {
                         // t = ((x >> sh) & m) | ((x & m) << sh)
+                        // BUGFIX: mask with the FULL 64-bit value (mov_ri64 into
+                        // R10 + and_rr64), NOT `and_ri64(m as u32)` which truncated
+                        // every mask to 32 bits — 0x5555..55, 0x3333..33, ... are
+                        // 64-bit patterns, so only the LOW 32 bits of x were being
+                        // reversed and the high 32 used a corrupt (low-32-only) mask
+                        // (rbit x; clz x = ctz returned 198+ vs oracle 10). RAX is
+                        // the running result; RCX holds the shifted-high piece.
                         buf.mov_rr64(RCX, RAX);
                         buf.shr_ri8(RCX, *sh);
-                        buf.and_ri64(RCX, *m as u32); // m low32 (archs: pre-32 steps fit u32)
-                        buf.and_ri64(RAX, *m as u32);
-                        buf.shl_ri8(RAX, (1u32 << k as u32) as u8);
-                        buf.or_rr64(RAX, RCX);
+                        buf.mov_ri64(R10, *m);
+                        buf.and_rr64(RCX, R10); // (x >> sh) & m
+                        buf.and_rr64(RAX, R10); // x & m  (note: NOT or'ing x in; RAX is masked then shifted)
+                        buf.shl_ri8(RAX, (1u32 << k as u32) as u8); // (x & m) << sh
+                        buf.or_rr64(RAX, RCX); // high-shifted | low-shifted
                     }
                 }
             }

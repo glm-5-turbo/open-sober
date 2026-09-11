@@ -2010,16 +2010,32 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
 
     // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
     // Gate (insn & (0x0f00_0000 | 0x0000_7000)): prefix 0x0f/0x2f/0x4f/0x6f SIMD
-    // register form and the SHIFTL marker (bits[14:12]==0b101 -> 0x5000). Shift
-    // = immb (bits[18:16], 0..7); esize from immh ((bits[22:19]), immh==0 => 8B).
+    // register form and the SHIFTL marker (bits[14:12]==0b101 -> 0x5000).
+    // immh = bits[22:19] (the FULL 4 bits, bit22 drops nothing), immb = bits[18:16].
+    // esize from the MSB of immh4 (esize_bytes = 1<<(fls-1) for .4S/.2D; immh4==0
+    // => 8B). shift = UInt(immh4:immb) - esize_bits (the field encodes esize+shift;
+    // e.g. shl .4S #25: immh=7,immb=1 -> (7<<3)|1 = 57, esize_bits=32, shift=25).
     if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f) && (insn & 0x0000_7000) == 0x0000_5000 {
-        let immh = (insn >> 19) & 0x7;
-        let es2 = if immh == 0 { 3 } else { immh.trailing_zeros() };
+        let immh4: u32 = (insn >> 19) & 0xf;
+        if immh4 == 0 {
+            // 8B lanes, shift = immb
+            return Inst::SimdShl {
+                rd: (insn & 0x1f) as u8,
+                rn: ((insn >> 5) & 0x1f) as u8,
+                esize: 8,
+                shift: ((insn >> 16) & 0x7) as u8,
+            };
+        }
+        let fls = 32 - immh4.leading_zeros(); // highest set bit, 1-indexed
+        let esize: u8 = 1u8 << (fls - 1);      // 1/2/4/8-byte lanes
+        let esize_bits = 8 * esize as u32;
+        let full: u32 = (immh4 << 3) | ((insn >> 16) & 0x7);
+        let shift = full.saturating_sub(esize_bits) as u8;
         return Inst::SimdShl {
             rd: (insn & 0x1f) as u8,
             rn: ((insn >> 5) & 0x1f) as u8,
-            esize: (1u8 << es2),          // 1/2/4/8-byte lanes
-            shift: ((insn >> 16) & 0x7) as u8,
+            esize,
+            shift,
         };
     }
 
@@ -5728,5 +5744,29 @@ mod logical_imm_regressions {
         match decode(0x4f7007fc) {
             Inst::SimdShr { .. } => {}
             other => panic!("sshr v28.2d,v31.2d,#16 -> SimdShr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shl_immediate_decode_shift_amount_and_esize() {
+        // shl Vd.T, Vn.T, #imm: shift = UInt(immh4:immb) - esize_bits, NOT just
+        // immb. Real encodings (aarch64-linux-gnu-as):
+        //   shl v29.4s, v29.4s, #25  = 0x4f3957bd  (immh=7,immb=1 -> field 57, 32b)
+        //   shl v31.4s, v31.4s, #25  = 0x4f3957ff
+        //   shl v28.4s, v28.4s, #25  = 0x4f39579c
+        // and the .2d case: shl v30.4s... use a 64-bit-lane variant:
+        //   shl v0.2d, v0.2d, #33  -> immh=0x9,immb=1 field=73, esize_bits=64,
+        //                              shift=9? verify against asm below.
+        match decode(0x4f3957bd) {
+            Inst::SimdShl { rd, rn, esize, shift } => {
+                assert_eq!((rd, rn, esize, shift), (29, 29, 4, 25));
+            }
+            other => panic!("shl v29.4s,#25 -> SimdShl(29,29,4,25), got {other:?}"),
+        }
+        match decode(0x4f3957ff) {
+            Inst::SimdShl { rd, esize, shift, .. } => {
+                assert_eq!((rd, esize, shift), (31, 4, 25));
+            }
+            other => panic!("shl v31.4s,#25 -> SimdShl, got {other:?}"),
         }
     }

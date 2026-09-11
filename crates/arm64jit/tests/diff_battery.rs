@@ -1781,3 +1781,26 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_simd_shl_immediate_large_shift() {
+    // Silent miscompile: `shl Vd.4S, Vn.4S, #imm` decoded the shift amount as
+    // just immb (bits 18:16) and esize from immh.trailing_zeros (dropping bit22)
+    // — so `shl v29.4s,#25` ran as a #1 shift on 1-byte lanes. gcc -O3 compiles
+    // `(unsigned int)(x<<25)` (u64 LCG then truncate per 32-bit lane) into
+    // shl.4s + uaddw; before the fix JIT returned 36832764464 vs oracle
+    // 35165044736. Guards the shift-left-immediate path: shift must be
+    // UInt(immh4:immb) - esize_bits.
+    assert_diff(
+        "shl32_immed_large",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv = 123456789ull;
+    unsigned long long x=seedv; unsigned int a[16];
+    for(int i=0;i<16;i++){x=x*1103515245ull+12345ull; a[i]=(unsigned int)(x<<25);}
+    long long s=0; for(int i=0;i<16;i++) s+=a[i]; return s;
+}
+"#,
+    );
+}
