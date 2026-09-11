@@ -4625,3 +4625,17 @@ correctness fixes (ld2/esize, W-form bitfield, shrn2, rbit mask, clz REX order,
 shl-imm decode, ubfx mask, ubfx-vs-ror). Next: keep fuzzing with more diverse
 generators (fp, structure loads, saturating arith), then libloader ELF/loader
 gaps per RECOMMENDATION order. HARD GATE unchanged (no GPU/APK/libroblox.so).
+
+## Session (Sep 11, 2026) — fuzz_jit loader-mode: PIE + reloc shapes end-to-end (100+ cases)
+
+Extended the differential fuzzer with a loader-mode: gen_globals_pie /
+gen_pie_callchain compile `-fPIE -pie -nostdlib` programs with exported
+statics, arrays, and function-pointer initializers — forcing R_AARCH64_GLOB_DAT,
+RELATIVE, and ABS64 relocations in .data.rel.ro — then run them through elfjit
+(load_elf_image + bind_image_plt + JIT) and diff against a qemu-aarch64 oracle.
+~35% of fuzz cases now take this path. Seeds 31-36: 120/120 pass, validating
+the full loader→reloc→bind→JIT chain the runtime depends on (commit 93c0ee4).
+The JIT correctness work is now broadly covered (~620 differential cases green
+total). Next (unchanged, in RECOMMENDATION order): libloader ELF/loader gaps
+then libbadcpu ISA gaps then services/auth; or more precision on the open
+co-resident two-loop widening bug. HARD GATE unchanged (no GPU/APK on this box).
