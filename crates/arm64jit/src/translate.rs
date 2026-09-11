@@ -2948,20 +2948,33 @@ pub fn translate(
                             Ok(())
                         }
                         Inst::ScalarUcvtf { rd, rn, sng } => {
-                            // ucvtf Dd, Dn : read Dn's low 64 bits as an unsigned integer
-                            // and write the double to Dd. Honest u64->f64 (Ucvtf2d lane).
+                            // ucvtf Dd/Dd or Sd,Sd : read Dn's low bits as an
+                            // UNSIGNED integer and write the float to Dd/Sd.
                             let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                            buf.mov_load64(RDX, RBX, slot(rn));
-                            buf.cvtsi2sd(0, true, RDX);
-                            buf.test_rr64(RDX, RDX);
-                            let jns = buf.jcc_rel32(0x89); // JNS (sign clear -> skip correction)
-                            buf.mov_ri64(RCX, 0x43f0_0000_0000_0000); // 2^64 as double
-                            buf.movq_xmm_r64(1, RCX);
-                            buf.addsd(0, 1);
-                            let end = buf.len();
-                            let disp = (end as i64 - (jns as i64 + 4)) as i32;
-                            buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
-                            buf.movq_store(RBX, slot(rd), 0);
+                            if sng {
+                                // S-form: low 32-bit lane as unsigned i32 -> f32.
+                                // Use src64=true signed-i64 convert on a zero-extended
+                                // RAX: max u32 (0xffffffff) is < 2^63, so an unsigned
+                                // u32 -> f32 conversion is EXACTLY the i64->f32 of the
+                                // zero-extended value (no sign/2^63 correction needed
+                                // within the u32 range).
+                                buf.mov_load32(RAX, RBX, slot(rn));
+                                buf.cvtsi2ss(0, true, RAX);   // u32(>=0 as i64) -> f32
+                                buf.movd_r32_xmm(RCX, 0);
+                                buf.mov_store32(RBX, slot(rd), RCX);
+                            } else {
+                                buf.mov_load64(RDX, RBX, slot(rn));
+                                buf.cvtsi2sd(0, true, RDX);
+                                buf.test_rr64(RDX, RDX);
+                                let jns = buf.jcc_rel32(0x89); // JNS (sign clear -> skip correction)
+                                buf.mov_ri64(RCX, 0x43f0_0000_0000_0000); // 2^64 as double
+                                buf.movq_xmm_r64(1, RCX);
+                                buf.addsd(0, 1);
+                                let end = buf.len();
+                                let disp = (end as i64 - (jns as i64 + 4)) as i32;
+                                buf.bytes[jns..jns + 4].copy_from_slice(&disp.to_le_bytes());
+                                buf.movq_store(RBX, slot(rd), 0);
+                            }
                             Ok(())
                         }
                         Inst::ScalarScvtf { rd, rn, sng } => {

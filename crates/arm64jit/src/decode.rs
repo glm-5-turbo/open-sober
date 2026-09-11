@@ -5173,11 +5173,21 @@ mod tests {
                                 }
                                 // scalar ucvtf d0, d1 = 0x7e61d820 (real libroblox audio mix): ScalarUcvtf.
                                 match decode(0x7e61d820) {
-                                    Inst::ScalarUcvtf { rd, rn, sng: _ } => {
+                                    Inst::ScalarUcvtf { rd, rn, sng } => {
                                         assert_eq!(rd, 0);
                                         assert_eq!(rn, 1);
+                                        assert!(!sng, "D-form ucvtf d0,d1 -> sng=false");
                                     }
                                     other => panic!("ucvtf d0,d1 -> {other:?}"),
+                                }
+                                // S-form: ucvtf s24,s24 = 0x7e21db18 -> sng=true
+                                match decode(0x7e21db18) {
+                                    Inst::ScalarUcvtf { rd, rn, sng } => {
+                                        assert_eq!(rd, 24);
+                                        assert_eq!(rn, 24);
+                                        assert!(sng, "S-form ucvtf s24,s24 -> sng=true");
+                                    }
+                                    other => panic!("ucvtf s24,s24 -> {other:?}"),
                                 }
                                 // vector ucvtf v2.2d,v2.2d must NOT decode as scalar.
                                 assert!(!matches!(decode(0x6e61d842), Inst::ScalarUcvtf { .. }));

@@ -1845,3 +1845,31 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_scalar_ucvtf_s_lane_from_volatile_u32() {
+    // regression: scalar ucvtf S-form (in-place int->float of a loaded raw
+    // 32-bit value) was decoded with sng=true but the translate arm ignored it
+    // and did a 64-bit D-form convert, losing the value. The `volatile u32`
+    // + `(float)s` is what gcc compiles to `ldr sX,[sp]` + `ucvtf sX,sX`.
+    assert_diff(
+        "scalar_ucvtf_s_from_volatile_u32",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned int s = 7;
+    float a0=100.0f,a1=200.0f,a2=300.0f,a3=50.0f,a4=80.0f,a5=120.0f,a6=250.0f,a7=10.0f;
+    float acc=0.0f;
+    acc += a0/3.0f + (float)s;
+    acc += a1/7.0f + (float)s;
+    acc += a2/11.0f + (float)s;
+    acc += a3/2.0f + (float)s;
+    acc += a4/5.0f + (float)s;
+    acc += a5/8.0f + (float)s;
+    acc += a6/13.0f + (float)s;
+    acc += a7/4.0f + (float)s;
+    return (long long)(acc*1000.0f);
+}
+"#,
+    );
+}
