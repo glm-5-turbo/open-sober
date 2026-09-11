@@ -1873,3 +1873,29 @@ long long entry(void){
 "#,
     );
 }
+
+// KNOWN-OPEN: vectorized fused mul-add + division reduction pipeline.
+// `acc += a[i]*b[i]+c[i]; acc += a[i]/b[i]` with a/b/c computed by shifting a
+// 64-bit LCG (ushr v.2d #40/#24/#8 + and + uzp1 + scvtf v.2d + fmla/fmul/fdiv)
+// collapses the result (jit 2^63 / ~4 vs oracle 7.78e6). Every individual op
+// isolates correctly against qemu; the interaction is not yet pinned. Keep
+// ignored so `cargo test` stays green while preserving the reproducer.
+#[test]
+#[ignore = "open FP pipeline bug: needs a per-instruction JIT tracer to pin"]
+fn diff_fmla_div_pipeline_lcg() {
+    assert_diff(
+        "fmla_div_pipeline_lcg",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv = 314159ull;
+    unsigned long long x = seedv;
+    float a[16], b[16], c[16];
+    for(int i=0;i<16;i++){ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=(float)(((x>>40)&0xffff)/1024.0); b[i]=(float)(((x>>24)&0xffff)/2048.0); c[i]=(float)(((x>>8)&0xffff)/4096.0); }
+    float acc=0.0;
+    for(int i=0;i<16;i++){ acc+=a[i]*b[i]+c[i]; }
+    return (long long)(acc*1e3);
+}
+"#,
+    );
+}
