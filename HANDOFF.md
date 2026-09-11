@@ -5162,5 +5162,30 @@ chain-TLS → `jit_run` pipeline. Two permanent gates
 
 `cargo build --workspace` clean; `cargo test --workspace` **319/0** (was 317;
 +2 loader_run). HARD GATE unchanged (no GPU/APK here). Next per RECOMMENDATION:
-true global-dynamic `__tls_get_addr` (DTPMOD/DTPREL) for older dep builds, more
-JNI fake-object backing, libbadcpu ISA.
+more JNI fake-object backing, libbadcpu ISA.
+
+## Session 32e (Sep 11, 2026, hermes-worker) — global-dynamic TLS `__tls_get_addr` closes the LAST TLS dialect (320/0)
+
+Completed the TLS relocation surface: GCC 13+ defaults to TLSDESC, but older dep
+builds forced to the classic model (`-mtls-dialect=trad
+-ftls-model=global-dynamic`) call `__tls_get_addr(&tls_index{module, offset})`
+from the PLT — and that JUMP_SLOT previously fell to the NULL/0 catch-all (guest
+called garbage). Commit `a1b1505`:
+
+- `bind_chain_tls` additionally binds `R_AARCH64_TLS_DTPMOD64` (1028 →
+  tls_index[0] = defining module's chain index) and `R_AARCH64_TLS_DTPREL64`
+  (1029 → tls_index[1] = the symbol's offset within that module's block).
+- `plt::set_chain_tls(tp, offsets)` stores process-wide TP + per-module block
+  offsets (single-threaded).
+- `host_tls_get_addr(a0=…&tls_index)` returns `TP + offsets[module] + offset`;
+  `ensure_tls_get_addr()` registers it by name in `bind_image_plt` so the
+  JUMP_SLOT binds (not the catch-all). `run_chain` seeds it before `jit_run`.
+- Permanent gate `loader_run_chain_dep_tls_global_dynamic_returns_403`
+  (dep_getx 3 + dep_gety 400 through a forced trad/gd dep).
+
+This completes **all three AArch64 TLS access models** for cross-module deps:
+initial-exec (TPREL64), TLSDESC (1031), and general-dynamic
+(DTPMOD/DTPREL via `__tls_get_addr`). The `R_AARCH64_TLS_*` gap in the memory
+ledger is now closed. `cargo build --workspace` clean; `cargo test --workspace`
+**320/0**. Next per RECOMMENDATION: more JNI fake-object backing, libbadcpu
+ISA, services/auth. HARD GATE unchanged (no GPU/APK here).
