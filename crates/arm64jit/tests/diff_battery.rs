@@ -1669,3 +1669,31 @@ long long entry(void){
 "#,
     );
 }
+
+
+#[test]
+fn diff_byte_negcount_ssubw_cmlt() {
+    // gcc -O3 vectorizes `if(sc[i]<0) count++` into cmlt -> sxtl -> ssubw (the
+    // count is accumulated by subtracting the sign-extended cmlt mask: -(-1)=+1
+    // per negative). Guards (a) SIMD integer compare-to-zero (cmlt Vd,Vn,#0)
+    // and (b) the sub-wide (ssubw/usubw) family, which the SimdAddw gate
+    // silently decoded as ADD. Also exercises uaddw/uxtl byte-array widening.
+    assert_diff(
+        "byte_negcount",
+        "-O3",
+        r#"
+long long entry(void){
+    unsigned char c[32]; signed char sc[32];
+    volatile int seed=13;
+    for(int i=0;i<32;i++){ c[i]=(unsigned char)((i*seed+3)&0xff); sc[i]=(signed char)((i*seed*3-50)&0xff); }
+    long long acc=0; long long nm=0;
+    for(int i=0;i<32;i++){ acc += (long long)c[i]; if(sc[i]<0) nm++; }
+    unsigned short u16[16];
+    for(int i=0;i<16;i++) u16[i]=(unsigned short)((i*seed*7+11)&0xffff);
+    unsigned long long s2=0;
+    for(int i=0;i<16;i++) s2 += (unsigned long long)u16[i]*3;
+    return acc + nm + (long long)s2;
+}
+"#,
+    );
+}

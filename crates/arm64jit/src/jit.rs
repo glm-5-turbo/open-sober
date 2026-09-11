@@ -4386,3 +4386,49 @@ mod diag_tmp {
         eprintln!("d0x0#1={:?}", crate::decode::decode(0x9e42fc00u32 as u64 as _));
     }
 }
+
+
+#[cfg(test)]
+mod isa_regress_tests {
+    use crate::decode::decode;
+    use crate::decode::Inst;
+    use crate::jit::{CpuState, exec_bytes};
+
+    #[test]
+    fn simd_cmpzero_cmlt_masks_negative_bytes() {
+        // cmlt v0.16b, v1.16b, #0 = 0x4e200820 (rd=0, rn=1). Per-byte all-ones
+        // mask where the signed byte<0. v1=0xf0000ffe01ff7f00 -> mem bytes
+        // [00,7f,ff,01,fe,0f,00,f0]: negatives at 0xff(=-1),0xfe(=-2),0xf0(=-16)
+        // -> mask bytes [00,00,ff,00,ff,00,00,ff] = 0xff_00_00_ff_00_ff_00_00.
+        assert!(matches!(decode(0x4e20a820), Inst::SimdCmpZero { cond: 3, esize: 1, q: true, .. }));
+        assert!(matches!(decode(0x4e209820), Inst::SimdCmpZero { cond: 0, esize: 1, q: true, .. }));
+        assert!(matches!(decode(0x4e208820), Inst::SimdCmpZero { cond: 1, .. }));
+        assert!(matches!(decode(0x6e208820), Inst::SimdCmpZero { cond: 2, .. }));
+        assert!(matches!(decode(0x6e209820), Inst::SimdCmpZero { cond: 4, .. }));
+        assert!(matches!(decode(0x4ea0a820), Inst::SimdCmpZero { esize: 4, .. }));
+        let code = [0x20u8, 0xa8, 0x20, 0x4e, 0xc0, 0x03, 0x5f, 0xd6]; // cmlt v0,v1,#0 = 0x4e20a820 ; ret
+        let mut st = CpuState::new();
+        st.v[2] = 0xf000_0ffe_01ff_7f00; // v1
+        st.v[0] = 0; // v0 clean
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.v[0], 0xff0000ff00ff0000 & 0xffff_ffff_ffff_ffff,
+            "cmlt v0,v1,#0 mask (neg bytes all-ones)");
+    }
+
+    #[test]
+    fn simd_ssubw_subtracts_widened_not_adds() {
+        // ssubw v0.4s, v0.4s, v1.4h = 0x0e613000 (bit13 set => sub-wide).
+        // saddw v0.4s,v0.4s,v1.4h = 0x0e611000 (bit13 clear => add-wide).
+        assert!(matches!(decode(0x0e613000), Inst::SimdAddw { sub: true, .. }));
+        assert!(matches!(decode(0x0e611000), Inst::SimdAddw { sub: false, .. }));
+        let code = [0x00u8, 0x30, 0x61, 0x0e, 0xc0, 0x03, 0x5f, 0xd6]; // ssubw v0,v0,v1 ; ret
+        let mut st = CpuState::new();
+        st.v[0] = (20u64 << 32) | 10;      // v0 4s lanes: [10,20,30,40]
+        st.v[1] = (40u64 << 32) | 30;
+        st.v[2] = 0x0004000300020001u64; // v1 4h (low 8 bytes): [1,2,3,4]
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        // v0[i] = [10-1,20-2,30-3,40-4] = [9,18,27,36]
+        assert_eq!(st.v[0], (18u64 << 32) | 9, "ssubw lanes 0-1");
+        assert_eq!(st.v[1], (36u64 << 32) | 27, "ssubw lanes 2-3 (subtract, not add)");
+    }
+}

@@ -310,7 +310,7 @@ pub enum Inst {
     // `upper` (Q=1 / saddw2·uaddw2): the narrow source is the UPPER half of
     // Vm (bytes 8..15), not the lower half — gcc vectorizes string/math loops
     // with saddw then saddw2 to accumulate both halves.
-    SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8, upper: bool },
+    SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8, upper: bool, sub: bool },
     // ---- SIMD vector bitwise AND/ORR/EOR/BIC (128b lanes) ----
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
@@ -386,6 +386,13 @@ pub enum Inst {
     // ---- SIMD FP compare-to-zero: fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd.T, Vn.T, #0.0 ----
     // op 0=eq 1=gt 2=ge 3=lt 4=le. Per-lane result = all-ones if Vn op 0 else 0.
     VecFpCmpZero { rd: u8, rn: u8, op: u8, esize: u8, q: bool },
+    // ---- SIMD integer compare-to-zero: cmeq/cmgt/cmge/cmlt/cmle Vd.T,Vn.T,#0 ----
+    // (two-register misc). top byte in {0x0e,0x2e,0x4e,0x6e} (Q=bit30, U=bit29);
+    // byte2 bits[15:10] in {0x22 cmgt, 0x26 cmeq, 0x2a cmlt}; esize = 1<<bits[23:22]
+    // (8B/8H/4S/2D); U toggles gt->ge and eq->le. Each lane -> all-ones if the
+    // signed/int compare against literal 0 holds, else 0. cond: 0=eq,1=gt,2=ge,
+    // 3=lt,4=le. (encodings from aarch64-linux-gnu-as, objdump-verified)
+    SimdCmpZero { rd: u8, rn: u8, esize: u8, q: bool, cond: u8 },
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
         WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool, upper: bool },
         // ---- SIMD add/sub-long widening: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T ----
@@ -1177,7 +1184,30 @@ pub fn decode(insn: u32) -> Inst {
     // half when set (fcvtn2). The byte2-0x21 (half-precision) forms are NOT
     // matched here and stay Unsupported. Placed before VecIntToFp/SimdMull
     // (which would otherwise swallow these as int->fp/widen-mul).
-    if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
+        // ---- SIMD integer compare-to-zero: cmeq/cmgt/cmge/cmlt/cmle Vd.T,Vn.T,#0 ----
+    // top byte {0x0e,0x2e,0x4e,0x6e} (U=bit29 toggles gt->ge / eq->le, Q=bit30),
+    // byte2 bits[15:10] in {0x22 cmgt, 0x26 cmeq, 0x2a cmlt}, bit26 set.
+    // esize = 1 << bits[23:22] (8B/8H/4S/2D). Per-lane all-ones-or-0 mask.
+    if matches!((insn >> 24) & 0x3f, 0x0e | 0x2e | 0x4e | 0x6e)
+        && (insn & 0x0400_0000) != 0
+        && matches!((insn >> 10) & 0x3f, 0x22 | 0x26 | 0x2a)
+        && (insn & 0x0001_0000) == 0 // bit16 set = FP frint/tbl family, NOT int cmeq/cmlt
+    {
+        let cond = match (insn >> 12) & 0xf {
+            8 => if (insn & 0x2000_0000) != 0 { 2 } else { 1 }, // cmge/cmgt
+            9 => if (insn & 0x2000_0000) != 0 { 4 } else { 0 }, // cmle/cmeq
+            _ => 3, // cmlt
+        };
+        let size = (insn >> 22) & 3;
+        return Inst::SimdCmpZero {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            esize: (1u8 << size),
+            q: (insn >> 30) & 1 == 1,
+            cond,
+        };
+    }
+if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         return Inst::VecFcvtl { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1 };
     }
     if matches!(insn & 0xffff_fc00, 0x0e61_6800 | 0x4e61_6800) {
@@ -1543,9 +1573,9 @@ pub fn decode(insn: u32) -> Inst {
     // ---- integer multiply/divide register (madd/msub/udiv/sdiv) ----
     // top 0x1a/0x9a (DIV) or 0x1b/0x9b (MUL). Masked base: 0x1ac00000 (div),
     // 0x1b000000 (mul). sf = bit31. signed: div bit17 (1=sdiv), mul bit15 (1=msub).
-    if insn & 0x7ff0_0000 == 0x1ac0_0000 || insn & 0x7ff0_0000 == 0x1b00_0000 {
+    if insn & 0x7fe0_0000 == 0x1ac0_0000 || insn & 0x7fe0_0000 == 0x1b00_0000 {
         let sf = (insn >> 31) & 1 == 1;
-        let div = insn & 0x7ff0_0000 == 0x1ac0_0000;
+        let div = insn & 0x7fe0_0000 == 0x1ac0_0000;
         let signed = if div {
             b(insn, 10, 10) == 1 // SDIV vs UDIV: bit10=1 => SDIV (assembler-verified: sdiv w1,w3,w5=0x1ac50c61 bit10=1, udiv=0x1ac50861 bit10=0)
         } else {
@@ -1866,6 +1896,7 @@ pub fn decode(insn: u32) -> Inst {
             sign: ((insn >> 29) & 1) == 0,
             esrc,
             upper: (insn >> 30) & 1 == 1, // Q=1 => saddw2/uaddw2 (upper half of Vm)
+            sub: (insn & 0x2000) != 0,     // bit13: ssubw/usubw (add-wide is bit13 clear)
         };
     }
 

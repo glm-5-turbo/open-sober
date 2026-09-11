@@ -3759,12 +3759,13 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
-                Inst::SimdAddw { rd, rn, rm, sign, esrc, upper } => {
+                Inst::SimdAddw { rd, rn, rm, sign, esrc, upper, sub } => {
                     // uaddw/saddw Vd.T, Vn.T, Vm.(T/2): Vd[i] = Vn[i] + extend(Vm_hi)
                     // narrow source element = esrc bytes, dest element = 2*esrc.
                     // `upper` (saddw2/uaddw2): the narrow src is the UPPER 64 bits
                     // of Vm (byte 8..15), not the lower — a second loop pass
-                    // accumulates the other half.
+                    // accumulates the other half. `sub` (ssubw/usubw, bit13):
+                    // Vd[i] = Vn[i] - extend(Vm[i]) -- the add/sub-wide family.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     let der = (esrc as i32) * 2;      // dest element width
                     let lanes = 8usize >> esrc.trailing_zeros() as usize;
@@ -3790,7 +3791,11 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                         if esrc == 4 && sign {
                             buf.movsxd_r64_r32(RCX, RCX);
                         }
-                        buf.add_rr64(RAX, RCX);
+                        if sub {
+                            buf.sub_rr64(RAX, RCX);
+                        } else {
+                            buf.add_rr64(RAX, RCX);
+                        }
                         match der {
                             4 => buf.mov_store32(RBX, dst, RAX),
                             8 => buf.mov_store64(RBX, dst, RAX),
@@ -4564,6 +4569,47 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 buf.cvtsd2ss(0, 0); // narrow f32 in xmm0 low
                 buf.movd_r32_xmm(RAX, 0); // low32 -> RAX
                 buf.mov_store32(RBX, dst + doff + lane * 4, RAX); // store f32
+            }
+            Ok(())
+        }
+        Inst::SimdCmpZero { rd, rn, esize, q, cond } => {
+            // cmeq/cmgt/cmge/cmlt/cmle Vd.T,Vn.T,#0: each lane -> all-ones if the
+            // signed int compare against literal 0 holds, else 0. cond: 0=eq,
+            // 1=gt, 2=ge, 3=lt, 4=le. Signed conds sign-extend the lane so the
+            // x86 setg/setge/setl/setle on the 64-bit value compare correctly.
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let lanes = if q { 16 / esize as u32 } else { 8 / esize as u32 } as u32;
+            let e = esize as i32;
+            let signed = cond != 0;
+            for l in 0..lanes {
+                let off = (l as i32) * e;
+                if e == 8 {
+                    buf.mov_load64(RAX, RBX, src + off);
+                } else if signed {
+                    match e {
+                        4 => { buf.mov_load32(RAX, RBX, src + off); buf.movsxd_r64_r32(RAX, RAX); }
+                        2 => buf.movsx_word_mem(RAX, RBX, src + off),
+                        _ => buf.movsx_byte_mem(RAX, RBX, src + off),
+                    }
+                } else {
+                    match e {
+                        4 => buf.mov_load32(RAX, RBX, src + off),
+                        2 => buf.movzx_word_mem(RAX, RBX, src + off),
+                        _ => buf.movzx_byte_mem(RAX, RBX, src + off),
+                    }
+                }
+                buf.test_rr64(RAX, RAX);
+                let cc = match cond { 0 => 4, 1 => 0xf, 2 => 0xd, 3 => 0xc, _ => 0xe };
+                buf.setcc_rm8(cc, RAX);       // AL = 0/1
+                buf.movzx_r32_r8(RAX, RAX);   // RAX = 0/1
+                buf.neg_r64(RAX);             // 0 or all-ones
+                match e {
+                    8 => buf.mov_store64(RBX, dst + off, RAX),
+                    4 => buf.mov_store32(RBX, dst + off, RAX),
+                    2 => buf.mov_store16(RBX, dst + off, RAX),
+                    _ => buf.mov_store8(RBX, dst + off, RAX),
+                }
             }
             Ok(())
         }
