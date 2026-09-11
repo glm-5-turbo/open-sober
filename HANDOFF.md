@@ -2399,3 +2399,65 @@ FMOD guard, root-causing the nested guest-`bl`-in-inter-inlined-block return reg
 `bl` to the once-routine (and generally guest `bl` whose callee contains diverted imports) through the
 dispatcher instead of inlining — i.e. treat a `bl` whose translatable body itself has out-of-block PLT mutex
 calls like `is_host_plt_stub`: push it to the stub table + `force_stubs`, not the inlined frontier.
+
+---
+## Session (Sep 11, 2026) — divert guest bl-to-import-bearing-callee through dispatcher (FMOD second-guard) DONE
+
+Picked up the HANDOFF's "next task": divert guest `bl` to the once-routine (and any
+import-bearing callee) through the dispatcher. Commit `10ddb7a` (on `dev`).
+
+### Environment note (fresh box)
+- `cargo build --workspace` ✓, `cargo test --workspace` ✓ all green (67 arm64jit +
+  5 + 16 libloader incl. the two android-layout tests, + others; 0 failures).
+- `cargo test --workspace` was already green for the libloader android layout tests
+  on this box: commit `8b72828` had already landed the deterministic fix (per-call
+  unique temp root) plus `ensure_dir_android` already does `create_dir_all` before
+  `set_permissions`, so the worker-handoff's "permission-set before parent dirs"
+  frame predates it. Verified passing.
+- The real `libroblox.so` (100 MB, `~/.cache/open-sober/libs/` on the old box) is
+  NOT present here and there is no APK/GSI/GPU, so the boot frontier can only be
+  exercised at the unit-test level in this session.
+
+### What landed (all in `crates/arm64jit/src/jit.rs`)
+1. `word_at(image, base, addr)` — bounds-checked 32-bit image read (replaces the
+   raw-pointer derefs `is_host_plt_stub` used to do on mapped guest==host memory).
+2. `is_host_plt_stub(image, base, addr)` converted to slice-based reads.
+   **Root-caused + fixed two real bugs the new tests exposed:**
+   - Stale `if addr < 0x1000 { return false; }` guard left over from the
+     pointer-based code — it wrongly rejected legitimate PLT stubs at low
+     synthetic addresses (the unit-test stub images live at 0x40), so
+     `body_contains_host_plt_bl` never saw the import. Removed; `word_at` is the
+     safety net now.
+   - `body_contains_host_plt_bl` was *following guest `bl` calls into their callee
+     bodies*, making the caller of an import-bearing callee transitively
+     import-bearing too (test asserted the caller is NOT). Now it only detects
+     **direct** host-import `bl`s in the entry's own body and lets the linear walk
+     fall through a guest `bl`. This is the right model for the bounded compiler:
+     transitive follow would mark every caller up the whole call graph as
+     import-bearing and defeat bounded compilation entirely.
+3. `compile_image_bounded` now diverts (forces a dispatcher-return stub, memoized
+   per target) any guest `bl` whose callee body itself calls a host import — the
+   FMOD once-routine (`2678068` GameActivity init, which calls
+   `pthread_mutex_lock@plt` etc.) regression is specifically this shape: inlining
+   it a second time in a different huge block regressed the inner import
+   diversion, so it returned "not done" (w0=1) and the caller branched into the
+   `.bss` guard `0x68c7518`.
+
++4 tests: `host_plt_stub_detected_from_image_slice`,
+`body_contains_host_plt_bl_follows_call_graph`,
+`guest_bl_to_import_bearing_callee_diverts_through_dispatcher` (run caller block
+⇒ `CpuState.pc==0x20` callee, `x30==0x04` link — real dispatcher re-entry, not an
+inline call), `guest_bl_to_import_free_callee_still_inlines`. **67/67 arm64jit,
+0 failures.** `cargo build --workspace` clean (warnings are pre-existing decode.rs
+dead-code / rustfmt churn).
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. JNI function-table stubs (`crates/arm64jit/src/jni.rs`): fill high-value slots
+   that must return real values when the guest boot path reaches them
+   (GetStaticMethodID, NewStringUTF, RegisterNatives, FindClass) with host
+   thunk-backed implementations + unit tests. This is the next name-surface the
+   JIT boot hits once the divert fix lets `JNI_OnLoad` progress.
+2. ELF/loader (`libloader`) gaps, then `libbadcpu` ISA gaps, then services/auth.
+3. Real-binary/GPU boot verification remains blocked until `libroblox.so` (or an
+   APK) and a GPU host are available — capture as `elfjit ... 0x1f0db20 --jni`
+   log on a capable host (HARD GATE).
