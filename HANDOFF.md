@@ -4740,3 +4740,18 @@ ground_truth) + moved the flow canary from #[ignore]d to a real regression
 (diff_fmla_div_pipeline_lcg). Sensitivity-proven both ways (695 vs 7777753).
 cargo test --workspace 293/0. This is the 10th JIT correctness fix this
 campaign; the fma_chain fuzzer is responsible for surfacing it.
+
+## Session (Sep 11, 2026) — RELR e2e test + campaign wrap (294/0, ~1680 fuzz cases)
+
+The loader's DT_RELR path (packed-relative relocations, tag 0x23) had a
+unit-tested decoder but the discovery wire-up (walk PT_DYNAMIC tags -> find the
+stream -> decode -> route back as R_AARCH64_RELATIVE) had no test. Added an
+e2e test that builds a minimal ELF with a RELR-only PT_DYNAMIC on disk and
+asserts read_elf_relocations returns the right offsets/info. This is the last
+unvalidated reloc path a real Android .so would hit (recent lld emits RELR by
+default).
+
+Known gap for next sessions: R_AARCH64_TLS_* (TPREL/DTPREL) are not handled at
+all by the loader/JIT. Real TLS needs a host-side per-thread guest TLS area
+(tp/x28 slot), an architected feature — needs the real binary to validate.
+cargo test --workspace 294/0, build clean.
