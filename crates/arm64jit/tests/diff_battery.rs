@@ -1036,6 +1036,18 @@ long long entry(void){
 }
 "#,
     );
+    assert_diff(
+        "mix_hash_ubfiz",
+        "-O2",
+        r#"
+unsigned long long entry(void){
+    unsigned long long h=0xdeadbeefcafebabeULL;
+    unsigned char msg[16]; for(int i=0;i<16;i++) msg[i]=(unsigned char)(i*31+h);
+    for(int i=0;i<16;i++){ h ^= (unsigned long long)msg[i] << ((i%8)*8); h = h*31ULL + 17; }
+    return h;
+}
+"#,
+    );
 }
 
 #[test]

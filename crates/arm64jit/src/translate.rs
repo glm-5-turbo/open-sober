@@ -1532,11 +1532,15 @@ pub fn translate(
                 // LSL (alias) : shift left by (bits-1-imms)
                 let sh = ((bits - 1 - imms) & (bits - 1)) as u8;
                 buf.shl_ri8(RAX, sh);
-            } else if imms + immr + 1 == bits {
+            } else if imms + immr + 1 == bits && !(immr > imms) {
                 // ROR (rotate right): the field spans the whole register, so the
                 // result is a pure rotate right by `imms`. (Verified against two
                 // real `ror rd, rn, #imm` words from libroblox: 0x139652d7 /
-                // 0x138f51eb, both ror #20 carry rotation in imms.)
+                // 0x138f51eb, both ror #20 carry rotation in imms.) A genuine
+                // rotate is immr<=imms; ubfiz/sbfiz (immr>imms) also satisfy
+                // imms+immr+1==bits when lsb==width (e.g. `ubfiz w4,w2,#3,#3`,
+                // immr=29,imms=2, 29+2+1=32) and must go to the SHIFT branch
+                // below, not rotate (mix-hash -O2 returned garbage from this).
                 buf.ror_ri8(RAX, (imms & (bits - 1)) as u8);
             } else if immr > imms {
                 // UBFIZ (logical) / SBFIZ (arith): zero- or sign-extending

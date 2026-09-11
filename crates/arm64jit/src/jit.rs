@@ -1933,6 +1933,35 @@ mod tests {
     }
 
     #[test]
+    fn ubfiz_immr_gt_imms_does_not_rotate() {
+        // Regression: `ubfiz w4,w2,#3,#3` (immr=29,imms=2 — 29+2+1==32==bits)
+        // was caught by the UBFM/SBFM **ROR** shortcut `imms+immr+1==bits`
+        // before reaching the UBFIZ shift branch, so it rotated by imms=2
+        // instead of left-extending (w2&7)<<3. A genuine rotate (ror) has
+        // immr<=imms; ubfiz/sbfiz have immr>imms. Named bfi semantic checks:
+        // the -O2 mix-hash loop `h ^= msg[i] << ((i%8)*8)` emitted this exact
+        // ubfiz and returned garbage (13680984341602923654 vs 13072640789477207222).
+        // ubfiz w4, w2, #3, #3 = 0x531d0844 => w4 = (w2 & 7) << 3.
+        let mut st = CpuState::new();
+        st.x[2] = 13; // (13 & 7) << 3 = 5*8 = 40
+        let code = [
+            0x44, 0x08, 0x1d, 0x53, // ubfiz w4, w2, #3, #3
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[4] & 0xffff_ffff, 40, "ubfiz w4,w2,#3,#3 of 13 -> 40 (not a rotate)");
+        // also cover a few more widths: ubfiz x4,x0,#7,#32 = 0xd3797c04
+        let mut st2 = CpuState::new();
+        st2.x[0] = 0x1; // (1 & mask32) << 7 = 0x80
+        let code2 = [
+            0x04, 0x7c, 0x79, 0xd3, // ubfiz x4,x0,#7,#32
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let _ = exec_bytes(&mut st2, &code2, 0).expect("exec");
+        assert_eq!(st2.x[4], 0x80, "ubfiz x4,x0,#7,#32 of 1 -> 0x80");
+    }
+
+    #[test]
     fn ld4_st4_decode_to_structure_deinterleave() {
         // Regression: the structure-load gate folded opcode 0b0000 (ld4/st4)
         // into the single-register consecutive path (0x7|0x0 => nreg 1), so
