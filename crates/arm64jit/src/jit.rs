@@ -947,7 +947,19 @@ pub fn compile_image_bounded(
                 break; // out of bounds; translate.rs will error if truly needed
             }
             if host_of_guest.contains_key(&cur) {
-                break; // reached already-emitted code (loop back-edge)
+                // Loop back-edge / already-emitted tail: emit an unconditional
+                // jump to the already-emitted host offset so a loop re-executes
+                // its body, instead of falling through to the shared epilogue
+                // `ret`. Without this every loop body "fell off the end" and
+                // returned / re-dispatched after a single pass (broke loops —
+                // diverged, corrupted pc, or hung re-compiling).
+                let disp_off = buf.jmp_rel32();
+                fixups.push(crate::translate::Fixup {
+                    target_pc: cur,
+                    disp_off,
+                    cc: 0, // unconditional jmp (E9)
+                });
+                break;
             }
             let off = (cur - base) as usize;
             let word =
@@ -1197,6 +1209,45 @@ mod tests {
         let r = exec_bytes(&mut st, &code, 0).expect("exec");
         assert_eq!(buf[0], 3, "fcvtzs d0,d0 stores the int 3, not the float 3.5");
         assert_eq!(r, 3, "x0 = converted integer");
+    }
+
+    #[test]
+    fn loop_back_edge_reiterates_body() {
+        // Regression: a guest `b.lt` (and unconditional `b` forward) forming a
+        // loop must iterate in-block, not fall through to the epilogue `ret`
+        // after one pass. sum(0..5) = 10. Assembler-verified bytes:
+        //   sub sp,#0x10; str xzr,[sp]; str xzr,[sp,#8]; b Ltest; Lbody:
+        //   ldr x0,add; str; ldr; add #1; str; Ltest: ldr; cmp #5; b.lt Lbody;
+        //   ldr x0[s=s]; add sp; ret
+        let insn: &[u32] = &[
+            0xd10043ff, 0xf90003ff, 0xf90007ff, 0x14000008, // entry
+            0xf94003e0, 0xf94007e1, 0x8b010000, 0xf90003e0, // Lbody part1
+            0xf94007e0, 0x91000400, 0xf90007e0, //            Lbody part2
+            0xf94007e0, 0xf100141f, 0x54fffeeb, //            Ltest cmp/b.lt
+            0xf94003e0, 0x910043ff, 0xd65f03c0, //            exit
+        ];
+        let mut code = Vec::new();
+        for w in insn {
+            code.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut st = CpuState::new();
+        let stack = Box::leak(vec![0u8; 512].into_boxed_slice());
+        st.x[31] = stack.as_ptr() as u64 + 256; // sp
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 10, "loop sum(0..5) == 10");
+    }
+
+    #[test]
+    fn movk_merges_into_existing_register() {
+        // Regression: `movk x0,#hi,lsl#16` must MERGE into bits[16..32],
+        // preserving the low 16 from a preceding `movz`. A full replace broke
+        // every multi-part constant: movz 0x8bb1 ; movk 0x2 lsl#16 must be
+        // 0x28bb1, but came out 0x20000.  movz x0,#0x8bb1 = 0xd2917620 ;
+        // movk x0,#0x2,lsl#16 = 0xf2a00040 ; ret = 0xd65f03c0
+        let code = [0x20u8, 0x76, 0x91, 0xd2, 0x40, 0x00, 0xa0, 0xf2, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0x28bb1, "movz 0x8bb1 then movk 0x2 lsl#16 == 0x28bb1");
     }
 
     #[test]
