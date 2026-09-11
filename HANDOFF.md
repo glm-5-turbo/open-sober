@@ -4596,3 +4596,32 @@ contamination at bits 32-63 of acc lanes when two widen loops share a block)
 and is independent of all six fixes. Next: keep sweeping SIMD/FP shapes; then
 libloader ELF/loader gaps per RECOMMENDATION order. HARD GATE unchanged (no
 GPU/APK/libroblox.so on this box).
+
+## Session (Sep 11, 2026) — randomized differential fuzz: +2 JIT fixes (289/0, 165 fuzz cases green)
+
+Extended the elfjit-vs-qemu-aarch64 differential harness into a randomized
+fuzzer (`fuzz_jit.py` in /tmp/combw) generating unrolled scalar/SIMD shift/xor/
+byte/fp programs with runtime-dependent LCG inputs. Found TWO more silent JIT
+bugs, both in `Inst::BitField` (the general-extract path):
+
+1. UBFM extract mask SIGN-EXTENSION: for a field width making the mask >= 2^31
+   (ubfx x,#16,#32 -> mask 0xffffffff) `and_ri64(RAX, mask as u32)` emitted a
+   64-bit AND with a sign-extended imm32 => mask became 0xffffffffffffffff
+   (no-op), leaking the high 32 bits of the shifted value into the result
+   ((x>>16) -> 8234290418553910946 vs 85047753507696). Route masks >0x7fffffff
+   through mov_ri64+and_rr64. Commit 750457a.
+2. UBFM mis-decoded as ROR: `imms+immr+1==bits` is NOT a rotate discriminator —
+   genuine ror is an EXTR alias (-> Inst::Extr), so any UBFM matching it
+   (ubfx x,#16,#32: immr=16,imms=47, field to the top bit) is a plain extract.
+   The old branch ran ror_ri8(imms), corrupting extracts. Removed it; words
+   fall through to the extract path. Genuine ror x,#17 still passes.
+
+Regression: diff_ubfx_masks_upper_bits_and_is_not_ror (u32-width extract +
+extract-with-genuine-ror), sensitivity-proven both ways. cargo build clean;
+cargo test --workspace 289/0. Randomized fuzz seeds 1-4: 165/165 match qemu.
+
+Combined with the previous sweep this cycle has produced EIGHT verified JIT
+correctness fixes (ld2/esize, W-form bitfield, shrn2, rbit mask, clz REX order,
+shl-imm decode, ubfx mask, ubfx-vs-ror). Next: keep fuzzing with more diverse
+generators (fp, structure loads, saturating arith), then libloader ELF/loader
+gaps per RECOMMENDATION order. HARD GATE unchanged (no GPU/APK/libroblox.so).
