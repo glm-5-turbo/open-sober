@@ -19,6 +19,7 @@ use crate::jit::{
 };
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Allocates thunk slots and remembers name -> slot addr.
@@ -821,47 +822,183 @@ fn store_real(name: &str, real: *mut libc::c_void) {
 }
 
 /// Host bridge fn: pthread_mutex_lock/mutex_unlock over the guest mutex.
+///
+/// We implement Android bionic's NORMAL (non-PI, non-recursive, non-errorcheck)
+/// mutex protocol BYTE-EXACT on the guest's own 16-bit `state` word (offset 0
+/// of the 44-byte modern NDK r28c `pthread_mutex_t`), so guest threads that
+/// contend/release via our bridge rendezvous correctly with each other.
+///
+/// Bionic `pthread_mutex_internal_t` (__LP64__): `_Atomic(uint16_t) state` @0,
+/// `uint16_t __pad` @2, `atomic_int owner_tid` @4, `char __reserved[28]` @8.
+/// The 16-bit `state` packs: bits 1:0 lock state (0=UNLOCKED, 1=LOCKED_
+/// UNCONTENDED, 2=LOCKED_CONTENDED), bits 12:2 recursive counter, bit 13 shared,
+/// bits 15:14 type (0=NORMAL, 1=RECURSIVE, 2=ERRORCHECK, 3=PI).
+///
+/// NORMAL protocol (from AOSP pthread_mutex.cpp NonPI::NormalMutexLock/Unlock):
+///   lock:  CAS state 0->1 (acquire). On failure loop:
+///          exchange state -> 2 (acquire); if prev was 0 (UNLOCKED) acquired,
+///          else futex_wait(&state, 2, PRIVATE unless shared).
+///   unlock: exchange state -> 0 (release); if prev was 2 (CONTENDED), wake 1.
+///
+/// On x86-64 the futex address is the 32-bit word covering the 16-bit state +
+/// the zero `__pad` (16-bit @2), which Bionic relies on being 0 (that's exactly
+/// why `__pad` exists). glibc's pthread_mutex_* can NOT be used on a bionic
+/// mutex (different layout/encoding) — that is the whole cross-ABI wall — so we
+/// never hand a NORMAL bionic mutex to glibc. Non-NORMAL mutexes (type!=0)
+/// still route to the glibc bridge as before (boot currently only contends on
+/// NORMAL).
 extern "C" fn host_mutex_lock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
-    // NOTE: we deliberately keep the glibc path here (not a hand-rolled bionic
-    // protocol). The blocking mutex's guest `state` decoded as 0x2 ("locked,
-    // waiters") in a u32 probe, but NDK r28c (modern bionic, __LP64__) stores
-    // the lock `state` as a SEPARATE _Atomic(uint16_t) at offset 0 with the
-    // owner_tid at offset 4 and a 28-byte reserved tail — a different layout
-    // than a packed 32-bit value word. A byte-exact bionic reimplementation
-    // (ROS-A contention protocol: state 0/1/2 + futex wait/wake on the 16-bit
-    // field) is the correct fix but must be written against that real layout
-    // and validated by a two-thread rendezvous test BEFORE being wired in. We
-    // tried an optimistic "CAS 0->1 only" version here and reverted: it would
-    // race with the guest's own inline fast-path atomics and isn't proven.
-    // glibc's blocking acquire keeps the boot stable-idle (exit 124, no crash)
-    // while the cross-ABI mismatch (glibc can't parse the bionic state word)
-    // is documented; see host_mutex_unlock / STATUS for the concrete next fix.
-    let f = *REAL_LOCK.get().expect("pthread_mutex_lock resolved");
+    let m = a0 as *mut u8;
     if std::env::var_os("JIT_TRACE").is_some() {
         let bionic_word: u32 = if a0 != 0 {
-            unsafe { core::ptr::read_unaligned((a0 as *const u8) as *const u32) }
+            unsafe { core::ptr::read_unaligned(m as *const u32) }
         } else {
             0
         };
         let gpc = crate::jit::current_guest_pc();
         let self_tid = crate::jit::current_tid();
         eprintln!(
-            "[t={self_tid}] [mutex_lock] {a0:#x} bionic_word=0x{bionic_word:08x} state=0x{:x} gpcreq={gpc:#x}",
-            bionic_word & 0xffff
+            "[t={self_tid}] [mutex_lock] {a0:#x} bionic_word=0x{bionic_word:08x} state=0x{:x} type=0x{:x} gpcreq={gpc:#x}",
+            bionic_word & 0x3, (bionic_word >> 14) & 0x3
         );
     }
-    let r = unsafe {
-        sanitize_mutex(a0 as *mut u8);
-        f(a0 as *mut u8)
-    };
+    let r = unsafe { bionic_mutex_lock(m) };
     r as u64
 }
 extern "C" fn host_mutex_unlock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
-    let f = *REAL_UNLOCK.get().expect("pthread_mutex_unlock resolved");
-    unsafe {
-        sanitize_mutex(a0 as *mut u8);
-        f(a0 as *mut u8) as u64
+    let m = a0 as *mut u8;
+    let r = unsafe { bionic_mutex_unlock(m) };
+    r as u64
+}
+
+// ---- State-field constants & helpers for the bionic NORMAL mutex -----------
+const BIONIC_STATE_LOCKED_UNCONTENDED: u16 = 1;
+const BIONIC_STATE_LOCKED_CONTENDED: u16 = 2;
+const BIONIC_SHARED_MASK: u16 = 0x2000; // bit 13
+const BIONIC_TYPE_MASK: u16 = 0xC000; // bits 15:14; 0 == NORMAL
+
+/// True iff this mutex is a plain NORMAL Non-PI mutex (the only layout we
+/// implement byte-exact). Reads the packed state word to check the type bits.
+unsafe fn bionic_is_normal(m: *const u8) -> bool {
+    if m.is_null() {
+        return false;
     }
+    let state = core::ptr::read_unaligned(m as *const u16);
+    (state & BIONIC_TYPE_MASK) == 0 // type bits == NORMAL
+}
+
+/// The 32-bit futex word covering state+__pad (Bionic relies on __pad==0).
+unsafe fn bionic_state_ptr(m: *const u8) -> *const u32 {
+    m as *const u32
+}
+
+/// Bionic `__futex_wait_ex` / `__futex_wake_ex` with PRIVATE unless shared.
+/// (PRIVATE flag = 128; not all libc versions export FUTEX_*_PRIVATE.)
+fn futex_wait(addr: *const u32, val: u32, shared: bool) {
+    let op = if shared { 0 /* FUTEX_WAIT */ } else { 128 /* FUTEX_WAIT_PRIVATE */ };
+    let _ = unsafe { libc::syscall(libc::SYS_futex, addr, op, val) };
+}
+fn futex_wake(addr: *const u32, n: i32, shared: bool) {
+    let op = if shared { 1 /* FUTEX_WAKE */ } else { 129 /* FUTEX_WAKE_PRIVATE */ };
+    let _ = unsafe { libc::syscall(libc::SYS_futex, addr, op, n) };
+}
+
+/// Bionic NonPI::NormalMutexLock against the guest 16-bit state word.
+/// # Safety
+/// `m` must point to a guest `pthread_mutex_t` whose first 4 bytes are
+/// writable; it must be a NORMAL (type bits 0) mutex or this returns EPROTO.
+unsafe fn bionic_mutex_lock(m: *mut u8) -> i32 {
+    if m.is_null() {
+        return libc::EINVAL;
+    }
+    if !bionic_is_normal(m) {
+        // Non-NORMAL (recursive/errorcheck/PI) — fall back to the glibc bridge.
+        return unsafe { glibc_mutex_lock(m) };
+    }
+    let state = m as *mut u16;
+    let shared = (unsafe { core::ptr::read_unaligned(state) } & BIONIC_SHARED_MASK) != 0;
+    let word = unsafe { &*(m as *const AtomicU16) };
+
+    // Fast path: CAS 0 -> 1, further coloured by shared.
+    let unlocked = if shared { BIONIC_SHARED_MASK } else { 0 };
+    let locked_uncontended = unlocked | BIONIC_STATE_LOCKED_UNCONTENDED;
+    let locked_contended = unlocked | BIONIC_STATE_LOCKED_CONTENDED;
+
+    if word.compare_exchange_weak(
+        unlocked,
+        locked_uncontended,
+        Ordering::Acquire,
+        Ordering::Relaxed,
+    ) == Ok(unlocked)
+    {
+        return 0;
+    }
+
+    // Contention: exchange state -> locked_contended; if we got UNLOCKED we won,
+    // else futex-wait until woken (the holder's unlock will exchange 0 and wake
+    // us if it saw CONTENDED). Matches bionic's `while exchange != unlocked`.
+    loop {
+        let prev = word.swap(locked_contended, Ordering::Acquire);
+        if prev == unlocked {
+            return 0;
+        }
+        futex_wait(bionic_state_ptr(m), locked_contended as u32, shared);
+    }
+}
+
+/// Bionic NonPI::NormalMutexUnlock against the guest 16-bit state word.
+unsafe fn bionic_mutex_unlock(m: *mut u8) -> i32 {
+    if m.is_null() {
+        return libc::EINVAL;
+    }
+    if !bionic_is_normal(m) {
+        return unsafe { glibc_mutex_unlock(m) };
+    }
+    let shared = (unsafe { core::ptr::read_unaligned(m as *const u16) } & BIONIC_SHARED_MASK) != 0;
+    let unlocked = if shared { BIONIC_SHARED_MASK } else { 0 };
+    let locked_contended = unlocked | BIONIC_STATE_LOCKED_CONTENDED;
+    let word = unsafe { &*(m as *const AtomicU16) };
+
+    let prev = word.swap(unlocked, Ordering::Release);
+    if prev == locked_contended {
+        // Waiters exist: wake exactly one (they re-swap to CONTENDED on sleep,
+        // so the account is self-perpetuating, per bionic's comment).
+        futex_wake(bionic_state_ptr(m), 1, shared);
+    }
+    0
+}
+
+/// glibc lock/unlock fallback for non-NORMAL mutexes (unchanged behavior).
+/// Resolves the real glibc entry point lazily if the OnceLock isn't populated
+/// yet (direct unit-test calls), so it never panics on an un-resolved slot.
+unsafe fn glibc_mutex_lock(m: *mut u8) -> i32 {
+    let f: MutexLockFn = match REAL_LOCK.get() {
+        Some(f) => *f,
+        None => resolve_glibc_pthread("pthread_mutex_lock"),
+    };
+    unsafe {
+        sanitize_mutex(m);
+        f(m)
+    }
+}
+unsafe fn glibc_mutex_unlock(m: *mut u8) -> i32 {
+    let f: MutexLockFn = match REAL_UNLOCK.get() {
+        Some(f) => *f,
+        None => resolve_glibc_pthread("pthread_mutex_unlock"),
+    };
+    unsafe {
+        sanitize_mutex(m);
+        f(m)
+    }
+}
+
+/// dlsym a glibc pthread function directly (RTLD_NEXT host libc), for the
+/// lazy fallback path. Panics only if glibc is genuinely missing the symbol.
+fn resolve_glibc_pthread(name: &str) -> MutexLockFn {
+    let sym = CString::new(name).expect("static symbol name");
+    let ptr = unsafe { libc::dlsym(libc::RTLD_NEXT, sym.as_ptr()) };
+    assert!(!ptr.is_null(), "glibc missing {name}");
+    unsafe { std::mem::transmute(ptr) }
 }
 extern "C" fn host_cond_wait(a0: u64, a1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
     let f = *REAL_COND_WAIT.get().expect("pthread_cond_wait resolved");
@@ -1121,6 +1258,132 @@ pub fn cstr(buf: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::jit::{jit_run, CpuState};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Two REAL host threads rendezvous through the bionic NORMAL mutex bridge
+    /// operating on a byte-exact bionic-layout `pthread_mutex_t` (16-bit state
+    /// @0, zero __pad @2, owner_tid @4). This is the regression gate the handoff
+    /// REQUIRES before the bridge is trusted anywhere near the real boot: the
+    /// old glibc path blocked forever on a contended bionic mutex because glibc
+    /// can't parse the 16-bit state word (the cross-ABI wall). This proves the
+    /// byte-exact bionic protocol wakes a genuinely-blocked waiter.
+    #[test]
+    fn bionic_normal_mutex_two_thread_rendezvous() {
+        // A host-aligned bionic pthread_mutex_t with NORMAL type (type bits 0),
+        // unlocked (state=0), like Bionic's PTHREAD_MUTEX_INITIALIZER + __pad.
+        let mut m = Box::new([0u8; 44]); // state@0 + pad@2 + owner_tid@4 + 28 tail
+        let mp = m.as_mut_ptr() as *mut u8;
+        let mp_addr = mp as usize;
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let entered2 = entered.clone();
+        let release2 = release.clone();
+
+        // Thread A acquires via the bridge, signals it holds the lock, then
+        // waits for the main thread's signal before unlocking.
+        let a = std::thread::spawn(move || {
+            let mpa = mp_addr as *mut u8;
+            let rc = unsafe { bionic_mutex_lock(mpa) };
+            assert_eq!(rc, 0, "thread A must acquire the unlocked mutex");
+            assert!(
+                unsafe { core::ptr::read_unaligned(mpa as *const u16) } & 0x3 == 1,
+                "after uncontended acquire, state word must be 1 (LOCKED_UNCONTENDED)"
+            );
+            entered2.store(true, Ordering::SeqCst);
+            while !release2.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            let rc = unsafe { bionic_mutex_unlock(mpa) };
+            assert_eq!(rc, 0, "thread A unlock must succeed");
+        });
+
+        // Spin until A holds the lock, then have the MAIN thread contend on it
+        // through the bridge — this must FUTEX-BLOCK (never return until A
+        // unlocks), proving the contention path actually parks.
+        while !entered.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let blocked = Arc::new(AtomicBool::new(false));
+        let blocked2 = blocked.clone();
+        let b = std::thread::spawn(move || {
+            let mpb = mp_addr as *mut u8;
+            // Should block until A (via futex_wake) releases it.
+            let rc = unsafe { bionic_mutex_lock(mpb) };
+            assert_eq!(rc, 0, "thread B must acquire after A unlocks");
+            blocked.store(true, Ordering::SeqCst);
+        });
+        // Give B a moment to enter the futex wait on the contended mutex. Poll
+        // for the contended state rather than relying on a fixed sleep, so the
+        // test isn't flaky on a loaded machine.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { core::ptr::read_unaligned(mp as *const u16) } & 0x3 != 2 {
+            assert!(
+                Instant::now() < deadline,
+                "B never entered the contended futex wait (state never reached 2)"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Now release A; A unlocks and must FUTEX_WAKE B.
+        release.store(true, Ordering::SeqCst);
+        a.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !blocked2.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "thread B was never woken by A's unlock — the futex wake failed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        b.join().unwrap();
+        // B acquired via the contended path, so bionic leaves the word at 2
+        // (LOCKED_CONTENDED — "maybe waiters"), NOT back to 1. That is correct
+        // bionic behavior: a thread that had to spin marks itself as contended
+        // so a future unlocker still performs a wake. Assert contended, then
+        // release so the word returns to unlocked.
+        assert!(
+            unsafe { core::ptr::read_unaligned(mp as *const u16) } & 0x3 == 2,
+            "after contended re-acquire, state word must be 2 (LOCKED_CONTENDED)"
+        );
+        let rc = unsafe { bionic_mutex_unlock(mp) }; // B left it held; release clean
+        assert_eq!(rc, 0, "final unlock succeeds");
+        assert!(
+            unsafe { core::ptr::read_unaligned(mp as *const u16) } & 0x3 == 0,
+            "after final unlock, state word must be 0 (UNLOCKED)"
+        );
+    }
+
+    /// The bridge must correctly classify mutex types before any protocol is
+    /// applied: only a NORMAL (type bits 0) Non-PI mutex uses our byte-exact
+    /// bionic protocol; recursive/errorcheck/PI mutexes (type bits non-zero)
+    /// must route to the glibc fallback instead. Verifies the classifier.
+    #[test]
+    fn bionic_classifier_routes_only_normal_to_bionic_protocol() {
+        let mut m = Box::new([0u8; 64]);
+        let mp = m.as_mut_ptr();
+        unsafe fn state(mp: *mut u8) -> u16 {
+            core::ptr::read_unaligned(mp as *const u16)
+        }
+        // PTHREAD_MUTEX_INITIALIZER-equivalent: all zero -> NORMAL.
+        assert!(unsafe { bionic_is_normal(mp) }, "all-zero state must be NORMAL");
+        // RECURSIVE: bits 15:14 = 1.
+        unsafe { core::ptr::write_unaligned(mp as *mut u16, 0x4000u16) };
+        assert!(!unsafe { bionic_is_normal(mp) }, "recursive must NOT be NORMAL");
+        // ERRORCHECK: bits 15:14 = 2.
+        unsafe { core::ptr::write_unaligned(mp as *mut u16, 0x8000u16) };
+        assert!(!unsafe { bionic_is_normal(mp) }, "errorcheck must NOT be NORMAL");
+        // PI mutex: type bits = 3.
+        unsafe { core::ptr::write_unaligned(mp as *mut u16, 0xC000u16) };
+        assert!(!unsafe { bionic_is_normal(mp) }, "PI must NOT be NORMAL");
+        // NULL ptr -> not normal (EINVAL guard).
+        assert!(!unsafe { bionic_is_normal(core::ptr::null()) });
+        // A NORMAL mutex that has entered the LOCKED_CONTENDED state is still
+        // NORMAL (only the low 2 state bits moved).
+        unsafe { core::ptr::write_unaligned(mp as *mut u16, 0x2u16) };
+        assert!(unsafe { bionic_is_normal(mp) }, "locked-contended NORMAL stays NORMAL");
+    }
 
     #[test]
     fn resolve_strlen_and_call_via_guest_blr() {
