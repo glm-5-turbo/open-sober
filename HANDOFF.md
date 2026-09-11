@@ -5011,3 +5011,49 @@ APK/binary host (`elfjit <libroblox.so> 0x1f0db20 --jni`); none on this GPU-less
 APK-less VPS. Next per RECOMMENDATION order: still libloader gaps (multi-module
 binding validated only against synthetic fixtures until the GSI/APK is present),
 then services/auth and the JNI surface.
+
+## Session 32 (Sep 11, 2026, hermes-worker) — JNI native-method registry + C++ static-init (__cxa_guard*) shims wired into boot (315/0)
+
+Opened at 311/0 green (no failing test; the android idempotency mandated fix is
+long since committed). Runtime-side advance per RECOMMENDATION order (JNI
+surface + the documented FMOD/engine C++ static-init boot blocker). Two commits:
+
+### 1. arm64jit JNI: register->lookup->dispatch native-method bridge (a55ead8)
+`jni_register_natives` returned JNI_OK and DROPPED the guest `JNINativeMethod`
+array, so a native method Roblox binds (e.g. Java_..._IAPPurchaseManager_*) was
+recorded nowhere and could never be called back into the guest. Now:
+- `parse_register_natives` reads the guest JNINativeMethod array (3 u64 words:
+  name*, signature*, fnPtr) at `methods[0..n)` and records (class,name) ->
+  (signature,fnPtr) in a process-wide registry (`native_registry()`).
+- `lookup_native_method(class,name)` returns the last-registration-wins binding.
+- `dispatch_native_method` runs a registered guest fnPtr (a Java_* impl address)
+  back through `jit_run` as a guest entry with args, returning guest x0.
++2 tests: records guest bindings (multi-entry parse, re-registration replaces,
+  unknown->None), and end-to-end register->lookup->dispatch through jit_run
+  returns 42 (guest `mov x0,#42; ret` as the registered fnPtr).
+
+### 2. __cxa_guard_*/__cxa_atexit C++ static-init shims wired into boot (4cff657)
+The elfjit `--jni` boot target (JNI_OnLoad) previously stopped when the FMOD /
+engine C++ static-init dispatched into pc=0x68c7518 (a `.bss` guard) because the
+guest's `__cxa_guard_acquire/release/abort` were never provided — the documented
+handoff blocker. Now:
+- `shims::register_cxx_shims()` installs Itanium `__cxa_guard_acquire/release/
+  abort` (single-threaded byte semantics: acquire sets 1 and returns 1 to run the
+  once-body, release sets 2, abort resets to 0) + a no-op `__cxa_atexit`.
+- `plt::bind_image_plt` now calls `register_shims()` + `register_cxx_shims()`
+  before symbol scanning, so the hand-written bionic shims (__errno/strlens/
+  android_log/AAsset/ALooper/ANativeWindow) AND the C++ shims all participate in
+  import binding instead of every unresolved name falling to the NULL/0 graphics
+  catch-all. `register_named` is idempotent (reuses an existing slot).
++2 tests: guard acquire/release/abort byte machine, and `register_cxx_shims` are
+  resolvable by name through `resolver::resolve` (proving the boot wiring).
+
+### Verification
+`cargo build --workspace` clean (0 errors); `cargo test --workspace` 315/0
+(was 311). Differential fuzz re-run on 9 fresh seeds (77,101,202,303,404,505,
+13,29,91) -> 0 fail / 0 skip, confirming no JIT correctness regression from the
+wiring. HARD GATE unchanged: real Roblox boot + reproducible run log on a
+GPU + real APK/binary host (`elfjit <libroblox.so> 0x1f0db20 --jni`) — none on
+this GPU-less, APK-less VPS. Next (RECOMMENDATION order, still open): libloader
+multi-module TLS (TPREL/DTPREL across DT_NEEDED deps), more JNI surface (fake
+object backing), libbadcpu ISA, services/auth.
