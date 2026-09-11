@@ -321,7 +321,21 @@ def gen_float_reduce():
     return (long long)((sum+mnm+mxm)*1000.0);
 }}"""
 
-gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce]
+def gen_fma_chain():
+    # compiler-contracted fmla / fma chains: a*b+c repeated, and a/b
+    n=random.choice([8,16,32])
+    ty=random.choice(["double","float"])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 314159ull;
+    unsigned long long x = seedv;
+    {ty} a[{n}], b[{n}], c[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=({ty})(((x>>40)&0xffff)/1024.0); b[i]=({ty})(((x>>24)&0xffff)/2048.0); c[i]=({ty})(((x>>8)&0xffff)/4096.0); }}
+    {ty} acc=0.0;
+    for(int i=0;i<{n};i++){{ acc+=a[i]*b[i]+c[i]; }}   // fmla candidate
+    for(int i=0;i<{n};i++){{ acc+=a[i]/b[i]; }}        // division
+    return (long long)(acc*1e3);
+}}"""
+gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce, gen_fma_chain]
 
 def main():
     fails=0; ok=0; skip=0
