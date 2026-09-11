@@ -689,6 +689,63 @@ def gen_fp_edge():
 gens_shared=[gen_selfimport]
 gens += [gen_fp_edge]
 
+def gen_double_neon():
+    # Double-precision (64-bit lane) NEON — none of the other SIMD generators
+    # exercise f64 lanes, but a 3D engine's physics/audio math is dense with
+    # them. Forces vfmaq_n_f64/vmulq_n_f64 by-element (.2d) and the horizontal
+    # fmaxv plus a vld1q_f64/vst1q_f64 round trip. Lane values are small
+    # binary-exact doubles and the accumulator is exact in f64, so a structural
+    # lane/operand miscompute shows as a real diff. The host x86 gcc can't
+    # compile <arm_neon.h>, so this runs through the qemu-aarch64 architectural
+    # oracle (run_qemu_exact), never a native-gcc one.
+    n=random.choice([4,6,8,10])
+    c=random.choice([0.25,0.5,1.0,2.0,-1.0,-3.0])
+    idx=random.choice([0,1])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 555777ull;
+    unsigned long long x = seedv;
+    double da[{n}];
+    for(int i=0;i<{n};i++){{ x=x*2862933555777941757ull+3037000493ull; da[i]=(double)(long long)(((x>>44)&0x7ff)-512); }}
+    float64x2_t v = vdupq_n_f64(0.0);
+    double sacc = 0.0;
+    for(int i=0;i<{n};i++){{
+        v = vfmaq_n_f64(v, vdupq_n_f64(da[i]), {c});
+        v = vmulq_n_f64(v, 0.5);
+        sacc = sacc*0.25 + da[i]*{c}*0.25;
+    }}
+    v = vfmaq_n_f64(v, vdupq_n_f64(3.0), 0.25);
+    sacc += 3.0*0.25;
+    double m = vmaxvq_f64(v);
+    double l[2]; vst1q_f64(l, v);
+    double lanesum = l[0] + l[1];
+    double ref = sacc + m + lanesum + da[0];
+    return (long long)ref;
+}}
+"""
+
+def gen_uxtl_uaddw():
+    # 16->32 and 32->64 widening with uaddw/subw + narrow back, forcing the
+    # SimdAddw / SimdXtl (permute-source) alias paths across multiple widths
+    n=random.choice([8,16,24])
+    k=random.choice([3,7,13,1009])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 998877ull;
+    unsigned long long x = seedv;
+    unsigned short a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1ull; a[i]=(unsigned short)(x>>48); }}
+    long long s=0;
+    for(int i=0;i<{n};i+=4){{
+        unsigned int p = (unsigned int)a[i] + a[i+1] + a[i+2] + a[i+3];
+        s += (long long)p * {k};
+    }}
+    for(int i=1;i<{n};i+=2) s += (long long)a[i]*a[i-1];
+    return s;
+}}
+"""
+
+gens += [gen_double_neon, gen_uxtl_uaddw]
+
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):

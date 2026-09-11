@@ -361,6 +361,12 @@ pub enum Inst {
     FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
     // ---- FP horizontal reduction cross vector: fmaxv/fminv Sd, Vn.4s ----
     FMaxV { rd: u8, rn: u8, min: bool },
+    // ---- FP pairwise two-register reduction: fmaxp/fminp/fmaxnmp/fminnmp
+    //      Vd, Vn (.2s/.2d). Reduces the two elements of Vn into a scalar
+    //      result in Vd (bit16 CLEAR = two-register form; bit16 SET is the
+    //      three-operand FMAXP Vd,Vn,Vm handled elsewhere). min = bit15;
+    //      nm (fmaxnm/fminnm) = bit13 skip-NaN. ----
+    FpPair { rd: u8, rn: u8, sz: bool, min: bool, nm: bool },
     // ---- switchable FP multiply-accumulate: fmla/fmls Vd.4s/.2s/.2d, Vn, Vm ----
     Fmla {
         rd: u8,
@@ -3252,6 +3258,33 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     return Inst::FMaxV { rd, rn, min };
                 }
 
+                // ---- FP pairwise two-register reduction: fmaxp/fminp/fmaxnmp/
+                // fminnmp Vd, Vn (.2s/.2d). Horizontal reduce the two elements of
+                // Vn into a scalar result in Vd (a two-register form; the three-
+                // operand FMAXP Vd,Vn,Vm also exists and is NOT this — bit16
+                // CLEAR here, bit16 SET for the 3-op form). Op fields (verified
+                // against aarch64-linux-gnu ground truth):
+                //   residue(0xffe0fc00): min = bit15 (0x8000), nm = bit13 (0x2000)
+                //   sz (2d) = bit22 (0x400000). Disjoint from FMaxV (3f residue
+                //   0x2e20_0800) and scalar FMaxMin (0x1e20_0800) — this is the
+                //   0x7e20/0x7ea0/0x7e60/0x7ee0 lane with bit16 clear.
+                let pw_r = insn & 0xffe0_fc00;
+                if matches!(
+                    pw_r,
+                    0x7e20_f800 | 0x7ea0_f800 | 0x7e60_f800 | 0x7ee0_f800
+                        | 0x7e20_c800 | 0x7ea0_c800 | 0x7e60_c800 | 0x7ee0_c800
+                ) {
+                    let rd = (insn & 0x1f) as u8;
+                    let rn = ((insn >> 5) & 0x1f) as u8;
+                    // Ground truth: bit23 = min (fminp/fminnmp); nm (fmaxnm/
+                    // fminnm) = bits[14:12]==4 (fmaxp/fminp have bits[14:12]==7);
+                    // sz (.2d) = bit22.
+                    let min = (insn & 0x0080_0000) != 0;
+                    let nm = ((insn >> 12) & 7) == 4;
+                    let sz = (insn & 0x0040_0000) != 0;
+                    return Inst::FpPair { rd, rn, sz, min, nm };
+                }
+
                 // ---- FP multiply-accumulate: fmla/fmls Vd.T, Vn, Vm ----
                 // Vd = Vd +/- Vn*Vm per-lane. Tight gate (insn&0x1fe0_0c00)==0x0e20_0c00
                 // with bit29 (=0x2000_0000) CLEAR, which excludes fmul (bit29 set) and
@@ -6002,5 +6035,35 @@ mod logical_imm_regressions {
                 assert_eq!((rd, rn, rm, sub), (3, 30, 4, true));
             }
             other => panic!("sub v3.16b,v30,v4 -> SimdAddB, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fp_pairwise_two_register_reduce_ground_truth() {
+        // fmaxp/fminp/fmaxnmp/fminnmp Vd, Vn (.2s/.2d): horizontal reduce the
+        // two elements of Vn into a scalar in Vd. Ground truth assembled with
+        // aarch64-linux-gnu-as and disassembled — all 8 two-register encodings
+        // (bit16 CLEAR; the 3-op FMAXP Vd,Vn,Vm has bit16 SET and is NOT this).
+        //   fmaxp s0,v1.2s  = 0x7e30f820 ; fmaxp d0,v1.2d = 0x7e70f820
+        //   fminp s0,v1.2s  = 0x7eb0f820 ; fminp d0,v1.2d = 0x7ef0f820
+        //   fmaxnmp s0,v1.2s= 0x7e30c820 ; fmaxnmp d0,v1.2d= 0x7e70c820
+        //   fminnmp s0,v1.2s= 0x7eb0c820 ; fminnmp d0,v1.2d= 0x7ef0c820
+        let cases: &[(u32, bool, bool, bool)] = &[
+            (0x7e30f820, false, false, false), // fmaxp 2s
+            (0x7e70f820, true, false, false),  // fmaxp 2d
+            (0x7eb0f820, false, true, false),  // fminp 2s
+            (0x7ef0f820, true, true, false),   // fminp 2d
+            (0x7e30c820, false, false, true),  // fmaxnmp 2s
+            (0x7e70c820, true, false, true),   // fmaxnmp 2d
+            (0x7eb0c820, false, true, true),   // fminnmp 2s
+            (0x7ef0c820, true, true, true),    // fminnmp 2d
+        ];
+        for (insn, sz, min, nm) in cases {
+            match decode(*insn) {
+                Inst::FpPair { rd, rn, sz: d, min: m, nm: n } => {
+                    assert_eq!((rd, rn, d, m, n), (0, 1, *sz, *min, *nm));
+                }
+                other => panic!("{insn:#x} -> FpPair, got {other:?}"),
+            }
         }
     }
