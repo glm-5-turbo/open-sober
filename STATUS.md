@@ -592,3 +592,25 @@ of 0xffffffff80000001.
    miscompiles (this ROR bug was #12-class: silent, symmetric-mask-masked).
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. HARD GATE (real Roblox boot + run log on a GPU/APK host) stays unmet here.
+---
+
+## Cycle 14b (Sep 11, 2026) — three silent SIMD/logic-imm miscompiles fixed (workspace 202/0)
+status: session covered two focused commit rounds (8c1706b + 01aa402) and several
+ledger-only updates (7628024); workspace 202/0 at end.
+last_agent_claim: three silent arm64jit miscompiles found via cross-gcc batteries
+driven end-to-end through elfjit (no QEMU) vs native, all fixed + regression-locked.
+
+1. LogicImm DecodeBitMasks rotate-RIGHT (8c1706b). Left-rotate vs ARM ROR —
+   every rotation-asymmetric logical-immediate mask miscompiled; symmetric masks
+   masked it from the test set. Quantified: fixed right-rotate agrees 592/592
+   valid encodings vs real as; old would be wrong on 509.
+2. Scalar-D ADDP vs fcvtzs collision (01aa402). 0x5ef1 (addp) hits the fcvtzs
+   scalar gate 0x5ee0b800; bit20 discriminates. New SimdPairAddD.
+3. saddw2/uaddw2 upper-half (01aa402). SimdAddw read Vm@0 always; Q=1 form reads
+   upper 8 bytes. -O2 loops accumulate both halves now.
+
+Verified: i*i reductions return 76 (native) at -O3 (addp) and -O2 (saddw+saddw2);
+50+ cross-gcc battery programs green. Commits: 8c1706b, 076b024, 01aa402.
+cargo build clean; cargo test --workspace 202/0.
+
+HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).

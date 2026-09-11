@@ -3698,3 +3698,35 @@ cross-gcc probe run through elfjit (no QEMU) vs native x86-64.
 Continue the cross-gcc ISA-surface battery for more silent-miscompile classes;
 libloader/libbadcpu/services gaps; HARD GATE (real Roblox boot, GPU/APK host)
 unmet on this box.
+
+---
+
+## Session 2026-09-11 — three silent SIMD/logic-imm miscompiles fixed (workspace 202/0)
+
+Session opened with the handoff-flagged failing test already green (200/0 from
+committed cycles); the "failing test first" gate was satisfied by prior work.
+This session's value = three silent JIT miscompiles flushed out by cross-gcc
+batteries driven end-to-end through elfjit (no QEMU) vs native x86-64, all
+found and fixed in arm64jit:
+
+1. **LogicImm DecodeBitMasks rotate-RIGHT** (`8c1706b`): the logical-immediate
+   element was LEFT-rotated; ARM DecodeBitMasks uses ROR. Every rotation-
+   asymmetric mask silently miscompiled (`mov x0,#0xffffffff80000001` ->
+   0xfffffffe00000007). Only symmetric masks gave the same value under both, so
+   the prior test set stayed green. Verified quantified vs the real assembler:
+   right-rotate agrees 592/592 valid (N,immr,imms); old left   would be wrong
+   on 509. Regression + loader_run end-to-end gate (`076b024`).
+
+2. **Scalar-D ADDP vs fcvtzs collision** (`01aa402`): `addp Dd, Vn.2D`
+   (0x5ef1...) collided with the scalar fcvtzs gate at 0x5ee0b800 — bit20 is
+   the discriminator (ADDP SET, fcvtzs CLEAR). Old gate silently ran every gcc
+   pairwise-add reduction as a float->int. New SimdPairAddD.
+
+3. **saddw2/uaddw2 upper-half** (`01aa402`): SimdAddw always read Vm at byte 0;
+   the Q=1 form (saddw2) reads the UPPER 64 bits. -O2 vectorized loops do
+   saddw (low) then saddw2 (high); old code accumulated low twice.
+
+All three proven end-to-end: the i*i reductions return 76 (native) at both -O3
+(addp) and -O2 (saddw+saddw2). 50+ cross-gcc battery programs acros.
+`cargo build --workspace` clean; `cargo test --workspace` **202/0**.
+HARD GATE unchanged: real Roblox boot/GPU host (no APK/GPU here).
