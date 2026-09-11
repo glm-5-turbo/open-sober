@@ -5486,3 +5486,28 @@ layout beyond SETTLS-pointer handoff, `clone3`(435), and tgkill/signal
 delivery to a specific child. The core spawn+shared-memory+thread-local-exit
 loop is now verified working. HARD GATE unchanged: real Roblox boot + run log
 only on a GPU/APK host (none on this VPS).
+
+## Cycle 38b (Sep 11, 2026) — pthread_join primitive: CLONE_CHILD_CLEARTID + futex (354/0)
+
+Commit `b778647` on dev. Completed the thread lifecycle after cycle 38's clone
+spawn: a joining parent can now block on `FUTEX_WAIT(ctid)` and be woken when
+the child exits.
+
+- `CpuState` gains `clear_tid_addr`. `clone`(220) now honors
+  `CLONE_CHILD_CLEARTID` (0x00200000): the child carries the child-tid word
+  address in its state (alongside the existing CLONE_CHILD_SETTID store).
+- thread-local `exit`(93) on a spawned child now **zeroes** that word and
+  **FUTEX_WAKEs** it before halting `pc` — exactly the kernel
+  CLONE_CHILD_CLEARTID semantics pthread_join's futex-wait depends on.
+- +`loader_run_clone_child_cleartid_join_via_futex`: parent FUTEX_WAITs on the
+  child's clear-tid word; child computes a signed sum, publishes a result
+  global, thread-exits (93); the exit clears+wakes the word so the parent's
+  wait returns. Asserts the word is zeroed, the result published, and the wait
+  returned cleanly -> 42.
+
+`cargo test --workspace` **354/0** (was 353), build clean. The core spawn →
+  child-runs-on-own-stack/tid → publishes-shared-state → thread-local-exit →
+  parent-futex-joins lifecycle is now verified headlessly end-to-end. Documented
+  remaining: per-thread guest TLS block layout, clone3(435), tgkill/signal
+  delivery. HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK
+  host (none on this VPS).
