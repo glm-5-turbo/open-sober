@@ -498,19 +498,21 @@ pointer globals/vtables.
   `[0x80,0x40]` was really SLEB -8192, not +0x2000, proving the decoder is
   faithful; offset-delta stride; SLEB negative; bad magic) and +1 integration
   (crates/libloader/tests/reloc_apply_test.rs: cross-gcc ET_DYN asserts every
-  RELATIVE slot == load_bias+addend).
+  RELATIVE slot == load_bias+addend), then +3 DT_RELR unit tests — DT_RELR
+  (0x23) fallback when no RELA table is present, per shipped glibc/Android
+  DO_RELR decode (offset word + bitmap bit i -> base+(i-1)*8).
 
 ### Gate (verified this cycle)
 - cargo build --workspace: clean
-- cargo test --workspace: 184 passed / 0 failed
-  (libloader 16 -> 20 unit + 1 integration)
-- HEAD: da6c47b (local `dev`)
+- cargo test --workspace: 187 passed / 0 failed
+  (libloader 16 -> 23 unit + 1 integration)
+- HEAD: e51835b (local `dev`)
 
 ### Honest remaining
 - The pre-existing `crates/libloader/tests` skips cleanly when cross-gcc absent.
 - Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni` run log)
   is the HARD GATE — blocked until a capable host + the real binary/APK (none
   on this box). load_elf_image now handles the RELATIVE data-reloc the real
-  dependency chain needs; next ordered items: GLOB_DAT/JUMP_SLOT main-dynamic
-  resolver (bind_image_plt already covers JUMP_SLOT), DT_RELR, libbadcpu gaps,
-  services/auth.
+  dependency chain needs from DT_RELA / DT_ANDROID_RELA(APS2) / DT_RELR; next
+  ordered items: GLOB_DAT/JUMP_SLOT main-dynamic resolver (bind_image_plt
+  already covers JUMP_SLOT), libbadcpu gaps, services/auth.
