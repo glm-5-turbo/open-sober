@@ -403,6 +403,13 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         78 => unsafe { libc::syscall(libc::SYS_readlinkat, libc::AT_FDCWD as usize, a[0] as usize, a[1] as usize, a[2] as usize) as c_long },
         59 => unsafe { libc::pipe2(a[0] as *mut c_int, a[2] as c_int) as c_long },
         96 => unsafe { libc::syscall(libc::SYS_set_tid_address, a[0] as usize) as c_long },
+        99 => 0, // set_robust_list: a no-op (no robust futexes) is valid; glibc retries if it errors
+        283 => 0, // membarrier: no-op
+        // rseq (293): the thread-local restartable sequence — glibc enables it
+        // opportunistically and continues if it fails, so -ENOSYS is fine; but
+        // if registered, the kernel expects a valid rseq area. We never touch it,
+        // so return -ENOSYS rather than fake a success.
+        // (add rseq only if a later boot frontier requires it)
         124 => unsafe { libc::sched_yield() as c_long },
         // --- time ---
         113 => unsafe { libc::clock_gettime(a[0] as libc::clockid_t, a[1] as *mut libc::timespec) as c_long },
