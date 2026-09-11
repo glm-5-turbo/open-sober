@@ -4,6 +4,32 @@ goal: run Roblox through the Open-Sober runtime (specialized runtime, graphics,
 sound) — the full "Roblox boots on the JIT/no-QEMU path" gate.
 started: 2026-09-11T01:20:42Z
 
+## Session (Sep 11, 2026) — multi-module (DT_NEEDED) loader + cross-module symbol binding (workspace 310/0)
+status: session-end (committed, tests green)
+last_agent_claim: The loader—the flagged "next frontier" per RECOMMENDATION — could
+previously load only a SINGLE aarch64 image; the real libroblox.so DT_NEEDs a
+dependency chain (libssl, libcrypto, liblog, GSI libs) that was never loaded, so
+the guest would fault on its first cross-module import. Committed `8f3c48b`:
+- `libloader::deps::{load_elf_with_deps, LoadedChain}` — resolves the main
+  image's DT_NEEDED closure recursively, maps each dep CONTIGUOUSLY after the
+  previous in one high guest region, so a single `jit_run` image slice
+  [chain.base, chain.end) covers every module and cross-module calls compile
+  from the same image. `load_elf_image` refactored into
+  `load_elf_image_at(path, base)`.
+- `arm64jit::plt::build_export_scope(els)` — combined name→guest_addr scope
+  (main-first interposition); `bind_image_plt`/`bind_glob_dat` take an optional
+  scope and resolve an import the dependency defines to its guest addr (else
+  the host resolver / float bridge / graphics stub as before).
+- Two latent binder bugs fixed: the GNU-hash symbol scan mistook the null
+  symbol (index 0) for a terminator → collected 0 exports; and
+  `patch_stack_canary` dereferenced its hardcoded libroblox GOT link even when
+  it mapped outside a small module's image (now guarded by `host_addr_of`).
+Verified end-to-end with a cross-gcc `-shared` fixture (commit `040c3bf`):
+libmain.so DT_NEEDs libdep.so; entry calls dep_val() (cross-module JUMP_SLOT)
+and reads dep_global (cross-module GLOB_DAT) → returns 82 from the dep's guest
+address through the shared slice. cargo test --workspace 310/0 (was 309).
+HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
+
 ## Cycle (Sep 11, 2026) — randomized differential fuzz: 8 JIT correctness fixes (workspace 289/0, ~500 cases)
 status: session-end (committed, tests green)
 last_agent_claim: Persisted `fuzz_jit.py` (elfjit-vs-native-oracle differential

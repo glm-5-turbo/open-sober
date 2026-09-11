@@ -4975,3 +4975,39 @@ aliases `rd`: `nb = if rn==rd { permute_source(..false) } else { vslot(rn) }`,
 
 HARD GATE unchanged: real Roblox boot + run log on a GPU + APK/binary host
 (none on this VPS).
+
+## Session 31b (Sep 11, 2026) — multi-module (DT_NEEDED) loader + cross-module symbol binding
+
+The loader could previously load only a **single** aarch64 image; the real
+libroblox.so `DT_NEED`s a dependency chain (libssl, libcrypto, liblog, GSI libs)
+that was never loaded, so the guest would fault on its first cross-module
+import. Committed `8f3c48b` + `040c3bf` (workspace **310/0**, build clean):
+
+- `libloader::deps::{load_elf_with_deps, LoadedChain}` resolves the main image's
+  `DT_NEEDED` closure recursively, maps each dependency **contiguously** after
+  the previous in one high guest region, so a single `jit_run` image slice
+  `[chain.base, chain.end)` covers every module and cross-module calls compile
+  from the same image. `load_elf_image` refactored into
+  `load_elf_image_at(path, base)` (the `-shared` tools default to GNU hash, so
+  no `DT_HASH` nchain — the scope scan is bounded by the mapped image end).
+- `arm64jit::plt::build_export_scope(els)` builds a combined `name→guest_addr`
+  map (main-first interposition); `bind_image_plt`/`bind_glob_dat` now take an
+  optional scope and resolve an import a loaded dependency defines to its guest
+  address (else the host resolver / float bridge / graphics stub as before).
+- Two latent binder bugs fixed en route: the symbol scan mistook the **null
+  symbol (index 0)** for a terminator → collected **0 exports**; and
+  `patch_stack_canary` dereferenced its hardcoded libroblox GOT link
+  (`0x631aa30`) even when it mapped outside a small module's image — now guarded
+  by `host_addr_of` (real libroblox path unaffected: the slot is in-image).
+
+Verified end-to-end with a cross-gcc `-shared` fixture: libmain.so `DT_NEED`s
+libdep.so; `entry()` calls `dep_val()` (cross-module **JUMP_SLOT**) and reads
+`dep_global` (cross-module **GLOB_DAT**) → returns **82** from the dependency's
+guest address through the shared slice (both symbol-resolution families now
+permanent `loader_run` gates).
+
+HARD GATE unchanged: real Roblox boot + reproducible run log on a GPU + real
+APK/binary host (`elfjit <libroblox.so> 0x1f0db20 --jni`); none on this GPU-less,
+APK-less VPS. Next per RECOMMENDATION order: still libloader gaps (multi-module
+binding validated only against synthetic fixtures until the GSI/APK is present),
+then services/auth and the JNI surface.
