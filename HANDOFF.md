@@ -3907,15 +3907,15 @@ dv_arith, fv4, fv4_fmul_only.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
 
-## Session (Sep 11, 2026) — 8 silent miscompiles + the long-open nondeterministic SIMD-loop bug fixed (workspace 233/0, 0 ignored)
+## Session (Sep 11, 2026) — 9 silent miscompiles + the long-open nondeterministic SIMD-loop bug fixed (workspace 234/0, 0 ignored)
 
-Three commits on `dev` (all `cargo build --workspace` + `cargo test --workspace` green):
+Five commits on `dev` (all `cargo build --workspace` + `cargo test --workspace` green):
 `6ffd490` (32-bit add/sub flags + ccmp/ccmn), `e1ec841` (4 FP/control-flow bugs),
-`7e2689a` (**ADDV-to-scalar stale bytes — the root-cause of the intermittent
-SIMD-loop corruption**). Opened at 230/0; no failing test (the android idempotent
+`7e2689a` (ADDV-to-scalar stale bytes), `5cbe6ce` (CMN/ADDS C-flag polarity),
+plus this docs commit. Opened at 230/0; no failing test (the android idempotent
 stays green). Delivered through the differential-probe harness — cross-compile the
 same C at -O2/-O3 through `elfjit`, compare against a native x86-64 oracle. HEAD of
-these runs caught 8 real bugs:
+these runs caught 9 real bugs:
 
 1. **32-bit ADDS/SUBS flag semantics** — `!sf` flagged adds/subtracts used 64-bit
    x86 add/sub after zero-extending, so `store_nzcv` saw SF from bit63, not bit31.
@@ -3945,13 +3945,19 @@ these runs caught 8 real bugs:
    that the old maskf/times7/mod_pow2/regidx/mixed canaries hit. Now the ADDV
    store zeros the upper bytes (64-bit store of a size-masked sum). `simdu3`
    (popcount loop) returns exact 591 deterministically, 8/8 runs at -O2/-O3.
+8. **CMN/ADDS C-flag polarity** (commit 5cbe6ce) — the flag-setting ADD path
+   stored C = x86 carry, but x86_cc_for_cond's HS/LO/HI/LS assume the SUBTRACT-
+   borrow convention. gcc's `unsigned um > 0xffffffffffff0000` (compiled to
+   `cmn x,#0x10000; b.ls`) evaluated "not greater" when it carries. cmc before
+   store_nzcv on the non-subtract paths stores C in borrow convention.
+   structfp was off by 999999 from exactly this.
 
 New permanent canaries: `diff_ccmp_cond_compare`, `diff_w32_overflow_compare`,
 `diff_fp_compare_zero_and_cset`, `diff_fp_nan_compare`, `diff_addv_popcount_accumulate`
 (all differential vs native oracle). Decode regressions: `ccmp_ccmn_decode`,
 `fcmp #0.0 / d0 / fcmpe #0.0` additions.
 
-**Verification:** `cargo test --workspace` **233/0**, **0 ignored** (was 227/0);
+**Verification:** `cargo test --workspace` **234/0**, **0 ignored** (was 227/0);
 the 28-program differential probe suite (FP math/compare/cvt, NaN, signed-zero,
 ccmp chains, 32-bit overflow compares, NEON/16-bit/unsigned SIMD, popcount,
 branch tables, recursion) matches the native oracle at both -O2 and -O3.
