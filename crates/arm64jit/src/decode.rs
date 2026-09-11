@@ -115,7 +115,7 @@ pub enum Inst {
     // stg loop; without this a full glibc-linked program stops on the first tag
     // store. Gate (insn & 0xff3fe71c)==0xd9200000 (verified vs objdump across
     // the 0xd9 top-byte alloc-tag space); load = bit22=1 && bit11=0.
-    MteTag { load: bool, rt: u8 },
+    MteTag { load: bool, rt: u8, rn: u8, wb: bool, wb_off: i64 },
     // ---- data/instruction cache maintenance: dc <op>,xN / ic <op>,xN ----
     // Single-threaded JIT (guest==host, no separate cache) => coherence ops are
     // no-ops. `dc zva` is the one that writes memory (zeros the 16-byte block we
@@ -2749,6 +2749,26 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 5, rt, read }; // dczid_el0 -> 0x4
         }
+        // mrs xN, gcspr_el0 = 0xd53b2522: op1=3, CRn=2, CRm=5, op2=1. The
+        // Guarded-Control-Stack pointer (armv9 GCS feature). The JIT runs no
+        // GCS and never sets the SCTLR_EL1.GCS enable, so a read returns 0 (the
+        // GCS stack pointer is only valid when GCS is enabled). Freshly-armed
+        // GNU aarch64 toolchains emit this MRS sizing a GCS call frame; without
+        // it a full glibc-linked program stops. Verified against objdump of the
+        // real modmain.elf word 0xd53b2522.
+        if op1 == 3 && crn == 2 && crm == 5 && op2 == 1 && read {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 6, rt, read }; // gcspr_el0 -> 0
+        }
+        // mrs xN, tpidr2_el0 = 0xd53bd0ae: op1=3, CRn=13, CRm=0, op2=5. The
+        // second thread-local storage pointer (SME feature). Distinct from the
+        // tpidr_el0 we model (op2=2). Without SME the register is architecturally
+        // 0 on a fresh EL0 context, so read 0. Glibc CRT reads it probing SME
+        // support. Verified against the real modmain.elf word 0xd53bd0ae.
+        if op1 == 3 && crn == 13 && crm == 0 && op2 == 5 && read {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 7, rt, read }; // tpidr2_el0 -> 0
+        }
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
@@ -2803,13 +2823,27 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
 
     // ---- memory-tagging (MTE) allocation-tag ops: ldg/stg/stzg/st2g (0xd9 top
     // byte). Host has no MTE and the JIT keeps no tag state: stores are pure
-    // no-ops; ldg (load, bit22=1 && bit11=0) reads tag 0 into Xt. Unblocks
-    // glibc's __libc_mtag_tag_region (stg loop). Mask 0xff200400 ignores Xt/
-    // Xn/imm9 (verified across stg/stzg/ldg/st2g with varied regs+offsets).
-    if insn & 0xff20_0400 == 0xd920_0000 {
+    // no-ops (memory untouched), OR a base-reg writeback when the addressing
+    // mode auto-increments Xn; ldg (load, bit22=1 && bit11=0) reads tag 0 into
+    // Xt. Unblocks glibc's __libc_mtag_tag_region (stg loop) and _memset-zva.
+    // Mask 0xff200000 ignores Xt/Xn/imm9 and the writeback bit (bit10) so both
+    // offset and post/pre-index forms are caught (verified across
+    // stg/stzg/ldg/st2g with varied regs, offsets and writebacks). load bit =
+    // bit22 (0x400000): ldg byte1=0x60->set; store stg/st2g 0x20/0xa0->clear.
+    // bit11 (0x0800) additionally separates the offset (set) / untagged-load
+    // base forms; ldg has bit11=0.
+    if insn & 0xff20_0000 == 0xd920_0000 {
         let rt = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
         let load = (insn & 0x0040_0000) != 0 && (insn & 0x0800) == 0;
-        return Inst::MteTag { load, rt };
+        // writeback forms (post-index, bit11=0 / pre-index, bit11=1) set bit10;
+        // both update Xn by the (signed, granule-scaled) immediate. imm9 =
+        // bits[20:12], scale = 4 bits (16-byte alloc granule), sign-extend.
+        let wb = (insn & 0x0400) != 0;
+        let imm9 = (insn >> 12) & 0x1ff;
+        let imm9 = if imm9 & 0x100 != 0 { imm9 as i64 - 0x200 } else { imm9 as i64 };
+        let wb_off = imm9 << 4;
+        return Inst::MteTag { load, rt, rn, wb, wb_off };
     }
 
     // ---- data/instruction cache maintenance: dc <op>, xN / ic <op>, xN ----

@@ -1339,7 +1339,56 @@ mod tests {
         assert!(matches!(crate::decode::decode(0xd92008c5), Inst::MteTag { load: false, .. }));
         assert!(matches!(crate::decode::decode(0xd96008c5), Inst::MteTag { load: false, .. }));
         assert!(matches!(crate::decode::decode(0xd9a008c5), Inst::MteTag { load: false, .. }));
-        assert!(matches!(crate::decode::decode(0xd96000c5), Inst::MteTag { load: true, rt: 5 }));
+        assert!(matches!(crate::decode::decode(0xd96000c5), Inst::MteTag { load: true, rt: 5, .. }));
+    }
+
+    #[test]
+    fn mrs_gcspr_and_tpidr2_read_zero() {
+        // Regression: full glibc-linked programs (modmain.elf) read gcspr_el0
+        // (armv9 GCS) + tpidr2_el0 (SME 2nd TLS) sizing GCS call frames; both
+        // must decode and read 0 (features not enabled). objdump-verified.
+        // gcspr_el0 x2 = 0xd53b2522, tpidr2_el0 x14 = 0xd53bd0ae.
+        assert!(matches!(crate::decode::decode(0xd53b2522), Inst::SysReg { sysreg: 6, rt: 2, read: true }));
+        assert!(matches!(crate::decode::decode(0xd53bd0ae), Inst::SysReg { sysreg: 7, rt: 14, read: true }));
+        let code = [
+            0x22, 0x25, 0x3b, 0xd5, // mrs x2, gcspr_el0
+            0xae, 0xd0, 0x3b, 0xd5, // mrs x14, tpidr2_el0
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[2] = 0xdead;
+        st.x[14] = 0xdead;
+        exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[2], 0, "gcspr_el0 reads 0");
+        assert_eq!(st.x[14], 0, "tpidr2_el0 reads 0");
+    }
+
+    #[test]
+    fn mte_writeback_advances_base_register() {
+        // Regression: st2g/stg writeback forms (post-index `[x2],#64` = bit10)
+        // previously fell through to Unsupported because the MteTag gate forced
+        // bit10==0; but the base-register advance is a real side effect glibc
+        // memset/stg loops depend on. Each instruction: tag-store to memory is a
+        // no-op (no tags kept) yet Xn must += imm<<4. Encodings objdump-verified
+        // (armv8.5-a+memtag): st2g x0,[x2],#64 = 0xd9a04440 (post, +64),
+        // stg x0,[x2,#-64]! = 0xd93fcc40 (pre, -64).
+        let code = [
+            0x40, 0x44, 0xa0, 0xd9, // st2g x0,[x2],#64  (x2 += 64)
+            0x40, 0xcc, 0x3f, 0xd9, // stg  x0,[x2,#-64]! (x2 -= 64)
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[2] = 0x1000;
+        exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[2], 0x1000, "post +64 then pre -64 net out to zero");
+        // decode binds writeback + offset for both forms.
+        assert!(matches!(crate::decode::decode(0xd9a04440),
+            Inst::MteTag { load: false, wb: true, wb_off: 64, rn: 2, .. }));
+        assert!(matches!(crate::decode::decode(0xd93fcc40),
+            Inst::MteTag { load: false, wb: true, wb_off: -64, rn: 2, .. }));
+        // plain offset form has no writeback.
+        assert!(matches!(crate::decode::decode(0xd9204840),
+            Inst::MteTag { load: false, wb: false, rn: 2, .. }));
     }
 
     #[test]

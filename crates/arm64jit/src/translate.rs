@@ -553,13 +553,32 @@ pub fn translate(
                         }
                         Ok(())
                     }
-                    Inst::MteTag { load, rt } => {
+                    Inst::MteTag { load, rt, rn, wb, wb_off } => {
                     // No MTE on the host and no tag state in the JIT: an
-                    // allocation-tag STORE (stg/stzg/st2g) is a pure no-op; the
-                    // only load (ldg) returns tag 0 into the guest Xt register.
+                    // allocation-tag STORE (stg/stzg/st2g) leaves memory
+                    // untouched, but a writeback form (post/pre-index: bit10
+                    // set) advances the base register Xn by the signed,
+                    // granule-scaled immediate — a real architectural side
+                    // effect (glibc memset/stg loops rely on it). The only
+                    // load (ldg) returns tag 0 into the guest Xt register.
                     if load && rt != 31 {
                         buf.mov_ri64(RAX, 0);
                         stg(buf, rt as u32, RAX); // tag 0
+                    } else if wb && rn != 31 {
+                        // Xn += wb_off (both post- and pre-index end with the
+                        // base advanced by the immediate).
+                        ldg(buf, RAX, rn as u32);
+                        if wb_off != 0 {
+                            if wb_off > 0 && wb_off <= 0x7fffffff {
+                                buf.add_ri64(RAX, wb_off as u32);
+                            } else if wb_off < 0 && -wb_off <= 0x7fffffff {
+                                buf.sub_ri64(RAX, -wb_off as u32);
+                            } else {
+                                buf.mov_ri64(RCX, wb_off as u64);
+                                buf.add_rr64(RAX, RCX);
+                            }
+                        }
+                        stg(buf, rn as u32, RAX);
                     }
                     Ok(())
                 }
@@ -1149,6 +1168,18 @@ pub fn translate(
                 // mrs xN, dczid_el0  ->  xN = 0x4 (16-byte DC ZVA block, DZP=0).
                 if read && rt != 31 {
                     buf.mov_ri64(RAX, 0x4);
+                    stg(buf, rt as u32, RAX);
+                }
+                return Ok(());
+            }
+            if sysreg == 6 || sysreg == 7 {
+                // GCS / SME-TLS registers the JIT neither enables nor models:
+                // sysreg 6 = gcspr_el0 (armv9 GCS pointer; 0 when GCS disabled),
+                // sysreg 7 = tpidr2_el0 (SME second TLS pointer; 0 without SME).
+                // Both read 0 on a fresh EL0 context that never enables the
+                // feature — matching what a real core reports at boot.
+                if read && rt != 31 {
+                    buf.mov_ri64(RAX, 0);
                     stg(buf, rt as u32, RAX);
                 }
                 return Ok(());
