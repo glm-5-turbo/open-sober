@@ -5575,3 +5575,59 @@ SIMD gen_varshift vectorizes to NEON ushl/sshl; the scalar arm was unfuzzed) —
 **`cargo test --workspace` 359/0** (was 355). New cross-lane fuzz campaign clean
 (8 seeds × 40, all pass). `cargo build --workspace` clean. HARD GATE unchanged:
 real Roblox boot + run log only on a GPU/APK host (none on this VPS).
+
+## Cycle 40 (Sep 11, 2026) — GUEST SIGNAL DELIVERY: rt_sigaction/kill/tgkill dispatch, handler run + SIGRET resume (363/0)
+
+Commit `5f8c16c` on `dev`. Completed the thread-model item documented as the
+next gap: a guest thread can now be interrupted by a signal (self-delivered or
+cross-thread), run a Linux-style handler, and resume cleanly.
+
+**New `crates/arm64jit/src/signals.rs`** (guest signal contract):
+- `rt_sigaction`(134) parses the aarch64 kernel `struct sigaction` (handler@0 /
+  flags@8 / restorer@16 / 8-byte mask@24) into a process-wide table
+  (SIG_DFL / SIG_IGN / guest-handler fn), reporting the prior action into oact.
+- `kill`(129)/`tgkill`(131) go through the guest model (NOT forwarded to libc,
+  which would kill the host): a SAME-thread target runs the handler right after
+  the `svc`; a DIFFERENT guest thread gets a cooperative `pending_signal` that
+  its own `jit_run` loop picks up (proves "signal to a specific child thread").
+- Handler run: save the interrupted context (x regs, vectors, sp, TPIDR, NZCV)
+  + guest siginfo/ucontext on a per-thread frame stack; enter the handler with
+  the aarch64 signal ABI (x0=signo, x1=siginfo, x2=ucontext, x30=SIGRET); on the
+  handler's `ret` (x30 lands on the SIGRET sentinel) or an explicit
+  `rt_sigreturn`(139) restore and resume right after the interrupted `svc`.
+- Un-handled signals fall back to the POSIX default disposition (ignore for
+  SIGCHLD/SIGURG/SIGWINCH/SIGCONT+stop family; terminate the process 128+sig
+  otherwise), so a guest raise(SIGTERM)/SIGPIPE behaves like Linux.
+
+**Two JIT fixes the dispatch exposed (both real):**
+1. Svc translate arm: the syscall-return store `stg x0` was overwriting the
+   handler's signo argument before the block yielded. Redirect now decides
+   FIRST (before `stg`), so guest x0 keeps `sig` for a self-delivered handler.
+2. `svc`-bearing `bl` callees — new `body_contains_svc` (follows guest calls
+   transitively) — are now diverted through the dispatcher like host-import
+   callees, so every `svc` runs at a top-level block boundary. Without this, an
+   svc inlined into a caller's monolithic block whose Svc arm early-rets (signal
+   redirect / thread-local exit) popped the *inlined-caller* return address
+   instead of jit_run's — corrupting the host stack (a real `movaps [rsp]` fault
+   below a corrupted RSP). This also hardens the pre-existing child-thread
+   local-`exit`-via-helper path.
+
+**CpuState**: `+redirect_request` (block-yield to a handler) and
+`+pending_signal` (cross-thread cooperative pickup, volatile), plus a
+guest-tid → CpuState registry (`GUEST_THREADS`) for `post_signal_to_thread`.
+
+**Tests (+3, one strengthened):** `loader_run_self_signal_handler_runs_and_resumes`
+(self-delivered SIGUSR1 handler sets globals, resumes, returns 42),
+`loader_run_sig_ign_prevents_termination` (SIG_IGN for default-death SIGPIPE
+survives), and `loader_run_cross_thread_signal_delivers_to_child` (parent
+`tgkill`s a spawned child; the child's own thread picks it up cooperatively,
+runs the handler, publishes a result and futex-joins — real cross-thread
+delivery). Unit `body_contains_svc_follows_call_graph`. The `guest_svc` oact
+assert moved from "128-byte buffer zeroed" (the old no-op artifact) to the real
+32-byte aarch64 sigaction struct boundary.
+
+`cargo build --workspace` clean; `cargo test --workspace` **363/0** (was 359).
+HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none on
+this VPS). Thread-model remaining: per-thread guest TLS block layout beyond the
+SETTLS-pointer handoff; signal-blocking (rt_sigprocmask is a no-op) and real
+timer/signalfd dispatch are still simplified.
