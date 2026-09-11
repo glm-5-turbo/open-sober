@@ -2572,3 +2572,42 @@ correct; several would have corrupted the real Roblox runtime.
 
 These are progressive ISA surface revealed by arbitrary compiled C, not
 blockers of the previously-validated Roblox boot path.
+
+## Session (Sep 11, 2026) — JIT executes real compiled C end-to-end (commits f1e65ce, f6bb244)
+
+Continuing the synthetic-program bring-up. The loop back-edge and four
+operand/decode fixes crossed the JIT from "decodes the boot ISA" to "correctly
+EXECUTES real compiled aarch64 C": functions with loops, recursion (fib=55),
+FP fmul/fadd/fcvtzs, mul (factorial 8!=40320), ldrsw sign-extend loads,
+movk multi-part constants, SP prologues — 15/15 cross-gcc programs return the
+right value through load_elf_image->jit_run (no QEMU).
+
+### f1e65ce — loop back-edge jmp
+A frontier block falling through to an already-emitted address (loop back-edge
+`b.le Lbody`) just `break` and hit the epilogue `ret` → every loop body ran
+once then returned/re-dispatched (hang/corrupt pc). Now emits a `jmp` to the
+already-emitted host offset + fixup. loop1 sum(0..9)=45, int_only loops correct.
+
+### f6bb244 — operand/memory decode correctness (four silent miscompiles)
+1. MOVK was a *replace* not a *merge*: `movz 0x8bb1; movk 0x2 lsl#16` → 0x20000
+   not 0x28bb1 (broke every multi-part constant). Now RMW at bits[shift,+16).
+2. MADD/MSUB with ra=31 (the `mul` alias) added the STACK POINTER (ldg RDI,31
+   read x31). ra==31 is XZR → skip the accum add/sub.
+3. AddSubReg gate caught MADD/MUL (top 0x9b) as `add ...,lsl #N` (mul x0,x1,x0
+   → add lsl#31). Restricted to the real add/sub shifted-register tops
+   {0x0b,0x2b,0x4b,0x6b,0x8b,0xab,0xcb,0xeb}; 0x9b falls through to MulDiv.
+4. ldrsw/ldrsh/ldrsb (sign-extend loads) decoded as STORES (bit22=0 like STR,
+   bit23=1). Added `sext` to LdStrImm; these are now sign-extending loads into
+   the X dest (ldrsw=movsxd, ldrsh/ldrsb=shl/sar 48/56).
+
+All regression-locked (+movk_merges_into_existing_register,
+loop_back_edge_reiterates_body, ldrsw_sign_extend_load_ground_truth, plus the
+earlier ones). Workspace 111/0, build clean.
+
+### Honest remaining (small, next session)
+- LdStrReg register-offset ldrsw/ldrsh may share the bit22-mislead (the C
+  battery only emitted unsigned-offset forms); verify and fix if so.
+- FcvVec 4S lane edge (uses movq/cvttsd2si on 4-byte lanes) and fcvtzu ≥2^63.
+- ADD/SUB with rn==31-as-XZR (`add xD, xzr, #imm` reads SP today; assembler
+  uses movz/orr, so low priority).
+- Then libbadcpu gaps; services/auth. GPU ev-boards: HARD GATE.
