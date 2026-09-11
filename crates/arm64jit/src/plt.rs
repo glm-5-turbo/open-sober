@@ -540,6 +540,9 @@ fn bind_glob_dat(
         if slot_guest == 0 {
             return 0; // unresolved
         }
+        // Captured for the unresolved diagnostic below (the `name` Vec inside
+        // the `value` if/else is scoped to that expression).
+        let mut unresolved_name: Vec<u8> = Vec::new();
 
         let value: Option<u64> = if st_shndx != SHN_UNDEF {
             // Defined in this module: runtime address = guest addr of st_value
@@ -561,6 +564,7 @@ fn bind_glob_dat(
                     p += 1;
                 }
             }
+            unresolved_name = name.clone();
             // A cross-module import: if a loaded dependency (or the main image)
             // defines this symbol, bind to its guest address so a guest deref /
             // blr on the GOT slot lands in the defining module, which the JIT
@@ -603,7 +607,12 @@ fn bind_glob_dat(
             }
             None => {
                 if std::env::var_os("JIT_TRACE").is_some() {
-                    eprintln!("[plt:glob_dat] unresolved {:#x}", r_offset);
+                    eprintln!(
+                        "[plt:glob_dat] unresolved {:#x} sym={} shndx={}",
+                        r_offset,
+                        String::from_utf8_lossy(&unresolved_name),
+                        st_shndx
+                    );
                 }
                 0 // unresolved
             }
