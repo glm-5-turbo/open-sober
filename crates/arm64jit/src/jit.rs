@@ -53,6 +53,10 @@ pub struct CpuState {
     /// thread-local `exit` returns from the block with this unchanged while
     /// zeroing `pc`. Kept after `permscratch` so VECTOR_BASE (272) is fixed.
     pub svc_next: u64,
+    /// Address of the child's clear-tid word (CLONE_CHILD_CLEARTID): the child
+    /// must zero it and futex-WAKE it at thread exit so a joining parent
+    /// (pthread_join's futex-WAIT) wakes. 0 = no clear-tid.
+    pub clear_tid_addr: u64,
     /// Guest thread id assigned by the clone handler (positive u64; 0 = main).
     /// Distinct per spawned thread, stable for the thread's lifetime.
     pub tid: u64,
@@ -76,8 +80,10 @@ pub const CNTVCT_OFF: i32 = TPIDR_OFF + 8; // 792
 pub const PERMSCRATCH_OFF: i32 = CNTVCT_OFF + 8; // 800
 /// Byte offset of `CpuState.svc_next` — right after permscratch (800..832).
 pub const SVC_NEXT_OFF: i32 = PERMSCRATCH_OFF + 32; // 832
-/// Byte offset of `CpuState.tid` — right after `svc_next` (832..840).
-pub const TID_OFF: i32 = SVC_NEXT_OFF + 8; // 840
+/// Byte offset of `CpuState.clear_tid_addr` — right after `svc_next` (832..840).
+pub const CLEAR_TID_OFF: i32 = SVC_NEXT_OFF + 8; // 840
+/// Byte offset of `CpuState.tid` — right after `clear_tid_addr` (840..848).
+pub const TID_OFF: i32 = CLEAR_TID_OFF + 8; // 848
 
 impl CpuState {
     pub fn new() -> Self {
@@ -91,6 +97,7 @@ impl CpuState {
             cntvct: 0,
             permscratch: [0; 4],
             svc_next: 0,
+            clear_tid_addr: 0,
             tid: 0,
         }
     }
@@ -527,7 +534,22 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
                 // is lost by _exit.
                 unsafe { libc::_exit(a[0] as c_int) };
             }
-            // Spawned-child's thread-local exit: halt just this guest thread.
+            // Spawned-child's thread-local exit: clear the CLONE_CHILD_CLEARTID
+            // word (zero it + FUTEX_WAKE so a joining parent's futex-WAIT — the
+            // pthread_join primitive — wakes), then halt just this guest thread.
+            if s.clear_tid_addr != 0 {
+                unsafe {
+                    let p = s.clear_tid_addr as *mut u32;
+                    p.write_volatile(0u32); // clear the TID
+                    libc::syscall(
+                        libc::SYS_futex,
+                        p as usize,
+                        libc::FUTEX_WAKE,
+                        1 as c_int, // wake a single waiter (the joining parent)
+                        0 as usize,
+                    );
+                }
+            }
             s.pc = 0;
             a[0] as c_long
         }
@@ -611,12 +633,14 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
             const CLONE_THREAD: u64 = 0x0001_0000;
             const CLONE_SETTLS: u64 = 0x0008_0000;
             const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+            const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
             const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
             let child_stack = a[1];
             let parent_tid = a[2] as *mut u32;
             let tls = a[3];
             let child_tid = a[4] as *mut u32;
-            if flags & CLONE_VM == 0 {
+            let flags_ = flags;
+            if flags_ & CLONE_VM == 0 {
                 // A real process-fork (new VM) isn't the thread model we run.
                 (-libc::EINVAL) as c_long
             } else {
@@ -628,18 +652,24 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
                 if child_stack != 0 {
                     child.x[31] = child_stack; // new stack pointer
                 }
-                if flags & CLONE_SETTLS != 0 {
+                if flags_ & CLONE_SETTLS != 0 {
                     child.tpidr = tls; // new TLS base
                 }
                 // Parent-side TID store: *parent_tid = child tid (meaningful when
                 // the child stores into the parent's memory; here identical).
-                if flags & CLONE_PARENT_SETTID != 0 {
+                if flags_ & CLONE_PARENT_SETTID != 0 {
                     unsafe { parent_tid.write_volatile(tid as u32) };
                 }
-                if flags & CLONE_CHILD_SETTID != 0 {
+                if flags_ & CLONE_CHILD_SETTID != 0 {
                     unsafe { child_tid.write_volatile(tid as u32) };
                 }
-                let _ = flags & CLONE_THREAD; // no separate thread group tracked
+                // CLONE_CHILD_CLEARTID: the child must zero `child_tid` and
+                // futex-WAKE it at thread exit (pthread_join's futex-WAIT), so
+                // carry the address in the child's state.
+                if flags_ & CLONE_CHILD_CLEARTID != 0 {
+                    child.clear_tid_addr = a[4];
+                }
+                let _ = flags_ & CLONE_THREAD; // no separate thread group tracked
                 // Re-enter jit_run on a host thread from the post-svc PC.
                 let post_svc = s.svc_next;
                 let ctx_guard = EXEC_CTX.lock().unwrap();

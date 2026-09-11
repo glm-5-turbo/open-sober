@@ -1082,3 +1082,88 @@ int entry(void){
     eprintln!("\x1b[32mPASS\x1b[0m clone-thread: guest thread wrote 42 to shared memory");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// `pthread_join` primitive: clone with CLONE_CHILD_CLEARTID, then have the
+/// PARENT block on FUTEX_WAIT on the child's clear-tid word. The child computes,
+/// writes its result to a shared global, then thread-exits (93); the exit path
+/// zeroes the clear-tid word + FUTEX_WAKEs it, so the parent's FUTEX_WAIT
+/// returns and the join succeeds. This proves the blocking-join mechanism
+/// (render/audio/network workers that a host main loop joins) works end-to-end.
+#[test]
+fn loader_run_clone_child_cleartid_join_via_futex() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_join: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("clone-join");
+
+    let src = r#"
+volatile long g_result = 0;
+volatile int g_ctlid = 0; // child clear-tid word (written by CLONE_CHILD_SETTID)
+
+int entry(void){
+    static char stack[131072] __attribute__((aligned(16)));
+    int cctlid = 0;
+
+    // clone(flags, newsp, ptid, tls, ctid)
+    // CLONE_VM(0x100)|FS(0x200)|FILES(0x400)|SIGHAND(0x800)|THREAD(0x10000)
+    //   |CHILD_SETTID(0x1000000)|CHILD_CLEARTID(0x200000)
+    register long x8 asm("x8") = 220;
+    register long x0 asm("x0") = 0xF00 | 0x10000 | 0x200000 | 0x1000000;
+    register long x1 asm("x1") = (long)(stack + 131072 - 128);
+    register long x2 asm("x2") = 0;                    // ptid
+    register long x3 asm("x3") = 0;                    // tls
+    register long x4 asm("x4") = (long)&cctlid;        // ctid
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    long tid = x0;
+
+    if (tid == 0) {
+        // ---- child ----
+        long sum = 0;
+        for (int i = 0; i < 256; i++) sum += (i & 1) ? i : -i; // = +128 (odd sum 16384, even sum 16256)
+        g_result = 10 + (sum == 128 ? 0 : 1000);
+        // thread-local exit (93) clears cctlid + FUTEX_WAKEs it
+        register long x8c asm("x8") = 93;
+        register long x0c asm("x0") = 0;
+        asm volatile("svc #0" :: "r"(x8c), "r"(x0c) : "memory");
+        return -2;
+    }
+
+    // ---- parent: pthread_join blocks on FUTEX_WAIT(ctid) ----
+    // FUTEX_WAIT(0) on &cctlid, expecting value == tid (nonzero).
+    // The child's clear-tid exit writes 0 + FUTEX_WAKE, so this returns.
+    int expect = (int)tid;
+    register long x8f asm("x8") = 98; // futex
+    register long x0f asm("x0") = (long)&cctlid;
+    register long x1f asm("x1") = 0;  // FUTEX_WAIT
+    register long x2f asm("x2") = expect;
+    register long x3f asm("x3") = 0;  // no timeout
+    long fr = 12345;
+    asm volatile("svc #0" : "+r"(x0f) : "r"(x8f), "r"(x1f), "r"(x2f), "r"(x3f) : "memory");
+    fr = x0f; // 0 = woken
+
+    // After the FUTEX_WAIT returns, the clear-tid word is 0 and the result is set.
+    long c_cleared = (cctlid == 0) ? 1 : 0;
+    if (fr != 0) return 1000;                 // futex wait interrupted?? -> fail
+    if (g_result != 10) return 2000;          // child didn't set result
+    if (c_cleared != 1) return 3000;          // clear-tid wasn't zeroed on exit
+    return 42;
+}
+"#;
+
+    let elf = compile(&wd, "join", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "clone-join: entry() -> {v}, expected 42 (futex join / cleartid failed?)"
+        ),
+        Err(e) => panic!("clone-join: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m clone-join: parent FUTEX_WAIT joined child via CLONE_CHILD_CLEARTID wake");
+    let _ = std::fs::remove_dir_all(&wd);
+}
