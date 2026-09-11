@@ -1466,6 +1466,27 @@ unsigned long long entry(void){
 }
 "#,
     );
+    assert_diff(
+        "math128_addsub",
+        "-O2",
+        // Forces REAL runtime carries through adds+adc and subs+sbc (the values
+        // are volatile so gcc cannot constant-fold the carry chains), locking
+        // the ADC/SBC borrow-convention-carry fix on its exact s/ns paths.
+        r#"
+typedef __int128 i128;
+volatile unsigned long long A=0xfffffffffffffff0ULL, B=0x123456789abcdef0ULL;
+volatile unsigned long long Cc=0x0000000000000005ULL, D=0x7fffffffffffffffULL;
+unsigned long long entry(void){
+    i128 x = ((i128)A << 64) | B;
+    i128 y = ((i128)Cc << 64) | D;
+    i128 s = x + y;              // adds + adc (carry into high word)
+    i128 d = x - y;              // subs + sbc (borrow chain)
+    unsigned long long lo = (unsigned long long)(s ^ d);
+    unsigned long long hi = (unsigned long long)((s ^ d) >> 64);
+    return lo ^ (hi << 1);
+}
+"#,
+    );
 }
 
 #[test]
