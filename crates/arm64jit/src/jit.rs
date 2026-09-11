@@ -1891,6 +1891,48 @@ mod tests {
     }
 
     #[test]
+    fn sqadd_uqadd_respect_lane_width_and_sign() {
+        // Regression: SimdSatAdd treated every lane >= 32-bit as a 64-bit op —
+        // `.4s` (esize=4) loaded 8 bytes as ONE 64-bit value and clamped both
+        // s-lanes together, returning the smin sentinel 0x80000000 for a=10,b=5
+        // (qemu: 15). Signed narrow lanes also compared the sign-extended result
+        // against a positive smin bit-pattern (0x80000000 of the lane width) and
+        // falsely clamped. Now: per-lane loads with the correct width, sign-
+        // extended bounds, and .2d guard shifts (1<<64 / 1<<63 overflow).
+        // uqadd v0.16b,v1.16b,v2.16b = 0x6e220c20 ; sqadd v0.4s = 0x4ea20c20 ;
+        // uqadd v0.2d = 0x6ee20c20 ; sqsub v0.2d = 0x4ee22c20.
+        for (w, esize, sub, unsigned, expect_lane0) in [
+            (0x6e220c20u32, 1, false, true, 15), // uqadd16b: byte lanes {10}+{5}
+            (0x4ea20c20u32, 4, false, false, 15), // sqadd4s
+            (0x4ea22c20u32, 4, true, false, 5), // sqsub4s
+            (0x6ea22c20u32, 4, true, true, 5), // uqsub4s
+            (0x0e220c20u32, 1, false, false, 15), // sqadd8b
+            (0x4e620c20u32, 2, false, false, 15), // sqadd8h q=1
+            (0x6ee20c20u32, 8, false, true, 15), // uqadd2d
+            (0x4ee22c20u32, 8, true, false, 5), // sqsub2d
+        ] {
+            let mut st = CpuState::new();
+            st.set_v(1, 0x0a, 0); // lane0 = 10 (low byte / dword)
+            st.set_v(2, 0x05, 0); // lane0 = 5
+            let code = [
+                w.to_le_bytes()[0], w.to_le_bytes()[1], w.to_le_bytes()[2], w.to_le_bytes()[3],
+                0xc0, 0x03, 0x5f, 0xd6, // ret
+            ];
+            let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+            let got = match esize {
+                8 => st.v[0],
+                4 => st.v[0] & 0xffff_ffff,
+                2 => (st.v[0] & 0xffff) as u64,
+                _ => (st.v[0] & 0xff) as u64,
+            };
+            assert_eq!(
+                got, expect_lane0,
+                "word {w:#x}: lane0 = {got} (expected {expect_lane0})"
+            );
+        }
+    }
+
+    #[test]
     fn ld4_st4_decode_to_structure_deinterleave() {
         // Regression: the structure-load gate folded opcode 0b0000 (ld4/st4)
         // into the single-register consecutive path (0x7|0x0 => nreg 1), so

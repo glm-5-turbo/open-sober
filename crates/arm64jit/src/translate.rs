@@ -2383,15 +2383,54 @@ pub fn translate(
                                 let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                                 let se = esize as i32;
                                 let lanes: i32 = if q { 16 / se } else { 8 / se };
-                                let full = (1u64 << (se * 8)) - 1;
-                                let smin = 1i64 << (se * 8 - 1);
-                                let smax = smin - 1;
+                                let full: u64 = if se == 8 { u64::MAX } else { (1u64 << (se * 8)) - 1 };
+                                // Signed bounds as 64-bit SIGN-EXTENDED constants.
+                                // smax is the positive max (0x7F.. its low bits);
+                                // smin must be the NEGATIVE bound so the 64-bit
+                                // compare sees a sign-extended result as < it
+                                // (for .4s/.8h/.16b the raw 0x80000000 bit-pattern
+                                // as u64 is a positive value, so RAX = 15 would be
+                                // "less" than 0x80000000 and wrongly clamp).
+                                let smax: u64 = if se == 8 { i64::MAX as u64 } else { ((1i64 << (se * 8 - 1)) - 1) as u64 };
+                                let smin: u64 = if se == 8 { i64::MIN as u64 } else { (-(1i64 << (se * 8 - 1))) as u64 };
                                 for i in 0..lanes {
                                     let so_n = vslot(rn) + i * se;
                                     let so_m = vslot(rm) + i * se;
                                     let dd = vslot(rd) + i * se;
-                                    if se >= 4 { buf.mov_load64(RAX, RBX, so_n); buf.mov_load64(RCX, RBX, so_m); }
-                                    else { buf.mov_load32(RAX, RBX, so_n); buf.mov_load32(RCX, RBX, so_m); }
+                                    // Load ONE lane, SIGN-extended for the signed
+                                    // path so the 64-bit clamps below see negative
+                                    // results correctly (a zero-extended 0x80 lane
+                                    // would read as +128, never clamp to smin).
+                                    // Unsigned lanes load zero-extended as before.
+                                    if unsigned {
+                                        match se {
+                                            8 => { buf.mov_load64(RAX, RBX, so_n); buf.mov_load64(RCX, RBX, so_m); }
+                                            4 => { buf.mov_load32(RAX, RBX, so_n); buf.mov_load32(RCX, RBX, so_m); }
+                                            2 => { buf.movzx_word_mem(RAX, RBX, so_n); buf.movzx_word_mem(RCX, RBX, so_m); }
+                                            _ => { buf.movzx_byte_mem(RAX, RBX, so_n); buf.movzx_byte_mem(RCX, RBX, so_m); }
+                                        }
+                                    } else {
+                                        match se {
+                                            1 => {
+                                                buf.movsx_byte_mem(RAX, RBX, so_n);
+                                                buf.movsx_byte_mem(RCX, RBX, so_m);
+                                            }
+                                            2 => {
+                                                buf.movsx_word_mem(RAX, RBX, so_n);
+                                                buf.movsx_word_mem(RCX, RBX, so_m);
+                                            }
+                                            4 => {
+                                                buf.mov_load32(RAX, RBX, so_n);
+                                                buf.movsxd_r64_r32(RAX, RAX);
+                                                buf.mov_load32(RCX, RBX, so_m);
+                                                buf.movsxd_r64_r32(RCX, RCX);
+                                            }
+                                            _ => {
+                                                buf.mov_load64(RAX, RBX, so_n);
+                                                buf.mov_load64(RCX, RBX, so_m);
+                                            }
+                                        }
+                                    }
                                     if unsigned {
                                         if sub {
                                             // uqsub: diff = Vn - Vm; clamp 0 on borrow
@@ -2414,8 +2453,13 @@ pub fn translate(
                                         buf.cmp_rr64(RAX, R10);
                                         buf.cmov_rr64(0x4c, RAX, R10);   // cmovl -> smin
                                     }
-                                    if se >= 4 { buf.mov_store64(RBX, dd, RAX); }
-                                    else { buf.mov_store32(RBX, dd, RAX); }
+                                    // Store a single lane back (width matches lane).
+                                    match se {
+                                        8 => buf.mov_store64(RBX, dd, RAX),
+                                        4 => buf.mov_store32(RBX, dd, RAX),
+                                        2 => buf.mov_store16(RBX, dd, RAX),
+                                        _ => buf.mov_store8(RBX, dd, RAX),
+                                    }
                                 }
                             Ok(())
                             }
