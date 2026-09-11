@@ -191,3 +191,46 @@ Commit summary: new boot.rs (auxv), SmeNoop/AddVectorLen/SveCntd/MulLong decodes
 - elfjit: permanent SIGSEGV diagnostic (guest pc + x0..x7 + sp from CpuState).
 - cargo test --workspace 142/0 (arm64jit 108). HARD GATE still unmet (no GPU/APK).
 ---
+## Cycle (Sep 11, 2026) — libbadcpu sigill-emulator register map + arm64jit BitField disarm (151/0)
+status: session-end (committed, tests green)
+last_agent_claim: two crates hardened against silent miscompiles; the HANDOFF's
+documented open arm64jit bug (`__tunable_get_val` x4 corruption) is FIXED.
+Commits 8325edc (libbadcpu), 9081bfc (arm64jit BitField).
+
+### libbadcpu (8325edc) — three emulator correctness bugs + 6 new tests
+1. Register-index table matched the WRONG glibc gregs layout. ucontext_t gregs
+   is greg_t[23] laid out R8..R15,RDI,RSI,RBP,RBX,RDX,RAX,RCX,RSP (0..15) then
+   RIP=16/EFL=17 — ONLY RIP/EFL match the x86 reg number. Old table indexed
+   gregs[0] as RAX etc., so every emulated POPCNT/MOVBE/LZCNT/TZCNT/BMI1 read/
+   wrote the WRONG register. Now GREGS_IDX maps x86 reg number -> true slot;
+   popcnt/lzcnt/tzcnt exec-tests prove the dest lands in the right slot.
+2. VEX vvvv was never decoded (vex_vvvv stayed 0) — both 3-byte (C4) and 2-byte
+   (C5) forms now extract the inverted bits[6:3]. ANDN uses vvvv as its first
+   source (was reading the dest register); BLSI/BLSMSK/BLSR correctly ignore it.
+3. VEX opcode byte was read from the C4/C5 prefix position, never the byte after
+   the VEX fields — no 0F38/0F3A-map VEX instruction ever decoded correctly.
+
+### arm64jit (9081bfc) — BitField dispatches by class; UBFIZ/SBFIZ vs BFI/BFXIL
+modmain.elf (full static-glibc boot) now runs PAST the crash the HANDOFF
+flagged, into `_dl_determine_tlsoffset` (a newer, distinct frontier).
+1. UBFIZ/SBFIZ landed in the BFI merge path and PRESERVED old Rd's upper bits.
+   `ubfiz x4,x0,#7,#32` = (0x18<<7)&mask kept a stale 0x7f8000000000 prefix;
+   glibc's `__tunable_get_val` then ldr'd [x4,#48] at 0x7f800048e888 (should be
+   0x48e888) and SIGSEGV'd. UBFIZ now zero-fills; SBFIZ sign-fills from top.
+2. Genuine BFI (insert=true) was also swallowed by the ROR shortcut
+   (imms+immr+1==bits) — bfi x4,x0,#16,#16 (0xb3703c04) compiled as a rotate.
+   The LSR/LSL/ROR shortcuts are UBFM/SBFM aliases; BFM inserts now handled
+   first via an early return (BFXIL in-place mask, BFI shifted-merge).
+Regressions: ubfiz_zero_extends_field_and_discards_old_rd,
+bfi_still_merges_into_old_rd (objdump-verified encoding).
+arm64jit 110/110; workspace 151/0. Battery (loop1 45, structs/dispatch/fpfun/
+vtable 42, byvalue 44, bv2/iso_arith 300, signmod 12, iso_wrd 4321, arr/shacc/
+fact/ldrsw/fp_only/A/C 42) ALL unchanged.
+
+### Honest remaining
+- modmain now SIGSEGVs deep in `_dl_determine_tlsoffset` (small-addr 0x2f load,
+  x4==sp coincidence) — the next glibc-CRT frontier. HANDOFF judges this
+  synthetic-glibc tangent NOT a Roblox boot blocker (real libroblox boot path
+  already fully decoded/exit 0); the __tunable_get_val blocker IS fixed.
+- Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+  HARD GATE; blocked on a capable host + the real binary/APK (none on this box).
