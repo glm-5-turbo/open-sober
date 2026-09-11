@@ -1159,6 +1159,25 @@ mod tests {
     }
 
     #[test]
+    fn sub_add_sp_updates_stack_pointer() {
+        // Regression: `sub sp,sp,#0x10` / `add sp,sp,#0x10` must actually update
+        // CpuState.x[31] (SP). Previously AddSubImm/AddSubReg suppressed rd==31,
+        // so every function prologue's `sub sp` silently did nothing and nested
+        // frames collided on the same sp (inlined f()'s `str d31,[sp+8]`
+        // clobbered the caller's saved x30 -> pc jumped to a double's bit pattern).
+        //   sub sp,sp,#0x10 = 0xd10043ff ; mov x0,sp = 0x910003e0
+        //   add sp,sp,#0x10 = 0x910043ff ; ret = 0xd65f03c0
+        let code = [0xffu8, 0x43, 0x00, 0xd1, 0xe0, 0x03, 0x00, 0x91, 0xff, 0x43, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        let sp0 = 0x7000_0000_2000u64;
+        st.x[31] = sp0;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[0], sp0 - 0x10, "sub sp must decrement SP (x0 = sp)");
+        assert_eq!(st.x[31], sp0, "add sp must restore SP (x31 == sp0)");
+        assert_eq!(r, sp0 - 0x10, "ret returns x0 = moved sp");
+    }
+
+    #[test]
     fn str_xzr_stores_zero_not_sp() {
         // Regression: `str xzr,[x0]` must write 0, never the stack pointer.
         // AArch64 stores read the source field x31 as XZR (zero); the JIT used to

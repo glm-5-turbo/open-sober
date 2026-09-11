@@ -304,8 +304,11 @@ pub fn translate(
             if s {
                 store_nzcv(buf); // N/Z/C/V -> CpuState.nzcv
             }
-            if rd != 31 {
-                stg(buf, rd as u32, RAX);
+            // rd==31 writes SP for ADD/SUB (unlike logical ops where it's XZR and
+            // discarded). The exception is cmp/cmn (s==1, rd==31) which must NOT
+            // clobber SP. `sub sp,sp,#imm` (every function prologue) must write.
+            if rd != 31 || !s {
+                stg(buf, rd as u32, RAX); // rd==31 -> writes the SP slot
             }
             Ok(())
         }
@@ -330,7 +333,8 @@ pub fn translate(
             if s {
                 store_nzcv(buf);
             }
-            if rd != 31 {
+            // rd==31 writes SP for ADD/SUB; only cmp/cmn (s==1, rd==31) discards.
+            if rd != 31 || !s {
                 stg(buf, rd as u32, RAX);
             }
             Ok(())
