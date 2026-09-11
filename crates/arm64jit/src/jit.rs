@@ -678,8 +678,12 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         // dispatcher loop below — instead of eagerly expanding the whole
         // reachable call graph into one multi-MB blast that took seconds to
         // translate and then SIGSEGV'd. CONFIG_JUMP_GUEST_BUDGET tunable.
-        const BLOCK_BUDGET: usize = 8192;
-        let block = compile_image_bounded(image, base, pc, state, BLOCK_BUDGET)?;
+        // `JIT_BUDGET` env overrides for instruction-granular tracing.
+        let block_budget: usize = std::env::var("JIT_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8192);
+        let block = compile_image_bounded(image, base, pc, state, block_budget)?;
         #[cfg(debug_assertions)]
         if std::env::var_os("JIT_DUMP").is_some() {
             let raw = block.dump();
@@ -932,6 +936,14 @@ pub fn compile_image_bounded(
     // given callee body at most once per compile (it may be inlined from many
     // call sites within one block).
     let mut memo_divert: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+    // Truncation fall-through tracking: when the budget cuts a straight-line
+    // body short (no terminal instruction writes pc), the last emitted
+    // instruction falls through to `trunc_next_pc` with nothing updating
+    // CpuState.pc — the dispatcher would otherwise re-compile from the SAME
+    // entry forever. Captured at function scope so multiple frontier regions
+    // don't contaminate it; only the last partially-emitted region matters.
+    let mut trunc_next_pc: Option<u64> = None;
+    let mut trunc_last_terminal = false;
     // Invariant: every address in frontier is a candidate block start.
     while let Some(addr) = frontier.pop() {
         if host_of_guest.contains_key(&addr) {
@@ -1046,9 +1058,30 @@ pub fn compile_image_bounded(
                         link: false, ..
                     }
             ) {
+                trunc_last_terminal = true; // this instruction writes pc itself
                 break;
             }
             cur += 4;
+            // Non-terminal fall-through successor (for truncation divert below).
+            trunc_next_pc = Some(cur);
+            trunc_last_terminal = false;
+        }
+    }
+
+    // Bounded truncation may cut a straight-line body short with no terminal
+    // instruction to write CpuState.pc. Divert the fall-through to a
+    // dispatcher-return stub for `trunc_next_pc` so the block advances past
+    // its untranslated tail instead of re-running its own entry forever.
+    if truncated && !trunc_last_terminal {
+        if let Some(np) = trunc_next_pc {
+            if np >= base && np - base + 4 <= image.len() as u64 {
+                let disp_off = buf.jmp_rel32();
+                fixups.push(crate::translate::Fixup {
+                    target_pc: np,
+                    disp_off,
+                    cc: 0, // unconditional jmp (E9) -> dispatcher-return stub
+                });
+            }
         }
     }
 
@@ -1148,6 +1181,46 @@ mod tests {
         st.x[0] = buf.as_ptr() as u64; // x0 = &buf[0]
         let r = exec_bytes(&mut st, &code, 0).expect("exec");
         assert_eq!(r, buf[2], "ldr x0,[x0,#16] should load buf[2]");
+    }
+
+    #[test]
+    fn ldst_pair_offset_form_applies_immediate() {
+        // Regression: the LdStPair *offset* form `ldp x0,x1,[x2,#16]` must read
+        // [x2+16] and [x2+24]; it used to ignore the `#16` and read [x2]/[x2+8],
+        // so a 16-byte struct passed by value read stale/x29 at the wrong base
+        // (byvalue.elf: returned 0,0 instead of the packed struct).
+        // ldp x0,x1,[x2,#16]=0xa9410440 ; ret=0xd65f03c0
+        let code = [0x40u8, 0x04, 0x41, 0xa9, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut buf = [0u64; 4];
+        buf[0] = 0xdead_beef_dead_beef; // must NOT be read (offset form)
+        buf[2] = 0x2222_2222_1111_1111; // [x2+16]
+        buf[3] = 0x4444_4444_3333_3333; // [x2+24]
+        let mut st = CpuState::new();
+        st.x[2] = buf.as_ptr() as u64; // x2 = &buf[0]
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, buf[2], "x0 = [x2+16]");
+        assert_eq!(buf[0], 0xdead_beef_dead_beef, "buf must be unmodified");
+        assert_eq!(st.x[1], buf[3], "x1 = [x2+24]");
+    }
+
+    #[test]
+    fn addsub_s_flag_reads_xzr_not_sp_for_rn31() {
+        // Regression: in ADD/SUB with the S (flags) bit set, register 31 is XZR
+        // (= 0), NOT SP. `negs w1,w0` (subs w1,wzr,w0) used to read rn=31 as the
+        // stack pointer, computing `sp - w0` instead of `-w0` (signmod.elf's
+        // `%16` returned garbled remainders; byvalue's negs/cset also corrupted).
+        // Seed SP with a distinctive value so any sp-dependent result differs.
+        // negs w1,w0=0x6b0003e1 ; mov w0,w1=0x2a0103e0 ; ret=0xd65f03c0
+        let code = [
+            0xe1u8, 0x03, 0x00, 0x6b, // negs w1,w0
+            0xe0, 0x03, 0x01, 0x2a, // mov w0,w1
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[0] = 5;
+        st.x[31] = 0x1000; // if rn=31 wrongly read as SP, result = (0x1000-5)&0xffffffff
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0xffff_fffb, "-w0 = -5 must not depend on SP (rn=31 is XZR)");
     }
 
     #[test]

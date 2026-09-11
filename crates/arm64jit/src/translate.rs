@@ -66,6 +66,17 @@ fn stg_if_writable(buf: &mut CodeBuf, g: u32) {
     }
 }
 
+/// Zero-extend the low 32 bits of x86 reg `r` into its upper half. AArch64
+/// writes to a W (32-bit) register always zero the upper 32 bits of the
+/// corresponding X register; x86 64-bit ops leave them stale, so a 32-bit data
+/// value must be cleaned before it propagates (e.g. `mov w0,w1` copying a
+/// negative two's-complement w1 would otherwise carry `0xffffffffffffffff`).
+#[inline]
+fn zext_w(buf: &mut CodeBuf, r: u8) {
+    buf.shl_ri8(r, 32);
+    buf.shr_ri8(r, 32);
+}
+
 /// Byte offset of `CpuState.nzcv` (after pc@256: nzcv u32 at 264).
 const NZCV_OFF: i32 = 8 * 32 + 8; // 264
 /// Byte offset of `CpuState.pad`.
@@ -308,10 +319,20 @@ pub fn translate(
             shift12,
             sub,
             s,
+            sf,
             ..
         } => {
             let imm: u64 = (imm12 as u64) << if shift12 { 12 } else { 0 };
-            ldg(buf, RAX, rn as u32);
+            // rn XZR-vs-SP: `sub sp,sp,#imm` (non-S) reads rn=31 as SP, but the
+            // flag-setting form (e.g. `cmp wzr,#imm`) reads rn=31 as XZR=0.
+            if s && rn == 31 {
+                buf.mov_ri64(RAX, 0);
+            } else {
+                ldg(buf, RAX, rn as u32);
+            }
+            if !sf {
+                zext_w(buf, RAX); // 32-bit: high garbage in rn is ignored
+            }
             if sub {
                 buf.sub_ri64(RAX, imm as u32);
             } else {
@@ -324,6 +345,9 @@ pub fn translate(
             // discarded). The exception is cmp/cmn (s==1, rd==31) which must NOT
             // clobber SP. `sub sp,sp,#imm` (every function prologue) must write.
             if rd != 31 || !s {
+                if !sf {
+                    zext_w(buf, RAX); // W write zero-extends into X
+                }
                 stg(buf, rd as u32, RAX); // rd==31 -> writes the SP slot
             }
             Ok(())
@@ -336,10 +360,28 @@ pub fn translate(
             s,
             shift,
             sh_amt,
+            sf,
             ..
         } => {
-            ldg(buf, RAX, rn as u32);
-            ldg(buf, RCX, rm as u32);
+            // rn/Rd XZR-vs-SP: in ADD/SUB the non-flag-setting form uses SP for
+            // rn=31 and rd=31 (e.g. function prologue `sub sp, sp, #N`), but when
+            // the S (flags) bit is set rn=31 and rd=31 are XZR — `negs w1,w0`
+            // (subs w1, wzr, w0) must read rn=31 as ZERO, not SP, or it computes
+            // `sp - w0`. Rm is always a GPR (XZR=0), never SP.
+            if s && rn == 31 {
+                buf.mov_ri64(RAX, 0);
+            } else {
+                ldg(buf, RAX, rn as u32);
+            }
+            if rm == 31 {
+                buf.mov_ri64(RCX, 0);
+            } else {
+                ldg(buf, RCX, rm as u32);
+            }
+            if !sf {
+                zext_w(buf, RAX); // 32-bit add/sub: zero high garbage in operands
+                zext_w(buf, RCX);
+            }
             apply_shift_const(buf, RCX, shift, sh_amt);
             if sub {
                 buf.sub_rr64(RAX, RCX);
@@ -351,6 +393,9 @@ pub fn translate(
             }
             // rd==31 writes SP for ADD/SUB; only cmp/cmn (s==1, rd==31) discards.
             if rd != 31 || !s {
+                if !sf {
+                    zext_w(buf, RAX); // W write zero-extends into X
+                }
                 stg(buf, rd as u32, RAX);
             }
             Ok(())
@@ -412,7 +457,15 @@ pub fn translate(
             } else {
                 ldg(buf, RAX, rn as u32);
             }
-            ldg(buf, RCX, rm as u32);
+            if rm == 31 {
+                buf.mov_ri64(RCX, 0);
+            } else {
+                ldg(buf, RCX, rm as u32);
+            }
+            if !sf {
+                zext_w(buf, RAX); // 32-bit ops: ignore high garbage in operands
+                zext_w(buf, RCX);
+            }
             apply_shift_const(buf, RCX, shift, sh_amt);
             match op {
                 0 => buf.and_rr64(RAX, RCX), // AND
@@ -421,14 +474,23 @@ pub fn translate(
                 // Inverted (N=1) variants: AND/NOT, OR/NOT, XOR/NOT (BIC/ORN/EON).
                 4 => {
                     buf.not_r64(RCX);
+                    if !sf {
+                        zext_w(buf, RCX); // 64-bit `not` sets high bits; 32-bit must not
+                    }
                     buf.and_rr64(RAX, RCX); // BIC
                 }
                 5 => {
                     buf.not_r64(RCX);
+                    if !sf {
+                        zext_w(buf, RCX);
+                    }
                     buf.or_rr64(RAX, RCX); // ORN
                 }
                 6 => {
                     buf.not_r64(RCX);
+                    if !sf {
+                        zext_w(buf, RCX);
+                    }
                     buf.xor_rr64(RAX, RCX); // EON
                 }
                 _ => return Err(format!("LogicReg op {} not implemented", op)),
@@ -439,6 +501,9 @@ pub fn translate(
                             store_nzcv(buf);
                         }
                         if rd != 31 {
+                            if !sf {
+                                zext_w(buf, RAX); // W write zero-extends into X
+                            }
                             stg(buf, rd as u32, RAX);
                         }
                         Ok(())
@@ -3110,13 +3175,20 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 4i32
             };
             let imm32 = imm as i32;
-            // eff base: pre-index adjusts the address by imm before the access;
-            // post/offset use rn (post then adds imm for writeback).
+            // eff base: three addressing modes.
+            //  pre-index `[rn, #imm]!`  -> access at rn+imm, then rn += imm
+            //  post-index `[rn], #imm`  -> access at rn,     then rn += imm
+            //  offset     `[rn, #imm]`  -> access at rn+imm, no writeback
+            // (ARM bit23=indexed, bit24=pre within indexed; offset form has
+            //  bit23=0 => writeback=false. The offset immediate must still apply
+            //  to the access address.)
             ldg(buf, RDX, rn as u32); // RDX = rn
             let (access_off, wb_off) = if preidx {
-                (imm32, imm32) // access at rn+imm, then rn=rn+imm
+                (imm32, imm32)
+            } else if writeback {
+                (0i32, imm32) // post-index: access at rn, then rn += imm
             } else {
-                (0i32, if writeback { imm32 } else { 0 }) // access at rn, wb adds imm
+                (imm32, 0i32) // offset: access at rn+imm, no writeback
             };
             if fp_d {
                 // 64-bit FP/vector d-pair: each reg is one u64 in CpuState.v
