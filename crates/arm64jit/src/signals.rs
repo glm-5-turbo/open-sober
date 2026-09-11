@@ -66,6 +66,111 @@ pub fn reset_actions() {
         [GuestSigAction { handler: 0, flags: 0, mask: [0; 8] }; 65];
 }
 
+/// Signal numbers Linux forbids blocking / catching (SIGKILL=9, SIGSTOP=19).
+/// The kernel silently drops these from any set a thread tries to block, and
+/// they are always actionable regardless of the mask.
+pub fn unblockable_mask() -> u64 {
+    (1u64 << (9 - 1)) | (1u64 << (19 - 1))
+}
+
+/// Whether `sig` is currently in this thread's blocked mask (Linux sigset: bit
+/// N-1 set means signal N is blocked). SIGKILL/SIGSTOP are never blocked.
+pub fn is_blocked(st: &CpuState, sig: u32) -> bool {
+    if !(1..=64).contains(&sig) {
+        return false;
+    }
+    if sig == 9 || sig == 19 {
+        return false;
+    }
+    (st.blocked_mask >> (sig - 1)) & 1 == 1
+}
+
+/// Atomically OR `sig` into this thread's pending mask (`pending_mask`): the
+/// signal has been raised but cannot be delivered yet (it is blocked). The
+/// owning thread delivers it once `rt_sigprocmask` unblocks `sig`. Safe to
+/// call from another host thread posting a signal to this guest thread.
+pub fn mark_pending(st: &mut CpuState, sig: u32) {
+    if (1..=64).contains(&sig) {
+        let bit = 1u64 << (sig - 1);
+        // Atomic OR so a cross-thread sender can race the owner's clear
+        // without losing a newly-pending signal.
+        let p = &mut st.pending_mask as *mut u64;
+        unsafe {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            std::ptr::write_volatile(p, std::ptr::read_volatile(p) | bit);
+        }
+    }
+}
+
+/// Try to deliver `sig` to the current guest thread (`st`). If `sig` is in
+/// `st.blocked_mask`, mark it pending and do NOT dispatch (it will run once
+/// unblocked). Otherwise dispatch immediately (handler / default / ignore).
+/// `resume` is the interrupted guest PC (see `dispatch_current_thread`).
+pub fn deliver(st: &mut CpuState, sig: u32, resume: u64) {
+    if is_blocked(st, sig) {
+        mark_pending(st, sig);
+    } else {
+        dispatch_current_thread(st, sig, resume);
+    }
+}
+
+/// Drain one deliverable pending signal: if any pending signal is no longer
+/// blocked, atomically clear its bit and return it; else None. Called at a
+/// block boundary after `rt_sigprocmask` unblocks something, so a previously-
+/// blocked signal gets dispatched as soon as it becomes deliverable.
+pub fn take_deliverable_pending(st: &mut CpuState) -> Option<u32> {
+    let p = &mut st.pending_mask as *mut u64;
+    unsafe {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        let pend = std::ptr::read_volatile(p);
+        let blocked = st.blocked_mask;
+        let deliverable = pend & !blocked;
+        if deliverable == 0 {
+            return None;
+        }
+        // Lowest set bit = lowest signal number pending & unblocked (Linux
+        // delivers in ascending signal-number order).
+        let sig = deliverable.trailing_zeros() as u32 + 1;
+        std::ptr::write_volatile(p, pend & !(1u64 << (sig - 1)));
+        Some(sig)
+    }
+}
+
+/// Apply `rt_sigprocmask` (syscall 135) semantics: how in
+/// {SIG_BLOCK=0, SIG_UNBLOCK=1, SIG_SETMASK=2}, `set`/`oset` point at 8-byte
+/// sigsets, `sigsetsize` is the sigset byte size (must be >= 8). Returns 0 on
+/// success, -EINVAL for a bad `how` / `sigsetsize`.
+pub fn sigprocmask(st: &mut CpuState, how: u64, set: u64, oset: u64, sigsetsize: u64) -> i64 {
+    if sigsetsize < 8 || how > 2 {
+        return (-libc::EINVAL) as i64;
+    }
+    // SIG_SETMASK with a NULL `set` is invalid (there'd be nothing to set).
+    if set == 0 && how == 2 {
+        return (-libc::EINVAL) as i64;
+    }
+    let old = st.blocked_mask;
+    // Read the incoming set only if provided (may be NULL for a pure query).
+    if set != 0 {
+        // SAFETY: guest passed a readable 8-byte sigset (sigsetsize >= 8).
+        let new = unsafe { std::ptr::read_unaligned(set as *const u64) };
+        st.blocked_mask = match how {
+            0 => old | new,  // SIG_BLOCK
+            1 => old & !new, // SIG_UNBLOCK
+            _ => new,        // SIG_SETMASK (how == 2)
+        };
+        // The kernel ignores attempts to block SIGKILL/SIGSTOP (and would
+        // deliver SIGKILL before the syscall returns); drop their bits so a
+        // blocked_mask with them can't stall a pending SIGKILL forever.
+        st.blocked_mask &= !unblockable_mask();
+    }
+    // Report the previous mask to oset (if provided).
+    if oset != 0 {
+        // SAFETY: guest passed a writable 8-byte sigset (sigsetsize >= 8).
+        unsafe { std::ptr::write_unaligned(oset as *mut u64, old); }
+    }
+    0
+}
+
 /// POSIX default disposition for an un-handled signal. Returns `true` when the
 /// default action terminates the process (everything not ignore/stop/continue).
 /// There is no job control in the single-process runtime, so SIGTSTP/SIGTTIN/

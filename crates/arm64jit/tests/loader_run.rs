@@ -1511,3 +1511,100 @@ int entry(void){
     eprintln!("\x1b[32mPASS\x1b[0m sig-xthread: parent tgkill delivered SIGUSR1 to the child's own thread");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// Real rt_sigprocmask blocking: a guest first BLOCKS SIGUSR1 (so a self
+/// tgkill marks it pending but does NOT run the handler), verifies the handler
+/// has not run while blocked, then UNBLOCKS SIGUSR1 and verifies the pending
+/// signal is delivered immediately (the handler runs once unblocked). This is
+/// the Linux "blocked signals stay pending until unmasked" contract the runtime
+/// must honor for worker threads that briefly mask signals during critical
+/// sections.
+#[test]
+fn loader_run_sigprocmask_block_then_unblock_delivers_pending() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_sigprocmask: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("sig-procmask");
+
+    let src = r#"
+struct ksa {
+    unsigned long handler;   // 0
+    unsigned long flags;     // 8
+    unsigned long restorer;  // 16
+    unsigned char mask[8];   // 24
+};
+volatile long g_hit = 0;
+volatile long g_sig = 0;
+void on_usr1(int sig){ g_hit = 1; g_sig = sig; }
+static long my_rt_sigaction(long sig, long act, long oact) {
+    register long x8 asm("x8") = 134;
+    register long x0 asm("x0") = sig;
+    register long x1 asm("x1") = act;
+    register long x2 asm("x2") = oact;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_tgkill(long tid, long sig) {
+    register long x8 asm("x8") = 131;
+    register long x0 asm("x0") = 0;
+    register long x1 asm("x1") = tid;
+    register long x2 asm("x2") = sig;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_gettid(void) {
+    register long x8 asm("x8") = 178;
+    register long x0 asm("x0") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+static long my_rt_sigprocmask(long how, long set, long oset, long sz) {
+    register long x8 asm("x8") = 135;
+    register long x0 asm("x0") = how;
+    register long x1 asm("x1") = set;
+    register long x2 asm("x2") = oset;
+    register long x3 asm("x3") = sz;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
+int entry(void){
+    struct ksa sa = {0};
+    sa.handler = (unsigned long)on_usr1;
+    long r = my_rt_sigaction(10, (long)&sa, 0);      // SIGUSR1 -> handler
+    if (r != 0) return 1000;
+
+    // BLOCK SIGUSR1 (SIG_BLOCK=0, set = bit 9 -> sig 10).
+    unsigned long block = 1 << (10 - 1);
+    r = my_rt_sigprocmask(0, (long)&block, 0, 8);
+    if (r != 0) return 2000;
+
+    // Self-deliver SIGUSR1 while blocked: must be marked pending, NOT run yet.
+    r = my_tgkill(my_gettid(), 10);
+    if (r != 0) return 3000;
+    if (g_hit != 0) return 4000;                      // handler MUST NOT have run while blocked
+
+    // UNBLOCK SIGUSR1 (SIG_UNBLOCK=1): the pending signal is now delivered.
+    r = my_rt_sigprocmask(1, (long)&block, 0, 8);
+    if (r != 0) return 5000;
+    if (g_hit != 1) return 6000;                      // pending signal not delivered on unblock
+    if (g_sig != 10) return 7000;                     // delivered the wrong signal number
+    return 42;
+}
+"#;
+    let elf = compile(&wd, "sig-procmask", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "sig-procmask: entry() -> {v}, expected 42 (block/pending/unblock delivery failed?)"
+        ),
+        Err(e) => panic!("sig-procmask: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m sig-procmask: blocked SIGUSR1 went pending and was delivered on unblock");
+    let _ = std::fs::remove_dir_all(&wd);
+}

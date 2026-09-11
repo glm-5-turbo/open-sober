@@ -74,8 +74,20 @@ pub struct CpuState {
     /// registered guest handler / applies the default disposition. Read/written
     /// through `read_volatile`/`write_volatile` raw pointers so the posting
     /// thread and the owning thread view the same word without a data race.
-    /// 0 = none. Kept last so all earlier field offsets are unchanged.
+    /// 0 = none. Kept so its offset (864) is unchanged for JIT-emitted access.
     pub pending_signal: u32,
+    /// Linux per-thread *blocked* signal mask, as an 64-bit sigset (signal N in
+    /// bit N-1). A signal is held in `pending_mask` while blocked and delivered
+    /// only once `rt_sigprocmask` unblocks it. Only the owning thread reads/
+    /// writes this (rt_sigprocmask runs on the syscaller's own thread).
+    pub blocked_mask: u64,
+    /// Signals pending on THIS guest thread (sigset, bit N-1): either cross-
+    /// thread posts (OR'd in atomically by the sender) or blocked self-signals.
+    /// The owning thread's dispatcher/Svc arm delivers the lowest signal that
+    /// is no longer blocked (`pending_mask & !blocked_mask`). Access is atomic
+    /// (a sender thread can OR a bit concurrently while the owner clears the
+    /// one it just decided to deliver).
+    pub pending_mask: u64,
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
@@ -104,6 +116,11 @@ pub const TID_OFF: i32 = CLEAR_TID_OFF + 8; // 848
 pub const REDIRECT_OFF: i32 = TID_OFF + 8; // 856
 /// Byte offset of `CpuState.pending_signal` — right after `redirect` (856..864).
 pub const SIG_PENDING_OFF: i32 = REDIRECT_OFF + 8; // 864
+/// Byte offset of `CpuState.blocked_mask` — right after `pending_signal`
+/// (864..872, pending_signal is u32 + 4 pad).
+pub const SIG_BLOCKED_OFF: i32 = SIG_PENDING_OFF + 8; // 872
+/// Byte offset of `CpuState.pending_mask` — right after `blocked_mask` (872..880).
+pub const SIG_PENDING_MASK_OFF: i32 = SIG_BLOCKED_OFF + 8; // 880
 
 impl CpuState {
     pub fn new() -> Self {
@@ -121,6 +138,8 @@ impl CpuState {
             tid: 0,
             redirect_request: 0,
             pending_signal: 0,
+            blocked_mask: 0,
+            pending_mask: 0,
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {
@@ -786,7 +805,7 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
                 (-libc::EINVAL) as c_long
             } else if pid == 0 || pid == unsafe { libc::getpid() as i64 } || pid == -1 {
                 let resume = s.svc_next; // post-svc continuation
-                crate::signals::dispatch_current_thread(s, sig as u32, resume);
+                crate::signals::deliver(s, sig as u32, resume);
                 0
             } else {
                 (-libc::ESRCH) as c_long
@@ -803,7 +822,7 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
                 (-libc::EINVAL) as c_long
             } else if target_is_self(s, tid_arg) {
                 let resume = s.svc_next; // post-svc continuation
-                crate::signals::dispatch_current_thread(s, sig as u32, resume);
+                crate::signals::deliver(s, sig as u32, resume);
                 0
             } else if post_signal_to_thread(sig as u32, tid_arg) {
                 0
@@ -846,12 +865,21 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
             s.redirect_request = s.pc;
             0
         },
-        135 => unsafe { // rt_sigprocmask(135): how, set, oset, sigsetsize. No-op: we
-            // do not dispatch signals, so accept and report an empty old-set.
-            if a[2] != 0 {
-                unsafe { std::ptr::write_bytes(a[2] as *mut u8, 0, 8); }
+        135 => { // rt_sigprocmask(135): how, set, oset, sigsetsize
+            // Real Linux semantics: update the per-thread blocked mask and
+            // report the previous mask into oset. A previously-blocked pending
+            // signal becomes deliverable immediately (the kernel would deliver
+            // it before the syscall returns) — drain one if available.
+            let r = crate::signals::sigprocmask(s, a[0], a[1], a[2], a[3]);
+            if r == 0 {
+                if let Some(sig) = crate::signals::take_deliverable_pending(s) {
+                    // SIG_DFL / SIG_IGN may terminate or consume; the dispatcher
+                    // loop runs the handler via redirect. Deliver synchronously
+                    // now (resume after the svc) for a same-thread unblock.
+                    crate::signals::dispatch_current_thread(s, sig, s.svc_next);
+                }
             }
-            0
+            r
         },
         223 => unsafe { // fadvise64(223): fd, off, len, advice (aarch64 __NR3264_fadvise64)
             libc::syscall(libc::SYS_fadvise64, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize) as c_long
@@ -1064,10 +1092,12 @@ fn post_signal_to_thread(sig: u32, tid_arg: i64) -> bool {
     for r in &*v {
         if r.host_tid as i64 == tid_arg || r.guest_tid as i64 == tid_arg {
             // SAFETY: the target thread is live (registered) and its CpuState
-            // is valid until it exits; a single-word volatile store races safely
-            // with the owning thread's volatile read in the dispatcher loop.
+            // is valid until it exits; mark_pending does a single-word volatile
+            // read-modify-write of pending_mask that races safely with the
+            // owning thread's take_deliverable_pending. The owning dispatcher
+            // loop delivers it once it is no longer blocked.
             unsafe {
-                std::ptr::write_volatile(&mut (*r.state).pending_signal, sig);
+                crate::signals::mark_pending(&mut *r.state, sig);
             }
             return true;
         }
@@ -1320,10 +1350,11 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         // checked before the bounds/`host_call_at` path below.
         unsafe {
             let resume = (*state).pc; // interrupted pc for a pending pickup
-            let pend = std::ptr::read_volatile(&(*state).pending_signal);
-            if pend != 0 {
-                std::ptr::write_volatile(&mut (*state).pending_signal, 0);
-                crate::signals::dispatch_current_thread(&mut *state, pend, resume);
+            // A cross-thread signal (or a blocked signal that was just
+            // unblocked) is in `pending_mask`; drain the lowest deliverable one
+            // (take_deliverable_pending respects the thread's blocked_mask).
+            if let Some(sig) = crate::signals::take_deliverable_pending(&mut *state) {
+                crate::signals::dispatch_current_thread(&mut *state, sig, resume);
                 continue;
             }
             let redirect = (*state).redirect_request;
