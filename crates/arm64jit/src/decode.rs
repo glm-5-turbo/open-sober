@@ -329,6 +329,11 @@ pub enum Inst {
     // from the modifed-immediate movi/mvni (which always have immh==0). unsigned =
     // bit29 (0x2f/0x6f). These previously fell into the broad VecMovi gate.
     SimdShr { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
+    // ---- SIMD shift-right-narrow: shrn/shrn2 Vd.T, Vn.T/2, #imm ----
+    // Shift each DOUBLE-width source element right, truncate to the dest element
+    // (dest is half the source width). `upper` (shrn2) writes the high dest
+    // half. Distinguishable from plain ushr/sshr by bit15 (0x8000) set.
+    SimdShrn { rd: u8, rn: u8, esrc: u8, shift: u8, upper: bool },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
     Ld2 { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
     // ---- SIMD st2 (structure store of two vectors) ----
@@ -2048,6 +2053,39 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             shift,
             unsigned: (insn >> 29) & 1 == 1,
         };
+    }
+
+    // ---- SIMD shift-right-narrow: shrn/shrn2 Vd.T, Vn.U, #imm ----
+    // shrn shifts each DOUBLE-width source element (e.g. .2D=64-bit) right and
+    // truncates to a HALF-width dest element (.2S=32-bit). Distinct from plain
+    // ushr/sshr (equal source/dest width) by bit15 (0x8000) SET. Q=0 (prefix
+    // 0x0f): dest low half; Q=1 shrn2 (prefix 0x4f): dest upper half. immh is
+    // the SOURCE element size (fls -> 2,4,8,16B); shift = src_esize_bits -
+    // (immh:immb), i.e. 2*total_bits - (immh:immb) like the plain form but the
+    // source element is twice the dest element.
+    if matches!((insn >> 24) & 0x0f, 0x0f | 0x4f)
+        && (insn & 0x0000_7000) == 0 && (insn & 0x0080_0000) == 0
+        && (insn & 0x8000) != 0
+    {
+        let immh4: u32 = (insn >> 19) & 0xf;
+        if immh4 != 0 {
+            let fls = 32 - immh4.leading_zeros(); // highest set bit, 1-indexed
+            let esrc: u8 = 1u8 << fls; // source element size in bytes (double dest)
+            let esrc_bits = 8 * esrc as u32;
+            let full: u32 = (immh4 << 3) | ((insn >> 16) & 0x7);
+            // shrn: the 7-bit (immh:immb) field is the DEST-window size; shift =
+            // 2*dest_esize_bits - (immh:immb) == source_esize_bits - (immh:immb).
+            // e.g. shrn .2S #16 from .2D (immh4=6, immb=0, esrc=8):
+            //   esrc_bits=64, full=48 -> shift=16.
+            let shift = if full < esrc_bits { (esrc_bits - full) as u8 } else { 0 };
+            return Inst::SimdShrn {
+                rd: (insn & 0x1f) as u8,
+                rn: ((insn >> 5) & 0x1f) as u8,
+                esrc,
+                shift,
+                upper: (insn >> 30) & 1 == 1, // Q bit: shrn2 (Q=1) writes upper half
+            };
+        }
     }
 
     // ---- SIMD plain shift-right immediate: ushr/sshr Vd.T, Vn.T, #imm ----
@@ -5664,3 +5702,31 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x1e620000), Inst::Scvtf { .. }), "{:?}", decode(0x1e620000));
     }
 }
+
+    #[test]
+    fn shrn_shrn2_decode_shift_narrow() {
+        // shrn v28.2s, v31.2d, #16 = 0x0f3087fc ; shrn2 v28.4s, v31.2d, #16 = 0x4f3087fc
+        // (both from aarch64-linux-gnu-as). Must decode to SimdShrn with a
+        // DOUBLE-width source (esrc=8) and shift=16, NOT a plain equal-size SimdShr.
+        match decode(0x0f3087fc) {
+            Inst::SimdShrn { rd, rn, esrc, shift, upper } => {
+                assert_eq!((rd, rn, esrc, shift, upper), (28, 31, 8, 16, false));
+            }
+            other => panic!("shrn v28.2s,v31.2d,#16 -> SimdShrn, got {other:?}"),
+        }
+        match decode(0x4f3087fc) {
+            Inst::SimdShrn { rd, rn, esrc, shift, upper } => {
+                assert_eq!((rd, rn, esrc, shift, upper), (28, 31, 8, 16, true));
+            }
+            other => panic!("shrn2 v28.4s,v31.2d,#16 -> SimdShrn, got {other:?}"),
+        }
+        // plain ushr/sshr must NOT hit the new gate (bit15 clear)
+        match decode(0x2f3007fc) {
+            Inst::SimdShr { .. } => {}
+            other => panic!("ushr v28.2s,v31.2s,#16 -> SimdShr, got {other:?}"),
+        }
+        match decode(0x4f7007fc) {
+            Inst::SimdShr { .. } => {}
+            other => panic!("sshr v28.2d,v31.2d,#16 -> SimdShr, got {other:?}"),
+        }
+    }

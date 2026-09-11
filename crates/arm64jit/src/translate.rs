@@ -4158,6 +4158,41 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdShrn { rd, rn, esrc, shift, upper } => {
+                    // shrn/shrn2 Vd.T, Vn.U, #imm: shift each DOUBLE-width source
+                    // element (esrc bytes) right by `shift`, truncate to the
+                    // HALF-width dest element (esrc/2 bytes). shrn (upper=false)
+                    // writes the low dest lanes; shrn2 (upper=true) writes the
+                    // high dest lanes. src lane i (stride esrc) -> dst lane i
+                    // (stride esrc/2). e.g. shrn v28.2s, v31.2d, #16:
+                    // src .2D at bytes 0,8 -> dst .2S at bytes 0,4 (shrn2: 8,12).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let es = esrc as i32;         // source element bytes
+                    let ds = (esrc as i32) / 2;   // dest element bytes
+                    let src_lanes = 16 / es;      // source elements in 128-bit reg
+                    let dst_off = if upper { 8 } else { 0 }; // shrn2 writes high half
+                    for i in 0..src_lanes {
+                        // load DOUBLE-width source lane, zero-extended
+                        match esrc {
+                            8 => buf.mov_load64(RAX, RBX, vslot(rn) + i * es),
+                            4 => buf.mov_load32(RAX, RBX, vslot(rn) + i * es),
+                            2 => buf.movzx_word_mem(RAX, RBX, vslot(rn) + i * es),
+                            _ => buf.movzx_byte_mem(RAX, RBX, vslot(rn) + i * es),
+                        }
+                        if (shift as i32) >= es * 8 {
+                            buf.xor_rr64(RAX, RAX);
+                        } else {
+                            buf.shr_ri8(RAX, shift);
+                        }
+                        let dst = vslot(rd) + dst_off + i * ds;
+                        match ds {
+                            4 => buf.mov_store32(RBX, dst, RAX),
+                            2 => buf.mov_store16(RBX, dst, RAX),
+                            _ => buf.mov_store8(RBX, dst, RAX),
+                        }
+                    }
+                    Ok(())
+                }
                 Inst::SimdShr { rd, rn, esize, shift, unsigned } => {
                     // ushr/sshr Vd.T, Vn.T, #imm : Vd_i = Vn_i >> shift (logical if
                     // unsigned/ushr, arithmetic if signed/sshr), no accumulate.

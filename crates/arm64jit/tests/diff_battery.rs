@@ -1755,3 +1755,29 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_shrn_shift_right_narrow_lanes() {
+    // Silent miscompile: shrn/shrn2 (shift-right-NARROW, bit15=0x8000 set) was
+    // decoded as a plain equal-size ushr/sshr, so the source lanes were read at
+    // HALF stride (32-bit instead of the double-width 64-bit) and the shift
+    // amount was wrong. gcc -O3 compiles `x ^ (x>>16)` (u64 LCG then truncate
+    // to u32 per lane) into shrn/shrn2 + uzp1 + eor + uxtl; before the fix the
+    // JIT returned 0x83f9b82e6 instead of the oracle 0x91f998726. Guards the
+    // whole transform. Root cause: missing SimdShrn decode+translate.
+    assert_diff(
+        "shrn_xor_shift_lanes",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv = 987654321ull;
+    unsigned long long x = seedv;
+    unsigned int arr[16];
+    for(int i=0;i<16;i++){ x = x*1664525ull + 1013904223ull; arr[i] = (unsigned int)(x ^ (x>>16)); }
+    long long s=0;
+    for(int i=0;i<16;i++) s += (long long)((unsigned int)(arr[i] * 2654435761u));
+    return s;
+}
+"#,
+    );
+}
