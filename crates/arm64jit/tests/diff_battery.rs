@@ -1380,3 +1380,23 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_scalar_reduction_minmax_float() {
+    // Running single-precision min/max reduction over an array (bounding-box /
+    // channel-energy pattern). gcc -O3 typically emits scalar fcmp+fsel pairs or
+    // vector fminnm/fmaxnm; either way the JIT must track the true extents.
+    assert_diff(
+        "rm_running_extents",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float s0=3.1f; float s=s0;
+    float a[8]; for(int i=0;i<8;i++) a[i]= (float)i*s - (float)(i%3)*1.7f;
+    float mn=1e9f,mx=-1e9f;
+    for(int i=0;i<8;i++){ mn = mn<a[i]?mn:a[i]; mx = mx>a[i]?mx:a[i]; }
+    return (long long)((mx-mn)*1000);
+}
+"#,
+    );
+}
