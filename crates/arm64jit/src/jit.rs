@@ -2277,6 +2277,27 @@ mod tests {
     }
 
     #[test]
+    fn sqshl_uqshl_sqshlu_exec_saturating() {
+        // sqshl v0.4h, v0.4h, #15 (0x0f0fa420): four i16 lanes shifted left 15,
+        // saturating. lane0=-13390 -> -32768, lane1=23654 -> +32767, lane2=300
+        // <<15 = 9830400 -> clamp 32767, lane3=-1 -> -32768.
+        let code = [0x00, 0x74, 0x1f, 0x0f, 0xc0, 0x03, 0x5f, 0xd6]; // sqshl v0.4h,v0.4h,#15;ret
+        let mut st = CpuState::new();
+        // v0 (Q=0 .4h): all 4 lanes in the low 8 bytes (v[0]):
+        // h0=0xCBB2(-13390) h1=0x5C66(23654) h2=0x012C(300) h3=0xFFFF(-1)
+        st.v[0] = (0xFFFFu64 << 48) | (0x012Cu64 << 32) | (0x5C66u64 << 16) | 0xCBB2u64;
+        st.v[1] = 0;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        // result lanes: h0=-32768, h1=32767, h2=32767, h3=-32768
+        let h = |off: usize| -> i16 { ((st.v[0] >> (16 * off)) & 0xFFFF) as i16 };
+        assert_eq!(h(0), -32768, "h0 sat min");
+        assert_eq!(h(1), 32767, "h1 sat max");
+        assert_eq!(h(2), 32767, "h2 sat max");
+        assert_eq!(h(3), -32768, "h3 sat min");
+        let _ = r;
+    }
+
+    #[test]
     fn addsubext_sxtw_and_postindex_exec() {
         // add x3, x2, w20, sxtw #3 = 0x8b34cc43: x3 = x2 + (sext32(w20)<<3).
         // mov x0,x3 (orr)=0xaa0303e0; ret.

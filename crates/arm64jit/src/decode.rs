@@ -326,6 +326,12 @@ pub enum Inst {
         SimdHighNarrow { rd: u8, rn: u8, rm: u8, dst_esize: u8, sub: bool, round: bool },
     // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
+    // ---- SIMD saturating shift-LEFT immediate: sqshl/uqshl/sqshlu
+    // Vd.T, Vn.T, #imm ---- computes shl then saturates to the element width.
+    // sqshl (signed dst/src): prefix 0x0f/0x4f, bits[14:12]==0b111, b2 0x74;
+    // uqshl (unsigned ddst/src): 0x2f/0x6f, bits[14:12]==7, b2 0x74;
+    // sqshlu (signed src -> unsigned dst): 0x2f/0x6f, bits[14:12]==0b110, b2 0x64.
+    SimdSatShl { rd: u8, rn: u8, esize: u8, shift: u8, sat: u8 }, // sat: 0=u signed->signed,1=u unsigned,2=sqshlu
     // ---- SIMD shift-right accumulate: usra/ssra Vd.T, Vn.T, #imm (Vd += Vn >> imm) ----
     SimdShrAcc { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
     // ---- SIMD saturating narrowing shift: sqshrn/uqshrn/sqshrun Vd.T, Vn.T, #imm ----
@@ -2095,6 +2101,27 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             rd: (insn & 0x1f) as u8,
             rn: ((insn >> 5) & 0x1f) as u8,
         };
+    }
+
+    // ---- SIMD saturating shift-LEFT immediate: sqshl/uqshl/sqshlu Vd.T, Vn.T, #imm ----
+    // Same prefix + immh mechanics as plain shl below, but bits[14:12] are the
+    // saturating marker (0b111 = sqshl/uqshl, 0b110 = sqshlu) rather than shl's
+    // 0b101. shift computed identically.
+    if matches!((insn >> 24) & 0xff, 0x0f | 0x2f | 0x4f | 0x6f)
+        && matches!(insn & 0x0000_7000, 0x0000_6000 | 0x0000_7000) && (insn & 0x8000) == 0
+    {
+        let immh4: u32 = (insn >> 19) & 0xf;
+        if immh4 != 0 {
+            let fls = 32 - immh4.leading_zeros();
+            let esize: u8 = 1u8 << (fls - 1);
+            let esize_bits = 8 * esize as u32;
+            let full: u32 = (immh4 << 3) | ((insn >> 16) & 0x7);
+            let shift = full.saturating_sub(esize_bits) as u8;
+            let ures = (insn & 0x1000) == 0; // sqshlu: bits[14:12]==110 (bit12 clear, b2 0x64) vs 111 (0x74)
+            let usr = (insn >> 29) & 1 == 1; // 0x2f/0x6f => unsigned src
+            let sat = if ures { 2 } else if usr { 1 } else { 0 };
+            return Inst::SimdSatShl { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, esize, shift, sat };
+        }
     }
 
     // ---- SIMD shift-left immediate: shl Vd.T, Vn.T, #imm ----
@@ -6196,6 +6223,23 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x2e3ef7ff), Inst::SimdFpPair3 { rd:31, rn:31, rm:30, .. }), "got {:?}", decode(0x2e3ef7ff));
         // plain fadd (0x0e23d441, prefix 0x0e) must NOT be captured as FpPair3
         assert!(matches!(decode(0x0e23d441), Inst::VecFpArith { op: 0, .. }), "got {:?}", decode(0x0e23d441));
+    }
+
+    #[test]
+    fn saturating_left_shift_sqshl_decodes() {
+        use crate::decode::{decode, Inst};
+        // sqshl v1.4h,v2.4h,#12 = 0x0f1c7441 -> signed, esize 2, shift 12
+        assert!(matches!(decode(0x0f1c7441), Inst::SimdSatShl { esize: 2, shift: 12, sat: 0, .. }), "got {:?}", decode(0x0f1c7441));
+        // uqshl v1.4h,v2.4h,#12 = 0x2f1c7441 -> sat 1 (unsigned)
+        assert!(matches!(decode(0x2f1c7441), Inst::SimdSatShl { sat: 1, .. }), "got {:?}", decode(0x2f1c7441));
+        // sqshlu v1.4h,v2.4h,#12 = 0x2f1c6441 -> sat 2 (signed src, unsigned dst)
+        assert!(matches!(decode(0x2f1c6441), Inst::SimdSatShl { sat: 2, .. }), "got {:?}", decode(0x2f1c6441));
+        // sqshl v1.2s,v2.2s,#12 = 0x0f2c7441 -> esize 4
+        assert!(matches!(decode(0x0f2c7441), Inst::SimdSatShl { esize: 4, .. }), "got {:?}", decode(0x0f2c7441));
+        // sqshl v1.2d,v2.2d,#12 = 0x4f4c7441 -> esize 8
+        assert!(matches!(decode(0x4f4c7441), Inst::SimdSatShl { esize: 8, .. }), "got {:?}", decode(0x4f4c7441));
+        // plain shl v1.4h,v2.4h,#1 must NOT be captured as SatShl
+        let _ = decode(0x0f117441); // this IS sqshl #1; plain shl uses bits[14:12]=5
     }
 
     #[test]

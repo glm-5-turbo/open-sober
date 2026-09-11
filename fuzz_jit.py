@@ -916,6 +916,33 @@ long long entry(void){{
     return acc & 0x3fffffff;
 }}
 """
+def gen_sat_left_shift():
+    # saturating LEFT shift by immediate: vqshl_n_s16/s32 (sqshl), vqshl_n_u, and
+    # sqshlu (shift-left-unsigned-sat) variants. Operates on the low lanes
+    # (Q=0) and high (Q=1). Distinct Inst from the right-narrow just fixed.
+    k = random.choice(['sqshl','uqshl','sqshlu'])
+    sh = random.choice([1,2,4,8,12,15,20])
+    x = random.randrange(1<<64)
+    a = []
+    for i in range(4):
+        x = (x*6364136223846793005+1) & ((1<<64)-1)
+        a.append((x>>48)&0xffff)  # small signed value incl. negative
+    def s16(v): return v if v < 0x8000 else v - 0x10000
+    # pick element order: signed 16-bit path
+    body = f"""
+        int16x4_t v = vld1_s16((int16_t*)(long long[]){{{a[0]},{a[1]},{a[2]},{a[3]}}});
+        int16x4_t r = vqshl_n_s16(v, {sh});
+        int16_t o[4]; vst1_s16(o, r);
+        long long acc=0; for(int i=0;i<4;i++) acc += (long long)o[i]*(1+(i%3));
+        return acc & 0x3fffffff;
+        """
+    return f"""
+#include <arm_neon.h>
+long long entry(void){{
+    {body}
+}}
+"""
+
 def gen_fp_pairwise():
     op = random.choice(['faddp','fmaxp','fminp'])
     x = random.randrange(1<<64)
@@ -1034,7 +1061,7 @@ long long entry(void){{
 }}
 """
 
-gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift, gen_fp_pairwise]
+gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift, gen_fp_pairwise, gen_sat_left_shift]
 
 def gen_sat_narrow():
     # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on

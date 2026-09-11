@@ -4370,6 +4370,70 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SimdSatShl { rd, rn, esize, shift, sat } => {
+                    // sqshl/uqshl/sqshlu Vd.T, Vn.T, #imm: left-shift each lane then
+                    // saturate. sat: 0=sqshl (signed src/dst), 1=uqshl (unsigned
+                    // src/dst), 2=sqshlu (signed src, unsigned dst). Shift arithmetic
+                    // on the 64-bit reg after sign/zero-extending the source, then
+                    // clamp. Self-alias-safe (dest not re-read).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let lanes = 16 / (esize as i32);
+                    let ebits = 8 * (esize as i32);
+                    let (maxv, minv): (i64, i64) = match (sat, esize) {
+                        (0, 8) => (i64::MAX, i64::MIN),
+                        (0, 4) => (0x7fff_ffff, -0x8000_0000),
+                        (0, 2) => (0x7fff, -0x8000),
+                        (0, 1) => (0x7f, -0x80),
+                        (1, 8) => (i64::MAX, 0),
+                        (1, 4) => (0xffff_ffff, 0),
+                        (1, 2) => (0xffff, 0),
+                        (1, 1) => (0xff, 0),
+                        (2, 8) => (i64::MAX, 0),
+                        (2, 4) => (0xffff_ffff, 0),
+                        (2, 2) => (0xffff, 0),
+                        _ => (0xff, 0),
+                    };
+                    let src_signed = sat != 1;
+                    for i in 0..lanes {
+                        let off = vslot(rn) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_load64(RAX, RBX, off),
+                            4 => {
+                                buf.mov_load32(RAX, RBX, off);
+                                if src_signed { buf.movsxd_r64_r32(RAX, RAX); }
+                            }
+                            2 => {
+                                if src_signed { buf.movsx_word_mem(RAX, RBX, off); }
+                                else { buf.movzx_word_mem(RAX, RBX, off); }
+                            }
+                            _ => {
+                                if src_signed { buf.movsx_byte_mem(RAX, RBX, off); }
+                                else { buf.movzx_byte_mem(RAX, RBX, off); }
+                            }
+                        }
+                        // shl in the wide 64-bit reg. Because shift <= ebits-1 and the
+                        // source was sign/zero-extended, value*2^shift fits i64 (magnitude
+                        // <= 2^(2*ebits-1)), so clamping against the element range after
+                        // the shift saturates correctly (a negative src that overflows the
+                        // lane clamps to min, a positive one to max).
+                        buf.shl_ri8(RAX, shift);
+                        // clamp
+                        buf.mov_ri64(RCX, minv as u64);
+                        buf.cmp_rr64(RAX, RCX);
+                        buf.cmov_rr64(0x4c, RAX, RCX); // RAX=minv if RAX<minv
+                        buf.mov_ri64(RCX, maxv as u64);
+                        buf.cmp_rr64(RAX, RCX);
+                        buf.cmov_rr64(0x4f, RAX, RCX); // RAX=maxv if RAX>maxv
+                        let dst = vslot(rd) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_store64(RBX, dst, RAX),
+                            4 => buf.mov_store32(RBX, dst, RAX),
+                            2 => buf.mov_store16(RBX, dst, RAX),
+                            _ => buf.mov_store8(RBX, dst, RAX),
+                        }
+                    }
+                    Ok(())
+                }
                 Inst::SimdShrAcc { rd, rn, esize, shift, unsigned } => {
                     // usra/ssra Vd.T, Vn.T, #imm : Vd_i += Vn_i >> imm (logical if
                     // unsigned/usra, arithmetic if signed/ssra). The source element is
