@@ -877,6 +877,34 @@ const BIONIC_STATE_LOCKED_CONTENDED: u16 = 2;
 const BIONIC_SHARED_MASK: u16 = 0x2000; // bit 13
 const BIONIC_TYPE_MASK: u16 = 0xC000; // bits 15:14; 0 == NORMAL
 
+/// Guest addresses of mutexes that were initialized through our `host_mutex_init`
+/// bridge (i.e. by REAL glibc `pthread_mutex_init` with a REAL glibc attr). Those
+/// are glibc-FORMATTED mutexes, and glibc's own lock/unlock must be used on them
+/// (not our bionic-word protocol) — critically, glibc tracks recursive/errorcheck
+/// type in `__kind` and handles same-thread recursive re-lock by incrementing a
+/// count, which a NORMAL-bionic-path would self-deadlock on. ONLY mutexes that
+/// were NOT initialized through the bridge (static `PTHREAD_MUTEX_INITIALIZER`
+/// zeroed words that the guest touches with bionic inline atomics) take the
+/// bionic-word path.
+static MUTEX_INIT_SET: OnceLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+    OnceLock::new();
+
+fn mutex_init_set() -> &'static std::sync::Mutex<std::collections::HashSet<usize>> {
+    MUTEX_INIT_SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn record_glibc_init(m: usize) {
+    if m != 0 {
+        mutex_init_set().lock().unwrap().insert(m);
+    }
+}
+
+/// True iff the guest called our `pthread_mutex_init` on this mutex (so it is
+/// glibc-formatted and glibc owns its lock/unlock semantics).
+fn is_glibc_initialized(m: *const u8) -> bool {
+    !m.is_null() && mutex_init_set().lock().unwrap().contains(&(m as usize))
+}
+
 /// True iff this mutex is a plain NORMAL Non-PI mutex (the only layout we
 /// implement byte-exact). Reads the packed state word to check the type bits.
 unsafe fn bionic_is_normal(m: *const u8) -> bool {
@@ -910,6 +938,11 @@ fn futex_wake(addr: *const u32, n: i32, shared: bool) {
 unsafe fn bionic_mutex_lock(m: *mut u8) -> i32 {
     if m.is_null() {
         return libc::EINVAL;
+    }
+    if is_glibc_initialized(m) {
+        // glibc owns this mutex (its `__kind` encodes the type, and it handles
+        // recursive/errorcheck re-entry correctly). Route to the real glibc.
+        return unsafe { glibc_mutex_lock(m) };
     }
     if !bionic_is_normal(m) {
         // Non-NORMAL (recursive/errorcheck/PI) — fall back to the glibc bridge.
@@ -951,7 +984,7 @@ unsafe fn bionic_mutex_unlock(m: *mut u8) -> i32 {
     if m.is_null() {
         return libc::EINVAL;
     }
-    if !bionic_is_normal(m) {
+    if is_glibc_initialized(m) || !bionic_is_normal(m) {
         return unsafe { glibc_mutex_unlock(m) };
     }
     let shared = (unsafe { core::ptr::read_unaligned(m as *const u16) } & BIONIC_SHARED_MASK) != 0;
@@ -1033,6 +1066,8 @@ extern "C" fn host_mutex_init(a0: u64, a1: u64, _2: u64, _3: u64, _4: u64, _5: u
         let r = f(a0 as *mut u8, a1 as *mut u8);
         if r == 0 && a0 != 0 {
             sanitize_mutex(a0 as *mut u8);
+            // glibc formatted & owns it now (glibc __kind carries the type).
+            record_glibc_init(a0 as usize);
         }
         r as u64
     }
@@ -1409,6 +1444,37 @@ mod tests {
             msg.len() - 1,
             "guest blr to host strlen(hello-roblox) == 12"
         );
+    }
+
+    /// A mutex that the guest initialized through our `host_mutex_init` bridge
+    /// is GLIBC-formatted (glibc __kind carries the type, incl. RECURSIVE), so
+    /// lock/unlock MUST route to glibc — NOT to the bionic 16-bit-word protocol,
+    /// which can't parse it and would self-deadlock on a same-thread recursive
+    /// re-lock (the exact wall: GameActivity's 0x6edae60 is init'd with
+    /// pthread_mutexattr_settype(RECURSIVE)). Verifies the registry routing.
+    #[test]
+    fn glibc_initialized_mutex_routes_to_glibc_not_bionic() {
+        let mut m = Box::new([0u8; 64]);
+        let mp = m.as_mut_ptr();
+        // Mark as glibc-initialized (as host_mutex_init would).
+        record_glibc_init(mp as usize);
+        assert!(is_glibc_initialized(mp), "registry must remember the init");
+        // Even though the word reads as NORMAL, routing must go to glibc. We
+        // can't call host_mutex_lock without a populated glibc slot, so assert
+        // the classifier-level routing decision that drives it.
+        assert!(
+            is_glibc_initialized(mp),
+            "glibc-initialized mutex flagged for glibc path"
+        );
+        // A non-initialized zero word must NOT be in the registry.
+        assert!(!super::is_glibc_initialized(core::ptr::null()));
+        // Sanity: a distinct never-inited address is not flagged.
+        let mut other = Box::new([0u8; 64]);
+        assert!(!super::is_glibc_initialized(other.as_mut_ptr()));
+        // Writing a bionic RECURSIVE type into a NON-inited word routes it away
+        // from the bionic path too (classifier).
+        unsafe { core::ptr::write_unaligned(mp as *mut u16, 0x4000u16) };
+        assert!(!unsafe { bionic_is_normal(mp) });
     }
 
     #[test]
