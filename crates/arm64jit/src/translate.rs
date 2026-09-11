@@ -773,9 +773,14 @@ pub fn translate(
                                 // product with it.
                                 ldg(buf, RDI, ra as u32);
                                 if signed {
-                                    buf.sub_rr64(RAX, RDI); // Rn*rm - ra
+                                    // MSUB: Wd = Wa - Wn*Wm  (ra - rn*rm), NOT
+                                    // rn*rm - ra. n - q*d compiled to msub was
+                                    // returning -48 for 1298-25*50 (should be 48)
+                                    // until this direction was fixed.
+                                    buf.sub_rr64(RDI, RAX); // RDI = ra - rn*rm
+                                    buf.mov_rr64(RAX, RDI);
                                 } else {
-                                    buf.add_rr64(RAX, RDI); // Rn*rm + ra
+                                    buf.add_rr64(RAX, RDI); // MADD: rn*rm + ra
                                 }
                             }
                         }

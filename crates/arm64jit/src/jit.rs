@@ -1435,6 +1435,33 @@ mod tests {
     }
 
     #[test]
+    fn msub_reuses_rm_as_rd_without_clobbering_the_multiply_operand() {
+        // REGRESSION (Session 99): br battery (n - (n/50)*50 -> `msub
+        // w0,w1,w0,w2`) returned -48 for n=1298, q=25, divisor=50: the MulDiv
+        // MSUB arm computed rn*rm - ra, but ARM MSUB is ra - rn*rm (Wd = Wa -
+        // Wn*Wm), so 25*50-1298 = -48 instead of 48. Constant-folded addrs
+        // masked it (gcc never emitted the instruction). 0x1b008820 = msub
+        // w0,w1,w0,w2, 0x1b008824 = msub w4,w1,w0,w2 (disjoint rd).
+        // msub w0,w1,w0,w2 = 0x1b008820 : w0 = w2 - w1*w0 = 1298 - 25*50 = 48
+        let code = [0x20u8, 0x88, 0x00, 0x1b, 0xc0, 0x03, 0x5f, 0xd6]; // msub w0,w1,w0,w2; ret
+        let mut st = CpuState::new();
+        st.x[1] = 25; // w1 = quotient q
+        st.x[0] = 50; // w0 = divisor d (rm, also dst)
+        st.x[2] = 1298; // w2 = dividend n (ra)
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec msub overlap");
+        assert_eq!(st.x[0] as u32, 48, "msub w0,w1,w0,w2 must read OLD w0=50 before writing dst");
+
+        // disjoint rd: msub w4,w1,w0,w2 = 0x1b008824 ; mov w0,w4
+        let code = [0x24u8, 0x88, 0x00, 0x1b, 0xe0, 0x03, 0x04, 0x2a, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.x[1] = 25;
+        st.x[0] = 50;
+        st.x[2] = 1298;
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec msub disjoint");
+        assert_eq!(st.x[0] as u32, 48, "msub disjoint rd must also give 48");
+    }
+
+    #[test]
     fn neg_reads_rn31_as_xzr_not_sp() {
         // Regression: `neg x6,x6` = `sub x6, xzr, x6` (0xcb0603e6) is the SHIFTED-
         // register add/sub form (bit21=0), where register 31 in the rn operand is
