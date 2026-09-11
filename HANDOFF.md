@@ -5631,3 +5631,58 @@ HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none on
 this VPS). Thread-model remaining: per-thread guest TLS block layout beyond the
 SETTLS-pointer handoff; signal-blocking (rt_sigprocmask is a no-op) and real
 timer/signalfd dispatch are still simplified.
+
+---
+## Cycle 41 (Sep 11, 2026) — REAL rt_sigprocmask blocking + per-thread TLS TP (365/0)
+
+Two thread-model gaps closed on `dev` (commits `de483c3`, `517b2fb`), following
+cycle 40's guest signal delivery.
+
+### 1. Real `rt_sigprocmask` (135) — signal blocking, Linux semantics (de483c3)
+The previous arm was a no-op (accepted and reported an empty old-set). Now:
+- `signals.rs::sigprocmask` implements SIG_BLOCK(0)/SIG_UNBLOCK(1)/SIG_SETMASK(2)
+  on a per-thread `CpuState.blocked_mask` (64-bit sigset, bit N-1 = sig N),
+  reports the previous mask into oset, returns -EINVAL on bad `how`/`sigsetsize`
+  or a NULL-set SIG_SETMASK. SIGKILL(9)/SIGSTOP(19) bits are silently dropped
+  from any attempted mask (the kernel never lets a thread block them).
+- A signal that arrives while blocked is **mercifully marked pending**
+  (`pending_mask`) and NOT dispatched; the dispatch arms (`kill`/`tgkill` self,
+  cross-thread post) route through `signals::deliver` which checks `is_blocked`.
+- On `rt_sigprocmask` returning after an UNBLOCK/SETMASK, `take_deliverable_pending`
+  drains the lowest unblocked pending signal and dispatches it post-svc (the
+  kernel delivers a pending signal before returning from sigprocmask).
+- **Cross-thread `tgkill` now posts into the target's `pending_mask`** via
+  `mark_pending` (blocked-aware), replacing the old fixed single-word
+  `pending_signal`; the target's dispatcher loop drains
+  `take_deliverable_pending` (respects its own blocked_mask) each iteration.
+  `pending_mask` access is volatile/atomic so a sender racing the owner's clear
+  can't lose a newly-pending signal.
++`loader_run_sigprocmask_block_then_unblock_delivers_pending` — set SIGUSR1
+handler, BLOCK it, `tgkill` self (handler MUST NOT run), UNBLOCK, assert the
+handler now runs with the right signo; returns 42.
+
+### 2. Per-thread TLS TP for `__tls_get_addr` (general-dynamic) (517b2fb)
+`host_tls_get_addr` previously resolved `{module, offset}` against a
+process-global main TP (from `set_chain_tls`), so a clone-spawned child thread
+accessing a dependency's `__thread` via the classic global-dynamic model
+(`-mtls-dialect=trad -ftls-model=global-dynamic`) read the MAIN thread's block.
+- New `jit::current_guest_tp()` thread-local, published at `jit_run` entry from
+  `CpuState::tpidr`. Each guest thread runs its own host thread (main scope or
+  clone child's `std::thread::spawn`), so this holds that guest thread's TP.
+- `host_tls_get_addr` uses `current_guest_tp()` (falling back to the main TP
+  only for a never-published call). Module block offsets (TP-relative) stay
+  global; only TP is per-thread. This closes the documented "per-thread guest
+  TLS block layout beyond the SETTLS-pointer handoff" item for the
+  general-dynamic path.
++unit `current_guest_tp_is_thread_local_and_published` (per-thread distinct TP,
+published/reset on the right host thread).
+
+### State
+`cargo build --workspace` clean; `cargo test --workspace` **365/0** (was 363).
+Thread-model remaining (documented, needs a multilib/real-guest host to fully
+validate): real timer/signalfd **to-guest-handler** dispatch (rt_sigaction
+guests can't yet receive host POSIX-timer expiry as guest signals); per-thread
+TLS **init-image copies** for clone children beyond the TP pointer handoff.
+HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none on
+this VPS). Next per RECOMMENDATION order: libbadcpu ISA, services/auth, more
+differential-fuzz coverage.
