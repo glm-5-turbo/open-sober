@@ -1,71 +1,71 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker) — pinned main-loop wall as a recursive-mutex rendezvous; reverted a mutex-weakening regression; graphics "first frame" gates verified (workspace green)
+## Session (Sep 12, 2026, hermes-worker) — main-loop wall pinned to the exact bit: a NORMAL bionic mutex in LOCKED_CONTENDED state (guest word 0x2), glibc cross-ABI mismatch; graphics "first frame" gates verified (workspace green, tree clean)
 
-Commit `6bc57a6` (dev). The real `libroblox.so` boot keeps advancing: JNI_OnLoad →
-`--startapp` drives `nativeAppBridgeV2StartAppWithParams` →
-`GameActivity_initializeNativeCode`, reaches the engine main loop, and **idles
-stably** (exit 124, no SIGSEGV/SIGABRT — same as the last milestone). This cycle
-identified EXACTLY what the loop waits on and why the naive fix was wrong.
+Commits `6bc57a6` → `18ae7f6` → `063dc5e` → `7946fe3` (dev). The real
+`libroblox.so` boot keeps advancing: JNI_OnLoad → `--startapp` drives
+`nativeAppBridgeV2StartAppWithParams` → `GameActivity_initializeNativeCode`,
+reaches the engine main loop, and **idles stably** (exit 124, no
+SIGSEGV/SIGABRT). This cycle identified exactly what the loop waits on.
 
-### 1. The wall, now precise
-New per-thread `current_guest_pc()` (set to the guest x30 return address around
-every integer-HostCall bridge) lets the `pthread` bridges name the guest caller
-of a blocking wait. With `JIT_TRACE`:
+### 1. The wall, exact
+`JIT_TRACE` shows the main loop parked in `pthread_mutex_lock` on guest mutex
+`0x6edae60`:
 ```
-[mutex_lock] 0x106edae60 kind=0x1 held_by=0 ... gpcreq=0x102b53bb0
+[t=...] [mutex_lock] 0x106edae60 bionic_word=0x00000002 state=0x2 gpcreq=0x102b53bb0
 ```
-- The main loop parks in `pthread_mutex_lock` on a **RECURSIVE** mutex
-  (`pthread_mutexattr_settype(attr,#1)` → kind=1) at guest `0x6edae60`.
-- Requested from `GameActivity_initializeNativeCode+0x2f8488` (guest `0x2b53bac`;
-  the code there does `pthread_mutexattr_init → settype(#1 RECURSIVE) →
-  pthread_mutex_init`).
-- Contended across two guest threads (t=2994935 and t=2995007) with `held_by=0`.
+- guest `state` = **2 = bionic `MUTEX_STATE_LOCKED_CONTENDED`** (NORMAL,
+  non-PI, non-recursive mutex).
+- Caller guest PC `0x102b53bb0` (in `GameActivity_initializeNativeCode
+  +0x2f8488`, the mutex-init attribute setup).
+- All guest threads idle in host futex, 0% CPU.
 
-**Root mechanism:** the guest manages its own bionic `pthread_mutex` via its own
-fast-path atomics (lock word + recursion count in the bionic layout). When it
-calls our bridge's glibc `pthread_mutex_lock`, glibc reads the guest-set lock
-word as "held" but sees no glibc `__owner`, so it futex-blocks forever while the
-holder (also a guest thread) clears the lock directly. A bionic-layout-vs-glibc
-cross-ABI collision on the guest's own lock word — NOT an ALooper wait, and **NOT
-a decoder gap**.
+**Root mechanism:** the guest manages its own bionic `pthread_mutex` on its own
+16-bit `state` word (modern NDK r28c layout: `_Atomic(uint16_t) state` @0,
+`owner_tid` @4, 28-byte tail). When a guest thread's inline fast-path hit
+contention it set state=2 and called our bridge's glibc `pthread_mutex_lock`;
+glibc reads the bionic 16-bit state word as glibc's own lock encoding, sees no
+matching glibc `__owner`, and futex-blocks forever while the holder (also a
+guest thread) released the lock via its own fast-path atomics. A clean
+**bionic-vs-glibc cross-ABI futex mismatch** — NOT an ALooper wait, NOT a
+decoder gap.
 
-### 2. An experiment proved the mutex is real — do NOT weaken it
-Sampling showed the boot is genuinely idle (all guest threads in
-`futex_wait_queue` / `hrtimer_nanosleep`, 0% CPU). Trying to "fix" it with an
-optimistic non-blocking acquire (`pthread_mutex_trylock`, return 0 even on EBUSY)
-made a second guest thread enter the same critical section and SIGSEGV on garbage
-memory. **Reverted to blocking acquire.** This is genuine shared-memory mutual
-exclusion (a rendezvous at lifecycle handoff), not a spurious block.
+### 2. Correction of this session's own earlier claim
+`6bc57a6`/`18ae7f6` called it a "recursive mutex rendezvous" from the glibc
+`__kind` field at mutex+16. That field is PAST the bionic word (on a different
+init path — `pthread_mutexattr_settype(#1)` at 0x2b53b04 inits a different
+mutex). `063dc5e` corrected it: the blocking mutex is NORMAL, in
+LOCKED_CONTENDED (word 0x2).
 
-### 3. Graphics "first frame" gates both pass (headless, this VPS)
-- `glesv2-wrapper` `headless_graphics.rs`: surfaceless ES3 context on Mesa
-  llvmpipe `LIBGL_ALWAYS_SOFTWARE=1`, ETC2 compressed-texture interception
-  decompresses+uploads, BC1 passes through, `eglGetProcAddress` forwards. ✓
-- `arm64jit` `egl_window_present.rs`: under Xvfb, opens a real X11 window, drives
-  `eglGetDisplay→Initialize→ChooseConfig→CreateWindowSurface→CreateContext→
-  MakeCurrent→glClearColor→glClear→eglSwapBuffers` entirely **through the JIT
-  guest-bridge slots**, returns EGL_TRUE. ✓ This is a real frame presented
-  through the resolver bridges, headless.
+### 3. Verified: the mutex is real — do NOT weaken it
+All guest threads genuinely idle (futex/nanosleep, 0% CPU). An "optimistic
+non-blocking acquire" (trylock→return 0 on EBUSY) let a second guest thread
+into the same critical section → SIGSEGV on garbage. A hand-rolled bionic CAS
+attempt was reverted in-tree, unbuilt, before touching the boot. Both reverted.
+This is genuine shared-memory mutual exclusion at lifecycle handoff.
 
-### 4. Next (the ordered path to a boot that doesn't idle)
-(a) **Implement bionic recursive-mutex acquire/release in the `pthread` bridge on
-the guest's own lock word** (state@+0, recursive owner/count in the bionic
-layout, owner = the guest thread) so a guest thread re-locking a recursive mutex
-it already holds is recognized as owned-by-self instead of handed to glibc (which
-misreads bionic word state and blocks). Real exclusion via CAS on the guest word;
-NOT a no-op and NOT `trylock-returns-0`. This is the precise unblock.
-(b) OR drive the awaited looper/app-command state so the engine dispatches a
-frame (the graphics stack is proven ready; the guest just hasn't reached EGL yet
-because it idles pre-graphics in the mutex rendezvous).
-Keep the stable idle boot as the base either way.
+### 4. Correct fix (SCOPED — next task)
+Implement bionic's NORMAL mutex protocol byte-exact on the guest's own 16-bit
+`state` word @0: acquire = CAS state 0/1→LOCKED_UNCONTENDED; contention → set
+LOCKED_CONTENDED(2), futex-wait on the word; unlock = clear to 0 + FUTEX_WAKE.
+Must be paired with the bionic `cond` (cond_wait internally unlock+relock the
+mutex). Validate with a TWO-THREAD rendezvous unit test (A locks via bridge, B
+blocks in bridge, A unlocks, B acquires) BEFORE wiring into the boot.
+Alternatively drive the awaited looper/app-command state. Keep the stable idle
+boot as the base.
 
-Repro (unchanged):
+### 5. Graphics "first frame" gates both pass (headless, this VPS)
+`glesv2-wrapper headless_graphics.rs` (surfaceless llvmpipe ES3, ETC2
+interception, BC1 passthrough) and `arm64jit egl_window_present.rs` (Xvfb real
+X11 window, full eglGetDisplay→...→glClear→eglSwapBuffers through the JIT
+guest-bridge slots, returns EGL_TRUE) both pass — real frames present headless.
+
+Repro:
 ```bash
 cd /home/hermes-worker/runs/open-sober
 cargo build -p arm64jit --example elfjit
 timeout 30 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144
-JIT_TRACE=1 ... | grep -E "mutex_lock|cond_wait" | tail   # pin the blocking mutex/caller
+JIT_TRACE=1 ... 2>&1 | grep mutex_lock | tail   # pin blocking mutex state/caller
 ```
 
 Commit `152dce9` (dev). Two real bottlenecks to StartApp forward-speed removed:
