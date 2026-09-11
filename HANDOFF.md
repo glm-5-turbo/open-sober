@@ -5057,3 +5057,37 @@ GPU + real APK/binary host (`elfjit <libroblox.so> 0x1f0db20 --jni`) — none on
 this GPU-less, APK-less VPS. Next (RECOMMENDATION order, still open): libloader
 multi-module TLS (TPREL/DTPREL across DT_NEEDED deps), more JNI surface (fake
 object backing), libbadcpu ISA, services/auth.
+
+## Session 32b (Sep 11, 2026, hermes-worker) — REAL bug: self-imports bound to the NULL catch-all (commit 88ba3f6, 316/0)
+
+Follow-on finding while validating the __cxa_guard_* shims against a real
+cross-gcc C++ fixture (function-local static with dynamic init): the fixture's
+`entry()` returned 0 instead of the correct 21. Root cause was NOT the guard
+shims — it was a binder bug **exposed** by the fixture's `bl init_value@plt`:
+a `-shared` module that calls one of its OWN exported functions goes through
+`@plt`, and that JUMP_SLOT names a symbol the module itself defines
+(`st_shndx != SHN_UNDEF`). `bind_image_plt` only handled cross-module deps
+(via `scope`), host resolution, float bridges, and the graphics/stub catch-all —
+never the module's own definitions. So `init_value@plt` bound to the NULL/0
+graphics catch-all host thunk, and the call dispatched to a stub returning
+garbage (0) instead of executing the real guest function at `guest_of(st_value)`.
+
+**Fix (plt.rs):** before host resolution, read the dynamic symbol's `st_shndx`
+(byte offset +6) and `st_value` (+8); if `st_shndx != 0` (locally defined), write
+`el.guest_of(st_value)` into the GOT slot and count it resolved. `st_value` is
+the definition's link address; `guest_of` maps it exactly like every other reloc
+target. Self-defined CUDA/PAC/STT exports are the same shape.
+
+**Verified** (`elfjit <guardfixture.so> 0x920 --jni`, real C++ static-init + guard):
+first `init_value` -> `__cxa_guard_acquire` returns 1 (runs init, x=0+3+5=8),
+release marks done; second call -> acquire returns 0 (already done), x=8+5=13;
+sum 8+13 = 21, and JIT now returns exactly 21 = native oracle (a=8 b=13 sum=21
+confirmed on host gcc). Before the self-import fix this returned 0. This pattern
+(own-exported functions internally `bl fn@plt`-called) is ubiquitous in real
+libroblox.so init code, so it is directly on the boot path.
+
++permanent regression `loader_run_self_import_binds_to_own_guest_body`
+(internal_fn(7) = 35; readelf-verifies the JUMP_SLOT names a self-defined symbol
+before running). `cargo build --workspace` clean; `cargo test --workspace`
+316/0. HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none
+on this VPS).
