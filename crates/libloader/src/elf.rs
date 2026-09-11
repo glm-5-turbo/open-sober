@@ -56,6 +56,16 @@ const PT_PHDR: u32 = 6;
 const PT_GNU_STACK: u32 = 0x6474e551;
 #[allow(unused)]
 const PT_GNU_RELRO: u32 = 0x6474e552;
+#[allow(unused)]
+const PT_TLS: u32 = 7;
+
+/// Size of the AArch64 thread control block that precedes a module's TLS data
+/// block in the per-thread image. The thread pointer (TP, the value tpidr_el0
+/// returns) points 16 bytes *before* the block, so a local-exec/initial-exec
+/// `tprel` offset `o` (linking a variable at block offset `o - 16`) addresses
+/// `TP + o == block_start + (o - 16)`. Matches arm64 LD/LE TLS accessors the
+/// toolchain emits (`add x0, tp, #n` with n baked at link time).
+pub const AARCH64_TCB_SIZE: usize = 16;
 
 /// Program header flags
 #[allow(unused)]
@@ -446,6 +456,61 @@ pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Describes the main image's PT_TLS segment, if present. The block's file
+/// bytes (`p_filesz` at file offset `p_offset`) are the initial values for the
+/// module's thread-local data; `p_memsz` is the block including zero-filled
+/// `.tbss`. Returns `None` when the ELF carries no TLS segment.
+#[allow(unused)]
+pub fn tls_layout(info: &ElfInfo) -> Option<(u64 /*p_offset*/, u64 /*p_filesz*/, u64 /*p_memsz*/)> {
+    info.phdrs
+        .iter()
+        .find(|p| p.p_type == PT_TLS)
+        .map(|p| (p.p_offset, p.p_filesz, p.p_memsz))
+}
+
+/// Initialise a per-thread TLS region for the loaded main image and return
+/// the thread pointer (tpidr_el0 value) the guest's `mrs tpidr_el0` should
+/// yield, so AArch64 local-exec / initial-exec `tprel` addressing lands on
+/// real TLS data.
+///
+/// Layout (AArch64 TLS ABI): the thread pointer TP sits 16 bytes before the
+/// module's TLS data block (`AARCH64_TCB_SIZE`). A variable linked at block
+/// offset `o` is accessed by the guest as `[TP + o + TCB_SIZE]` (or, for the
+/// reloc-loader form, `TP + tprel`). This copies the PT_TLS init image
+/// (`p_filesz` bytes) to `tls_region + TCB_SIZE`, zero-fills to `p_memsz`,
+/// and returns `tls_region as u64` as TP (== the block start minus the TCB).
+/// The caller supplies the writable `tls_region` and, when the ELF has no
+/// PT_TLS, TP is simply `tls_region` (an empty thread pointer), mirroring the
+/// previous zero-fill behaviour.
+#[allow(unused)]
+pub fn setup_guest_tls(
+    info: &ElfInfo,
+    path: &Path,
+    tls_region: *mut u8,
+    tls_region_size: usize,
+) -> anyhow::Result<u64> {
+    let Some((p_offset, p_filesz, p_memsz)) = tls_layout(info) else {
+        return Ok(tls_region as u64);
+    };
+    anyhow::ensure!(
+        p_memsz as usize <= tls_region_size.saturating_sub(AARCH64_TCB_SIZE),
+        "PT_TLS memsz {p_memsz} does not fit in {}-byte TLS region",
+        tls_region_size
+    );
+    // The block sits right after the TCB.
+    let block = unsafe { tls_region.add(AARCH64_TCB_SIZE) };
+    unsafe { std::ptr::write_bytes(block, 0, p_memsz as usize) };
+    if p_filesz > 0 {
+        let mut f = std::fs::File::open(path)?;
+        use std::io::{Read as _, Seek as _};
+        f.seek(std::io::SeekFrom::Start(p_offset))?;
+        let dst = unsafe { std::slice::from_raw_parts_mut(block, p_filesz as usize) };
+        f.read_exact(dst)
+            .context("Failed to read PT_TLS init image into guest TLS region")?;
+    }
+    Ok(tls_region as u64) // TP = block start - TCB_SIZE
+}
 
 /// Open and parse an ELF file, returning header information.
 ///
@@ -1068,5 +1133,89 @@ mod tests {
         assert!(posix & libc::PROT_READ != 0);
         assert!(posix & libc::PROT_EXEC != 0);
         assert!(posix & libc::PROT_WRITE == 0);
+    }
+
+    #[test]
+    fn setup_guest_tls_copies_init_and_returns_tcb_tpidr() {
+        let dir = std::env::temp_dir().join(format!(
+            "open-sober-tlstest-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tls.so");
+
+        // A fake PT_TLS whose init image lives at file offset 0x2000. Layout
+        // mirrors the real cross-gcc fixture: g_slot(i32)@block 0, 4B pad,
+        // g_big(i64)@block 8 (filesz 16), and a 4-byte .tbss g_zero (memsz 20).
+        let mut tls_init = vec![0u8; 16];
+        tls_init[0..4].copy_from_slice(&7i32.to_le_bytes());
+        tls_init[8..16].copy_from_slice(&123456789i64.to_le_bytes());
+        let mut file = std::fs::File::create(&path).unwrap();
+        use std::io::Write as _;
+        // Pad to p_offset.
+        let pad = vec![0u8; 0x2000];
+        file.write_all(&pad).unwrap();
+        file.write_all(&tls_init).unwrap();
+        drop(file);
+
+        let info = ElfInfo {
+            path: path.clone(),
+            entry: 0,
+            entry_offset: 0,
+            phdrs: vec![Elf64Phdr {
+                p_type: PT_TLS,
+                p_flags: PF_R,
+                p_offset: 0x2000,
+                p_vaddr: 0x2000,
+                p_paddr: 0,
+                p_filesz: 16,
+                p_memsz: 20,
+                p_align: 8,
+            }],
+            base_load_addr: 0x2000,
+            is_pie: true,
+            needed_libs: vec![],
+            has_interp: false,
+            interp: None,
+        };
+
+        assert_eq!(
+            tls_layout(&info),
+            Some((0x2000, 16usize as u64, 20usize as u64))
+        );
+
+        let region = Box::leak(vec![0xffu8; 64].into_boxed_slice());
+        let tpidr = setup_guest_tls(&info, &path, region.as_mut_ptr(), 64).unwrap();
+        // TP points 16 bytes (the AArch64 TCB) before the module TLS block.
+        assert_eq!(tpidr, region.as_ptr() as u64);
+        let block = unsafe { region.as_ptr().add(AARCH64_TCB_SIZE) };
+        let got = unsafe { std::slice::from_raw_parts(block, 20) };
+        assert_eq!(&got[..16], &tls_init, "init image copied to block");
+        assert_eq!(
+            &got[16..20],
+            &[0u8; 4],
+            ".tbss zero-filled to p_memsz"
+        );
+        // tprel addressing: the linker emits `add x0, TP, #n`; g_slot (block+0)
+        // is hit at TP + 16 and g_big (block+8) at TP + 24.
+        let base = tpidr as usize;
+        assert_eq!(
+            unsafe { std::ptr::read_unaligned::<i32>((base + 16) as *const i32) },
+            7
+        );
+        assert_eq!(
+            unsafe { std::ptr::read_unaligned::<i64>((base + 24) as *const i64) },
+            123456789
+        );
+
+        // No PT_TLS -> tpidr = region (unchanged zero-fill behaviour).
+        let no_tls = ElfInfo { phdrs: vec![], ..info };
+        let region2 = Box::leak(vec![0u8; 32].into_boxed_slice());
+        assert_eq!(
+            setup_guest_tls(&no_tls, &path, region2.as_mut_ptr(), 32).unwrap(),
+            region2.as_ptr() as u64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

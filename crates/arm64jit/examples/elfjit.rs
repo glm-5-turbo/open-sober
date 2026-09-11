@@ -186,8 +186,17 @@ fn main() {
     st.set(31, sp); // x31 = SP (points at argc on the initial stack)
     const TLS_SIZE: usize = 1024 * 64;
     let tls = Box::leak(vec![0u8; TLS_SIZE].into_boxed_slice());
-    st.tpidr = tls.as_ptr() as u64;
-    println!("guest sp=0x{:x} tls=0x{:x}", sp, st.tpidr);
+    // Seed the guest TLS region from the image's PT_TLS (local-exec/initial-exec
+    // thread-locals) and point tpidr_el0 at the AArch64 TCB (16 bytes before the
+    // module's TLS block). `__thread` globals then read/write real data.
+    st.tpidr = libloader::elf::setup_guest_tls(
+        &el.info,
+        std::path::Path::new(&path),
+        tls.as_ptr() as *mut u8,
+        TLS_SIZE,
+    )
+    .expect("setup_guest_tls");
+    println!("guest sp=0x{:x} tls(tpidr)=0x{:x}", sp, st.tpidr);
 
     // JNI boot mode: hand the guest a guest-visible JavaVM* in x0 (as the Android
     // runtime would). Pass `--jni` to set x0 = vm. If x0/x1/x2 were already

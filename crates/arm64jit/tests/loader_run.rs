@@ -140,7 +140,11 @@ fn run_elf(path: &std::path::Path) -> Result<u64, String> {
     );
     st.set(31, sp);
     let tls = Box::leak(vec![0u8; 64 * 1024].into_boxed_slice());
-    st.tpidr = tls.as_ptr() as u64;
+    // Seed the guest TLS region from the image's PT_TLS (local-exec/initial-exec
+    // thread-locals) so `mrs tpidr_el0` + `:tprel:` addressing reads real data.
+    // ELFs without a PT_TLS segment get tpidr = region (unchanged behaviour).
+    st.tpidr = libloader::elf::setup_guest_tls(&el.info, path, tls.as_ptr() as *mut u8, 64 * 1024)
+        .map_err(|e| format!("setup_guest_tls: {e:#}"))?;
 
     jit_run(image, base, entry, &mut st as *mut CpuState)
 }
@@ -356,5 +360,30 @@ fn loader_run_pairwise_add_reduction_returns_76() {
         // -O3 forces the SIMD pairwise-add reduction path (addp).
         "int entry(void){ int a[16]; for(int i=0;i<16;i++)a[i]=i*i; long long s=0; for(int i=0;i<16;i++) s+=a[i]; return (int)(s%97); }\n",
         76,
+    );
+}
+
+#[test]
+fn loader_run_thread_local_storage_returns_123456804() {
+    // End-to-end gate for guest TLS bootstrapping (R_AARCH64_TLS local-exec):
+    // `__thread` globals compiled by gcc read/write through `mrs tpidr_el0` +
+    // baked `:tprel:` offsets (`add x0, tp, #n`). `setup_guest_tls` must copy
+    // the PT_TLS init image into a region at TP+16 (the AArch64 TCB) so the
+    // accesses land on real data. g_slot=7, g_big=123456789, g_zero=0(.tbss),
+    // and bump() adds 1 -> 7+123456789+0+8 = 123456804 (matches the native
+    // x86-64 oracle; qemu-aarch64 itself SIGSEGVs on this nostdlib static
+    // because it doesn't seed PT_TLS without a dynamic loader). Before the TLS
+    // seeding the region was zeroed, so all `__thread` reads returned 0.
+    assert_runs(
+        "tls1",
+        "__thread int g_slot = 7;\n\
+         __thread long long g_big = 123456789;\n\
+         __thread int g_zero;\n\
+         int get_a(void){ return g_slot; }\n\
+         int get_b(void){ return (int)g_big; }\n\
+         int get_c(void){ return g_zero; }\n\
+         int bump(void){ g_slot += 1; return g_slot; }\n\
+         int entry(void){ return get_a() + get_b() + get_c() + bump(); }\n",
+        123456804,
     );
 }
