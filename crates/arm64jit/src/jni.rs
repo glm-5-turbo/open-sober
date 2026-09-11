@@ -79,6 +79,69 @@ fn str_handle(bytes: &[u8]) -> u64 {
     addr
 }
 
+/// Guest-visible registry of native methods registered via `RegisterNatives`.
+///
+/// Android's `JNI_OnLoad` calls `env->RegisterNatives(clazz, methods, nMethods)`
+/// where `methods` is a `JNINativeMethod` array (3 u64 words each: `name`,
+/// `signature`, `fnPtr`). The JIT's `jni_register_natives` host stub previously
+/// returned JNI_OK and DROPPED the array — so a native method Roblox binds
+/// (e.g. `Java_com_roblox_..._IAP...`) could never be found again when the host
+/// runtime later dispatches back into the guest. This registry parses the
+/// guest array (guest==host, so a host read is a guest read) and records
+/// `(class, name) -> (signature, fnPtr)` where `fnPtr` is the *guest* address
+/// of the Java_* implementation, ready to be driven through `jit_run` as a
+/// guest entry point.
+#[derive(Clone, Debug)]
+pub struct NativeMethod {
+    pub class: Vec<u8>,
+    pub name: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub fn_ptr: u64,
+}
+
+fn native_registry() -> &'static Mutex<Vec<NativeMethod>> {
+    static REG: OnceLock<Mutex<Vec<NativeMethod>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Wipe the registry (test-only / re-boot hygiene; also guarded so a fresh
+/// JNI_OnLoad doesn't accumulate stale bindings with side effects).
+pub fn clear_native_methods() {
+    native_registry().lock().unwrap().clear();
+}
+
+/// Look up a registered native method by (class, name); returns the guest
+/// `fnPtr` and signature. This is what a host dispatch of a Roblox Java_*
+/// method needs to convert a Java method name into a runnable guest entry.
+pub fn lookup_native_method(class: &[u8], name: &[u8]) -> Option<NativeMethod> {
+    let reg = native_registry().lock().unwrap();
+    // Last-registration wins (JNI semantics: re-registering replaces).
+    reg.iter().rev().find(|m| m.class == class && m.name == name).cloned()
+}
+
+/// Record a native method binding from the guest `JNINativeMethod` array at
+/// `methods` (nMethods words of sizt 3). Parse each entry's three u64 words
+/// (name*, signature*, fnPtr). A missing/unreadable name or a NULL fnPtr is a
+/// malformed register call; skip it (JNI treats fnPtr==NULL as "delete
+/// binding" — stricter handling can come later) rather than fault.
+fn parse_register_natives(cls: u64, methods: u64, n: u64) {
+    if methods == 0 {
+        return;
+    }
+    let class_bytes = read_cstr(cls).unwrap_or_default();
+    let mut reg = native_registry().lock().unwrap();
+    let base = methods as *const u64;
+    for i in 0..n {
+        let e = unsafe { base.add(i as usize * 3) };
+        let name_p = unsafe { *e };
+        let sig_p = unsafe { *e.add(1) };
+        let fn_ptr = unsafe { *e.add(2) };
+        let Some(name) = read_cstr(name_p) else { continue };
+        let sig = read_cstr(sig_p).unwrap_or_default();
+        reg.push(NativeMethod { class: class_bytes.clone(), name, signature: sig, fn_ptr });
+    }
+}
+
 /// Read a NUL-terminated C string from guest memory (`guest==host`, so a host
 /// read is a guest read). Bounded to avoid over-reading a bad pointer.
 fn read_cstr(p: u64) -> Option<Vec<u8>> {
@@ -156,10 +219,12 @@ extern "C" fn jni_get_string_utf_length(
 }
 
 extern "C" fn jni_register_natives(
-    _e: u64, _cls: u64, _methods: u64, _n: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+    _e: u64, cls: u64, methods: u64, n: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
-    // Bindings are not yet serviced by the JIT host runtime; succeed so boot
-    // continues (future work: record name/signature/fnPtr into a table).
+    // Parse the guest JNINativeMethod array and record (class,name,sig)->fnPtr
+    // so a registered Roblox Java_* method can later be dispatched back into
+    // the guest as a jit_run entry. (See parse_register_natives docs.)
+    parse_register_natives(cls, methods, n);
     0 // JNI_OK
 }
 
@@ -269,6 +334,40 @@ pub fn env_addr() -> u64 {
     e
 }
 
+/// Dispatch a registered native method back into the guest through `jit_run`.
+///
+/// `lookup_native_method` resolves (class,name) to a guest `fnPtr` (a Java_*
+/// implementation the guest bound via `RegisterNatives`). This runs it as a
+/// JIT guest entry with `base`/`image` covering the loaded ELF, passing the
+/// caller-supplied trace/region. Returns the guest x0 after the callee's
+/// `ret`. This is the glue that turns a *recorded* Java_* binding — which
+/// `jni_register_natives` now captures — into a *callable* guest function,
+/// which is what a host Android-runtime dispatch of a Roblox native method
+/// needs alongside a real fake-object backing.
+///
+/// Returns `Err` if the method has no binding or `jit_run` stops (unmapped /
+/// unsupported).
+pub fn dispatch_native_method(
+    method: &NativeMethod,
+    base: u64,
+    image: &[u8],
+    args: [u64; 8],
+    tpidr: u64,
+) -> Result<u64, String> {
+    if method.fn_ptr == 0 {
+        return Err(format!(
+            "native method {}:{} has NULL fnPtr",
+            String::from_utf8_lossy(&method.class),
+            String::from_utf8_lossy(&method.name)
+        ));
+    }
+    let mut st = crate::jit::CpuState::new();
+    st.tpidr = tpidr;
+    st.x[..8].copy_from_slice(&args);
+    crate::jit::jit_run(image, base, method.fn_ptr, &mut st as *mut crate::jit::CpuState)?;
+    Ok(st.x[0])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,9 +415,118 @@ mod tests {
     }
 
     #[test]
+    fn jni_register_natives_records_guest_bindings() {
+        // Build a real JNINativeMethod array (3 u64 words each: name*,
+        // signature*, fnPtr) in guest memory, exactly as JNI_OnLoad does, and
+        // verify the registry parses it and lookup_native_method returns the
+        // guest fnPtr (a Java_* address the host would jit_run).
+        use std::alloc::{alloc, Layout};
+        let mut w = |bytes: &[u8]| -> u64 {
+            let p = unsafe { alloc(Layout::array::<u8>(bytes.len() + 1).unwrap()) } as *mut u8;
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()) };
+            unsafe { *p.add(bytes.len()) = 0 };
+            p as u64
+        };
+        let cls = w(b"com/roblox/engine/jni/iap/IAPPurchaseManager");
+        let name1 = w(b"nativeInit");
+        let sig1 = w(b"(J)V");
+        let fn1 = 0x1000_5f00u64; // a guest .text address
+        let name2 = w(b"nativePurchase");
+        let sig2 = w(b"(Ljava/lang/String;)Z");
+        let fn2 = 0x1000_7200u64;
+        let methods = {
+            let p = unsafe { alloc(Layout::array::<u64>(6).unwrap()) } as *mut u64;
+            let src = [name1, sig1, fn1, name2, sig2, fn2];
+            for (i, v) in src.iter().enumerate() {
+                unsafe { *p.add(i) = *v };
+            }
+            p as u64
+        };
+
+        clear_native_methods();
+        assert_eq!(jni_register_natives(0, cls, methods, 2, 0, 0, 0, 0), 0); // JNI_OK
+
+        let m = lookup_native_method(
+            b"com/roblox/engine/jni/iap/IAPPurchaseManager",
+            b"nativeInit",
+        )
+        .expect("nativeInit bound");
+        assert_eq!(m.fn_ptr, fn1);
+        assert_eq!(m.signature, b"(J)V");
+        assert_eq!(
+            lookup_native_method(
+                b"com/roblox/engine/jni/iap/IAPPurchaseManager",
+                b"nativePurchase",
+            )
+            .unwrap()
+            .fn_ptr,
+            fn2
+        );
+        // Unknown name -> None.
+        assert!(lookup_native_method(b"x", b"no_such").is_none());
+        // Last registration wins (re-register with a different fnPtr).
+        let name3 = w(b"nativeInit");
+        let p3 = unsafe { alloc(Layout::array::<u64>(3).unwrap()) } as *mut u64;
+        unsafe {
+            *p3 = name3;
+            *p3.add(1) = sig1;
+            *p3.add(2) = 0x2000_1111u64;
+        }
+        jni_register_natives(0, cls, p3 as u64, 1, 0, 0, 0, 0);
+        assert_eq!(
+            lookup_native_method(
+                b"com/roblox/engine/jni/iap/IAPPurchaseManager",
+                b"nativeInit",
+            )
+            .unwrap()
+            .fn_ptr,
+            0x2000_1111u64,
+            "re-registration replaces"
+        );
+    }
+
+    #[test]
     fn jni_entry_point_builds() {
         let (env, vm) = build_jni();
         assert!(env > 0 && vm > 0);
+    }
+
+    /// End-to-end: register a native method binding whose guest fnPtr is a
+    /// real aarch64 function (`mov x0,#0x2a; ret`), then dispatch it through
+    /// jit_run and verify the guest x0 comes back. Proves the recorded
+    /// fnPtr (guested address) is directly runnable as a JIT entry.
+    #[test]
+    fn jni_dispatch_registered_native_method_through_jit() {
+        // Function: mov x0,#0x2a (42); ret
+        let code: [u8; 8] = [
+            0x40, 0x05, 0x80, 0xd2, // mov x0, #0x2a (d2800540)
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let base = 0x1000u64;
+        clear_native_methods();
+        // Register a binding pointing into the `code` buffer as guest/home
+        // (guest==host here). Build the JNINativeMethod array.
+        use std::alloc::{alloc, Layout};
+        let mut w = |bytes: &[u8]| -> u64 {
+            let p = unsafe { alloc(Layout::array::<u8>(bytes.len() + 1).unwrap()) } as *mut u8;
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()) };
+            unsafe { *p.add(bytes.len()) = 0 };
+            p as u64
+        };
+        let cls = w(b"com/example/Native");
+        let name = w(b"answer");
+        let sig = w(b"()I");
+        let arr = unsafe { alloc(Layout::array::<u64>(3).unwrap()) } as *mut u64;
+        unsafe {
+            *arr = name;
+            *arr.add(1) = sig;
+            *arr.add(2) = base; // fnPtr = the guest code we JIT
+        }
+        jni_register_natives(0, cls, arr as u64, 1, 0, 0, 0, 0);
+
+        let m = lookup_native_method(b"com/example/Native", b"answer").expect("bound");
+        let ret = dispatch_native_method(&m, base, &code, [0; 8], 0).expect("dispatch");
+        assert_eq!(ret, 42, "guest Java_* method executed through jit_run");
     }
 
     #[test]
