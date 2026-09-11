@@ -225,6 +225,24 @@ extern "C" fn cxa_atexit(
     0
 }
 
+/// __cxa_thread_atexit_impl(func, arg, dso): register a thread-local
+/// destructor. NO-OP (return 0 = success) WITHOUT storing anything, so glibc
+/// never invokes the guest functor natively on thread exit.
+///
+/// Why: `__cxa_thread_atexit_impl` is an Android/glibc CRT hook that registers
+/// a `__thread`/thread_local destructor. If we leave it resolved to the real
+/// glibc function, glibc stores the *guest* AArch64 function pointer and, when
+/// a guest thread (e.g. the worker spawned during JNI_OnLoad) exits, calls it
+/// natively as x86 — jumping into guest `.text` (SIGSEGV executing ARM64 as
+/// x86, the post-boot worker/teardown crash). Swallowing the registration is
+/// safe: TLS destructors are insignificant to headless boot, and skipping them
+/// keeps every call into guest code routed through `jit_run`.
+extern "C" fn cxa_thread_atexit_impl(
+    _fn: u64, _arg: u64, _dso: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+
 /// pthread_once(once_control, init_routine).
 ///
 /// A guest `bl pthread_once@plt` passes a *guest* `init_routine` address. The
@@ -300,6 +318,7 @@ pub fn register_cxx_shims() -> usize {
         (b"__cxa_guard_release\0", cxa_guard_release),
         (b"__cxa_guard_abort\0", cxa_guard_abort),
         (b"__cxa_atexit\0", cxa_atexit),
+        (b"__cxa_thread_atexit_impl\0", cxa_thread_atexit_impl),
         (b"pthread_once\0", bionic_pthread_once),
         (b"pthread_create\0", bionic_pthread_create),
         (b"pthread_join\0", bionic_pthread_join),
@@ -447,7 +466,13 @@ mod tests {
     fn register_cxx_shims_are_resolvable_by_name() {
         let n = register_cxx_shims();
         assert!(n >= 4, "guard_acquire/release/abort + atexit registered");
-        for name in ["__cxa_guard_acquire", "__cxa_guard_release", "__cxa_guard_abort", "__cxa_atexit"] {
+        for name in [
+            "__cxa_guard_acquire",
+            "__cxa_guard_release",
+            "__cxa_guard_abort",
+            "__cxa_atexit",
+            "__cxa_thread_atexit_impl",
+        ] {
             let addr = crate::resolver::resolve(name.as_bytes())
                 .unwrap_or_else(|| panic!("{name:?} not resolvable by name"));
             assert!(
