@@ -5725,3 +5725,51 @@ Extended `fuzz_jit.py` with two generators for previously-uncovered shapes:
 Committed `9d40f47` (+ this doc). The gen_double_neon generator is a permanent
 asset that now keeps the f64-NEON lane classes regression-guarded. HARD GATE
 unchanged (real Roblox boot + run log only on a GPU/APK host; none on this VPS).
+
+## Cycle 43 (Sep 11, 2026) — REAL guest POSIX timer -> guest-signal dispatch (367/0)
+
+### What was wrong
+`timer_create(107)/timer_settime(110)/timer_delete(109)` forwarded to host
+POSIX timers (`libc::timer_create/timer_settime`). A host timer expiry raises a
+**host** SIGALRM delivered to the host process's libc disposition — it never
+reached the guest's `SIG_ACTIONS` handler table that cycle 40 built. So Android
+watchdogs/callbacks that rely on SIGALRM (SystemClock, trace, watchdog,
+timeout handlers) never fired on the guest. This was the documented "real
+timer/signalfd-to-guest-handler dispatch" thread item.
+
+### Fix (test-driven; commit 641f45b)
+Routed the three syscalls to a guest-side timer implementation:
+- **`guest_timer_create`**: reads the aarch64 `struct sigevent`
+  (`sigev_signo`@8, `sigev_notify`@12; default SIGALRM=14), returns a non-null
+  `timer_t` id, records the owning guest thread's real host tid + signo.
+- **`guest_timer_settime`**: reads the 16-byte `struct itimerspec`, spawns a
+  host worker thread that sleeps `it_value` then **POSTS the signal into the
+  owner's blocked-aware `pending_mask`** (`post_signal_to_thread`, the cycle-41
+  mechanism); a periodic `it_interval` re-arms. The owner's dispatcher loop
+  drains it via `take_deliverable_pending` and runs the registered handler.
+  Fresh `Arc<AtomicBool>` stop-flag per arming cancels any prior worker without
+  stopping the newly-armed one.
+- **`guest_timer_delete`**: signals the worker to stop (the worker holds an Arc
+  clone of the flag, so it stays valid) and frees the slot.
+
+Two bugs the e2e test surfaced: (1) the guest's `timer_t` local wasn't being
+reloaded after the svc (gcc kept it in a register) — fixed the *test* with a
+global volatile; (2) settime re-used the SAME stop flag it set to cancel the
+prior worker, so every new worker immediately stopped itself — fixed by
+installing a fresh Arc per arming.
+
+### Test
+`loader_run_timer_signal_delivers_sigalm_to_handler`: guest installs a SIGALRM
+handler, creates a timer (default sigevent), arms a 100ms periodic itimerspec,
+spins (1ms nanosleep yields) until the handler ticks **2** times, then
+verifies `g_sig == 14`. Runs in ~0.23s — real timer→guest-signal dispatch.
+
+### State
+`cargo build --workspace` clean; `cargo test --workspace` **367/0** (was 366).
+Fuzz sanity (3 seeds, 25 cases) 0 fail — no JIT regression from the timing code.
+Committed `641f45b` (+ this doc). Documents the fuzzer additions since cycle 42
+(gen_scalar_fp_sign_chain, gen_fmadd_reduce) in the cycle-42 record.
+Thread-model remaining: per-thread TLS **init-image copies** for clone children
+beyond the TP pointer handoff (needs a real multilib guest to validate).
+HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none on
+this VPS).
