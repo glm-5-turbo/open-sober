@@ -1255,3 +1255,128 @@ long long entry(void){
 "#,
     );
 }
+#[test]
+fn diff_minmax_reduction_float() {
+    // SIMD single-precision min/max reductions (fminnm/fmaxnm v.4s or the
+    // scalar fmin/fmax path gcc -O3 emits for a running min/max over an array
+    // pair). A 3D engine computes AABBs / camera bounds / skeleton extents
+    // with exactly this shape; a wrong min/max lane or a mis-decoded fcmlt/
+    // fsel silently flips geometry bounds.
+    assert_diff(
+        "mm_pair_minmax",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float s0=0.4f; float sc=s0;
+    float a[8],b[8];
+    for(int i=0;i<8;i++){ a[i]=(float)(i+1)*sc; b[i]=(float)(8-i)*sc; }
+    float mn=0,mx=0;
+    for(int i=0;i<8;i++){
+        float m = a[i]<b[i]?a[i]:b[i];
+        float M = a[i]>b[i]?a[i]:b[i];
+        mn = mn<m?mn:m;
+        mx = mx>M?mx:M;
+    }
+    return (long long)((mn+mx)*100);
+}
+"#,
+    );
+    assert_diff(
+        "mm_single_running_min",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float s0=3.0f; float sc=s0;
+    volatile float a0=0.25f; float a=a0;
+    float mn=1e9f,mx=-1e9f;
+    for(int i=0;i<8;i++){
+        float v = a + (float)i*sc*0.01f;
+        mn = mn<v?mn:v;
+        mx = mx>v?mx:v;
+    }
+    return (long long)((mx-mn)*100000);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_reciprocal_and_div_float() {
+    // Reciprocal / division funnel (audio normalization, colour-space scale):
+    // sum of 1/(i+3), filtered through a range test. Exercises scalar fdiv s,
+    // fadd s, fcvtzs and a FCMP-guarded branch in one function.
+    assert_diff(
+        "g_recip_sum",
+        "-O3",
+        r#"
+long long entry(void){
+    float a[8]; for(int i=0;i<8;i++) a[i]=1.0f/(float)(i+3);
+    float s=0; for(int i=0;i<8;i++) s+=a[i];
+    return (long long)(s*1000.0f);
+}
+"#,
+    );
+    assert_diff(
+        "g_div_range_filter",
+        "-O3",
+        r#"
+long long entry(void){
+    float a[8]; for(int i=0;i<8;i++) a[i]=48.0f/(float)(i+4);
+    float s=0; for(int i=0;i<8;i++){ if(a[i]>5.0f && a[i]<9.0f) s+=a[i]; }
+    return (long long)(s*10.0f);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_widening_mul_accumulate_int() {
+    // smaddl/umaddl / smull widening integer multiply-accumulate (position/
+    // index math, hash tables). A wrong MADD acc/dir or a missing zero-extend
+    // silently corrupts the accumulator.
+    assert_diff(
+        "w_smaddl_pair_product",
+        "-O3",
+        r#"
+long long entry(void){
+    int a[9]; for(int i=0;i<9;i++) a[i]=(i+1);
+    long long acc=0;
+    for(int i=0;i<9;i++) acc += (long long)a[i]*(long long)a[8-i];
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "w_umaddl_unsigned",
+        "-O3",
+        r#"
+long long entry(void){
+    unsigned int a[7]; for(int i=0;i<7;i++) a[i]=(unsigned int)(i+1)*0x10000u;
+    unsigned long long acc=0;
+    for(int i=0;i<7;i++) acc += (unsigned long long)a[i]*(unsigned long long)i;
+    return (long long)acc;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_double_fp_loop_condition() {
+    // Double FP with an array built from division and a FP loop-condition
+    // guard (lighting / physics accumulation). Exercises double FMADD,
+    // FCMP->B.cond, and a mixed int+double reduction.
+    assert_diff(
+        "l_double_div_accum_guard",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile double t0=2.0; double t=t0;
+    double a[6];
+    for(int i=0;i<6;i++) a[i]= (double)(i+1)*t/(double)(i+2);
+    double s=0; int n=0;
+    for(int i=0;i<6;i++){ if(a[i]<3.0){ s+=a[i]; n++; } }
+    return (long long)((s*1000.0)+(double)n);
+}
+"#,
+    );
+}

@@ -1880,7 +1880,13 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- SIMD bitwise select BSL only (Vd = (Vd&Vn)|(~Vd&Vm)); bit/bif handled by SimdBit ----
-    if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e) && (insn & 0x0000_1c00) == 0x1c00 && (insn & 0x0040_0000) != 0 {
+    // Gate also requires bits[15:13]==0 (byte1 low nibble 0xc): the select family
+    // always encodes byte1 low 0x1c, whereas the FP `.2d` two-source ops in the
+    // same 0x2e/0x6e column (fdiv v0.2d = 0x6e61fc00, fmul v0.2d = 0x6e61dc00,
+    // byte1 low 0xdc/0xfc = bits[15:13] SET) were being swallowed as a bitwise
+    // select, silently corrupting double arithmetic into pandn/pand logic. They
+    // now fall through to Simd2dFp.
+    if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e) && (insn & 0x0000_1c00) == 0x1c00 && (insn & 0x0040_0000) != 0 && (insn & 0x0000_e000) == 0 {
         return Inst::SimdSel {
             rd: (insn & 0x1f) as u8,
             rn: ((insn >> 5) & 0x1f) as u8,
@@ -2887,6 +2893,16 @@ pub fn decode(insn: u32) -> Inst {
         // W-dest column: 0x1e70_.. == fcmp d6,d16, but 0x9e70_.. == legitimate fcvt to X).
         // bit16=U (unsigned), bit22=double source, round: 0x28=+inf 0x30=-inf.
         {
+            // Guard on bit12 CLR: the scalar FP immediate form `fmov d,#imm`
+            // (e.g. 0x1e651017 = fmov d23,#12.0 with imm8 at bits[13:20]) shares
+            // the top-16 `0x1e65` of fcvtau but has bit12 (0x1000, the imm lane
+            // anchor) SET, whereas every real fcvt-to-int opcode keeps bit12 CLR.
+            // Without this the coarse 0xffff0000 mask stole `fmov d,#imm` values
+            // whose imm8 set bit16+ (m>=8: 12.0, 13.0, 14.0, 15.0) as fcvtau and
+            // silently loaded 0 into the destination. Verified: fcvtzu w0,d1 =
+            // 0x1e790020, fcvtas w0,d1 = 0x1e640020, fcvtau w2,d3 = 0x1e650062,
+            // all bit12 CLR; fmov d23,#12.0 = 0x1e651017, bit12 SET.
+            if (insn & 0x1000) == 0 {
             let fam = insn & 0xffff_0000;
             let mode = match fam {
                 0x9e28_0000 | 0x9e29_0000 | 0x9e68_0000 | 0x9e69_0000
@@ -2910,6 +2926,7 @@ pub fn decode(insn: u32) -> Inst {
                     fbits: 0,
                 };
             }
+            } // end bit12-clear guard (FMOV-imm exclusion)
         }
 
         // ---- `scvtf d0, w0 = 0x1e620000`. The scalar int->FP family gate
@@ -3190,7 +3207,7 @@ pub fn decode(insn: u32) -> Inst {
                                         // class Q=1 0x0e20_0000 .. 0x4e20_0000 integer add (S: size=01);
                                         // sub is the same class with bit29 set (0x2e20_0400 vs 0x0e20_0400).
                                         let addclass = insn & 0x2f20_0c00;
-                                        if (addclass == 0x0e20_0400 || addclass == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && ((insn >> 22) & 3) == 2 {
+                                        if (addclass == 0x0e20_0400 || addclass == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && ((insn >> 22) & 3) == 2 && (insn & 0x4000) == 0 {
                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
@@ -3201,7 +3218,7 @@ pub fn decode(insn: u32) -> Inst {
                                         // Same walk as Simd4s but size-field == 3 (D lanes), Q=0/1.
                                         // sub = 0x6e.. vs add 0x4e.. (bit29). Disjoint: Simd4s above only when size!=3.
                                         let add2d = insn & 0x2f20_0c00;
-if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
+if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 && (insn & 0x4000) == 0 {
                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
@@ -3212,7 +3229,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                 // size field bits[23:22] == 0 (byte). Same walk residue as Simd4s but byte lane.
                                                                                 {
                                                                                     let bc = insn & 0x2f20_0c00;
-                                                                                    if (bc == 0x0e20_0400 || bc == 0x2e20_0400) && ((insn >> 22) & 3) == 0 {
+                                                                                    if (bc == 0x0e20_0400 || bc == 0x2e20_0400) && ((insn >> 22) & 3) == 0 && (insn & 0x4000) == 0 {
                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                         let rd = (insn & 0x1f) as u8;
@@ -3225,7 +3242,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                 // Same walk/wrap residue as Simd4s/AddB but size-field == 1 (H lanes).
                                                                                 {
                                                                                     let hc = insn & 0x2f20_0c00;
-                                                                                    if (hc == 0x0e20_0400 || hc == 0x2e20_0400) && ((insn >> 22) & 3) == 1 {
+                                                                                    if (hc == 0x0e20_0400 || hc == 0x2e20_0400) && ((insn >> 22) & 3) == 1 && (insn & 0x4000) == 0 {
                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                         let rd = (insn & 0x1f) as u8;
@@ -5422,6 +5439,50 @@ mod logical_imm_regressions {
         match decode(0x4e221c20) {
             Inst::SimdVLog { op: 0, .. } => {}
             other => panic!("and v0.16b,v1.16b,v2.16b -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fp_2d_op_decode_collisions_with_int_add_bsl_and_fcvt() {
+        // Session (Sep 11 2026): the FP `Vd.2D` two-source ops and `fmov d,#imm`
+        // shared residues with three earlier decoders, silently corrupting double
+        // math:
+        //   - `fadd v0.2d,v0.2d,v1.2d` (0x4e61d400) -> Simd2dFp fadd, NOT integer
+        //     SimdAddH (the int add/sub gates now require bit14 CLR).
+        //   - `fdiv v0.2d` (0x6e61fc00) / `fmul v0.2d` (0x6e61dc00) -> Simd2dFp,
+        //     NOT SimdSel (the select gate now requires bits[15:13] CLR).
+        //   - `fmov d23,#12.0` (0x1e651017) -> FmovImm, NOT FcvtToInt (the fcvt
+        //     round gate now requires bit12 CLR; FMOV-imm has it SET).
+        match decode(0x4e61d400) {
+            Inst::Simd2dFp { rd: 0, rn: 0, rm: 1, op: 2 } => {}
+            other => panic!("fadd v0.2d -> {other:?}"),
+        }
+        match decode(0x6e61fc00) {
+            Inst::Simd2dFp { op: 0, .. } => {} // fdiv
+            other => panic!("fdiv v0.2d -> {other:?}"),
+        }
+        match decode(0x6e61dc00) {
+            Inst::Simd2dFp { op: 1, .. } => {} // fmul
+            other => panic!("fmul v0.2d -> {other:?}"),
+        }
+        match decode(0x1e651017) {
+            Inst::FmovImm { rd: 23, value_bits, .. } => {
+                assert_eq!(f64::from_bits(value_bits), 12.0);
+            }
+            other => panic!("fmov d23,#12.0 -> {other:?}"),
+        }
+        // and the real ops those collisions stole from must STILL decode:
+        match decode(0x4e618421) {
+            Inst::SimdAddH { .. } => {} // integer add v1.8h
+            other => panic!("add v1.8h -> {other:?}"),
+        }
+        match decode(0x6e611c00) {
+            Inst::SimdSel { .. } => {} // bsl v0.16b
+            other => panic!("bsl v0.16b -> {other:?}"),
+        }
+        match decode(0x1e790020) {
+            Inst::FcvtToInt { unsigned: true, .. } => {} // fcvtzu w0,d1
+            other => panic!("fcvtzu w0,d1 -> {other:?}"),
         }
     }
 

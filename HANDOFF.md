@@ -4228,3 +4228,54 @@ Honest next: continue the battery sweep (vector frinta/frintn, f2d .2d forms,
 sdadd/sqadd, pmull); runtime-side FMOD bl-to-once dispatcher + JNI table stubs
 are still pending the real binary; HARD GATE (elfjit on libroblox.so on a GPU/
 APK host) unchanged — impossible on this GPU-less, APK-less VPS.
+
+---
+
+# Session (Sep 11, 2026) — three silent FP `.2d`/FMOV-imm decode collisions fixed (workspace 264/0)
+
+Extended the differential battery with four new game-critical canaries (SIMD
+fmin/fmax reduction, reciprocal/division funnel, integer widening mul-acc,
+double FP loop-condition). One — `l_double_div_accum_guard` (6-element
+`(i+1)*2/(i+2)` sum with a `<3.0` guard) — **failed: jit 2001 vs oracle 8820**.
+Bisecting it (per-instruction exec_bytes + whole-block runs through
+`load_elf_image`+`jit_run`) surfaced THREE unrelated silent miscompiles in the
+FP/vector decode layer, each a real pixel/audio/coordinate corruption:
+
+## 1. `fadd/fmul/fsub Vd.2D` swallowed by the integer add/sub gates
+The four SIMD int add/sub gates (Simd4s/SimdAddD/SimdAddB/SimdAddH) keyed on
+`insn & 0x2f20_0c00` in {0x0e200400, 0x2e200400} plus `size`, but ignored bit14.
+FP `.2d` two-source ops (byte1 0xd4, bit14 SET) share that residue with integer
+`add` (byte1 0x84, bit14 CLR). `fadd v0.2d,v0.2d,v1.2d` (0x4e61d400) compiled as
+a **halfword `paddw`** on the double bits. The isolated host dump showed
+`paddw xmm0,xmm1`; the decode scratch returned `SimdAddH`. Fix: `(insn & 0x4000)
+== 0` on all four gates. VecFpArith covers `.2s/.4s` early; Simd2dFp now gets
+`.2d`.
+
+## 2. `fdiv/fmul Vd.2D` swallowed by the SimdSel (bsl) gate
+byte1 low 0xfc/0xdc (bits[15:13] SET) duped the bsl select gate, which only
+checked `(insn & 0x1c00) == 0x1c00` (bits[12:10]). Host dump showed
+`pandn/pand/por` — a bitwise select. `fdiv v0.2d` returned 256 for 64/8 (both
+lanes). The real bsl family always has byte1 low 0x1c (bits[15:13] CLR). Fix:
+`(insn & 0xe000) == 0` on the SimdSel gate.
+
+## 3. `fmov d,#imm` with mantissa m>=8 swallowed by the fcvt-to-int round gate
+`fmov d23,#12.0` = 0x1e651017 decoded as `FcvtToInt` (destination silently 0).
+The coarse fcvt-round gate (`insn & 0xffff_0000`, added for `0x9e..` X-dest
+fcvtps/ms/au) included `0x1e65` (W fcvtau) which collides with FMOV-imm. FMOV-imm
+has bit12 SET (the imm lane anchor) while every fcvt-to-int has bit12 CLR
+(verified: fcvtzu 0x1e790020, fcvtas 0x1e640020, fcvtau 0x1e650062). Fix: gate
+the fcvt-round block on `(insn & 0x1000) == 0`.
+
+## Verification
+- Isolated vs the real aarch64 assembler: bsl 0x6e611c00, fdiv/fmul/fadd .2d
+  0x6e61fc00/0x6e61dc00/0x4e61d400, fcvtzu 0x1e790020, `fmov d,#12.0` words
+  0x1e651017 etc. p9 (scalar div+fmadd, was 2^63) -> 6000, p5 (vector
+  a[]+reduce, was 90000) -> 8814, l_double -> 8820.
+- +1 decode regression (`fp_2d_op_decode_collisions_with_int_add_bsl_and_fcvt`),
+  +2 exec regressions (`vector_2d_fp_div_mul_not_swallowed_by_int_add_or_bsl`,
+  `fmov_imm_high_mantissa_12_to_15_not_swallowed_as_fcvt`), and the 4 new battery
+  canaries are permanent.
+- `cargo build --workspace` clean; `cargo test --workspace` 264/0, 0 ignored.
+
+HARD GATE unchanged: real-binary/GPU boot proof (`elfjit <libroblox.so>
+0x1f0db20 --jni`) on a GPU + real binary/APK host (none on this VPS).

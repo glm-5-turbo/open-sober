@@ -3716,6 +3716,69 @@ mod tests {
     }
 
     #[test]
+    fn vector_2d_fp_div_mul_not_swallowed_by_int_add_or_bsl() {
+        // Session (Sep 11 2026): three FP `Vd.2D` decode collisions silently
+        // corrupted double math on real code paths. Each op must compute the
+        // honest double, not a integer add / bitwise-select of the bit patterns.
+        //   - `fadd v0.2d` (0x4e61d400) was decoded as integer SimdAddH
+        //     (halfword paddw) because the integer add/sub gates ignored bit14.
+        //   - `fdiv v0.2d` (0x6e61fc00) / `fmul v0.2d` (0x6e61dc00) were decoded
+        //     as SimdSel (bsl bitwise select) because byte1 bits[15:13] were not
+        //     masked off the 0x2e/0x6e select gate.
+        // v0={64,128}, v1={8,16}, v2.d[0]=2.0
+        let mk = |v0: f64, v1: f64, v2: f64, v3: f64| {
+            let mut st = CpuState::new();
+            st.v[0] = v0.to_bits(); st.v[1] = v1.to_bits();
+            st.v[2] = v2.to_bits(); st.v[3] = v3.to_bits();
+            st
+        };
+        // fadd v0.2d,v0.2d,v1.2d = 0x4e61d400 -> {72.0, 144.0}
+        let mut st = mk(64.0, 128.0, 8.0, 16.0);
+        exec_bytes(&mut st, &0x4e61d400u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(st.v[0], 72.0f64.to_bits());
+        assert_eq!(st.v[1], 144.0f64.to_bits());
+        // fmul v0.2d,v0.2d,v1.2d = 0x6e61dc00 -> {512.0, 2048.0}
+        let mut st = mk(64.0, 128.0, 8.0, 16.0);
+        exec_bytes(&mut st, &0x6e61dc00u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(st.v[0], 512.0f64.to_bits());
+        assert_eq!(st.v[1], 2048.0f64.to_bits());
+        // fdiv v0.2d,v0.2d,v1.2d = 0x6e61fc00 -> {8.0, 8.0}
+        let mut st = mk(64.0, 128.0, 8.0, 16.0);
+        exec_bytes(&mut st, &0x6e61fc00u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(st.v[0], 8.0f64.to_bits());
+        assert_eq!(st.v[1], 8.0f64.to_bits());
+        // genuine bsl v0.16b,v0.16b,v1.16b must STILL be SimdSel (bitwise).
+        let mut st = mk(0.0, 0.0, 0.0, 0.0);
+        st.v[0] = 0x0f0f0f0f0f0f0f0f; st.v[1] = 0x0f0f0f0f0f0f0f0f;
+        st.v[2] = 0x00ff00ff00ff00ff; st.v[3] = 0;
+        exec_bytes(&mut st, &0x6e611c00u32.to_le_bytes(), 0).unwrap();
+        // bsl op0: Vd = (Rn&Rd)|(~Rd&Vm). Rd=Rn=v0(0x0f..), Vm=v1(0x00ff.. per
+        // byte, low byte first). Per byte: (0x0f&0x0f)|(~0x0f & Vm) = 0xff when
+        // Vm byte is 0xff, 0x0f when Vm byte is 0x00 => 0x0fff0fff0fff0fff.
+        // (A pure bitwise result — proves it is NOT the FP fdiv.)
+        assert_eq!(st.v[0], 0x0fff0fff0fff0fffu64);
+    }
+
+    #[test]
+    fn fmov_imm_high_mantissa_12_to_15_not_swallowed_as_fcvt() {
+        // Session (Sep 11 2026): `fmov d,#imm` values with mantissa m>=8 (imm8 bit3 set,
+        // instruction bit16) were swallowed by the coarse fcvt-to-int round gate
+        // (0xffff_0000 top-16 matched `fcvtau 0x1e65`'s top bytes) and decoded as
+        // FcvtToInt, leaving the destination 0 instead of loading 12/13/14/15.
+        // The fcvt-round gate now requires bit12 CLR (FMOV-imm has it SET).
+        for (enc, expect) in [
+            (0x1e651017u32, 12.0f64),
+            (0x1e655017u32, 13.0f64),
+            (0x1e659017u32, 14.0f64),
+            (0x1e65d017u32, 15.0f64),
+        ] {
+            let mut st = CpuState::new();
+            exec_bytes(&mut st, &enc.to_le_bytes(), 0).unwrap();
+            assert_eq!(f64::from_bits(st.v[46]), expect, "fmov d23,# {expect} (0x{enc:08x})");
+        }
+    }
+
+    #[test]
     fn guest_svc_routes_write_and_mmap() {
         // Directly exercise the AArch64->host syscall dispatcher (AArch64 numbers):
         //   nr=64 write(fd, buf, n) to a pipe, and nr=222 mmap(len,...) returning real mem.

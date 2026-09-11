@@ -4,6 +4,21 @@ goal: run Roblox through the Open-Sober runtime (specialized runtime, graphics,
 sound) — the full "Roblox boots on the JIT/no-QEMU path" gate.
 started: 2026-09-11T01:20:42Z
 
+## Cycle (Sep 11, 2026) — three silent FP `.2d`/FMOV-imm decode collisions fixed (workspace 264/0)
+status: session-end (committed, tests green)
+last_agent_claim: extended the differential battery (4 new game-critical probes:
+SIMD fmin/fmax reduction, reciprocal/division funnel, integer widening mul-acc,
+double FP loop-condition); `l_double_div_accum_guard` failed (2001 vs 8820) and
+bisecting it exposed THREE silent FP decode collisions: (1) fadd/fmul/fsub Vd.2D
+was compiled as integer `paddw` by the Simd4s/AddD/AddB/AddH gates (bit14 not
+masked); (2) fdiv/fmul Vd.2D was compiled as `pandn/pand` bsl by the SimdSel
+gate (bits[15:13] not masked); (3) `fmov d,#imm` 12.0-15.0 (bit12 SET) was
+swallowed by the coarse fcvt-to-int round gate (0xffff_0000 top match on
+`fcvtau 0x1e65`). Fixed with bit14/bit15:13/bit12 guards on those gates; all
+verified vs the real aarch64 assembler; +1 decode +2 exec regressions + the 4
+canaries now permanent. cargo build clean; cargo test --workspace 264/0, 0
+ignored. HARD GATE unchanged (no GPU/APK/libroblox.so on this VPS).
+
 ## Cycle (Sep 11, 2026) — SIMD NEON widening/lane-op correctness sweep
 status: session-end (committed, tests green)
 last_agent_claim: four real silent miscompiles fixed in arm64jit's SIMD path,
@@ -713,4 +728,13 @@ last_agent_claim: Follow-on to the scalar FP-rounding fix. Vector-FP probe
   diff_vector_fp_compare_zero; decode regression
   simd_frint_and_cmpzero_not_swallowed_by_widen_mul. cargo build clean;
   cargo test --workspace 257/0 (battery 32). HARD GATE unchanged (no GPU/APK).
-updated: 2026-09-11T08:45:00Z
+updated: 2026-09-11T08:45:00Zcycle: 19
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T07:44:48Z
+---
+cycle: 20
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T07:45:20Z
+---
