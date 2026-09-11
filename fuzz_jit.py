@@ -746,6 +746,42 @@ def gen_uxtl_uaddw():
 
 gens += [gen_double_neon, gen_uxtl_uaddw]
 
+def gen_scalar_fp_sign_chain():
+    # Scalar FP sign/abs/negate + fp<->int round trips with signed zeros and
+    # negative magnitudes — exercises the FmovGp, scalar FMaxMin, Fabs/Fneg,
+    # FcvtToInt/FcvtFromInt paths that a graphics/audio engine hits constantly
+    # but the int-heavy generators never do. Binary-exact magnitudes so oracle
+    # parity is exact.
+    n=random.choice([6,10,14])
+    op=random.choice(["max","min"])
+    accsel = "(b >= acc ? b : acc)" if op=="max" else "(b <= acc ? b : acc)"
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 314159ull;
+    unsigned long long x = seedv;
+    double a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*2862933555777941757ull+3037000493ull; a[i]=(double)(long long)(((x>>45)&0x3ff)-256); }}
+    double acc = 1e-9;
+    double lo = 0.0, hi = 0.0;
+    for(int i=0;i<{n};i++){{
+        double av = (a[i] < 0) ? -a[i] : a[i];      // abs via select
+        double n2 = -a[i];                          // fneg
+        double b = (a[i] < 3.0) ? av : n2;          // fmax/fmin mix
+        acc = {accsel};
+        if (b < lo) lo = b;
+        if (b > hi) hi = b;
+    }}
+    // fp->int->fp sign round trips (exercises fcvtzs + scvtf + fmov gp/fp)
+    long long ip = (long long)(hi*1000.0);
+    double back = (double)(long long)(lo*1000.0);
+    double zero_cmp = (0.0 > -0.0) ? 5.0 : 2.0;
+    double r = ((hi + lo)*31.0) + (double)(ip & 0x7ff) + back + zero_cmp;
+    long long rr = (long long)r;
+    return (rr < 0 ? -rr : rr) & 0xfffffffff;
+}}
+"""
+
+gens += [gen_scalar_fp_sign_chain]
+
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
