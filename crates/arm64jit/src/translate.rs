@@ -317,13 +317,18 @@ fn apply_shift_const(buf: &mut CodeBuf, x: u8, kind: ShiftKind, amt: u8) {
     if amt == 0 {
         return;
     }
-    // mov cl, amt ; then shl/shr/sar r64, cl
-    buf.mov_ri32(RCX, amt as u32); // mov ecx, amt  (zero-extends), low byte CL
+    // BUGFIX (Session 99): this used `mov cl, amt; shl x, cl`. Both callers pass
+    // x == RCX (the Rm value being shifted), so `mov rcx, amt` CLOBBERED the value
+    // with the shift count and `shl rcx, cl` gave (amt << amt) — e.g. the array
+    // index `add x1,x2,x0,lsl#3` became x2+24 (constant, not x0<<3), making loops
+    // read the SAME element every iteration (fclamp -O2 returned 10 instead of 9).
+    // Use the immediate-shift forms (C1 /4..7 ib) instead — no CL scratch, so the
+    // shifted value stays in `x`.
     match kind {
-        ShiftKind::Lsl => buf.shl_cl64(x),
-        ShiftKind::Lsr => buf.shr_cl64(x),
-        ShiftKind::Asr => buf.sar_cl64(x),
-        ShiftKind::Ror => buf.ror_cl64(x),
+        ShiftKind::Lsl => buf.shl_ri8(x, amt),
+        ShiftKind::Lsr => buf.shr_ri8(x, amt),
+        ShiftKind::Asr => buf.sar_ri8(x, amt),
+        ShiftKind::Ror => buf.ror_ri8(x, amt),
     }
 }
 

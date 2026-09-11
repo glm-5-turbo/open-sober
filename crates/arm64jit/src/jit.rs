@@ -2828,6 +2828,32 @@ mod tests {
     }
 
     #[test]
+    fn add_shifted_register_applies_shift_to_source_not_clobbered() {
+        // REGRESSION (Session 99): apply_shift_const wrote the shift amount into
+        // RCX (the very register holding the Rm value) then `shl rcx, cl`, so
+        // `add x1,x2,x0,lsl#3` became x2 + (3<<3=24) — a CONSTANT, not x0<<3.
+        // -O2 array-index loops then read the same element every iteration
+        // (fclamp returned 10 instead of 9). Encodings from shadd.o.
+        let mut st = CpuState::new();
+        st.set(0, 2); // x0
+        st.set(1, 4); // x1
+        st.set(4, 16); // x4
+        st.set(6, -8i64 as u64); // x6 (asr #1 -> -4)
+        st.set(8, 1); // x8
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x8b00_0c22u32.to_le_bytes()); // add x2,x1,x0,lsl#3
+        code.extend_from_slice(&0x8b44_0803u32.to_le_bytes()); // add x3,x0,x4,lsr#2
+        code.extend_from_slice(&0x8b86_0425u32.to_le_bytes()); // add x5,x1,x6,asr#1
+        code.extend_from_slice(&0x8b08_0007u32.to_le_bytes()); // add x7,x0,x8
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec shifted-register add");
+        assert_eq!(st.x[2], 20, "x1 + (x0<<3)");
+        assert_eq!(st.x[3], 6, "x0 + (x4>>2)");
+        assert_eq!(st.x[5], 0, "x1 + (x6 asr#1)");
+        assert_eq!(st.x[7], 3, "x0 + x8");
+    }
+
+    #[test]
     fn fnmul_scalar_negate_mul() {
         // fnmul s10, s0, s1 = 0x1e21880a (wall): s10 = -(s0*s1).
         let f = |x: f32| x.to_bits() as u64;
