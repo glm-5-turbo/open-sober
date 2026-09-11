@@ -383,6 +383,9 @@ pub enum Inst {
     // result lane = all-ones if Vn op Vm, else 0. op 0=eq,1=gt,2=ge (lt/le are
     // gt/ge with Vn/Vm swapped). esize 4 (.2s/.4s) or 8 (.2d); q = bit30.
     VecFpCmp { rd: u8, rn: u8, rm: u8, esize: u8, op: u8, q: bool },
+    // ---- SIMD FP compare-to-zero: fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd.T, Vn.T, #0.0 ----
+    // op 0=eq 1=gt 2=ge 3=lt 4=le. Per-lane result = all-ones if Vn op 0 else 0.
+    VecFpCmpZero { rd: u8, rn: u8, op: u8, esize: u8, q: bool },
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
         WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool, upper: bool },
         // ---- SIMD add/sub-long widening: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T ----
@@ -418,6 +421,10 @@ pub enum Inst {
     VarShiftVar { rd: u8, rn: u8, rm: u8, op: u8, sf: bool },
     // ---- SIMD FP unary: fneg/fabs/fsqrt Vd.T, Vn.T - op 0=neg 1=abs 2=sqrt ----
     SimdFpUnary { rd: u8, rn: u8, op: u8, esize: u8, q: bool },
+    // ---- SIMD FP rounding: frint{n,m,p,z,a} Vd.T, Vn.T ----
+    // mode 0=n(nearest-even) 1=m(toward -inf/floor) 2=p(+inf/ceil) 3=z(toward zero)
+    // 4=a(nearest, ties away). esize = element size bytes (4=s, 8=d).
+    SimdFrint { rd: u8, rn: u8, mode: u8, esize: u8, q: bool },
     // ---- compare-and-branch ----
     Cbz {
         rt: u8,
@@ -1180,6 +1187,31 @@ pub fn decode(insn: u32) -> Inst {
             2u8 // fcmge
         };
         return Inst::VecFpCmp { rd, rn, rm, esize, op, q };
+    }
+    // ---- SIMD FP compare-to-zero: fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd.T, Vn.T, #0.0 ----
+    // byte2 (bits15:8) 0xc8=gt/ge, 0xd8=eq/le, 0xe8=lt; bit29 flips gt->ge (0xc8)
+    // and eq->le (0xd8). es=bit22 (0=s 4B, 1=d 8B), q=bit30. Encodings verified vs
+    // the aarch64 assembler across .2s/.4s/.2d. Disjoint from VecFpCmp (2-reg,
+    // byte2 0xe4) and from the coarse smull gate (byte2 must be 0x80/0xc0).
+    {
+        const CMPZ: &[(u32, u8, u8)] = &[
+            // (residue & 0xffff_fc00, op, esize_bytes)
+            (0x0ea0_d800, 0, 4), (0x4ea0_d800, 0, 4), (0x4ee0_d800, 0, 8), // fcmeq
+            (0x0ea0_c800, 1, 4), (0x4ea0_c800, 1, 4), (0x4ee0_c800, 1, 8), // fcmgt
+            (0x2ea0_c800, 2, 4), (0x6ea0_c800, 2, 4), (0x6ee0_c800, 2, 8), // fcmge
+            (0x0ea0_e800, 3, 4), (0x4ea0_e800, 3, 4), (0x4ee0_e800, 3, 8), // fcmlt
+            (0x2ea0_d800, 4, 4), (0x6ea0_d800, 4, 4), (0x6ee0_d800, 4, 8), // fcmle
+        ];
+        let res = insn & 0xffff_fc00;
+        if let Some(&(_, op, esize)) = CMPZ.iter().find(|&&(r, _, _)| r == res) {
+            return Inst::VecFpCmpZero {
+                rd: (insn & 0x1f) as u8,
+                rn: ((insn >> 5) & 0x1f) as u8,
+                op,
+                esize,
+                q: (insn >> 30) & 1 == 1,
+            };
+        }
     }
     // ---- variable shift by register: lslv/lsrv/asrv/rorv Wd|Xd, Wn|Xn, Wm|Xm ----
     // Gate (insn & 0xffe0_2000) in {0x1ac0_2000, 0x9ac0_2000}; distinct from MulDiv
@@ -3298,6 +3330,38 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                 fbits,
             };
         }
+        // ---- SIMD FP rounding frint{n,m,p,z,a} Vd.T, Vn.T ----
+        // Encodings (rd=0,rn=0, verified vs the aarch64 assembler): frint{n,m,p,z}
+        //   .2s 0x0e21_88/98/.., .4s 0x4e21_88/98/, .2d 0x4e61_88/98/…;
+        //   frinta .2s 0x2e218800 / .4s 0x6e218800. mode = bit23<<1|bit12
+        //   (n=00,m=01,p=10,z=11); frinta sets bit29; es=bit22(1=d,0=s); q=bit30.
+        // MUST be decoded BEFORE smull/umull's coarse gate: it only keeps the top
+        // nibble + bits15:14 of byte2, so a vector frint (byte2 0x80|0x90 ->
+        // bits15:14 = 10) folds into the smlal residue there and was silently
+        // miscompiling as a widening multiply.
+        {
+            const FRINT: &[(u32, u8, u8, bool)] = &[
+                // (residue & 0xffff_fc00, mode, esize_bytes, frinta)
+                (0x0e21_8800, 0, 4, false), (0x0e21_9800, 1, 4, false),
+                (0x0ea1_8800, 2, 4, false), (0x0ea1_9800, 3, 4, false), // 2s
+                (0x4e21_8800, 0, 4, false), (0x4e21_9800, 1, 4, false),
+                (0x4ea1_8800, 2, 4, false), (0x4ea1_9800, 3, 4, false), // 4s
+                (0x4e61_8800, 0, 8, false), (0x4e61_9800, 1, 8, false),
+                (0x4ee1_8800, 2, 8, false), (0x4ee1_9800, 3, 8, false), // 2d
+                (0x2e21_8800, 4, 4, true),  (0x6e21_8800, 4, 4, true),  // frinta 2s/4s
+                (0x6e61_8800, 4, 8, true),                             // frinta 2d
+            ];
+            let res = insn & 0xffff_fc00;
+            if let Some(&(_, mode, esize, _a)) = FRINT.iter().find(|&&(r, _, _, _)| r == res) {
+                return Inst::SimdFrint {
+                    rd: (insn & 0x1f) as u8,
+                    rn: ((insn >> 5) & 0x1f) as u8,
+                    mode,
+                    esize,
+                    q: (insn >> 30) & 1 == 1,
+                };
+            }
+        }
         // ---- SIMD widening multiply smull/umull & smlal/umlal (0x0f00_c000/8000 gate) ----
                                                                                                                                                                                         // acc = which gateway matched: c000 = plain mul, 8000 = accumulate (smlal).
                                                                                                                                                                                         // res_esize = 2 << bits[23:22] (source elem = 2^bits => result = 2x):
@@ -3308,7 +3372,16 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                                                                                         // got res=4, and plain smull/umull accumulated. Fixed here.)
                                                                                                                                                                                         {
                                                                                                                                                                                             let mullgt = insn & 0x0f00_c000;
-                                                                                                                                                                                            if mullgt == 0x0e00_c000 || mullgt == 0x0e00_8000 {
+                                                                                                                                                                                            // The top-nibble + bits15:14 residue is coarser than the real opcode:
+                                                                                                                                                                                            // byte2's bits[13:11] are always clear for genuine smull/umull/smlal/umlal
+                                                                                                                                                                                            // (element size varies in byte2 bits[2:0], e.g. smull .8h 0x...c020 vs
+                                                                                                                                                                                            // umull 0x...c340, and acc flips bit14; verified against every width/.2d/
+                                                                                                                                                                                            // 2 variant). Vector FRINT (byte2 0x88/0x98) and compare-to-zero fcmlt
+                                                                                                                                                                                            // (0xea) both set a bit in 0x38, so requiring <insn&0x3800>==0 keeps them
+                                                                                                                                                                                            // from silently decoding as a widening multiply.
+                                                                                                                                                                                            if (mullgt == 0x0e00_c000 || mullgt == 0x0e00_8000)
+                                                                                                                                                                                                                                                            && (insn & 0x0000_3800) == 0
+                                                                                                                                                                                            {
                                                                                                                                                                                                 let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                                                                                                                                 let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                 let rd = (insn & 0x1f) as u8;
@@ -3887,6 +3960,26 @@ mod tests {
         // umulh/smulh must NOT decode as MulLong (they're MulHigh, bit22 set).
         assert!(matches!(decode(0x9bc57c83), Inst::MulHigh { .. }));
         assert!(matches!(decode(0x9b487ce6), Inst::MulHigh { .. }));
+    }
+
+    #[test]
+    fn simd_frint_and_cmpzero_not_swallowed_by_widen_mul() {
+        // The coarse SimdMull gate (insn & 0x0f00_c000, which drops bit28 and
+        // only keeps byte2 bits15:14) used to fold vector FRINT (byte2 0x98/0x88)
+        // and compare-to-zero fcmlt (byte2 0xea) into the smlal residue — a
+        // silent widening multiply instead of a rounding / compare. Guard:
+        //  (a) vector frintm/frintz .4s decode to SimdFrint (never SimdMull),
+        //  (b) fcmlt .4s #0.0 decodes to VecFpCmpZero (never SimdMull),
+        //  (c) genuine umull (byte2 0xc3, bits13:11 clear) still decodes Smull2D.
+        // (a): from real gcc -O3 floor loop: frintm v1.4s, v1.4s
+        assert!(matches!(decode(0x4e219821), Inst::SimdFrint { mode: 1, esize: 4, q: true, .. }));
+        assert!(matches!(decode(0x4ea19821), Inst::SimdFrint { mode: 3, .. })); // frintz .4s
+        // (b): from gcc select: fcmlt v6.4s, v16.4s, #0.0
+        assert!(matches!(decode(0x4ea0ea06), Inst::VecFpCmpZero { op: 3, esize: 4, .. }));
+        // (c): real umull (magic-div BFS, byte2 0xc3): still a widening mul (.2d)
+        assert!(matches!(decode(0x2ebbc340), Inst::SimdMull { res_esize: 8, acc: false, .. }));
+        // and genuine smlal (byte2 0x80) still accumulates.
+        assert!(matches!(decode(0x0e628020), Inst::SimdMull { acc: true, .. }));
     }
 
     #[test]

@@ -690,3 +690,27 @@ last_agent_claim: Fixed 2 silent scalar single-precision FP miscompiles in
   reverted. Workspace `cargo test --workspace` 254/0, 0 ignored (battery 30).
 updated: 2026-09-11T08:20:00Z
 ---
+---
+cycle: 19b
+status: cycle_end (committed, tests green)
+last_agent_claim: Follow-on to the scalar FP-rounding fix. Vector-FP probe
+  sweep exposed a SYSTEMIC misdecode: the SIMD widen-multiply gate
+  (insn AND 0x0f00_c000) drops bit28 and only keeps byte2 bits15:14, so any op
+  sharing those folded into smlal. Two real SILENT (garbage, not stop)
+  miscompiles fixed: (1) VECTOR frint{n,m,p,z,a} (a floor loop's
+  frintm v1.4s decoded as smlal, returned 1.9e16 vs 590): new SimdFrint
+  decode+translate BEFORE smull, per-lane cvtss2sd->roundsd->cvtsd2ss;
+  (2) VECTOR compare-to-zero fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd,Vn,#0.0
+  (gcc x<0?a:b select, byte2 0xea -> smlal, wrong branch): new VecFpCmpZero
+  decode+translate (comiss vs zeroed xmm1 + setcc). Plus SimdMull gate
+  tightened to (insn AND 0x3800)==0 (byte2 bits13:11 clear) — genuine
+  smull/umull/smlal always clear them, frint(0x88/98)/fcmlt(0xea) set one;
+  an earlier byte2==0xc0/0x80 was too strict (size lives in bits[2:0]) and
+  broke diff_magic_div; corrected. Proved prior 'vfa fneg sign flip' was a
+  UB false alarm (unsigned cast of a negative; aarch64 fcvtzu clamps to 0,
+  x86 signed trunc -363 — JIT returning 0 was CORRECT). Verified fneg/bsl/
+  fcmlt+bsl isolate clean. New canaries diff_vector_frint_rounding +
+  diff_vector_fp_compare_zero; decode regression
+  simd_frint_and_cmpzero_not_swallowed_by_widen_mul. cargo build clean;
+  cargo test --workspace 257/0 (battery 32). HARD GATE unchanged (no GPU/APK).
+updated: 2026-09-11T08:45:00Z

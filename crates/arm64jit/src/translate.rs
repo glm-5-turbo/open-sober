@@ -2281,8 +2281,47 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed, upper } => {
-                                // shll/s hll2 vd.Td, vn.Ts: widen nlanes low (upper half) elements
+        Inst::VecFpCmpZero { rd, rn, op, esize, q } => {
+            // fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd.T, Vn.T, #0.0: per-lane = all-ones
+            // if Vn op 0.0 else 0 (mirrors VecFpCmp with a zeroed second operand).
+            // comiss/comisd(x, 0): CF=1 if x<0, ZF=1 if x==0; unordered(NaN) sets
+            // all three, so seta/setae/sete/setb/setbe match the existing VecFpCmp
+            // NaN precedent (fcmgt/ge safe; eq/lt/le NaN-imperfect as there).
+            let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let es = esize as i32;
+            let lanes = if q { 16 / es } else { 8 / es };
+            let cc = match op {
+                0 => 4u8, // fcmeq : sete (ZF)
+                1 => 7u8, // fcmgt : seta (CF=0 && ZF=0)
+                2 => 3u8, // fcmge : setae (CF=0)
+                3 => 2u8, // fcmlt : setb (CF=1)
+                _ => 6u8, // fcmle : setbe (CF=1 || ZF=1)
+            };
+            for l in 0..lanes {
+                let off = l * es;
+                buf.pxor_xmm(1, 1); // xmm1 = +0.0
+                if esize == 8 {
+                    buf.movq_load(0, RBX, nb + off);
+                    buf.comisd(0, 1);
+                } else {
+                    buf.mov_load32(RAX, RBX, nb + off);
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.comiss(0, 1);
+                }
+                buf.setcc_rm8(cc, 0); // AL = 0/1
+                buf.movzx_r32_r8(RAX, RAX);
+                buf.neg_r64(RAX); // low 32/64: 0 -> 0, +1 -> all-ones
+                if esize == 8 {
+                    buf.mov_store64(RBX, db + off, RAX);
+                } else {
+                                    buf.mov_store32(RBX, db + off, RAX);
+                                }
+                            }
+                            Ok(())
+                        }
+                        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed, upper } => {
+                                                 // shll/s hll2 vd.Td, vn.Ts: widen nlanes low (upper half) elements
                                 // of vn, sign/zero extend to dst_esize-byte lanes.
                                 let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                 let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
@@ -4312,6 +4351,59 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 if esize == 8 {
                     buf.movq_store(RBX, dst + off, 0);
                 } else {
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, dst + off, RAX);
+                }
+            }
+            Ok(())
+        }
+        Inst::SimdFrint { rd, rn, mode, esize, q } => {
+            // frint{n,m,p,z,a} Vd.T, Vn.T: per-lane FP rounding. esize 8 lanes
+            // are doubles; esize 4 lanes are singles (promote to double, round,
+            // demote). roundsd imm: 0b00=nearest-even(frintn), 0b01=floor(m),
+            // 0b10=ceil(p), 0b11=toward-zero(z). frinta (mode 4) = ties-away:
+            // sign*floor(|x|+0.5).
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let m = esize as i32;
+            let emit_round = |buf: &mut crate::x86::CodeBuf| {
+                match mode {
+                    0 => buf.roundsd(0, 0, 0b00), // frintn: round to nearest-even
+                    1 => buf.roundsd(0, 0, 0b01), // frintm: floor
+                    2 => buf.roundsd(0, 0, 0b10), // frintp: ceil
+                    3 => buf.roundsd(0, 0, 0b11), // frintz: toward zero
+                    4 => {
+                        // frinta: nearest, ties away = sign*floor(|x|+0.5)
+                        buf.movq_r64_xmm(RAX, 0);
+                        buf.mov_ri64(RCX, 0x8000_0000_0000_0000);
+                        buf.and_rr64(RAX, RCX);               // sign bit
+                        buf.movq_xmm_r64(2, RAX);             // xmm2 = sign mask
+                        buf.movq_r64_xmm(RAX, 0);
+                        buf.mov_ri64(RCX, 0x7fff_ffff_ffff_ffff);
+                        buf.and_rr64(RAX, RCX);               // |x|
+                        buf.movq_xmm_r64(0, RAX);
+                        buf.mov_ri64(RAX, 0x3fe0_0000_0000_0000); // 0.5
+                        buf.movq_xmm_r64(1, RAX);
+                        buf.addsd(0, 1);                      // |x| + 0.5
+                        buf.roundsd(0, 0, 0x01);              // floor
+                        buf.pxor_xmm(0, 2);                   // reapply sign
+                    }
+                    _ => unreachable!("SimdFrint bad mode {mode}"),
+                }
+            };
+            for l in 0..lanes {
+                let off = l * m;
+                if esize == 8 {
+                    buf.movq_load(0, RBX, src + off); // 64-bit double lane
+                    emit_round(&mut *buf);
+                    buf.movq_store(RBX, dst + off, 0);
+                } else {
+                    buf.mov_load32(RAX, RBX, src + off); // 32-bit float lane
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.cvtss2sd(0, 0); // promote to double
+                    emit_round(&mut *buf);
+                    buf.cvtsd2ss(0, 0); // demote back to single
                     buf.movd_r32_xmm(RAX, 0);
                     buf.mov_store32(RBX, dst + off, RAX);
                 }

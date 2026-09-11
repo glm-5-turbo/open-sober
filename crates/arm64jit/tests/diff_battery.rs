@@ -1189,3 +1189,69 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_vector_frint_rounding() {
+    // VECTOR frint{v,m,p,z} Vd.T, Vn.T (32-bit lanes). These used to decode as
+    // SimdMull (smull/umull widen-multiply) because the coarse 0x0f00_c000 gate
+    // swallows byte2 0x98/0x88 into the smlal residue — a floor/ceil loop was a
+    // silent widening-multiply (garbage), not an honest stop (a floor loop
+    // returned 1.9e16 vs 590). Fixed by giving frint its own decode BEFORE
+    // SimdMull + tightening SimdMull to exact byte2 0x80/0xc0.
+    assert_diff(
+        "vflr_floor",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 2.2f; float seed = vseed;
+    float a[8]; for(int i=0;i<8;i++) a[i] = __builtin_floorf(seed*(float)i);
+    float s=0; for(int i=0;i<8;i++) s += a[i];
+    return (long long)(s*10);
+}
+"#,
+    );
+    assert_diff(
+        "vflr_ceil",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 1.3f; float seed = vseed;
+    float a[8]; for(int i=0;i<8;i++) a[i] = __builtin_ceilf(seed*(float)i + 0.2f);
+    float s=0; for(int i=0;i<8;i++) s += a[i];
+    return (long long)(s*10);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_vector_fp_compare_zero() {
+    // Vector FP compare-to-zero (fcmlt/fcmgt/fcmge/fcmge/fcmle Vd, Vn, #0.0)
+    // driving a bitwise select (bsl). Used to decode as SimdMull too (byte2
+    // 0xea -> smlal residue), silently selecting the wrong branch. fnint: the
+    // select must pick the negative (fcmlt) / positive (fcmgt) lanes.
+    assert_diff(
+        "vcmp0_lt_keep_neg",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = -1.3f; float seed = vseed;
+    float a[8]; for(int i=0;i<8;i++) a[i] = (seed*(float)i < 0 ? seed*(float)i : -(seed*(float)i));
+    float s=0; for(int i=0;i<8;i++) s += a[i];
+    return (long long)(s*10);
+}
+"#,
+    );
+    assert_diff(
+        "vcmp0_gt_keep_pos",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = -2.7f; float seed = vseed;
+    float a[8]; for(int i=0;i<8;i++) a[i] = (seed*(float)i > 0 ? seed*(float)i : 0.0f);
+    float s=0; for(int i=0;i<8;i++) s += a[i];
+    return (long long)(s*10);
+}
+"#,
+    );
+}

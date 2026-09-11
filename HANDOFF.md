@@ -4180,3 +4180,51 @@ stop (no silent value), so gcc's vectorized rounding is the next feature slice;
 then the runtime-side items (FMOD bl-to-once dispatcher, JNI table stubs) and
 the HARD GATE real-binary/GPU boot proof which is impossible on this APK-less,
 GPU-less VPS.
+
+---
+
+## Session 2026-09-11 (cycle 19b) — VECTOR frint + compare-to-zero + SimdMull gate fix (workspace 257/0)
+
+Follow-on to the scalar FP-rounding fix. Sweeping more vector-FP probes exposed a
+**systemic misdecode class**: the SIMD widening-multiply gate was
+`insn & 0x0f00_c000` — it drops bit28 and only keeps byte2 bits15:14, so ANY
+op whose byte2 shares those bits folded into the smlal residue. Two real,
+silent (garbage-not-stop) miscompiles found and fixed:
+
+1. **VECTOR frint** (frint{n,m,p,z,a} Vd.T, Vn.T): a `floorf` loop's
+   `frintm v1.4s,v1.4s` (byte2 0x98) decoded as **smlal** — the floor loop
+   returned 1.9e16 vs native 590 (a silent widen-multiply of the float bits).
+   Implemented `Inst::SimdFrint` + decode (mode = bit23<<1|bit12, es=bit22,
+   frinta=bit29) before SimdMull; translate per-lane via cvtss2sd→roundsd→
+   cvtsd2ss (0b00 n / 0b01 m / 0b10 p / 0b11 z, frinta ties-away trick).
+
+2. **VECTOR compare-to-zero** (fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd,Vn,#0.0): gcc's
+   `x<0 ? a : b` select uses `fcmlt ... #0.0` (byte2 0xea) + `bsl` — the fcmlt
+   was also smlal, so the select chose the wrong branch. Implemented
+   `Inst::VecFpCmpZero` + decode + translate (comiss/comisd vs a zeroed xmm1,
+   setcc per lane like the existing VecFpCmp; seta/setae/sete/setb/setbe).
+
+3. **SimdMull gate tightened** to `(insn & 0x3800) == 0` (byte2 bits13:11
+   clear) — genuine smull/umull/smlal always clear those (size varies in byte2
+   bits[2:0], e.g. smull .8h 0x...c020 vs umull 0x...c340), while frint (0x88/98)
+   and fcmlt (0xea) set one. Prevents any future frint/cmpz-style smlal fires
+   even if a new width variant slips the earlier gates. (An earlier too-strict
+   `byte2 == 0xc0/0x80` broke diff_magic_div etc. — element size lives in byte2
+   bits[2:0]; corrected to the 0x3800 check, which keeps all mull widths working.)
+
+Also proved the earlier `vfa` "fneg sign flip" was a **UB false alarm**: the
+probe cast a negative float to `unsigned long long` (undefined in C) — aarch64
+emits `fcvtzu` (clamps to 0) while x86 emits signed trunc (-363), so the JIT
+returning 0 was CORRECT aarch64 semantics. With a signed cast, jit == native ==
+-363. Isolated tests confirmed fneg, bsl, and fcmlt+bsl are each correct.
+
+New differential canaries: diff_vector_frint_rounding (vflr_floor, vflr_ceil),
+diff_vector_fp_compare_zero (vcmp0_lt_keep_neg, vcmp0_gt_keep_pos). New decode
+regression `simd_frint_and_cmpzero_not_swallowed_by_widen_mul` (guards (a) frint
+(b) fcmlt (c) genuine umull still SimdMull). cargo build clean; cargo test
+--workspace 257/0. Committed on dev.
+
+Honest next: continue the battery sweep (vector frinta/frintn, f2d .2d forms,
+sdadd/sqadd, pmull); runtime-side FMOD bl-to-once dispatcher + JNI table stubs
+are still pending the real binary; HARD GATE (elfjit on libroblox.so on a GPU/
+APK host) unchanged — impossible on this GPU-less, APK-less VPS.
