@@ -478,6 +478,66 @@ long long entry(void){
 // family, which the older integer/double batteries did not touch.
 
 #[test]
+fn diff_ccmp_cond_compare() {
+    // gcc lowers `a < N && b != N` loop guards to `cmp` + `ccmp x,#0,#nzcv,cond`
+    // + `b.ge`. Pre-fix these decoded as a logical set-flags op -> wrong NZCV ->
+    // the loop never terminated (JIT hang). Also covers ccmn/ccmp register form.
+    assert_diff(
+        "ccmp_cond",
+        "-O2",
+        r#"
+long long entry(void){
+    long long n = 0;
+    long long a = 0, b = 5;
+    // while (a < 4 && b != 7)  -> the ccmp x1,#0,#1,ne idiom
+    while (a < 4 && b != 7) { n++; a++; }
+    long long acc = n; // 4
+    int x = 3, y = 10;
+    if (x < 5 && y > 5) acc += 100;      // ccmp with ge
+    if (x == 3 || y == 100) acc += 1000; // ccmn/ccmp with eq
+    if (y >= 10 && x <= 3) acc += 10000; // ge/le ccmp
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "ccmp_masked_loop",
+        "-O3",
+        r#"
+long long entry(void){
+    // gcc may rotate this into cmp/ccmp + branch; 32-bit counter
+    long long cnt = 0;
+    for (int k = 0; k < 1000 && (k & 3) != 0; k++) cnt++;
+    return cnt + 5;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_w32_overflow_compare() {
+    // 32-bit arithmetic must set NZCV from the 32-bit result (N=bit31), not a
+    // 64-bit add with the operand pre-zero-extended (which gave N=0 for
+    // 0x7fffffff+1). `s = a+b` wrapping to INT_MIN then `s<0` must be true.
+    assert_diff(
+        "w32_ovf_cmp",
+        "-O2",
+        r#"
+long long entry(void){
+    volatile int a = 0x7fffffff, b = 1;
+    int s = a + b;                     // wraps to INT_MIN in w
+    unsigned u = (unsigned)a + (unsigned)b; // wraps to 0x80000000
+    long long acc = (long long)s;      // -2147483648
+    acc += (long long)u;               // +2147483648 = 0
+    acc += (s < 0) ? 1000000 : 1;
+    acc += (u > 1000000000u) ? 2000000 : 2;
+    return acc;
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_float_vector_arith() {
     // Elementwise vector fmla/fmul/fadd on .4s lanes + a final scalar sum.
     assert_diff(

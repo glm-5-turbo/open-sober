@@ -757,6 +757,24 @@ impl CodeBuf {
     pub fn sub_rr64(&mut self, rd: u8, rs: u8) {
         self.binop(0x29, rd, rs);
     }
+    /// add r32 <- r32 (32-bit: NO REX.W). Sets N/Z/C/V from the 32-bit result
+    /// (SF=bit31, OF=32-bit signed overflow) exactly as AArch64 `adds w…` needs,
+    /// and clears the upper 32 bits of rd (x86-64 semantics for 32-bit writes).
+    pub fn add_rr32(&mut self, rd: u8, rs: u8) {
+        self.binop32(0x01, rd, rs);
+    }
+    /// sub r32 <- r32 (32-bit, no REX.W) — `subs w…` / `cmp w…` flag semantics.
+    pub fn sub_rr32(&mut self, rd: u8, rs: u8) {
+        self.binop32(0x29, rd, rs);
+    }
+
+    fn binop32(&mut self, op: u8, rd: u8, rs: u8) {
+        if rd >= 8 || rs >= 8 {
+            self.b(rex(false, rs, 0, rd)); // REX with W=0 for high regs
+        }
+        self.b(op);
+        self.b(modrm(3, rs & 7, rd & 7));
+    }
     /// adc r64 <- r64 + CF  (opcode 11: reg=src, rm=dest)
     pub fn adc_rr64(&mut self, rd: u8, rs: u8) {
         self.binop(0x11, rd, rs);
@@ -869,6 +887,23 @@ impl CodeBuf {
             self.b(0x49);
         } else {
             self.b(0x48);
+        }
+        self.b(0x81);
+        self.b(modrm(3, op, rd & 7));
+        self.u32(imm);
+    }
+
+    /// add r32, imm32 (81 /0, NO REX.W) — 32-bit flag semantics + upper-clear.
+    pub fn add_ri32(&mut self, rd: u8, imm: u32) {
+        self.ari_imm32(0, rd, imm);
+    }
+    /// sub r32, imm32 (81 /5, no REX.W).
+    pub fn sub_ri32(&mut self, rd: u8, imm: u32) {
+        self.ari_imm32(5, rd, imm);
+    }
+    fn ari_imm32(&mut self, op: u8, rd: u8, imm: u32) {
+        if rd >= 8 {
+            self.b(0x41);
         }
         self.b(0x81);
         self.b(modrm(3, op, rd & 7));

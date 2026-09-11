@@ -536,6 +536,21 @@ pub enum Inst {
                 cond: u8, // AArch64 condition code
                 sz: bool, // true = double (fcmp Dn,Dm), false = single
             },
+            // ---- integer conditional compare: ccmp/ccmn Rn, <Rm|#imm>, #nzcv, cond ----
+            // (insn & 0x001f_f07f) — variable fields: imm5/Rm[20:16], cond[15:12],
+            // rn[6:4], nzcv[3:0] — leaves residue in {0xfa/x7a/xba/x3a + 0x000/0x400
+            // + 0x800}. If cond(guest NZCV) is true the flags become `Rn op <Rm|imm>`
+            // (cmn=add, ccmp=sub); else they become `nzcv`. Flag-only, no writeback.
+            CcMp {
+                rn: u8,
+                rm: u8,   // the other GPR (register form); unused for immediate
+                imm: u8,  // 5-bit immediate (immediate form)
+                nzcv: u8,
+                cond: u8,
+                cmn: bool,   // true = CCMN (add), false = CCMP (sub)
+                sf: bool,    // true = 64-bit compare, false = 32-bit
+                is_reg: bool,// true = register form, false = immediate
+            },
             // ---- scalar FP->int to FP reg: fcvtzs/fcvtzu Dd,Dn / Sd,Sn (trunc toward zero) ----
             FcvtTzReg { rd: u8, rn: u8, dbl: bool, unsigned: bool },
         // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
@@ -1476,6 +1491,30 @@ pub fn decode(insn: u32) -> Inst {
 
     // ---- logical (shifted register): AND/ORR/EOR/BIC/ORN/EON ----
     // top byte: 0x0a xx-family; opc = bits[30:29], N = bit21
+    // NOTE: conditional-compare ccmp/ccmn shares the 0xFA/0x7A/0xBA/0x3A top
+    // bytes with the logical set-flags family but is distinguished by its full
+    // residue — checked FIRST so it isn't swallowed as an ANDS/BICS.
+    {
+        let varmask = 0x001f_f3ef; // Rn[9:5] | imm5/Rm[20:16] | cond[15:12] | nzcv[3:0]
+        let res = insn & !varmask;
+        if matches!(
+            res,
+            0xfa40_0800 | 0xfa40_0000 | 0x7a40_0800 | 0x7a40_0000
+                | 0xba40_0800 | 0xba40_0000 | 0x3a40_0800 | 0x3a40_0000
+        ) {
+            let cond = b(insn, 12, 15) as u8;
+            let nzcv = b(insn, 0, 3) as u8;
+            let rn = b(insn, 5, 9) as u8;
+            let src = b(insn, 16, 20) as u8; // rm (reg) or imm5 (imm)
+            let sf = (insn >> 31) & 1 == 1;
+            let cmn = (insn >> 30) & 1 == 0; // ccmp=bit30 (subtract), ccmn=add
+            let is_reg = (insn & 0x800) == 0; // bit11=1 => immediate form
+            if !is_reg {
+                return Inst::CcMp { rn, rm: 0, imm: src, nzcv, cond, cmn, sf, is_reg };
+            }
+            return Inst::CcMp { rn, rm: src, imm: 0, nzcv, cond, cmn, sf, is_reg };
+        }
+    }
     if matches!(
         top,
         0x0a | 0x2a | 0x4a | 0x6a | 0x8a | 0x9a | 0xaa | 0xba | 0xca | 0xda | 0x3a | 0x7a
@@ -4652,9 +4691,82 @@ mod tests {
                     }
                     other => panic!("expected Ror, got {other:?}"),
                 }
-                // A real UBFM extract (lsl) must NOT be mis-decodded as Ror.
-                                assert!(!matches!(decode(0xbbf13c69), Inst::Ror { .. }));
-                            }
+                // A real UBFM extract (lsl) must NOT be mis-decoded as Ror.
+                                                assert!(!matches!(decode(0xbbf13c69), Inst::Ror { .. }));
+                                            }
+
+                                            #[test]
+                                            fn ccmp_ccmn_decode() {
+                                                // Real gcc encodings (cross-disassembled this session).
+                                                // ccmp X imm: 0xfa450809 = ccmp x0, #5, #0x9, eq
+                                                match decode(0xfa450809) {
+                                                    Inst::CcMp { rn, rm, imm, nzcv, cond, cmn, sf, is_reg } => {
+                                                        assert_eq!(rn, 0);
+                                                        assert_eq!(imm, 5);
+                                                        assert_eq!(nzcv, 9);
+                                                        assert_eq!(cond, 0x0); // eq
+                                                        assert!(!cmn); // ccmp = subtract
+                                                        assert!(sf); // X form
+                                                        assert!(!is_reg); // immediate
+                                                        assert_eq!(rm, 0);
+                                                    }
+                                                    other => panic!("ccmp x0,#5,#9,eq -> {other:?}"),
+                                                }
+                                                // ccmp W imm: 0x7a478842 = ccmp w2, #7, #0x2, hi
+                                                match decode(0x7a478842) {
+                                                    Inst::CcMp { rn, imm, nzcv, cond, cmn, sf, is_reg, .. } => {
+                                                        assert_eq!(rn, 2);
+                                                        assert_eq!(imm, 7);
+                                                        assert_eq!(nzcv, 2);
+                                                        assert_eq!(cond, 0x8); // hi
+                                                        assert!(!cmn);
+                                                        assert!(!sf); // W form
+                                                        assert!(!is_reg);
+                                                    }
+                                                    other => panic!("ccmp w2,#7,#2,hi -> {other:?}"),
+                                                }
+                                                // ccmn X imm = 0xba450809 = ccmn x0, #5, #0x9, eq
+                                                match decode(0xba450809) {
+                                                    Inst::CcMp { cmn, imm, nzcv, cond, .. } => {
+                                                        assert!(cmn); // ccmn = add
+                                                        assert_eq!(imm, 5);
+                                                        assert_eq!(nzcv, 9);
+                                                        assert_eq!(cond, 0x0);
+                                                    }
+                                                    other => panic!("ccmn x0,#5,#9,eq -> {other:?}"),
+                                                }
+                                                // ccmp X reg = 0xfa4610a8 = ccmp x5, x6, #0x8, ne
+                                                match decode(0xfa4610a8) {
+                                                    Inst::CcMp { rn, rm, imm, nzcv, cond, is_reg, .. } => {
+                                                        assert_eq!(rn, 5);
+                                                        assert_eq!(rm, 6);
+                                                        assert_eq!(imm, 0); // register form: no imm
+                                                        assert_eq!(nzcv, 8);
+                                                        assert_eq!(cond, 0x1); // ne
+                                                        assert!(is_reg);
+                                                    }
+                                                    other => panic!("ccmp x5,x6,#8,ne -> {other:?}"),
+                                                }
+                                                // The real bitman-loop idiom: ccmp x1,#0,#0x1,ne = 0xfa401821
+                                                match decode(0xfa401821) {
+                                                    Inst::CcMp { rn, imm, nzcv, cond, is_reg, .. } => {
+                                                        assert_eq!(rn, 1);
+                                                        assert_eq!(imm, 0);
+                                                        assert_eq!(nzcv, 1);
+                                                        assert_eq!(cond, 0x1); // ne
+                                                        assert!(!is_reg);
+                                                    }
+                                                    other => panic!("ccmp x1,#0,#1,ne -> {other:?}"),
+                                                }
+                                                // A genuine logical set-flags instruction must NOT be swallowed as CcMp.
+                                                // ands x0,x1,x2 = 0xea020020 (opc=11 S, N=0, lsl#0) —
+                                                // shares the S-flag top-byte space the ccmp family
+                                                // overlaps. Also confirm `sbcs` (0xfa020020, add-sub
+                                                // carry) is left alone (not CcMp).
+                                                assert!(!matches!(decode(0xea020020), Inst::CcMp { .. }));
+                                                assert!(!matches!(decode(0xfa020020), Inst::CcMp { .. }));
+                                                assert!(matches!(decode(0xea020020), Inst::LogicReg { .. }));
+                                            }
 
                             #[test]
                             fn clz_scalar_ucvtf_decode() {

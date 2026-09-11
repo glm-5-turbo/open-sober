@@ -405,9 +405,15 @@ pub fn translate(
                 zext_w(buf, RAX); // 32-bit: high garbage in rn is ignored
             }
             if sub {
-                buf.sub_ri64(RAX, imm as u32);
-            } else {
+                if sf {
+                    buf.sub_ri64(RAX, imm as u32);
+                } else {
+                    buf.sub_ri32(RAX, imm as u32); // 32-bit flags + upper-clear
+                }
+            } else if sf {
                 buf.add_ri64(RAX, imm as u32);
+            } else {
+                buf.add_ri32(RAX, imm as u32); // `adds w…` N/V/Z/C from 32-bit result
             }
             if s {
                 store_nzcv(buf); // N/Z/C/V -> CpuState.nzcv
@@ -462,9 +468,15 @@ pub fn translate(
             }
             apply_shift_const(buf, RCX, shift, sh_amt);
             if sub {
-                buf.sub_rr64(RAX, RCX);
-            } else {
+                if sf {
+                    buf.sub_rr64(RAX, RCX);
+                } else {
+                    buf.sub_rr32(RAX, RCX); // `subs w…`: 32-bit flags + upper-clear
+                }
+            } else if sf {
                 buf.add_rr64(RAX, RCX);
+            } else {
+                buf.add_rr32(RAX, RCX); // `adds w…`: N/V/Z/C from the 32-bit result
             }
             if s {
                 store_nzcv(buf);
@@ -2436,6 +2448,65 @@ pub fn translate(
             // patch displacements: relative to disp_off+4
             let jd = j_cond as i32;
             let d1 = ((fp_off - (jd + 4)) as u32).to_le_bytes();
+            buf.bytes[jd as usize..(jd + 4) as usize].copy_from_slice(&d1);
+            let je = j_end as i32;
+            let d2 = ((tail_off - (je + 4)) as u32).to_le_bytes();
+            buf.bytes[je as usize..(je + 4) as usize].copy_from_slice(&d2);
+            Ok(())
+        }
+        Inst::CcMp { rn, rm, imm, nzcv, cond, cmn, sf, is_reg } => {
+            // ccmp/ccmn Rn, <Rm|#imm>, #nzcv, <cond>: if cond(guest NZCV) holds,
+            // the flags become `Rn op <Rm|imm>` (ccmn=add, ccmp=subtract); else
+            // they become the 4-bit `nzcv` immediate. Flag-only, no writeback —
+            // same branch-then-patch structure as Fccmp above.
+            let jcc = x86_cc_for_cond(cond)
+                .ok_or_else(|| format!("CcMp: bad cond {cond:#x}"))?;
+            load_nzcv_to_eflags(buf);              // eflags = guest NZCV (cond eval)
+            let j_cond = buf.jcc_rel32(jcc);       // jump to the compare path when cond TRUE
+            // cond FALSE: NZCV = the nzcv immediate (N[3]Z[2]C[1]V[0] -> bits 31/30/29/28)
+            buf.mov_ri64(RAX, (nzcv as u64) << 28);
+            buf.mov_store32(RBX, NZCV_OFF, RAX);
+            let j_end = buf.jmp_rel32();           // skip the compare path
+            let cmp_off = buf.len() as i32;        // start of cond-TRUE path
+            // cond TRUE: compute Rn op <Rm|imm> and set flags from the result.
+            if rn == 31 {
+                buf.mov_ri64(RAX, 0);              // Rn = XZR (0)
+            } else {
+                ldg(buf, RAX, rn as u32);
+            }
+            if !sf {
+                zext_w(buf, RAX); // 32-bit compare: zero high garbage
+            }
+            if is_reg {
+                if rm == 31 {
+                    buf.mov_ri64(RCX, 0);
+                } else {
+                    ldg(buf, RCX, rm as u32);
+                }
+                if !sf {
+                    zext_w(buf, RCX);
+                }
+            } else {
+                buf.mov_ri64(RCX, imm as u64);
+            }
+            if cmn {
+                // cmn: Rn + src (op=add)
+                if sf {
+                    buf.add_rr64(RAX, RCX);
+                } else {
+                    buf.add_rr32(RAX, RCX);
+                }
+            } else if sf {
+                // ccmp: Rn - src (same sub semantics as `cmp` -> branch conds agree)
+                buf.sub_rr64(RAX, RCX);
+            } else {
+                buf.sub_rr32(RAX, RCX);
+            }
+            store_nzcv(buf);
+            let tail_off = buf.len() as i32;
+            // patch displacements: disp relative to disp_off+4
+            let jd = j_cond as i32;
+            let d1 = ((cmp_off - (jd + 4)) as u32).to_le_bytes();
             buf.bytes[jd as usize..(jd + 4) as usize].copy_from_slice(&d1);
             let je = j_end as i32;
             let d2 = ((tail_off - (je + 4)) as u32).to_le_bytes();
