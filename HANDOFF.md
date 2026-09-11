@@ -2461,3 +2461,49 @@ dead-code / rustfmt churn).
 3. Real-binary/GPU boot verification remains blocked until `libroblox.so` (or an
    APK) and a GPU host are available — capture as `elfjit ... 0x1f0db20 --jni`
    log on a capable host (HARD GATE).
+
+## Session (Sep 11, 2026) — JNI/JavaVM function tables on the OFFICIAL Android ABI slot offsets (commit bdd8b03)
+
+Continuing the ordered work ("JNI function-table stubs"). Examined both
+`crates/arm64jit/src/jni.rs` (JIT path) and the QEMU `jni_shim.c` (validated
+reference) and found the JIT JNI table was mis-slotted vs. the ABI the guest
+uses.
+
+### The bug (real, and it would crash a booted guest)
+libroblox.so indexes `JNINativeInterface` with the OFFICIAL jni.h word offsets:
+`GetVersion=4, FindClass=6, GetMethodID=33, GetFieldID=94,
+GetStaticMethodID=113, NewStringUTF=167, GetStringUTFChars=169,
+RegisterNatives=199, GetJavaVM=203`, and `vm GetEnv=7`. The JIT table carried
+unvalidated guesses from the QEMU shim (`NewStringUTF@36`, `GetArrayLength@37`,
+`GetObjectField@102`, `RegisterNatives@193`, `GetJavaVM@197`, vm GetEnv@4/6).
+The QEMU path only ever end-to-end-validated GetVersion/FindClass/
+GetStaticMethodID against the real binary — of those, FindClass(6) and
+GetStaticMethodID(113) coincidentally match the official offsets, which is why
+the mismatch went unnoticed (its boot hung at nativeSetAssetPath before any
+divergent slot was exercised). `bdd8b03` rebuilds the JIT tables on the official
+offsets so a guest call lands on the real stub, not NULL/wrong.
+
+### Handles are now readable (not low sentinels)
+FindClass/NewStringUTF/GetMethodID return a stable, interned, readable UTF-8
+buffer handle (the `str_handle` registry — analogue of the QEMU shim's
+`track_ptr`), instead of the old `0x3000` sentinel that risks a guest deref
+fault. GetStringUTFChars returns that buffer and clears `*isCopy`;
+RegisterNatives succeeds (records nothing yet) so boot continues; GetJavaVM
+writes the live vm handle. `jni_vm_getenv` (GetEnv @ slot 7) writes `*penv`.
+
+### Verification
+- `+2` tests: `jni_table_has_official_abi_slots_nonnull` (regression guard that
+  all boot-relevant slots are non-null host thunks at the OFFICIAL offsets),
+  `jni_new_string_utf_is_readable`.
+- Fixed the E2E `jit_jni_onload_getenv_getversion` to load vm GetEnv at
+  offset 56 (slot 7) and to dereference `env->functions` before indexing slot 4
+  (JNIEnv word0 is the fn-table ptr; the earlier test read `[env+32]` directly).
+  69/69 arm64jit, workspace 103/0. `cargo build --workspace` clean.
+
+### Next (ordered)
+1. `libloader` ELF/loader gaps (next in RECOMMENDATION order); drive
+   `elfjit`/`--jit` boot path end-to-end against a synthetic/test ELF to
+   confirm no regression from the divert + JNI changes.
+2. `libbadcpu` ISA gaps; then services/auth.
+3. Real-binary/GPU boot verification remains blocked (no APK/libroblox.so, no
+   GPU) — HARD GATE on a capable host.
