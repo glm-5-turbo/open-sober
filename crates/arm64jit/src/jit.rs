@@ -705,6 +705,49 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         83 => unsafe { libc::fdatasync(a[0] as c_int) as c_long },
         45 => unsafe { libc::truncate(a[0] as *const c_char, a[1] as libc::off_t) as c_long },
         46 => unsafe { libc::ftruncate(a[0] as c_int, a[1] as libc::off_t) as c_long },
+        // --- system memory (sysinfo 179): a game engine sizes its worker-pool
+        // heaps / caches from totalram/freeram. The asm-generic `struct sysinfo`
+        // is byte-identical on aarch64 and x86-64, so forward the host's REAL
+        // values (the record shows forging memory figures changes nothing). ---
+        179 => {
+            unsafe {
+                let mut si: libc::sysinfo = core::mem::zeroed();
+                let r = libc::sysinfo(&mut si);
+                if r == 0 {
+                    std::ptr::copy_nonoverlapping(
+                        &si as *const libc::sysinfo as *const u8,
+                        a[0] as *mut u8,
+                        core::mem::size_of::<libc::sysinfo>(),
+                    );
+                }
+                r as c_long
+            }
+        }
+        // --- statx (291): the modern stat query (bionic/Java use it for file
+        // metadata); `struct statx` is asm-generic and byte-identical on both
+        // arches, so a raw forward writes the guest's statx buffer in place. ---
+        291 => unsafe {
+            libc::syscall(
+                libc::SYS_statx,
+                a[0] as usize, a[1] as usize, a[2] as usize,
+                a[3] as usize, a[4] as usize,
+            ) as c_long
+        },
+        // --- get_robust_list (100): glibc's pthread init probes for a robust
+        // futex list; report a valid EMPTY list (a zeroed `next`) rather than
+        // -ENOSYS so thread bootstrap proceeds. len = pointer size. ---
+        100 => {
+            static EMPTY_ROBUST_LIST: [u8; 24] = [0u8; 24]; // struct robust_list{next}/flags
+            if a[1] != 0 {
+                unsafe { std::ptr::write(a[1] as *mut u64, &EMPTY_ROBUST_LIST as *const u8 as u64); }
+            }
+            if a[2] != 0 {
+                unsafe { std::ptr::write(a[2] as *mut u64, core::mem::size_of::<u64>() as u64); }
+            }
+            0
+        }
+        128 => (-4i32) as c_long, // restart_syscall(128): only surfaces from a
+        // -ERESTART* interrupted syscall we never produce; -EINTR is correct.
         // --- filesystem space (statfs/fstatfs, 43/44) ---
         43 => {
             // AArch64 statfs (43): path, struct statfs*. Write the guest layout,
@@ -4959,6 +5002,53 @@ mod tests {
         let r199 = guest_svc(&mut st as *mut CpuState);
         assert_ne!(r199 as libc::uid_t, unsafe { libc::getuid() },
             "199 is not getuid (it is socketpair)");
+    }
+
+    /// The boot-memory/stat syscalls added this cycle: sysinfo (179) fills the
+    /// guest asm-generic struct with real host values; statx (291) statfs a file;
+    /// get_robust_list (100) reports a valid empty list; restart_syscall (128)
+    /// returns -EINTR. All must succeed (no -ENOSYS) and be self-consistent.
+    #[test]
+    fn guest_svc_sysinfo_statx_robust_restart_roundtrip() {
+        let mut st = CpuState::new();
+
+        // sysinfo(179) -> guest struct: uptime/totalram must be non-zero and the
+        // guest buffer actually receives the asm-generic 64-bit layout.
+        let mut si = [0u8; 256];
+        st.x[8] = 179; st.x[0] = si.as_mut_ptr() as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "sysinfo succeeds");
+        // uptime (first 8 bytes) is a u64 > 0 on any running host.
+        let uptime = u64::from_le_bytes(si[0..8].try_into().unwrap());
+        assert!(uptime > 0, "uptime populated (got {uptime})");
+        let totalram = u64::from_le_bytes(si[16..24].try_into().unwrap());
+        assert!(totalram > 0, "totalram populated (got {totalram})");
+
+        // statx(291) on "." via AT_FDCWD: must return 0 and write a statx struct.
+        let path = b".\0";
+        let path_addr = path.as_ptr() as u64;
+        let mut sx = [0u8; 256];
+        st.x[8] = 291; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = path_addr;
+        st.x[2] = 0; st.x[3] = libc::AT_STATX_SYNC_AS_STAT as u64; st.x[4] = sx.as_mut_ptr() as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "statx succeeds (kernel supports statx)");
+        // stx_mask is first u32; at least STX_TYPE (0x1) set for a dir.
+        let mask = u32::from_le_bytes(sx[0..4].try_into().unwrap());
+        assert!(mask != 0, "statx mask populated (got {mask:#x})");
+
+        // get_robust_list(100) writes a non-zero head and size, returns 0.
+        let mut head = 0u64; let mut len = 0u64;
+        st.x[8] = 100; st.x[0] = 0; // this process
+        st.x[1] = (&mut head as *mut u64) as u64; st.x[2] = (&mut len as *mut u64) as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, 0, "get_robust_list succeeds");
+        assert_ne!(head, 0, "reports an empty robust-list head pointer");
+        assert!(len > 0, "reports a sane list size ({len})");
+
+        // restart_syscall(128) -> -EINTR (-4), never -ENOSYS.
+        st.x[8] = 128;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r as i64, -4, "restart_syscall returns -EINTR");
     }
 
     #[test]
