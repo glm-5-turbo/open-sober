@@ -1,6 +1,73 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker) — main-loop wall pinned to the exact bit: a NORMAL bionic mutex in LOCKED_CONTENDED state (guest word 0x2), glibc cross-ABI mismatch; graphics "first frame" gates verified (workspace green, tree clean)
+## Session (Sep 12, 2026, hermes-worker, cycle B) — bionic NORMAL mutex implemented byte-exact; boot idles at the awaited-lifecycle wall (workspace 392/0)
+
+Commit `f0f352a` (dev). The cross-ABI futex deadlock the previous session pinned
+is **fixed in production code** and validated by a real two-thread rendezvous
+test, but the boot does NOT cross the wall — it now parks CORRECTLY (bionic
+protocol) on the same `GameActivity_initializeNativeCode` lifecycle mutex. This
+is exactly what the handoff predicted: the mutex was necessary-but-not-sufficient
+groundwork; the residual is driving the awaited Java-side lifecycle/app-command
+state (a separate, large lever).
+
+### 1. What landed (`f0f352a`)
+`host_mutex_lock`/`host_mutex_unlock` no longer hand a bionic-layout mutex to
+glibc (which can't parse the 16-bit state word — the old wall mechanism). They
+now reimplement AOSP `NonPI::NormalMutexLock/Unlock` **byte-exact on the guest
+16-bit `_Atomic(uint16_t) state` field** (offset 0; `__pad`@2, `owner_tid`@4,
+28-byte tail — modern NDK r28c LP64 layout):
+- lock: CAS 0→1 (acquire); else loop `exchange→2` + `__futex_wait(&state, 2)`
+  (PRIVATE unless shared).
+- unlock: `exchange→0` (release); if prev was CONTENDED, `__futex_wake(1)`.
+- `MUTEX_TYPE` bits (15:14)==0 ⇒ NORMAL path; recursive/errorcheck/PI defer to
+  the glibc fallback (now lazy-dlsym'd, never panics on un-populated OnceLock).
+
+Two new tests in `crates/arm64jit/src/resolver.rs`:
+- `bionic_normal_mutex_two_thread_rendezvous`: **two REAL host threads** —
+  A acquires via bridge, holds; main thread contends via bridge and **futex-*
+  blocks**; A releases; the waiter is **woken** and acquires. Asserts the guest
+  word walks 0→1→2→0 across the rendezvous. This is the gate the handoff
+  REQUIRED before wiring into the boot.
+- `bionic_classifier_routes_only_normal_to_bionic_protocol`: all-zero
+  (INITIALIZER)=normal; recursive 0x4000 / errorcheck 0x8000 / PI 0xC000 all
+  route away; a contended (0x2) normal mutex stays normal.
+
+Workspace `cargo test --workspace` = **392 passed / 0 failed**; idle JNI boot
+still exits 0 clean.
+
+### 2. Boot state after the fix (real lib, headless)
+```
+timeout 30 ./target/debug/examples/elfjit .../libroblox.so 0x2173ff4 --jni --startapp 0x258b144
+```
+→ reaches StartApp → `GameActivity_initializeNativeCode` → **three guest
+threads** (main + worker tid1 + tid2) all park at 0% CPU (verified: 0 utime
+ticks over 3s) on `pthread_mutex_lock` of guest mutex `0x6edae60`,
+`gpcreq=0x102b53bb0`, through the NEW bionic bridge (JIT_TRACE shows
+`[mutex_lock] ... 0x106edae60 state=0x2 type=0x0`). Exit 124 (timeout), no
+SIGSEGV/SIGABRT. Idle JNI-only boot unchanged (exit 0).
+
+The trace shows 5 bridge-lock attempts on `0x6edae60` and only 1 bridge-unlock,
+a fresh `pthread_create(tid=2)` at the rendezvous, and `cond_wait/timedwait`
+are **never reached** (0 calls) — so the "pair with bionic cond" note is not a
+live wall yet. The holder genuinely does not release within the 30s window: it
+awaits the lifecycle/app-command/looper state the real Java layer would supply
+(the wall the previous session named as lever (c)).
+
+### 3. Next lever (unblocked, advances the boot)
+The mutex groundwork is done and proven. The wall is now squarely the **awaited
+Java-side lifecycle/app-command state** in `GameActivity_initializeNativeCode`
+(region `0x2b53bb0`, TLS accessor `0x2b9dee0`, `ldar x22,[x0+0x10]; cbz` await).
+Ordered candidates:
+1. **Drive the awaited state / seed the singleton** whose init never completes
+   (Session-11 guard/flag pattern, as the previous wall notes suggested). Find
+   the specific condition `0x2b9dee0` polls and seed it so `GameActivity`
+   proceeds to construct the surface/loop.
+2. Route the boot's `egl*`/`gl*` imports through the **Mesa llvmpipe resolver**
+   (surfaceless first, or an Xvfb window) so the first EGL/GLES call the engine
+   makes after the rendezvous resolves to real software graphics — the
+   `eglGetDisplay→...→eglSwapBuffers` path is already proven in
+   `egl_window_present.rs` (headless) and `headless_graphics.rs` (surfaceless).
+3. Only then advance render/input.
 
 Commits `6bc57a6` → `18ae7f6` → `063dc5e` → `7946fe3` (dev). The real
 `libroblox.so` boot keeps advancing: JNI_OnLoad → `--startapp` drives
