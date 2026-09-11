@@ -3229,6 +3229,60 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+        Inst::FpLdStImm {
+            vt,
+            rn,
+            imm,
+            size,
+            ld,
+        } => {
+            // Transfer `size` bytes (B/H/S/D) between the low bytes of the guest
+            // vector slot v[vt] and [rn + imm*size]. Upper lanes of the 16-byte
+            // slot are untouched (ARM `ldr d0` preserves the high 64 bits, and a
+            // scalar `str s0/d0` only stores the low 32/64).
+            ldg(buf, RDX, rn as u32); // base address
+            let off = (imm as i32).wrapping_mul(size as i32);
+            if off != 0 {
+                buf.lea64(RDX, RDX, off);
+            }
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            match (size, ld) {
+                (8, true) => {
+                    buf.mov_load64(RAX, RDX, 0);
+                    buf.mov_store64(RBX, vslot, RAX);
+                }
+                (8, false) => {
+                    buf.mov_load64(RAX, RBX, vslot);
+                    buf.mov_store64(RDX, 0, RAX);
+                }
+                (4, true) => {
+                    buf.mov_load32(RAX, RDX, 0);
+                    buf.mov_store32(RBX, vslot, RAX);
+                }
+                (4, false) => {
+                    buf.mov_load32(RAX, RBX, vslot);
+                    buf.mov_store32(RDX, 0, RAX);
+                }
+                (2, true) => {
+                    buf.movzx_word_mem(RAX, RDX, 0);
+                    buf.mov_store16(RBX, vslot, RAX);
+                }
+                (2, false) => {
+                    buf.movzx_word_mem(RAX, RBX, vslot);
+                    buf.mov_store16(RDX, 0, RAX);
+                }
+                (1, true) => {
+                    buf.movzx_byte_mem(RAX, RDX, 0);
+                    buf.mov_store8(RBX, vslot, RAX);
+                }
+                (1, false) => {
+                    buf.movzx_byte_mem(RAX, RBX, vslot);
+                    buf.mov_store8(RDX, 0, RAX);
+                }
+                (s, _) => return Err(format!("FpLdStImm size {} not implemented", s)),
+            }
+            Ok(())
+        }
         Inst::VecMovi { vd, lo, hi } => {
             // Write a full 128-bit vector immediate into the guest v-slot
             // (CpuState.v, 16 bytes at VECTOR_BASE + 16*vd). The two u64 halves

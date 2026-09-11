@@ -1139,6 +1139,26 @@ mod tests {
     }
 
     #[test]
+    fn str_d0_writes_vector_reg_not_gpr() {
+        // Regression: `str d0,[x0]` must write the FP/vector register v[0]'s low
+        // 64 bits to memory, not the GPR x0 slot (it used to be decoded as a GPR
+        // store).  str d0,[x0]=0xfd000000 ; ldr x1,[x0]=0xf9400001 ; ret=0xd65f03c0
+        let insn: &[u32] = &[0xfd000000, 0xf9400001, 0xd65f03c0];
+        let mut code = Vec::new();
+        for w in insn {
+            code.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut buf = [0u64; 2];
+        let mut st = CpuState::new();
+        st.x[0] = buf.as_ptr() as u64;
+        st.x[31] = 0x1111_2222_3333_4444; // sentinel SP
+        st.v[0] = 0xdead_beef_cafe_f00d; // d0 low 64 bits (v is [u64;64])
+        let _r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(buf[0], 0xdead_beef_cafe_f00d, "str d0 wrote v[0] to memory");
+        assert_eq!(st.x[1], 0xdead_beef_cafe_f00d, "ldr x1 read back the stored d0");
+    }
+
+    #[test]
     fn str_xzr_stores_zero_not_sp() {
         // Regression: `str xzr,[x0]` must write 0, never the stack pointer.
         // AArch64 stores read the source field x31 as XZR (zero); the JIT used to

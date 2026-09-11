@@ -133,6 +133,17 @@ pub enum Inst {
         imm: u32, // scaled-by-16 byte offset
         ld: bool,
     },
+    // ---- FP/SIMD scalar-register load/store (ldr/str d0,s0,h0,b0,[xN,#imm]) ----
+    // bit26=1 selects the vector/FP register file; width = size (1/2/4/8 bytes:
+    // B/H/S/D). Unlike a GPR store there is no XZR quirk — all 32 vector regs
+    // are writable — so rt maps to CpuState.v[vt] (16-byte slot).
+    FpLdStImm {
+        vt: u8,
+        rn: u8,
+        imm: u32, // scaled-by-size byte offset
+        size: u8, // 1/2/4/8
+        ld: bool,
+    },
     // ---- SIMD/NEON vector move-immediate (movi Vd.<T>, #imm) ----
     // `lo`/`hi` are the low/high 64-bit halves of the 128-bit result, already
     // expanded to the element size (each byte/word/dword lane set to #imm).
@@ -1031,9 +1042,15 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
-    // ---- load/store (unsigned immediate offset) ----
-    // class: (top & 0x3b) == 0x39 => ldr/str, all sizes, both ld or st
-    if (insn & 0x3b00_0000) == 0x3900_0000 {
+    // ---- load/store (unsigned immediate offset) ---- GPR (W/X registers
+    // only). The FP/SIMD register-file loads/stores (`str d/s/h/b`, `str q`)
+    // share the size/addressing encodings but differ in bit26 (0x04000000):
+    // here bit26 must be 0 (GPR). Enforce it in the mask so an FP-register
+    // load/store is not mis-decoded as `str x` (which would read/write the GPR
+    // x[rt] slot instead of the vector v[rt], corrupting FP/vector state). The
+    // FP forms are routed below (VecLdStImm for 128-bit q, FpLdStImm for the
+    // D/S/B/H scalars).
+    if (insn & 0x3f00_0000) == 0x3900_0000 {
         let size = match (insn >> 30) & 0x3 {
             0 => 1,
             1 => 2,
@@ -1061,6 +1078,29 @@ pub fn decode(insn: u32) -> Inst {
         let rn = b(insn, 5, 9) as u8;
         let vt = b(insn, 0, 4) as u8;
         return Inst::VecLdStImm { vt, rn, imm, ld };
+    }
+
+    // ---- FP/SIMD scalar-register load/store (ldr/str d0,s0,h0,b0,[xN,#imm]) ----
+    // bit26=1 (FP/vector file), bit25=0 (immediate-offset form). The 128-bit q
+    // form was consumed above; the scalar B/H/S/D widths here map by size.
+    if (insn & 0x3f00_0000) == 0x3d00_0000 {
+        let size = match (insn >> 30) & 0x3 {
+            0 => 1, // b
+            1 => 2, // h
+            2 => 4, // s
+            _ => 8, // d
+        };
+        let ld = (insn >> 22) & 1 == 1;
+        let imm = (insn >> 10) & 0xfff; // scaled by `size`
+        let rn = b(insn, 5, 9) as u8;
+        let vt = b(insn, 0, 4) as u8;
+        return Inst::FpLdStImm {
+            vt,
+            rn,
+            imm,
+            size,
+            ld,
+        };
     }
 
     // ---- SIMD widen/long (sxtl/uxtl): Vd.TL, Vn.T ----
@@ -2926,6 +2966,50 @@ mod tests {
             }
             other => panic!("expected LdStrImm, got {:?}", other),
         }
+    }
+    #[test]
+    fn fp_reg_ldst_decode_ground_truth() {
+        // Regression: FP/vector register loads/stores must touch the VECTOR
+        // file, not be mis-decoded as GPR x/w ops. (Previously the GPR gate left
+        // bit26 unmasked, so str d0/ldr s0/ldr q all became LdStrImm on the GPR
+        // file — str q even as a 1-byte GPR load.) Encodings from
+        // aarch64-linux-gnu-as/objdump ground truth.
+        //   str d0,[x8,#8] = 0xfd000500 ; ldr d31,[x1,#16] = 0xfd40083f
+        //   ldr s1,[x2]    = 0xbd400041
+        //   str q6,[x3,#16]= 0x3d800466 ; ldr q7,[x4,#32]= 0x3dc00887
+        match decode(0xfd000500) {
+            Inst::FpLdStImm { vt, rn, imm, size, ld } => {
+                assert_eq!((vt, rn, imm, size, ld), (0, 8, 1, 8, false));
+            }
+            other => panic!("str d0 -> FpLdStImm, got {other:?}"),
+        }
+        match decode(0xfd40083f) {
+            Inst::FpLdStImm { vt, rn, imm, size, ld } => {
+                assert_eq!((vt, rn, imm, size, ld), (31, 1, 2, 8, true));
+            }
+            other => panic!("ldr d31 -> FpLdStImm, got {other:?}"),
+        }
+        match decode(0xbd400041) {
+            Inst::FpLdStImm { vt, rn, imm, size, ld } => {
+                assert_eq!((vt, rn, imm, size, ld), (1, 2, 0, 4, true));
+            }
+            other => panic!("ldr s1 -> FpLdStImm, got {other:?}"),
+        }
+        // 128-bit q must go to VecLdStImm (used to be swallowed as a 1-byte GPR load).
+        match decode(0x3dc00887) {
+            Inst::VecLdStImm { vt, rn, .. } => {
+                assert_eq!((vt, rn), (7, 4));
+            }
+            other => panic!("ldr q7 -> VecLdStImm, got {other:?}"),
+        }
+        match decode(0x3d800466) {
+            Inst::VecLdStImm { vt, rn, ld, .. } => {
+                assert_eq!((vt, rn, ld), (6, 3, false));
+            }
+            other => panic!("str q6 -> VecLdStImm, got {other:?}"),
+        }
+        // Plain GPR unchanged.
+        assert!(matches!(decode(0xf9000c01), Inst::LdStrImm { rt: 1, rn: 0, .. }));
     }
     #[test]
     fn ldr_w_reg_ground_truth() {
