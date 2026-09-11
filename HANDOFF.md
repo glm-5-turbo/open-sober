@@ -4279,3 +4279,42 @@ the fcvt-round block on `(insn & 0x1000) == 0`.
 
 HARD GATE unchanged: real-binary/GPU boot proof (`elfjit <libroblox.so>
 0x1f0db20 --jni`) on a GPU + real binary/APK host (none on this VPS).
+---
+
+# Session (Sep 11, 2026) — SIMD across-lanes min/max + smax/smin & movsx fixes (workspace 268/0)
+
+Continuing the differential battery: a new int SIMD min/max reduction canary
+(`im_running_minmax`) exposed one missing ISA and two more silent bugs.
+
+## 1. SMINV/SMAXV/UMINV/UMAXV implemented (was Unsupported)
+Across-lanes reduce to the bottom scalar (upper cleared). New
+`Inst::SimdReduceMinMax` decode (0x4e/0x6e `XYa820` family: esize by byte2 high
+nibble {3,7,b}, min/max by byte2 bit0, signed by bit29) + translate (per-lane
+sign/zero-extended CMOVcc reduce). Two gotchas during bring-up: cmov_rr64
+expects the cc in the `0F 4X` domain (I first passed the raw 0x0X Jcc domain ->
+SIGILL `0F 0C`), and the cmp/cmov direction is min=CMOV-G/A, max=CMOV-L/B
+(update when the candidate is the extrema found by `cmp RDX, RAX`).
+
+## 2. Element-wise smax/smin mis-decoded for high source registers (silent)
+The SminMax gate is correctly written `(b2 mask 0xfc) == 0x64` (max) but the
+ASSIGNMENT was `max: b2 == 0x64` (EXACT). b2 = bits[15:8] and its low 2 bits
+carry Rn (bits[9:8]). A real gcc `smax v30.4s, v29.4s, v28.4s` encodes b2=0x67,
+so it masked to max but the exact-equality assign said MIN -> returned the Vn
+operands verbatim. Only source regs 0..3 (b2 stays 0x64/0x6c) ever hid it.
+Fixed to mask like the gate.
+
+## 3. movsx_word_mem/movsx_byte_mem lacked REX.W (silent, shared-emitter)
+`0F BF /r` / `0F BE /r` with REX no-W write only a 32-bit destination, so a
+negative 8/16-bit lane loaded into RAX compared as a huge POSITIVE u64 in any
+64-bit signed reduction (`sminv.8h` over {-9,-2,..} picked 4, not -9). Latent
+across every consumer (incl. ADDV signed byte/halfword sums). Both emitters now
+emit REX.W. This was the real root of the earlier `.8h`/`.16b` sminv results.
+
+Verified via per-instruction stepping of the gcc-unrolled probe: smax produced
+v30=[0,-28,28,28] (wrong) -> after fix [112,140,252,308]; sminv/smaxv/addv
+scalars and the final result 3640 = oracle. +2 differential canaries
+(rm_running_extents, im_running_minmax), +2 exec regressions. cargo build
+--workspace clean; cargo test --workspace 268/0, 0 ignored.
+
+HARD GATE unchanged: real-binary/GPU boot proof (`elfjit <libroblox.so>
+0x1f0db20 --jni`) on a GPU + real binary/APK host (none on this VPS).

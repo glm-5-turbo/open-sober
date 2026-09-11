@@ -4,6 +4,20 @@ goal: run Roblox through the Open-Sober runtime (specialized runtime, graphics,
 sound) — the full "Roblox boots on the JIT/no-QEMU path" gate.
 started: 2026-09-11T01:20:42Z
 
+## Cycle (Sep 11, 2026) — SIMD across-lanes min/max + smax/smin & movsx fixes (workspace 268/0)
+status: session-end (committed, tests green)
+last_agent_claim: new int SIMD min/max differential canary (im_running_minmax)
+exposed one missing ISA and two silent bugs: (1) SMINV/SMAXV/UMINV/UMAXV
+across-lanes reduce was unimplemented -> added Inst::SimdReduceMinMax
+(CMOVcc-reduce); (2) element-wise smax/smin decoded as the wrong op for high
+source regs because the max assignment was exact `b2 == 0x64` while the gate
+masks (b2's low 2 bits carry Rn; real gcc smax b2=0x67 -> decoded MIN, returned
+Vn verbatim: canary -2600 vs 3640) — now masks; (3) movsx_word_mem/byte_mem
+lacked REX.W so negative 8/16-bit lanes compared as huge positive u64 in signed
+reductions — both emitters fixed to REX.W. +2 canaries, +2 exec regressions.
+cargo build clean; cargo test --workspace 268/0, 0 ignored. HARD GATE unchanged
+(no GPU/APK/libroblox.so on this VPS).
+
 ## Cycle (Sep 11, 2026) — three silent FP `.2d`/FMOV-imm decode collisions fixed (workspace 264/0)
 status: session-end (committed, tests green)
 last_agent_claim: extended the differential battery (4 new game-critical probes:
