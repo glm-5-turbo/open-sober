@@ -352,7 +352,42 @@ def gen_mask_extract():
     return (long long)s;
 }}"""
 
-gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce, gen_fma_chain, gen_mask_extract]
+def gen_signed_div():
+    # Signed division/modulo with negatives + magic constants: exercises sdiv,
+    # smull/msub remainder, and sign-extension (sdiv by non-pow2 -> smull chain).
+    n=random.choice([16,32,64])
+    divs=random.choice([3,5,7,9,11,13,17,100,101,1000,1024+1,2047])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 961479ull;
+    unsigned long long x = seedv;
+    int a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1103515245ull+12345ull; a[i]=(int)((x>>31) - (x>>1)); }}  // spread +/-
+    long long s=0;
+    for(int i=0;i<{n};i++){{ s += a[i] / {divs}; s += a[i] % {divs}; }}
+    for(int i=0;i<{n};i+=2){{ s += (long long)(a[i] / -{divs}); s += a[i] % -{divs}; }}
+    return s;
+}}"""
+
+def gen_widen_byte_lut():
+    # Byte-indexed lookup with widening i64 accumulate, plus a second constant-step
+    # byte sum: two co-resident widening loops (uxtb/uxtw + combine) stratified by
+    # different strides — the historical two-loop widening bug family.
+    n=random.choice([16,32,48,64])
+    step=random.choice([2,3,4,5])
+    lut=(', '.join(str(random.choice([1,3,7,11,31,101])) for _ in range(37)))
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 777213ull;
+    unsigned long long x = seedv;
+    unsigned char b[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull; b[i]=(unsigned char)((x*2654435761u)>>24); }}
+    unsigned char lut[37] = {{ {lut} }};
+    long long s1=0, s2=0;
+    for(int i=0;i<{n};i++) s1 += (long long)lut[b[i]%37] * (long long)(b[i]&7);
+    for(int i=0;i<{n};i+={step}) s2 += (long long)b[i];
+    return s1*131 + s2*7 + (long long)b[0]*{step};
+}}"""
+
+gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce, gen_fma_chain, gen_mask_extract, gen_signed_div, gen_widen_byte_lut]
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
