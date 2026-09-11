@@ -383,3 +383,89 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_unsigned_magic_div_umull() {
+    // Unsigned magic division drives the LONG path gcc picks for divisors that
+    // aren't a power of two: it widens with `umull2`+`uzp2` (the unsigned
+    // sibling of the signed smull %101 reducer) or `umaddh`. Guards the
+    // umull/umaddh variant of the uzp2 quotient gather.
+    assert_diff(
+        "umagic",
+        "-O2",
+        r#"
+long long entry(void){
+    unsigned long long m[24];
+    for(int k=0;k<24;k++) m[k] = (k*97u) / 1000u;
+    unsigned long long acc = m[3] + m[17]*1000 + m[23]*1000000;
+    return (long long)acc;
+}
+"#,
+    );
+    assert_diff(
+        "umagic2",
+        "-O2",
+        r#"
+long long entry(void){
+    unsigned long long m[24];
+    for(int k=0;k<24;k++) m[k] = (k*1024u + 31337u) / 65521u;
+    unsigned long long acc = m[3] + m[17]*1000 + m[23]*1000000;
+    return (long long)acc;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_long_accumulate_widening() {
+    // Widening long-multiply / long-add accumulation: `umlal`/`smlal`/`uaddl`/
+    // `mla` accumulate a 64-bit sum from 32-bit lane products — the family that
+    // reuses the mla carry chain and the smull2 upper-half gather.
+    assert_diff(
+        "longacc",
+        "-O3",
+        r#"
+long long entry(void){
+    long long acc = 0;
+    for(int i=0;i<300;i++){
+        acc += (long long)i * (long long)(i & 0xff);
+        acc -= (long long)(i*3) * 2;
+    }
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "ulongacc",
+        "-O3",
+        r#"
+long long entry(void){
+    unsigned long long acc = 7;
+    for(int i=0;i<250;i++) acc += (unsigned long long)(i*31u) * 17u;
+    return (long long)(acc & 0xffffffff);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_byte_scan_strlen() {
+    // Byte-scan loops compiler lowers to SIMD compare/branch or scalar ldrb/
+    // cbnz + zero-count: exercises load/increment/compare/branch idioms and
+    // the vectorized "-1 then count-zeroes" trick.
+    assert_diff(
+        "strlen",
+        "-O2",
+        r#"
+long long entry(void){
+    const unsigned char s[] = "the quick brown fox jumps over the lazy dog";
+    long long n=0; while(s[n]) n++;
+    long long p=0; while(n--){
+        if(s[p]==(unsigned char)0x61) break;   // 'a'
+        p++;
+    }
+    return n*1000 + p;
+}
+"#,
+    );
+}
