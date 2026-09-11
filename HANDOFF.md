@@ -5282,6 +5282,13 @@ decompressed it, not raw-Mesa). cargo build --workspace clean; cargo test
    allocs + optionally seeds with initialElement; Get/Set are bounds-checked
    (get→NULL, set→no-op out of range, never fault). +regression test.
 
+5. **timerfd + signalfd syscalls (5220aed, 346/0)** — ALooper/libutils wait on
+   timerfds for timeouts and some services take a signalfd; both were -ENOSYS.
+   timerfd_create(85)/settime(86)/gettime(87) are clean itimerspec forwards
+   (283 is membarrier, already handled); signalfd4(74) returns a real host
+   signalfd with an EMPTY sigset (no guest-signal dispatch here, so it never
+   fires, but the call succeeds). +guest_svc_timerfd_and_signalfd_roundtrip.
+
 ## Session (cycle 35, Sep 11, 2026) — GRAPHICS TRANSLATION LAYER: egl-wrapper + glesv2-wrapper cdylibs, input-wrapper, real-EGL JIT wiring (336/0)
 Per the worker operating rules, took the graphics translation layer
 (GRAPHICS_RECOMMENDATION.md) as the highest-leverage unblocked item — built AND
