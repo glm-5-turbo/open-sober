@@ -5394,3 +5394,44 @@ string-region copy). `cargo test --workspace` **351/0** (was 346), build clean.
 
 Next per RECOMMENDATION order: libbadcpu ISA gaps, then services/auth. HARD GATE
 unchanged (real Roblox boot + run log only on a GPU/APK host; none on this VPS).
+
+## Cycle 37 / 37b (Sep 11, 2026) — JNI fake-object backing + boot syscall gaps (352/0)
+
+Commits `23e053a`, `ae4de9c` (+ docs 3a8ea7b, 1d8783f) on `dev`. Per the ordered
+post-graphics RECOMMENDATION list (JNI function-table stubs / fake-object backing,
+then ELF/loader, libbadcpu, services/auth).
+
+1. **JNI fake-object backing (`23e053a`)** — `crates/arm64jit/src/jni.rs` backed
+   arrays/strings/~14 slots; the rest of the JNINativeInterface fell to the voidp
+   default (return 0), so guest `if (!ref / !clazz / !buf) fail` aborts. Wired the
+   behavior-changing slots at authoritative NDK offsets: NewLocalRef/NewGlobalRef/
+   NewWeakGlobalRef (identity), IsSameObject (identity compare), GetObjectClass
+   (stable non-zero jclass), IsInstanceOf/IsAssignableFrom (permissive true),
+   GetSuperclass/PopLocalFrame, the DirectByteBuffer trio (NewDirectByteBuffer/
+   GetDirectBufferAddress/GetDirectBufferCapacity via a handle->(addr,cap) registry
+   — Roblox's NIO texture/audio/asset buffers), and GetStringUTFRegion (bounds-safe
+   copy). Monitor/exception/local-frame/static-field/call-method slots are typed
+   no-op stubs at correct offsets. +4 tests (NDK offsets, nonnull-at-offset, fake-object
+   semantics, direct-buffer roundtrip, string-region copy). 347→351.
+
+2. **Boot-critical syscall gaps (`ae4de9c`)** — sysinfo(179)/statx(291)/
+   get_robust_list(100)/restart_syscall(128) were -ENOSYS. sysinfo fills the guest
+   asm-generic 64-bit struct with REAL host values (no forging per the record);
+   statx is a raw SYS_statx forward; get_robust_list reports an empty robust-futex
+   list so glibc pthread init proceeds; restart_syscall returns -EINTR.
+   +guest_svc_sysinfo_statx_robust_restart_roundtrip. 351→352.
+
+3. **Differential-fuzz validation** — 3 campaigns, 14 fresh seeds x 100 = ~1500
+   cases, **0 failures / ~150 skips**: the JIT FP (fcsel/frint/fcvt/vector-compare),
+   SIMD (widen/bitmix/popcount/4s), bitfield, long-loop and shared/PIE paths all
+   hold against the qemu-aarch64 + native x86 gcc oracles. No silent miscompile found.
+
+`cargo build --workspace` clean; `cargo test --workspace` **352/0**. HARD GATE
+unchanged: real Roblox boot + run log only on a GPU/APK host (none on this VPS).
+
+**Assessed next (not landed — see project no-half-baked discipline):** the armed64jit
+guest thread model (`clone` 220 → host thread with post-svc PC continuation + a
+per-thread CpuState + join/tid registry). This is the last large JIT capability a
+real Roblox run needs (render/audio/network worker threads) but is a genuine
+multi-session subsystem; the translator already threads per-instruction guest PC
+(needed for child continuation) and guest==host makes child memory shared.
