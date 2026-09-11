@@ -1821,12 +1821,14 @@ pub fn translate(
                     }
                     _ => {
                 // frintm/p/z (floor/ceil/trunc) and fsqrt via double round-trip.
-                buf.cvtss2sd(0, 0);              // xmm0 = (double)RAX31 (cvtss reads xmm0 low32)
+                buf.movd_xmm_r32(0, RAX);        // move the loaded float bits into xmm0.low32
+                                                 // (cvtss2sd reads xmm0 low32, not RAX)
+                buf.cvtss2sd(0, 0);              // xmm0 = (double)xmm0.low32
                 match op {
                     0 => buf.sqrtsd(0, 0),       // fsqrt s
                     1 => buf.roundsd(0, 0, 0b01), // frintm s: floor
                     2 => buf.roundsd(0, 0, 0b10), // frintp s: ceil
-                    3 => buf.roundsd(0, 0, 0b00), // frintz s: trunc
+                    3 => buf.roundsd(0, 0, 0b11), // frintz s: trunc (toward zero; 0b00 is round-to-NEAREST)
                     7 => {
                         // frinta s: round half-away = sign*floor(|x|+0.5) on the sd'd val
                         buf.movq_r64_xmm(RAX, 0);

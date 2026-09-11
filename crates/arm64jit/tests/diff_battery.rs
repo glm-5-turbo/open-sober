@@ -1141,3 +1141,51 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_scalar_fp_round_single() {
+    // Scalar 1-source FP rounding on SINGLE (frintm/frintp/frintz s) and the
+    // fsqrt-s sibling. Two silent miscompiles lived in the FpUnary single
+    // path:
+    //  (a) the loaded float bits (RAX) were never moved into xmm0 before
+    //      `cvtss2sd`, so EVERY single frint/fsqrt read stale xmm0 — a floor
+    //      loop returned 450 vs 360 (and would return garbage generically).
+    //  (b) `frintz s` (toward zero = truncate) used roundsd mode 0b00 which is
+    //      round-to-NEAREST, not truncate — the negative-heavy trunc probe
+    //      returned 20 vs native 40. The double path already used 0b11.
+    // A floor probe (positive) caught (a); a trunc probe with negatives is the
+    // sharp canary for (b).
+    assert_diff(
+        "fr_floor_single",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float a[8] = {1.4f,2.6f,3.5f,4.1f,5.9f,6.2f,7.8f,8.3f};
+    float s=0; for(int i=0;i<8;i++) s += __builtin_floorf(a[i]);
+    return (long long)(s*10.0f);
+}
+"#,
+    );
+    assert_diff(
+        "fr_ceil_single",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float a[8] = {1.4f,2.6f,3.5f,4.1f,5.9f,6.2f,7.8f,8.3f};
+    float s=0; for(int i=0;i<8;i++) s += __builtin_ceilf(a[i]);
+    return (long long)(s*10.0f);
+}
+"#,
+    );
+    assert_diff(
+        "fr_trunc_single_negatives",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float a[8] = {-1.4f,2.6f,-3.5f,4.1f,-5.9f,6.2f,-7.8f,8.3f};
+    float s=0; for(int i=0;i<8;i++) s += __builtin_truncf(a[i]);
+    return (long long)(s*10.0f);
+}
+"#,
+    );
+}

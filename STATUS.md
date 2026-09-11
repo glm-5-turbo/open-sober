@@ -671,3 +671,22 @@ status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T06:30:56Z
 ---
+cycle: 18
+status: cycle_end
+last_agent_claim: Ad-hoc verification complete (script `/tmp/hermes-verify-arm64jit.sh`, created and cleaned up): (rc=0)
+updated: 2026-09-11T07:29:39Z
+---
+cycle: 19
+status: cycle_end (committed, tests green)
+last_agent_claim: Fixed 2 silent scalar single-precision FP miscompiles in
+  arm64jit (FpUnary single path): (a) loaded float bits in RAX were never moved
+  into xmm0 before `cvtss2sd`, so EVERY single frint*/fsqrt s read stale xmm0
+  (a floor loop returned 450 vs 360); (b) `frintz s` used roundsd mode 0b00
+  (round-to-nearest) instead of 0b11 (toward-zero), so trunc of negatives came
+  out 20 vs native 40. Verified vs native oracle (floor 360/360, ceil 440/440,
+  trunc 40/40). Added differential canary diff_scalar_fp_round_single (3
+  probes: fr_floor_single, fr_ceil_single, fr_trunc_single_negatives); confirmed
+  the trunc canary reverts to a 20-vs-40 MISCOMPILE when the mode fix is
+  reverted. Workspace `cargo test --workspace` 254/0, 0 ignored (battery 30).
+updated: 2026-09-11T08:20:00Z
+---

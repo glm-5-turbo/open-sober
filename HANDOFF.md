@@ -4142,3 +4142,41 @@ cargo build clean; `cargo test --workspace` 253/0. HEAD `97417af`.
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+---
+
+## Session 2026-09-11 (cycle 19) — scalar single-precision FP rounding fixed (workspace 254/0)
+
+Workspace opened green (253/0, android idempotency test passing — the mandated
+first fix was already committed in prior cycles). Continued the differential
+battery ISA sweep and flushed out **two silent miscompiles** in the arm64jit
+FpUnary SINGLE-precision path (`frintm/frintp/frintz/fsqrt s`):
+
+1. **Loaded float bits never reached xmm0.** The single path did
+   `mov_load32(RAX, RNslot)` then `cvtss2sd(0,0)` — but `cvtss2sd` reads xmm0's
+   low32, so EVERY single frint/fsqrt converted STALE xmm0 instead of the value.
+   The FpScalar single path (op 4-7) correctly inserts `movd_xmm_r32(0, RAX)`
+   first; FpUnary single was missing it. A `floorf` loop returned 450 vs 360.
+   Fix: add `buf.movd_xmm_r32(0, RAX);` before `cvtss2sd`.
+
+2. **`frintz s` used round-to-nearest, not truncate.** roundsd mode was `0b00`
+   (toward-nearest) instead of `0b11` (toward-zero). The double path already
+   used `0x03`. A negative-heavy `truncf` loop: what ARM-trunc gives 40 came out
+   20 because negatives rounded to nearest. Fix: `0b00` → `0b11`.
+
+Verified vs native x86-64 oracle through elfjit (no QEMU): floor 360/360,
+ceil 440/440, trunc 40/40; double trunc 40/40 (double was already correct).
+
+Added a new differential battery test `diff_scalar_fp_round_single` with three
+probes (fr_floor_single, fr_ceil_single, fr_trunc_single_negatives). Confirmed
+the canary is a REAL gate: reverting just the `0b11` mode fix makes
+fr_trunc_single_negatives fail with exactly `jit 20 vs oracle 40`, then restored.
+
+`cargo build --workspace` clean; `cargo test --workspace` **254/0, 0 ignored**
+(battery 30). Committed on `dev`.
+
+Honest next (unchanged): vector `frintm/p/z v.*` is still an honest *Unsupported*
+stop (no silent value), so gcc's vectorized rounding is the next feature slice;
+then the runtime-side items (FMOD bl-to-once dispatcher, JNI table stubs) and
+the HARD GATE real-binary/GPU boot proof which is impossible on this APK-less,
+GPU-less VPS.
