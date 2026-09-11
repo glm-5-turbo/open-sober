@@ -3910,10 +3910,13 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 (imm32, 0i32) // offset: access at rn+imm, no writeback
             };
             if fp_d {
-                // 64-bit FP/vector d-pair: each reg is one u64 in CpuState.v
-                // at VECTOR_BASE + rt*8; transfer via RAX.
-                let v0 = crate::jit::VECTOR_BASE + (rt as i32) * 8;
-                let v1 = crate::jit::VECTOR_BASE + (rt2 as i32) * 8;
+                // 64-bit FP/vector d-pair: each reg is the LOW 8 bytes of its
+                // 16-byte guest vector slot, at VECTOR_BASE + rt*16. BUGFIX
+                // (Session 99): the stride was rt*8, so `ldp d29,d28` wrote to
+                // 0x1f8/0x1f0 instead of 0x2e0/0x2d0 and the follow-on fmadd read
+                // stale vector slots (structfield.elf -O2 returned 128 vs 52).
+                let v0 = crate::jit::VECTOR_BASE + (rt as i32) * 16;
+                let v1 = crate::jit::VECTOR_BASE + (rt2 as i32) * 16;
                 for (reg_off, mem_off) in [(v0, access_off), (v1, access_off + esize)] {
                     if ld {
                         buf.mov_load64(RAX, RDX, mem_off); // rax <- [addr]

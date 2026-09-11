@@ -2828,6 +2828,42 @@ mod tests {
     }
 
     #[test]
+    fn ldst_pair_d_registers_use_16_byte_vector_stride() {
+        // REGRESSION (Session 99): the LdStPair fp_d branch used VECTOR_BASE + rt*8
+        // as the D-reg slot, but Dn is the LOW 8 bytes of the 16-byte Vn slot
+        // (VECTOR_BASE + rt*16). So `ldp d0,d1,[x0]` wrote to 0x110/0x108 instead
+        // of 0x110/0x120, and a follow-on fmadd read stale slots — structfield.elf
+        // (-O2, struct double array walk via `ldp d29,d28,[x0],#16`) returned 128
+        // instead of 52. Encodings from ldpd.o.
+        let mut st = CpuState::new();
+        let vals: [u64; 4] = [
+            0x1111_2222_3333_4444,
+            0x5555_6666_7777_8888,
+            0x9999_aaaa_bbbb_cccc,
+            0xdddd_eeee_ffff_0000,
+        ];
+        let mut buf = Vec::new();
+        for v in vals {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let bb = Box::leak(buf.into_boxed_slice());
+        let orig = bb.as_ptr() as u64;
+        st.set(0, orig);
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x6d40_0400u32.to_le_bytes()); // ldp d0,d1,[x0] (bytes 0,1 as f64)
+        code.extend_from_slice(&0x6cc1_0c02u32.to_le_bytes()); // ldp d2,d3,[x0],#16
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec ldp d-pair");
+        // d0 = low 8 of V0 = st.v[0]; d1 = low 8 of V1 = st.v[2]; d2 = V2 = st.v[4]; etc.
+        assert_eq!(st.v[0], vals[0], "d0 = first double");
+        assert_eq!(st.v[2], vals[1], "d1 = second double");
+        // second ldp has no pre-advance: reads vals[0],vals[1] again, then +16.
+        assert_eq!(st.v[4], vals[0], "d2 = first double (no wx before 2nd ldp)");
+        assert_eq!(st.v[6], vals[1], "d3 = second double");
+        assert_eq!(st.x[0], orig + 16, "post-index ldp advanced x0 by 16");
+    }
+
+    #[test]
     fn add_shifted_register_applies_shift_to_source_not_clobbered() {
         // REGRESSION (Session 99): apply_shift_const wrote the shift amount into
         // RCX (the very register holding the Rm value) then `shl rcx, cl`, so
