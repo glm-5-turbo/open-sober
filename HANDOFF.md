@@ -3455,3 +3455,64 @@ addv_horizontal_sum_across_4s_lanes. arm64jit 134/134, workspace **179/0**.
 Cycle total (back half): 4 fixes (sdiv signedness, MSUB direction, s-pair
 scale, ADDV) + earlier (WidenShl, FP-N, ld1-2reg, FMOVimm, FMA3, apply_shift,
 d-pair stride) = 11 miscompile fixes + FMA + ADDV. HEAD 6290937.
+
+---
+
+## Session (Sep 11, 2026) — libloader: Android packed relocations (APS2) + RELATIVE application (workspace 184/0)
+
+Per the ordered "libloader ELF/loader gaps" step: the Rust loader did **zero
+relocation** — `load_elf_image` only mapped segments, sp-mprotected them, and
+relied on `bind_image_plt` for JUMP_SLOT. Real Roblox APK libs and their
+Android/GSI dependencies carry `R_AARCH64_RELATIVE` data relocations (often
+packed via `DT_ANDROID_RELA`), which a real loader materializes before the code
+can dereference pointer globals/vtables. The QEMU path worked around this with
+the external `unpack_rela.py`; this session brought it in-process to the Rust
+loader so the JIT path can load those libraries.
+
+### `crates/libloader/src/android_relocs.rs` (new)
+- `read_sleb128` (sign-correct, x64-bounded; terminal-byte bit6 = value sign).
+- `decode_aps2` — faithful port of AOSP `for_all_packed_relocs` (validated in
+  Session 14 against real 2.726.1142 libroblox.so): magic `APS2`, then
+  SLEB128 `num_relocs` / running `r_offset` / groups with the
+  GROUPED_BY_INFO/OFFSET_DELTA/ADDEND + GROUP_HAS_ADDEND flag logic.
+  Declared-count mismatch → error (no silent truncation).
+- `read_elf_relocations(path)` — walks PT_DYNAMIC, prefers
+  `DT_ANDROID_RELA`/`DT_ANDROID_RELASZ` (0x60000011/12) over plain
+  `DT_RELA`/`DT_RELASZ`, reads the stream from file, decodes APS2 or parses
+  stock 24-byte Elf64_Rela. **Early real bug**: PT_DYNAMIC's `p_offset` is a
+  *file* offset, not a vaddr — I wrongly ran it through `vaddr_to_file_offset`
+  and got `DT_* vaddr not covered by a PT_LOAD`; only the RELA vaddr needs that
+  conversion.
+- `apply_relatives` — for each `R_AARCH64_RELATIVE` writes `load_bias + addend`
+  (8B LE) at `guest_of(r_offset)` via a caller-supplied target resolver.
+
+### Wired into `load_elf_image` (elf.rs)
+Reordered the segment loop: copy-file → push segment (NO mprotect in the copy
+loop), then for PIE (`is_pie`) read+decode relocs and apply RELATIVE **while
+the whole image is still RW**, then a second pass mprotects each segment to its
+final ELF protection. Non-PIE ET_EXEC (self-relocating like the battery ELFs)
+is untouched by the `is_pie` gate.
+
+### Verification (both honest, both catch regressions)
+- Unit: a **hand-built** APS2 golden bitstream (independent byte-by-byte
+  encode; first attempt used `[0x80,0x40]`="+0x2000" which is actually
+  SLEB -8192 — the decoder correctly rejected my wrong test bytes, a good sign
+  the decoder is faithful) + a grouped-by-offset-delta stride case
+  (r_offset = header + i*delta) + SLEB negative + bad-magic reject.
+- Integration `crates/libloader/tests/reloc_apply_test.rs`: cross-gcc
+  `-shared -fPIC` ET_DYN with `int *ptr = &data` → asserts EVERY
+  `R_AARCH64_RELATIVE` slot (parsed from `readelf -r`, whose type column is
+  truncated to `R_AARCH64_RELATIV`) equals `load_bias + addend`. Without the
+  apply the slot holds the raw file addend (e.g. 0x600) ≠ 0x100000600 → fails.
+- `cargo test --workspace` **184/0** (libloader 16 → 20 unit + 1 integration);
+  `cargo build --workspace` clean (only the pre-existing decode.rs rustfmt-warn
+  churn). Skips when cross-gcc absent.
+
+### Status / next
+`load_elf_image` now materializes RELATIVE relocations for PIE/shared objects,
+pending APS2 decode, all in-process (no `unpack_rela.py`). Next (ordered):
+finish libloader gap — a GOT/PLT JUMP_SLOT + GLOB_DAT resolver for the *main*
+dynamic (the APS1/other Android tags, DT_RELR) and lad elfjit's PLT binder
+already covers JUMP_SLOT; then libbadcpu ISA gaps; then services/auth. HARD
+GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
+GPU + real-binary host (no APK/libroblox.so/GPU on this VPS).

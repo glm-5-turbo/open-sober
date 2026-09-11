@@ -473,3 +473,44 @@ plus pre-compaction WidenShl, FP-compare N, ld1-2reg, FMOVimm, FMA3,
 apply_shift_const, d-pair stride. All regression-locked.
 JIT now robust for FP/int/SIMD/conversion under -O2/-O3 after 11 bug classes.
 HARD GATE unchanged (reproducible boot + GPU artifact on real host).
+cycle: 11
+status: cycle_end
+last_agent_claim: - `cargo build --workspace` → clean (Finished in 0.17s, only a pre-existing warning in `sober-core`) (rc=0)
+updated: 2026-09-11T04:34:32Z
+---
+
+## cycle 12 (Sep 11, 2026) — libloader: Android packed relocations (APS2) + RELATIVE application (workspace 184/0)
+status: session-end (committed, tests green)
+last_agent_claim: The Rust loader now materializes R_AARCH64_RELATIVE data
+relocations for ET_DYN/PIE libraries in-process (no external unpack_rela.py),
+so the JIT path can load real Roblox APK libs and their Android/GSI
+dependencies whose .data/.data.rel.ro needs relocation before code dereferences
+pointer globals/vtables.
+
+### What landed (commit on `dev`)
+- `crates/libloader/src/android_relocs.rs` (new): read_sleb128, decode_aps2
+  (AOSP for_all_packed_relocs port, validated vs real 2.726.1142 in Session 14),
+  read_elf_relocations (DT_ANDROID_RELA 0x60000011/12 preferred over
+  DT_RELA/RELASZ; APS2 decode or stock Elf64_Rela), apply_relatives.
+- `load_elf_image` (elf.rs): reordered segment loop to copy->apply-relocs
+  (while image still RW, gated on is_pie)->mprotect. Non-PIE ET_EXEC untouched.
+- Tests +4 libloader unit (hand-built APS2 golden bitstream — first attempt's
+  `[0x80,0x40]` was really SLEB -8192, not +0x2000, proving the decoder is
+  faithful; offset-delta stride; SLEB negative; bad magic) and +1 integration
+  (crates/libloader/tests/reloc_apply_test.rs: cross-gcc ET_DYN asserts every
+  RELATIVE slot == load_bias+addend).
+
+### Gate (verified this cycle)
+- cargo build --workspace: clean
+- cargo test --workspace: 184 passed / 0 failed
+  (libloader 16 -> 20 unit + 1 integration)
+- HEAD: da6c47b (local `dev`)
+
+### Honest remaining
+- The pre-existing `crates/libloader/tests` skips cleanly when cross-gcc absent.
+- Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni` run log)
+  is the HARD GATE — blocked until a capable host + the real binary/APK (none
+  on this box). load_elf_image now handles the RELATIVE data-reloc the real
+  dependency chain needs; next ordered items: GLOB_DAT/JUMP_SLOT main-dynamic
+  resolver (bind_image_plt already covers JUMP_SLOT), DT_RELR, libbadcpu gaps,
+  services/auth.
