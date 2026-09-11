@@ -387,3 +387,53 @@ fn loader_run_thread_local_storage_returns_123456804() {
         123456804,
     );
 }
+
+#[test]
+fn loader_run_bfi_64_returns_279514809947() {
+    // 64-bit bitfield-insert (bfi/bfiz on GPRs, immr>imms overlap the old
+    // ubfiz-vs-ror bug): a volatile (so the compiler can't fold it) mask-shift
+    // field insert into an accumulator. Native x86-64 oracle == 279514809947;
+    // a wrong bfi/bfiz shift or a ror-vs-insert mix computes garbage.
+    assert_runs(
+        "bfi64",
+        "long long entry(void){\n\
+         volatile unsigned long long v = 0xFF00FF0012345678ull;\n\
+         unsigned long long acc = 0;\n\
+         for(int i=0;i<6;i++){ unsigned long long field = (v >> (17+i)) & 0x3f; acc |= (field << (i*7)); acc ^= (v >> i) & 0xff; }\n\
+         return (long long)acc;\n}\n",
+        279514809947,
+    );
+}
+
+#[test]
+fn loader_run_tbz_branches_returns_4068() {
+    // Bit-test branches (tbz/tbnz — gcc emits these from `v & (1ull<<i)` with a
+    // compile-time bit): 64 single-bit tests, branch on bit + fallthrough with
+    // an odd-i xor. Native oracle == 4068.
+    assert_runs(
+        "tbz",
+        "long long entry(void){\n\
+         volatile unsigned long long v = 0x8000000000000123ull;\n\
+         long long s = 0;\n\
+         for(int i=0;i<64;i++){ if(v & (1ull<<i)) s += (long long)(i*i); else if(i & 1) s ^= i; }\n\
+         return s;\n}\n",
+        4068,
+    );
+}
+
+#[test]
+fn loader_run_fixed_pt_fcvt_returns_99() {
+    // Fixed-point float->int (fcvtzs/fcvtzu #fbits): (long long)(a*2^k) with a
+    // volatile k so it isn't folded; also trunc toward zero on negatives
+    // ((long long)(a/2.0)). Native oracle == 99.
+    assert_runs(
+        "fcvtfp",
+        "long long entry(void){\n\
+         volatile double a[6] = {0.75, -1.5, 2.25, -3.75, 8.5, -0.125};\n\
+         volatile double k = 16.0;\n\
+         long long s = 0;\n\
+         for(int i=0;i<6;i++){ s += (long long)(a[i]*k); if(i & 1) s -= (long long)(a[i]/2.0); }\n\
+         return s;\n}\n",
+        99,
+    );
+}
