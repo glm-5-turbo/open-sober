@@ -90,3 +90,17 @@ regressions.
 - Continue the SIMD surface as the battery reveals it; then svc routing on use.
 - libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 - Real-binary/GPU boot proof on a capable host + libroblox.so/APK.
+
+### Addendum (same cycle) — data/instruction cache maintenance (dc/ic) no-ops
+- `Inst::CacheMaintain{d zva: bool, rt}`: cache clean/invalidate/coherence ops
+  (`dc gva/civac/ivac`, `ic ivau`, etc., top byte 0xd5, CRn=7) are no-ops in the
+  direct-mapped single-threaded JIT — EXCEPT `dc zva` which zeros the 16-byte
+  cache line at [Xt] (the block size dczid_el0 advertises). This unblocks
+  full glibc-linked programs whose CRT `__libc_mtag_tag_region` ends with a
+  `dc` op (modmain.elf stopped at 0x40c174 on `dc gva`).
+- Two bugs fixed while landing it: (1) the session's draft used wrong encodings
+  in tests (0xd50b7400 is a `sys`, not `dc zva`; real `dc zva x0`=0xd50b7420);
+  (2) Rt was decoded from bits[9:5] instead of bits[4:0], so `dc zva x0` wrote
+  the zero via guest x1 -> segfault. zva discriminator = CRm==4 && op2==1,
+  objdump-verified across gva/civac/ivac/ivau. Regression in jit.rs.
+- arm64jit 95, workspace 129/0.

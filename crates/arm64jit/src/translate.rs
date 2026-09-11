@@ -563,6 +563,19 @@ pub fn translate(
                     }
                     Ok(())
                 }
+                Inst::CacheMaintain { zva, rt } => {
+                    // Cache maintenance in the direct-mapped single-threaded JIT
+                    // (guest==host, warm shared memory) is a no-op — except `dc
+                    // zva` which zeros the 16-byte cache line at [Xt] (the block
+                    // size we advertise via dczid_el0).
+                    if zva && rt != 31 {
+                        ldg(buf, RAX, rt as u32); // RAX = base address
+                        buf.mov_ri64(RCX, 0);
+                        buf.mov_store64(RAX, 0, RCX);   // [base+0]
+                        buf.mov_store64(RAX, 8, RCX);   // [base+8]
+                    }
+                    Ok(())
+                }
                 Inst::MulHigh { rd, rn, rm, signed } => {
                     // umulh/smulh Xd, Xn, Xm: high 64 bits of the 128-bit product.
                     // x86 one-operand mul/imul: RDX:RAX = RAX * rm, high in RDX.

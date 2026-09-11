@@ -116,6 +116,11 @@ pub enum Inst {
     // store. Gate (insn & 0xff3fe71c)==0xd9200000 (verified vs objdump across
     // the 0xd9 top-byte alloc-tag space); load = bit22=1 && bit11=0.
     MteTag { load: bool, rt: u8 },
+    // ---- data/instruction cache maintenance: dc <op>,xN / ic <op>,xN ----
+    // Single-threaded JIT (guest==host, no separate cache) => coherence ops are
+    // no-ops. `dc zva` is the one that writes memory (zeros the 16-byte block we
+    // advertise via dczid_el0) and so must emit the zeros, not just skip.
+    CacheMaintain { zva: bool, rt: u8 },
     // ---- load/store (unsigned immediate offset) ----
     LdStrImm {
         rt: u8,
@@ -2805,6 +2810,20 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
         let rt = (insn & 0x1f) as u8;
         let load = (insn & 0x0040_0000) != 0 && (insn & 0x0800) == 0;
         return Inst::MteTag { load, rt };
+    }
+
+    // ---- data/instruction cache maintenance: dc <op>, xN / ic <op>, xN ----
+    // System-prefix 0xd5, CRn=7. In the single-threaded, direct-mapped JIT
+    // (guest==host, warm shared memory, no separate cache) a cache clean/
+    // invalidate/coherence op has no observable effect → no-op. The one that
+    // WRITES memory is `dc zva` (zero the cache line at [Xn]); we advertise a
+    // 16-byte block via dczid_el0 so zero 16 bytes. RT is the address register.
+    // Verified vs objdump (armv8.5-a+memtag): dc zva x4=0xd50b7424 (CRm=4,
+    // op2=1), dc gva=0xd50b7462 (op2=3), civac=0xd50b7e20 — only zva zeroes.
+    if (insn >> 24) & 0xff == 0xd5 && ((insn >> 12) & 0xf) == 7 {
+        let rt = (insn & 0x1f) as u8;
+        let zva = ((insn >> 8) & 0xf) == 4 && ((insn >> 5) & 0x7) == 1;
+        return Inst::CacheMaintain { zva, rt };
     }
 
     Inst::Unsupported(insn)

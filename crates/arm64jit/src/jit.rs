@@ -1343,6 +1343,33 @@ mod tests {
     }
 
     #[test]
+    fn cache_maintain_dc_is_noop_dc_zva_zeroes() {
+        // Regression: glibc's __libc_mtag_tag_region ends with `dc gva`/cache
+        // ops; a full glibc-linked program stopped on `dc gva` (modmain.elf at
+        // 0x40c174). In the single-threaded direct-mapped JIT these coherence
+        // ops are no-ops; `dc zva` must zero the advertised 16-byte block.
+        // Encodings objdump-verified (armv8.5-a+memtag):
+        //   dc gva x2 = 0xd50b7462 ; dc zva x0 = 0xd50b7420 ; dc civac x3 = 0xd50b7e60
+        //   dc zva zeroes [x0] = 16 zero bytes.
+        let code = [
+            0x62, 0x74, 0x0b, 0xd5, // dc gva, x2  (no-op)
+            0x20, 0x74, 0x0b, 0xd5, // dc zva, x0  (zero [x0])
+            0x60, 0x7e, 0x0b, 0xd5, // dc civac, x3 (no-op)
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let buf = [0xabu8; 16];
+        let mut st = CpuState::new();
+        st.x[0] = buf.as_ptr() as u64;
+        exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(buf, [0u8; 16], "dc zva zeroed the 16-byte cache line");
+        // decode binds: zva vs non-zva distinguished by CRm=4/op2=1.
+        assert!(matches!(crate::decode::decode(0xd50b7420), Inst::CacheMaintain { zva: true, .. }));
+        assert!(matches!(crate::decode::decode(0xd50b7462), Inst::CacheMaintain { zva: false, .. }));
+        assert!(matches!(crate::decode::decode(0xd50b7e20), Inst::CacheMaintain { zva: false, .. }));
+        assert!(matches!(crate::decode::decode(0xd50b7526), Inst::CacheMaintain { zva: false, rt: 6 }));
+    }
+
+    #[test]
     fn fcvtzu_handles_u64_beyond_2pow63() {
         // Regression: `fcvtzu x0,d0` (unsigned double->u64) is valid over the
         // whole [0,2^64) range, but x86 cvttsd2si saturates anything >= 2^63 to
