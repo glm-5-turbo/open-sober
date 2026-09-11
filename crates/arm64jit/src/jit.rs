@@ -1316,6 +1316,33 @@ mod tests {
     }
 
     #[test]
+    fn mte_alloc_tag_ops_stores_noop_ldg_zero() {
+        // Regression: glibc's __libc_mtag_tag_region issues an `stg` loop; a full
+        // glibc-linked program stopped on the first tag store (modmain.elf at
+        // 0x40c120 = `stg x0,[x0]`). Host has no MTE: stores are no-ops, ldg reads
+        // tag 0. Encodings objdump-verified (armv8.5-a+memtag):
+        //   stg x0,[x0]=0xd9200800 ; stzg x1,[x1,#16]=0xd9601821
+        //   ldg x2,[x3]=0xd9600062 ; st2g x0,[x4]=0xd9a00880
+        let code = [
+            0x00, 0x08, 0x20, 0xd9, // stg x0, [x0]
+            0x21, 0x18, 0x60, 0xd9, // stzg x1, [x1, #16]
+            0x62, 0x00, 0x60, 0xd9, // ldg x2, [x3]
+            0x80, 0x08, 0xa0, 0xd9, // st2g x0, [x4]
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[3] = 0xdead_beef_cafe_b000; // base for ldg
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[2], 0, "ldg reads tag 0 (no MTE / no tag state)");
+        assert_eq!(r, 0, "x0 untouched by the stg stores");
+        // decode binds across the alloc-tag space: stores (no load), ldg (load).
+        assert!(matches!(crate::decode::decode(0xd92008c5), Inst::MteTag { load: false, .. }));
+        assert!(matches!(crate::decode::decode(0xd96008c5), Inst::MteTag { load: false, .. }));
+        assert!(matches!(crate::decode::decode(0xd9a008c5), Inst::MteTag { load: false, .. }));
+        assert!(matches!(crate::decode::decode(0xd96000c5), Inst::MteTag { load: true, rt: 5 }));
+    }
+
+    #[test]
     fn fcvtzu_handles_u64_beyond_2pow63() {
         // Regression: `fcvtzu x0,d0` (unsigned double->u64) is valid over the
         // whole [0,2^64) range, but x86 cvttsd2si saturates anything >= 2^63 to

@@ -553,7 +553,17 @@ pub fn translate(
                         }
                         Ok(())
                     }
-                    Inst::MulHigh { rd, rn, rm, signed } => {
+                    Inst::MteTag { load, rt } => {
+                    // No MTE on the host and no tag state in the JIT: an
+                    // allocation-tag STORE (stg/stzg/st2g) is a pure no-op; the
+                    // only load (ldg) returns tag 0 into the guest Xt register.
+                    if load && rt != 31 {
+                        buf.mov_ri64(RAX, 0);
+                        stg(buf, rt as u32, RAX); // tag 0
+                    }
+                    Ok(())
+                }
+                Inst::MulHigh { rd, rn, rm, signed } => {
                     // umulh/smulh Xd, Xn, Xm: high 64 bits of the 128-bit product.
                     // x86 one-operand mul/imul: RDX:RAX = RAX * rm, high in RDX.
                     ldg(buf, RAX, rn as u32);  // multiplicand

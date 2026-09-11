@@ -108,6 +108,14 @@ pub enum Inst {
         rm: u8,
         signed: bool,
     },
+    // ---- memory-tagging (MTE) allocation-tag load/store: ldg/stg/stzg/st2g/...
+    // The host has no MTE and the JIT keeps no tag state, so a store is a pure
+    // no-op (it would tag memory, which we don't model) and `ldg` (the only
+    // load) returns tag 0 into Xt. GLIBC's __libc_mtag_tag_region issues a
+    // stg loop; without this a full glibc-linked program stops on the first tag
+    // store. Gate (insn & 0xff3fe71c)==0xd9200000 (verified vs objdump across
+    // the 0xd9 top-byte alloc-tag space); load = bit22=1 && bit11=0.
+    MteTag { load: bool, rt: u8 },
     // ---- load/store (unsigned immediate offset) ----
     LdStrImm {
         rt: u8,
@@ -2788,9 +2796,19 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
         };
     }
 
+    // ---- memory-tagging (MTE) allocation-tag ops: ldg/stg/stzg/st2g (0xd9 top
+    // byte). Host has no MTE and the JIT keeps no tag state: stores are pure
+    // no-ops; ldg (load, bit22=1 && bit11=0) reads tag 0 into Xt. Unblocks
+    // glibc's __libc_mtag_tag_region (stg loop). Mask 0xff200400 ignores Xt/
+    // Xn/imm9 (verified across stg/stzg/ldg/st2g with varied regs+offsets).
+    if insn & 0xff20_0400 == 0xd920_0000 {
+        let rt = (insn & 0x1f) as u8;
+        let load = (insn & 0x0040_0000) != 0 && (insn & 0x0800) == 0;
+        return Inst::MteTag { load, rt };
+    }
+
     Inst::Unsupported(insn)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
