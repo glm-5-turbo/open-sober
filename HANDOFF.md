@@ -3286,3 +3286,35 @@ emulator.
   16 + libloader 16 + 1 + 1 + 11).
 - HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
   GPU + real-binary host (no APK/libroblox.so/GPU on this VPS).
+
+## Session (Sep 11, 2026) — three silent FP/SIMD miscompiles fixed via a double-precision C battery (commit a0465a0)
+Drove a new cross-gcc double-FP battery (real `double` C: polynomial Horner,
+array sums, 2x2 matmul, exact division, 3^10 accumloop with fcvtzs, |x|>threshold
+counting, weighted average) through `elfjit`, comparing each result to a native
+x86-64 compile. Ground truth: dpoly31 dsum17 dmat50 ddiv10 dscale1 dclamp4 ddmat2-4.
+Found + fixed THREE real miscompiles (all silent wrong results, not crashes):
+1. **scalar fsub (0x1e613800) decoded as SIMD WidenShl** — the shll gate's
+   `(insn>>24)&0x0f==0x0e` nibble test ALSO matched the scalar-FP 0x1e family
+   when bits15:8==0x38, so `fsub d0,d0,d1` ran as a halfword-widen no-op
+   (59049.0-59048.0 → 0.0). Real shll bytes are 0x0e/0x2e/0x4e/0x6e (bit28=0);
+   scalar-FP 0x1e has bit28=1. Gate now requires bit28==0. dscale.elf 0→1.
+2. **store_nzcv_fp hardcoded N=0** — FP compare sets N=1 for ordered less-than,
+   so b.mi/b.lt/b.le never fired and b.gt evaluated N==V as 0==0 for every
+   ordered non-equal pair (dclamp 6→4). N now = CF∧¬ZF.
+3. **ld1 multiple-structure (2-reg, opcode bits[15:12]==0xA) swallowed by the
+   ld2 gate (0x8, deinterleave)** — compiler array-literal `ld1 {v30,v31}`
+   loaded interleaved garbage (ddiv double array 2→10). Added Ld1N/St1N
+   (consecutive, NO deinterleave) for 1/2/3/4-reg, discriminated by opcode
+   bits[15:12]. (Verified real encodings: ld1-2reg=0x4c40a040, ld2=0x4c408040,
+   ld1-1reg=0x4c407040.)
++3 regression tests (fsub-vs-shll collision, FP-compare N flag + b.mi/le/gt,
+ld1-2reg consecutive). arm64jit 123/123, workspace **172/0**. Cross-gcc C
+battery + SIMD hand-battery (lane_test/smov=-570, loop1=45, iso_*=etc) all
+still green. fsqrt verified (sqrt(16)=4 via sqrtquad.elf).
+Honest: dsqrt .c didn't link (sqrt undefined under -nostdlib); tested fsqrt via
+hand-asm instead. Test-setup lesson: guest Dn/Vn maps to st.v[2n]/st.v[2n+1]
+(D1 = st.v[2], NOT st.v[1]) — two new tests initially failed on my own wrong
+constant placement, not a JIT bug.
+Next: keep pressing the cross-gcc FP/SIMD surface (division edges, fma chains,
+single-precision float, struct-by-value + FP, loop-with-FP-condition) to find
+more silent miscompiles; then libloader gaps. HARD GATE unchanged.

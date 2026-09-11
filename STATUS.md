@@ -346,3 +346,28 @@ already 16-bit; TZCNT had no offset) + lzcnt_16bit regtest.
 Gate: build clean; tests **169/0** (arm64jit 120+4, libbadcpu 16, libloader 16,
 +1+1+11). HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` on a
 GPU + real-binary host.
+cycle: 10
+status: cycle_end
+last_agent_claim: Focused ad-hoc verification complete (explicitly **not** a suite-green claim): (rc=0)
+updated: 2026-09-11T04:03:22Z
+---
+---
+## Cycle (Sep 11, 2026) — three silent FP/SIMD miscompiles fixed (workspace 172/0)
+Built a new cross-gcc **double-precision** battery (real `double` C arrays,
+Horner, matmul, exact division, 3^10 loop, |x|>thresh count, weighted avg),
+each result diffed against a native x86-64 compile. Three real bugs found+fixed
+(commit a0465a0), all silent wrong results:
+1. scalar `fsub` (0x1e613800) swallowed by the SIMD WidenShl/shll gate (its
+   `(insn>>24)&0x0f==0x0e` nibble test also matched the scalar-FP 0x1e family):
+   shll gate now requires bit28==0 (real shll 0x0e/2e/4e/6e; scalar-FP 0x1e).
+   dscale.elf 0→1.
+2. store_nzcv_fp hardcoded N=0 → FP compare b.mi/b.lt/b.le never fired, b.gt
+   always true for ordered non-equal. N = CF∧¬ZF. dclamp 6→4.
+3. `ld1 {v30,v31}` (2-reg) swallowed by the ld2 (deinterleave) gate → array
+   literals loaded interleaved garbage. Added Ld1N/St1N consecutive handlers,
+   discriminated by opcode bits[15:12] (ld1-2reg=0xA vs ld2=0x8).
++3 regression tests. arm64jit 120→123, workspace 169→**172/0**. Full cross-gcc
++SIMD hand-battery still green (loop1=45, lane_test/smov=-570, iso_*=doc).
+Gate: cargo build clean; cargo test --workspace 172/0. HARD GATE unchanged:
+real Roblox boot + run log on a GPU/APK host (elfjit <libroblox.so> 0x1f0db20
+--jni). HEAD a0465a0 on local dev.
