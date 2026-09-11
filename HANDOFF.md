@@ -5686,3 +5686,42 @@ TLS **init-image copies** for clone children beyond the TP pointer handoff.
 HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none on
 this VPS). Next per RECOMMENDATION order: libbadcpu ISA, services/auth, more
 differential-fuzz coverage.
+
+## Cycle 42 (Sep 11, 2026) — fuzzer found FP pairwise gap; fmaxp/fminp/fmaxnmp/fminnmp fixed (366/0)
+
+### What happened (a new generator caught a real incomplete-ISA decode)
+Extended `fuzz_jit.py` with two generators for previously-uncovered shapes:
+- **`gen_double_neon`** — f64-lane (`.2d`) NEON, which NONE of the existing SIMD
+  generators exercised (they're all f32/single). Forces `vfmaq_n_f64`,
+  `vmulq_n_f64`, `vmaxvq_f64` and a `vld1q/vst1q_f64` round trip, with small
+  binary-exact lane values so any structural miscompute reads as a real diff.
+  The host x86 gcc can't compile `<arm_neon.h>`, so it runs through the
+  **qemu-aarch64 architectural oracle** (`run_qemu_exact`), never a native one.
+- **`gen_uxtl_uaddw`** — 16→32→64 widening chains (`uxtl`/`uaddw`/narrow back)
+  exercising the `SimdAddw`/`SimdXtl` permute-source alias paths.
+- **`gen_double_neon` immediately exposed a real gap**: the very first shape
+  stopped the JIT with `Unsupported(0x7e70fa60)` at an fp-reduce site. That
+  word is `fmaxp d0, v19.2d` — the **FP pairwise two-register horizontal
+  reduce** (`FMAXP Vd, Vn`), which had NO decoder slot (it fell to the scalar-
+  fp family's Unsupported residue).
+
+### Fix (commit 9d40f47)
+- `Inst::FpPair` + decode: all **8 two-register** encodings
+  (`fmaxp/fminp/fmaxnmp/fminnmp` × `.2s/.2d`), with ground-truthed field
+  extraction (verified against `aarch64-linux-gnu-as`/`objdump`):
+  `min = bit23`, `nm = bits[14:12]==4` (fmaxp/fminp have bits[14:12]==7),
+  `sz (.2d) = bit22`. Disjoint from the 3-operand `FMAXP Vd,Vn,Vm` (bit16 SET)
+  and from `FMaxMin`/`FMaxV`. (My first field guess — bit15-min, bit13-nm — was
+  wrong and the decode unit test caught it.)
+- translate: pairwise-reduce Vn's two elements into a scalar Vd — `.2s` via
+  `maxss/minsd`.../`minss`, `.2d` via `maxsd/minsd` (x86 max/min ignore NaN,
+  acceptable for the fmaxnm* path like the existing `FMaxMin` comment notes).
+- decode regression test `fp_pairwise_two_register_reduce_ground_truth` (all 8).
+- Verified end-to-end: the exact program that previously stopped now returns
+  **1562 == qemu oracle**. 16+16 fresh oracle-gated cases for both new
+  generators: 0 fail / 0 skip.
+
+`cargo build --workspace` clean; `cargo test --workspace` **366/0** (was 365).
+Committed `9d40f47` (+ this doc). The gen_double_neon generator is a permanent
+asset that now keeps the f64-NEON lane classes regression-guarded. HARD GATE
+unchanged (real Roblox boot + run log only on a GPU/APK host; none on this VPS).
