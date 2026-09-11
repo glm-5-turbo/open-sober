@@ -1,5 +1,56 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 11, 2026, hermes-worker) — POST-JNI_OnLoad game-start: `--startapp` boot stage; real libroblox reaches the ENGINE MAIN LOOP (workspace 388/0)
+
+Commit `a4f94d1` (dev). The real `libroblox.so` 2.738.1397 boot advances from
+"JNI_OnLoad returns 0x10006 then the process exits" to **the guest entering and
+persistently running the engine's `GameActivity` main-loop / event-pump region**
+after a new `--startapp` stage chains the real Java-side game-start entry.
+
+- **Why the boot previously exited**: JNI_OnLoad is a *registration* function;
+  on real Android the JVM then calls `nativeAppBridgeV2StartAppWithParams` etc.
+  to actually start the game (main loop + EGL/GLES init). elfjit only ran
+  JNI_OnLoad, so once it returned and the spawned worker boot-body finished, the
+  harness's `main()` returned and the process exited cleanly (exit 0).
+- **`--startapp <link-addr>`** (elfjit): after `jit_run(JNI_OnLoad)` returns
+  `Ok(0x10006)`, builds the singleton env + fake-but-valid `jobject` (x1) +
+  `jstring` (x2) and `jit_run`s the real `nativeAppBridgeV2StartAppWithParams`
+  (0x258b144) as a fresh guest entry. Critical detail: it reuses the **boot-phase
+  guest SP** (`s2.x[31]=st.x[31]`); a fresh 0 SP wrapped StartApp's `sub sp,#0xf0`
+  prologue to `0xffffffffffffff10` and the frame-write SIGSEGV'd immediately.
+- **New jni helpers**: `new_fake_object()`, `new_string_utf_handle()`, and a
+  `JNI_TRACE_REGISTRY` env to dump RegisterNatives bindings.
+- **Verified** (headless, no QEMU): the guest executes 800+ distinct blocks
+  through StartApp — FindClass for dozens of Roblox classes, repeated VM_GetEnv,
+  pthread_once/mutex/getspecific TLS-key protocoling in the
+  `GameActivity_initializeNativeCode` thread-local setup, `LockBasedAllocator` —
+  then settles into a persistent main-loop cycle (`ldar x22,[x0+0x10]; cbz`
+  await + `pthread_getspecific` dispatch) across two guest threads and runs
+  until the harness `timeout` fires (exit 124; **no SIGSEGV/SIGABRT**). JNI_OnLoad
+  alone still exits 0 cleanly (~4.8s); both paths preserved.
+
+### Current wall (narrowed from "nothing drives the app" to a specific loop)
+The engine main loop is reached but awaits app events / lifecycle (looper
+input, window/surface, EGL) that the real Java side supplies. Next (ordered):
+1. Feed the awaited `GameActivity` app-command / looper state and route the
+   boot's `egl*`/`gl*` imports through the existing Mesa llvmpipe resolver so
+   any EGL context/frame path reachable from StartApp runs real software
+   graphics — the first reproducible engine-loop artifact (a frame / looper
+   event dispatch), headless on this VPS.
+2. Advance FMOD audio init and the JNIMain main-loop drive.
+3. HARD GATE (real session + run log) unchanged as the end goal; the
+   achievable-on-this-VPS milestone next is a real *frame* / first looper event,
+   then it's a GPU host for the final perf proof.
+
+Repro:
+```
+cargo build -p arm64jit --example elfjit
+# boot-only: timeout 120 ./target/debug/examples/elfjit .../libroblox.so 0x2173ff4 --jni
+# boot + game-start main loop: timeout 30 ./target/debug/examples/elfjit .../libroblox.so 0x2173ff4 --jni --startapp 0x258b144
+```
+Run-log: `/home/hermes-worker/runs/startapp-boot-runlog.txt` (exit 124 = ran
+in the engine main loop until the harness timeout; no crash).
+
 ## 🟢 STABLE HEADLESS BOOT of real libroblox.so (exit 0, reproducible)
 
 **The real `libroblox.so` (2.738.1397) now boots to a stable state headlessly
