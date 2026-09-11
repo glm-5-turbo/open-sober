@@ -5359,3 +5359,38 @@ Two follow-on commits on the graphics/JNI surface:
 
 cargo build --workspace clean; `cargo test --workspace` **341/0** (was 336). HARD GATE
 unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
+
+## Cycle 37 (Sep 11, 2026) — JNI fake-object backing + full JNI surface (351/0)
+
+Commit `23e053a` (dev). Per the ordered post-graphics RECOMMENDATION list, took
+"JNI function-table stubs / fake-object backing" as the highest-leverage
+unblocked item. The JIT `jni.rs` (crates/arm64jit) had backed arrays, strings and
+~14 slots, but everything else in the JNINativeInterface fell to the `voidp`
+default (returns 0) — so guest Roblox JNI paths that `if (!ref / !clazz / !buf)
+fail` aborted instead of proceeding.
+
+Backed the behavior-changing slots at their authoritative Android NDK offsets:
+- **NewLocalRef / NewWeakGlobalRef**: identity pass-through (no distinct ref pool).
+- **IsSameObject**: identity compare (1 iff a==b).
+- **GetObjectClass**: stable non-zero jclass handle (interned
+  `java/lang/Object`), never aliases the object; NULL obj -> NULL class.
+- **IsInstanceOf / IsAssignableFrom**: permissive true (fake-object model takes
+  the success branch instead of a NULL/abort path).
+- **GetStringUTFRegion**: bounds-safe UTF-8 byte copy (real behavior, tested).
+- **DirectByteBuffer trio** (Roblox passes textures/audio/asset native memory as
+  java.nio.ByteBuffer): NewDirectByteBuffer creates a fresh unique handle into a
+  handle->(addr,cap) registry; GetDirectBufferAddress/Capacity recover it; unknown
+  handle -> 0.
+- **PopLocalFrame**: passes its `result` arg through.
+- Wired monitor (Enter/Exit=JNI_OK), exception (Occurred/Check=no-pending,
+  Describe/Clear no-op), local-frame (Push=JNI_OK, EnsureCapacity=JNI_OK),
+  static-field (GetStaticFieldID=GetMethodID stub, Get/SetStatic* typed), and the
+  Call{Object,Boolean,Int,Void}Method + CallStatic* forms (typed zero) to explicit
+  stubs so they're non-null at correct offsets.
+
+**Tests**: +4 (NDK offset assertions for 23 slots; nonnull-at-official-offsets for
+17 boot-relevant slots; fake-object backing semantics; direct-buffer round-trip +
+string-region copy). `cargo test --workspace` **351/0** (was 346), build clean.
+
+Next per RECOMMENDATION order: libbadcpu ISA gaps, then services/auth. HARD GATE
+unchanged (real Roblox boot + run log only on a GPU/APK host; none on this VPS).

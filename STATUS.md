@@ -1030,3 +1030,25 @@ cause is a co-resident host-register scheduling clobber in translate; needs a
 single-instruction host-emission diff (JIT_STEP is block-granular) to nail the
 exact scratch-reg collision. Next targeted step for this bug.
 HARD GATE unchanged (no GPU/APK host — real Roblox boot + run log impossible here).
+---
+cycle: 37
+status: committed (tests green)
+last_agent_claim: JNI fake-object backing + full JNINativeInterface surface at official
+  NDK offsets (commit 23e053a). The JIT JNI table (crates/arm64jit/src/jni.rs) backed
+  arrays/strings/~14 slots; the rest fell to the voidp default returning 0, so guest
+  Roblox JNI paths checking `if (!ref / !clazz / !buf) fail` aborted. Backed the
+  behavior-changing slots with real fake-object semantics: NewLocalRef/NewGlobalRef/
+  NewWeakGlobalRef (identity), IsSameObject (identity compare), GetObjectClass (stable
+  non-zero jclass), IsInstanceOf/IsAssignableFrom (permissive true), PopLocalFrame
+  (arg pass-through), GetStringUTFRegion (bounds-safe UTF-8 copy), and crucially the
+  DirectByteBuffer trio (NewDirectByteBuffer/GetDirectBufferAddress/GetDirectBufferCapacity
+  via a handle->(addr,cap) registry) for Roblox's NIO texture/audio/asset buffers. Wired
+  monitor/exception/local-frame/static-field/call-method slots to typed no-op stubs at
+  the correct offsets. 34 new non-null slots + 4 new tests (NDK offset assertions,
+  nonnull-at-offset, fake-object semantics, direct-buffer roundtrip, string-region copy).
+  Workspace cargo test --workspace 351/0 (was 346). This advances the ordered
+  post-graphics RECOMMENDATION list (JNI function-table stubs + fake-object backing).
+  HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
+  Next per RECOMMENDATION order: libbadcpu ISA gaps, services/auth.
+updated: 2026-09-11T00:00:00Z
+---
