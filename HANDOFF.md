@@ -2508,8 +2508,51 @@ writes the live vm handle. `jni_vm_getenv` (GetEnv @ slot 7) writes `*penv`.
 3. Real-binary/GPU boot verification remains blocked (no APK/libroblox.so, no
    GPU) — HARD GATE on a capable host.
 
-## Session (Sep 11, 2026) — JIT correctness: XZR/SP, FP/vector loads, static-ELF loader (commits b0c3237, f1707e2, df470fa)
+## Session (Sep 11, 2026) — 128-bit SIMD ld/st register-offset/unscaled/pre-post-index mis-decoded as GPR; silent x-reg corruption FIXED (156/0)
 
+Root-caused the `modmain.elf` (full static-glibc) `__memset_generic` SIGSEGV.
+The memset's `str q0,[x0,x3]` (0x3ca36800) decoded as a GPR 1-byte sign-extend
+load **into the base register** (`ldrsb x0,[x0,x3]`), silently clobbering guest
+x0 → `__tls_init_tp`'s `str w5,[x0,#4]` faulted at address 0x4. The GPR
+register-offset (0x38200800) and pre/post/unscaled (0x3800xxxx) decode gates had
+no bit26 (vector-file) mask; the imm-offset gate (df470fa, prior session) did.
+
+## Fix (commit `853cc44`)
+Three new 128-bit vector classes gated BEFORE the GPR gates (bit26=1), plus
+`bit26==0` added to both GPR gates:
+- **VecLdStrReg** — register-offset str/ldr q: `(insn & 0xffe00c00)` in
+  `{0x3ca00800 (str), 0x3ce00800 (ldr)}`.
+- **VecLdStImmUnscaled** — ldur/stur q: `{0x3c800000, 0x3cc00000}` (signed imm9;
+  note the residue is 0x0000 — the imm9 lives in bits[20:12], outside the mask).
+- **VecLdStIndexed** — pre/post-index writeback: `{0x3c800c00, 0x3cc00c00,
+  0x3c800400, 0x3cc00400}`; Xn advances by signed imm9.
+
+All transfer 16 bytes via XMM0 to/from `CpuState.v[vt]`. Gate correctness
+verified against `aarch64-linux-gnu-as` ground truth incl. **non-collision**
+with scalar B/H/S/D register-offset/unscaled (e.g. stur b0=0x3c1fc100 masks to
+0x3c000000, bit23 clear).
+
+## Result
+modmain no longer SIGSEGVs in `__tls_init_tp`'s memset — it advances through
+the whole vector ld/st family and stops HONESTLY (Unsupported) on the next wall
+instead of corrupting. `+4` regression tests (3 exec: base preserved for the
+reg-offset store, pointer preserved for unscaled stur, Xn advanced for
+pre-index ldr; 1 decode: the three classes + scalar-b non-collision).
+arm64jit 115/115; workspace 156/0; build clean.
+
+## Next (ordered, no APK/GSI/GPU on this box)
+1. Scalar S/D register-offset ld/st (top 0xbc/0xfc, **bit26=0**, e.g. `str
+   s0,[x0,x3,lsl#2]` at modmain 0x40a958, word 0xbc237800) — the remaining
+   glibc-CRT-memset wall; needs a V/opc discriminator, not the bit26 mask. This
+   is glibc-CRT-tail territory, repeatedly judged NOT a Roblox boot blocker
+   (real libroblox.so boot ISA already fully decoded / exit 0).
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth (ordered
+   plan).
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
+   the HARD GATE — blocked until a capable host + real binary/APK (none here).
+---
+
+## Session (Sep 11, 2026) — JIT correctness: XZR/SP, FP/vector loads, static-ELF loader (commits b0c3237, f1707e2, df470fa)
 Unblocked running real compiled aarch64 C through elfjit (loader+dispatcher)
 by making `bind_image_plt` skip static ELFs instead of panicking (b0c3237),
 then used cross-gcc test programs to regression-test actual control flow. This

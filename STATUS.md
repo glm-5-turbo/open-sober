@@ -261,3 +261,19 @@ a memset frontier. arm64jit 111/111; workspace 152/0; battery unchanged.
 - modmain SIGSEGVs in glibc `__memset_generic` (caller passed x0=0) — glibc-CRT
   tail, NOT a Roblox boot blocker (HANDOFF; libroblox boot already decoded).
 - HARD GATE unchanged.
+cycle: 8
+status: <updating>
+last_agent_claim: <no completion claim yet>
+updated: 2026-09-11T22:45:00Z
+---
+
+## Cycle 8 (Sep 11, 2026) — 128-bit SIMD ld/st mis-decode fix (workspace 156/0)
+Root-caused the modmain `__memset_generic` SIGSEGV: `str q0,[x0,x3]`
+(0x3ca36800) decoded as GPR `ldrsb x0,[x0,x3]` and silently clobbered guest x0
+(GPR register-offset/pre-post/unscaled gates lacked a bit26 vector-file mask).
+Added VecLdStrReg + VecLdStImmUnscaled + VecLdStIndexed (128-bit q classes,
+bit26=1) and bit26==0 on the two GPR gates. modmain now advances cleanly
+(honest Unsupported stop) instead of SIGSEGVing. +4 regressions, arm64jit
+111->115. Commits: 853cc44 on dev.
+next: scalar S/D register-offset (0xbc/0xfc, bit26=0) — glibc-CRT tail, not a
+Roblox boot blocker; then libloader -> libbadcpu -> services/auth.
