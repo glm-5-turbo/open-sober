@@ -4,6 +4,28 @@ goal: run Roblox through the Open-Sober runtime (specialized runtime, graphics,
 sound) — the full "Roblox boots on the JIT/no-QEMU path" gate.
 started: 2026-09-11T01:20:42Z
 
+## Cycle (Sep 11, 2026) — guest_svc syscall surface: fstat/newfstatat (guest-layout), sockets, epoll, and 15+ more (workspace 270/0)
+status: session-end (committed, tests green)
+last_agent_claim: fstat(80)/newfstatat(79) with a hand-transcribed AArch64
+`stat` layout (asm-generic, 128B: st_dev@0 st_ino@8 st_mode@16 st_uid@24
+st_gid@28 st_rdev@32 st_size@48 st_blksize@56 st_blocks@64 times@72..112) —
+the host libc::stat layout DIFFERS across arches, so forwarding the host struct
+would silently mis-place every field; write_guest_stat converts. Also added
+readv(65)/writev(66), uname(160), gettimeofday(169), clock_getres(114),
+dup(23)/dup3(24), ioctl(29), eventfd2(19), epoll_create1(20)/epoll_ctl(21)/
+epoll_pwait(22), ppoll(73), socket(198)/bind(200)/listen(201)/accept(202)/
+connect(203)/setsockopt(208)/getsockopt(209), getrlimit(163)/setrlimit(164),
+kill(129)/tgkill(131), timer_create(107)/timer_settime(110). All numbers
+verified against /usr/aarch64-linux-gnu/include/asm-generic/unistd.h +
+asm-generic/stat.h (not guessed). These are the syscalls a real Android
+boot/ALooper/login-path needs that the table lacked. New integration test
+guest_svc_stats_and_descriptors_roundtrip exercises fstat/newfstatat st_size+st_mode
+into the guest-layout buffer, eventfd write/read, epoll_create1+epoll_ctl(ADD on
+an eventfd/pipe — regular files EPERM), gettimeofday, uname=="Linux".
+cargo build clean; cargo test --workspace 270/0 (was 269). HARD GATE unchanged
+(no GPU/APK/libroblox.so on this VPS).
+---
+
 ## Cycle (Sep 11, 2026) — SIMD across-lanes min/max + smax/smin & movsx fixes (workspace 268/0)
 status: session-end (committed, tests green)
 last_agent_claim: new int SIMD min/max differential canary (im_running_minmax)
@@ -751,4 +773,9 @@ cycle: 20
 status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T07:45:20Z
+---
+cycle: 21
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T08:08:57Z
 ---

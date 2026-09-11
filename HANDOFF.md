@@ -4318,3 +4318,39 @@ scalars and the final result 3640 = oracle. +2 differential canaries
 
 HARD GATE unchanged: real-binary/GPU boot proof (`elfjit <libroblox.so>
 0x1f0db20 --jni`) on a GPU + real binary/APK host (none on this VPS).
+---
+
+# Session (Sep 11, 2026) — guest_svc syscall surface expanded for real-boot/ALooper/login (workspace 270/0)
+
+The android-layout idempotency test is green at HEAD (long since fixed); the
+workspace gate is clean. This session widened the JIT's in-process AArch64
+syscall dispatcher (`guest_svc` in `crates/arm64jit/src/jit.rs`) from ~30 to
+~48 syscalls, targeting the families a real Android boot / ALooper / login
+path issues that the table previously sent to -ENOSYS:
+
+- **fstat(80) / newfstatat(79)** with a **guest-layout `stat`** — the host
+  `libc::stat` layout differs across x86_64 vs aarch64, so forwarding the host
+  struct would silently mis-place every field. `unsafe fn write_guest_stat`
+  transcribes into the AArch64 asm-generic layout (128B): st_dev@0 st_ino@8
+  st_mode@16 st_nlink@20 st_uid@24 st_gid@28 st_rdev@32 st_size@48
+  st_blksize@56 st_blocks@64, times (sec+nsec) @72..112. Numbers + layout
+  verified against `/usr/aarch64-linux-gnu/include/asm-generic/{unistd,stat}.h`.
+- **sockets**: socket(198), bind(200), listen(201), accept(202), connect(203),
+  setsockopt(208), getsockopt(209) — the networking/login path.
+- **event/epoll** (Android ALooper is epoll-based): eventfd2(19),
+  epoll_create1(20), epoll_ctl(21), epoll_pwait(22), ppoll(73).
+- **descriptors**: dup(23), dup3(24), ioctl(29), readv(65), writev(66).
+- **system/time**: uname(160), gettimeofday(169), clock_getres(114).
+- **limits/signals/timers**: getrlimit(163)/setrlimit(164), kill(129),
+  tgkill(131), timer_create(107), timer_settime(110).
+
+All struct-returning syscalls chosen with layout-identical-or-explicit
+conversion (timeval/rlimit/utsname/epoll_event layouts are arch-identical;
+`stat` uses write_guest_stat). New integration test
+`guest_svc_stats_and_descriptors_roundtrip` verifies fstat/newfstatat st_size+
+st_mode in guest layout, eventfd write/read, epoll_create1+epoll_ctl(ADD — on an
+eventfd/pipe, not a regular file which EPERMs), gettimeofday, uname=="Linux".
+
+Gate: `cargo build --workspace` clean; `cargo test --workspace` 270/0 (was 269).
+HARD GATE unchanged — real Roblox boot + run log on a GPU/APK host
+(`elfjit <libroblox.so> 0x1f0db20 --jni`); none of that is on this VPS.

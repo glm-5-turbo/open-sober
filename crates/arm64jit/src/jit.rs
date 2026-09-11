@@ -361,6 +361,34 @@ fn host_float32_call_at(pc: u64) -> Option<(HostFloat32Call, usize)> {
 ///   getpid 172->39, getppid 173->110, getuid 199->102, nanosleep 101->35,
 ///   clock_gettime 113->228, getrandom 278->318, access 48->21, uname 160->65,
 ///   gettimeofday 169->96 (to libc instead), readahead, ...
+/// AArch64 `struct stat` (asm-generic/stat.h, 64-bit — 128 bytes) written into
+/// guest memory. The HOST `libc::stat` layout differs across architectures
+/// (x86_64 vs aarch64), so forwarding the host struct as-is would let the guest
+/// read st_mode/st_size/etc. from the wrong offsets — a silent miscompile. We
+/// copy the host fields into this fixed aarch64 layout.
+unsafe fn write_guest_stat(buf: u64, s: &libc::stat) {
+    unsafe {
+        let p = buf as *mut u64;
+        let w = buf as *mut u32;
+        std::ptr::write_volatile(p.add(0), s.st_dev as u64); // st_dev    @0
+        std::ptr::write_volatile(p.add(1), s.st_ino as u64); // st_ino    @8
+        std::ptr::write_volatile(w.add(4), s.st_mode as u32); // st_mode   @16
+        std::ptr::write_volatile(w.add(5), s.st_nlink as u32); // st_nlink @20
+        std::ptr::write_volatile(w.add(6), s.st_uid as u32); // st_uid    @24
+        std::ptr::write_volatile(w.add(7), s.st_gid as u32); // st_gid    @28
+        std::ptr::write_volatile(p.add(4), s.st_rdev as u64); // st_rdev  @32
+        std::ptr::write_volatile(p.add(6), s.st_size as i64 as u64); // st_size @48
+        std::ptr::write_volatile(w.add(14), s.st_blksize as i32 as u32); // st_blksize @56
+        std::ptr::write_volatile(p.add(8), s.st_blocks as i64 as u64); // st_blocks @64
+        std::ptr::write_volatile(p.add(9), s.st_atime as i64 as u64); // st_atime @72
+        std::ptr::write_volatile(p.add(10), s.st_atime_nsec as u64); // @80
+        std::ptr::write_volatile(p.add(11), s.st_mtime as i64 as u64); // st_mtime @88
+        std::ptr::write_volatile(p.add(12), s.st_mtime_nsec as u64); // @96
+        std::ptr::write_volatile(p.add(13), s.st_ctime as i64 as u64); // st_ctime @104
+        std::ptr::write_volatile(p.add(14), s.st_ctime_nsec as u64); // @112
+    }
+}
+
 pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     let s = unsafe { &mut *st };
     let nr = s.x[8];
@@ -455,6 +483,71 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         },
         // --- misc upper commonly needed ---
         278 => unsafe { libc::syscall(libc::SYS_getrandom, a[0] as usize, a[1] as usize, a[2] as u32) as c_long },
+        // --- file/dir stat (aarch64 buf layout, see write_guest_stat) ---
+        80 => { // AArch64 fstat (80)
+            unsafe {
+                let mut st = core::mem::MaybeUninit::<libc::stat>::zeroed().assume_init();
+                let r = libc::fstat(a[0] as c_int, &mut st);
+                if r == 0 {
+                    write_guest_stat(a[1], &st);
+                }
+                r as c_long
+            }
+        }
+        79 => { // AArch64 newfstatat (fstatat, 79)
+            unsafe {
+                let mut st = core::mem::MaybeUninit::<libc::stat>::zeroed().assume_init();
+                let r = libc::fstatat(a[0] as c_int, a[1] as *const c_char, &mut st, a[3] as c_int);
+                if r == 0 {
+                    write_guest_stat(a[2], &st);
+                }
+                r as c_long
+            }
+        }
+        // --- readv/writev ---
+        65 => unsafe { libc::readv(a[0] as c_int, a[1] as *const libc::iovec, a[2] as c_int) as c_long },
+        66 => unsafe { libc::writev(a[0] as c_int, a[1] as *const libc::iovec, a[2] as c_int) as c_long },
+        // --- system metadata (fixed char-array layout, arch-independent) ---
+        160 => { // uname
+            unsafe {
+                let mut u = core::mem::MaybeUninit::<libc::utsname>::zeroed().assume_init();
+                let r = libc::uname(&mut u);
+                if r == 0 {
+                    // utsname is fixed 65-byte char arrays on both arches (asm-generic).
+                    std::ptr::copy_nonoverlapping(&u as *const libc::utsname as *const u8, a[0] as *mut u8, core::mem::size_of::<libc::utsname>());
+                }
+                r as c_long
+            }
+        }
+        // --- timeval (two u64/i64, layout-identical) ---
+        169 => unsafe { libc::gettimeofday(a[0] as *mut libc::timeval, a[1] as *mut libc::timezone) as c_long },
+        114 => unsafe { libc::clock_getres(a[0] as libc::clockid_t, a[1] as *mut libc::timespec) as c_long },
+        // --- descriptors ---
+        23 => unsafe { libc::dup(a[0] as c_int) as c_long },
+        24 => unsafe { libc::dup3(a[0] as c_int, a[1] as c_int, a[2] as c_int) as c_long },
+        29 => unsafe { libc::ioctl(a[0] as c_int, a[1] as libc::c_ulong, a[2]) as c_long },
+        // --- event/epoll (Android ALooper is epoll-based; struct layouts identical) ---
+        19 => unsafe { libc::eventfd(a[0] as libc::c_uint, a[1] as c_int) as c_long },
+        20 => unsafe { libc::epoll_create1(a[0] as c_int) as c_long },
+        21 => unsafe { libc::epoll_ctl(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as *mut libc::epoll_event) as c_long },
+        22 => unsafe { libc::epoll_pwait(a[0] as c_int, a[1] as *mut libc::epoll_event, a[2] as c_int, a[3] as c_int, a[4] as *const libc::sigset_t) as c_long },
+        73 => unsafe { libc::ppoll(a[0] as *mut libc::pollfd, a[1] as libc::nfds_t, a[2] as *const libc::timespec, a[3] as *const libc::sigset_t) as c_long },
+        // --- sockets ---
+        198 => unsafe { libc::socket(a[0] as c_int, a[1] as c_int, a[2] as c_int) as c_long },
+        200 => unsafe { libc::bind(a[0] as c_int, a[1] as *const libc::sockaddr, a[2] as libc::socklen_t) as c_long },
+        201 => unsafe { libc::listen(a[0] as c_int, a[1] as c_int) as c_long },
+        202 => unsafe { libc::accept(a[0] as c_int, a[1] as *mut libc::sockaddr, a[2] as *mut libc::socklen_t) as c_long },
+        203 => unsafe { libc::connect(a[0] as c_int, a[1] as *const libc::sockaddr, a[2] as libc::socklen_t) as c_long },
+        208 => unsafe { libc::setsockopt(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as *const c_void, a[4] as libc::socklen_t) as c_long },
+        209 => unsafe { libc::getsockopt(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as *mut c_void, a[4] as *mut libc::socklen_t) as c_long },
+        // --- limits ---
+        163 => unsafe { libc::getrlimit(a[0] as u32, a[1] as *mut libc::rlimit) as c_long },
+        164 => unsafe { libc::setrlimit(a[0] as u32, a[1] as *const libc::rlimit) as c_long },
+        // --- signals / timers re-delivery ---
+        129 => unsafe { libc::kill(a[0] as c_int, a[1] as c_int) as c_long },
+        131 => unsafe { libc::tgkill(a[0] as c_int, a[1] as c_int, a[2] as c_int) as c_long },
+        107 => unsafe { libc::timer_create(a[0] as libc::clockid_t, a[1] as *mut libc::sigevent, a[2] as *mut libc::timer_t) as c_long },
+        110 => unsafe { libc::timer_settime(a[0] as libc::timer_t, a[1] as c_int, a[2] as *const libc::itimerspec, a[3] as *mut libc::itimerspec) as c_long },
         _ => {
             eprintln!(
                 "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (a0={:#x} a1={:#x} a2={:#x})",
@@ -3875,6 +3968,94 @@ mod tests {
         st.x[8] = 172;
         let pid = guest_svc(&mut st as *mut CpuState);
         assert_eq!(pid as u32, std::process::id());
+    }
+
+    #[test]
+    fn guest_svc_stats_and_descriptors_roundtrip() {
+        // Exercise the newly-added AArch64 syscall families without crashing or
+        // touching stdout: fstat(80) + newfstatat(79) must write a GUEST-layout
+        // stat; eventfd/dup/gettid-style fd ops and gettimeofday must roundtrip.
+
+        // A temp file to stat.
+        let path = std::env::temp_dir().join(format!("svc_stat_{}_{}.tmp", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::write(&path, b"some-payload-bytes").unwrap();
+        let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY) };
+        assert!(fd >= 0);
+
+        // fstat (80) -> guest-layout buffer.
+        let mut buf = [0u8; 128];
+        let mut st = CpuState::new();
+        st.x[8] = 80; st.x[0] = fd as u64; st.x[1] = buf.as_mut_ptr() as u64;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r, 0, "fstat ok");
+        // Guest layout: st_size @48 (i64), st_mode @16 (u32), st_ino @8 (u64).
+        let size = i64::from_le_bytes(buf[48..56].try_into().unwrap());
+        assert_eq!(size, b"some-payload-bytes".len() as i64, "fstat st_size");
+        let mode = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+        assert!(mode & 0o170000 != 0, "fstat st_mode has a file type (S_IFREG)");
+
+        // newfstatat (79) with AT_FDCWD.
+        let mut buf2 = [0u8; 128];
+        st.x[8] = 79; st.x[0] = libc::AT_FDCWD as u64;
+        st.x[1] = cpath.as_ptr() as u64; st.x[2] = buf2.as_mut_ptr() as u64; st.x[3] = 0;
+        let r = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(r, 0, "newfstatat ok");
+        let size2 = i64::from_le_bytes(buf2[48..56].try_into().unwrap());
+        assert_eq!(size2, b"some-payload-bytes".len() as i64, "newfstatat st_size");
+
+        // eventfd (19): createable and readable (may be ignored by some kernels
+        // without EFD; but any valid fd >= 0 proves the routing works).
+        st.x[8] = 19; st.x[0] = 0; st.x[1] = libc::EFD_CLOEXEC as u64 | 0 as u64;
+        let efd = guest_svc(&mut st as *mut CpuState);
+        let mut efd_writable = 0;
+        if efd > 0 {
+            // write 1 to it, read it back.
+            let one = 1u64;
+            unsafe { assert_eq!(libc::write(efd as i32, &one as *const u64 as *const libc::c_void, 8), 8); }
+            let mut val = 0u64;
+            unsafe { assert_eq!(libc::read(efd as i32, &mut val as *mut u64 as *mut libc::c_void, 8), 8); }
+            assert_eq!(val, 1);
+            efd_writable = efd as i32;
+        }
+
+        // epoll_create1 (20) + epoll_ctl (21): create an epoll fd and register an
+        // eventfd (the Android ALooper pattern). Regular files aren't pollable,
+        // so EPERM registering `fd` — use the eventfd (or a pipe) instead.
+        st.x[8] = 20; st.x[0] = 0; // EPOLL_CLOEXEC off
+        let ep = guest_svc(&mut st as *mut CpuState);
+        assert!(ep >= 0, "epoll_create1 fd");
+        if ep > 0 {
+            let mut ev = libc::epoll_event { events: libc::EPOLLIN as u32, u64: 42 };
+            if efd_writable == 0 {
+                // no eventfd: fall back to a pipe (pollable).
+                let mut p = [0i32; 2];
+                unsafe { assert_eq!(libc::pipe(p.as_mut_ptr()), 0); }
+                efd_writable = p[0];
+            }
+            st.x[8] = 21; st.x[0] = ep as u64; st.x[1] = libc::EPOLL_CTL_ADD as u64;
+            st.x[2] = efd_writable as u64; st.x[3] = (&mut ev as *mut libc::epoll_event) as u64;
+            assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "epoll_ctl ADD");
+            unsafe { libc::close(ep as i32); }
+        }
+        if efd > 0 { unsafe { libc::close(efd as i32); } }
+
+        // gettimeofday (169): fills a timeval (two i64 -> identical layout).
+        let mut tv = [0u8; 16];
+        st.x[8] = 169; st.x[0] = tv.as_mut_ptr() as u64; st.x[1] = 0;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "gettimeofday ok");
+        let secs = i64::from_le_bytes(tv[0..8].try_into().unwrap());
+        assert!(secs > 1_500_000_000, "gettimeofday tv_sec sane, got {secs}");
+
+        // uname (160): sysname == "Linux".
+        let mut un = [0u8; 65 * 6];
+        st.x[8] = 160; st.x[0] = un.as_mut_ptr() as u64;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "uname ok");
+        let sysname_len = un.iter().position(|&c| c == 0).unwrap_or(0);
+        assert_eq!(&un[..sysname_len], b"Linux", "uname sysname");
+
+        unsafe { libc::close(fd); }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
