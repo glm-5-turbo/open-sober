@@ -819,7 +819,7 @@ def gen_byte_reverse_perm():
     # reference accumulates the same bytes in normal order, so any lane/rev or
     # width mismatch shows as a real oracle diff (not ULP noise).
     n=random.choice([16,32,64])
-    which=random.choice(["rev32q","rev64q","rev16q","uzp","trn","rbit-u32"])
+    which=random.choice(["rev32q","rev64q","rev16q","uzp","trn","rbit-u32","zip","zipw","zip","zipw"])
     return f"""#include <arm_neon.h>
 long long entry(void){{
     volatile unsigned long long seedv = 555555ull;
@@ -833,7 +833,8 @@ long long entry(void){{
     else if ("{which}"=="rev64q") r = vrev64q_u8(a);
     else if ("{which}"=="rev16q") r = vrev16q_u8(a);
     else if ("{which}"=="uzp") {{ r = vaddq_u8(vuzp1q_u8(a,b), vuzp2q_u8(a,b)); }}
-    else if ("{which}"=="trn") {{ r = vaddq_u8(vtrn1q_u8(a,b), vtrn2q_u8(a,b)); }}
+    else if ("{which}"=="zip") {{ r = vaddq_u8(vzip1q_u8(a,b), vzip2q_u8(a,b)); }}
+    else if ("{which}"=="zipw") r = vreinterpretq_u8_u16(vaddq_u16(vzip1q_u16(vreinterpretq_u16_u8(a), vreinterpretq_u16_u8(b)), vzip2q_u16(vreinterpretq_u16_u8(a), vreinterpretq_u16_u8(b))));
     else {{ uint32x4_t t = vreinterpretq_u32_u8(a); r = vreinterpretq_u8_u32(vrev64q_u32(t)); }}
     uint8_t out[{n}]; vst1q_u8(out,r); vst1q_u8(out+16,a); vst1q_u8(out+32,b);
     unsigned long long acc = 0;
