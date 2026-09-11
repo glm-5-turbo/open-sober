@@ -6,9 +6,10 @@ started: 2026-09-11T01:20:42Z
 
 ## Cycle (Sep 11, 2026) — SIMD NEON widening/lane-op correctness sweep
 status: session-end (committed, tests green)
-last_agent_claim: three real silent miscompiles fixed in arm64jit's SIMD path,
+last_agent_claim: four real silent miscompiles fixed in arm64jit's SIMD path,
 each driven through the cross-gcc asm battery via `elfjit` and regression-locked.
-Commits 0f2d806 (lane ops), 80d27e5 (add-sub-long), d052723 (multiply-long).
+Commits 0f2d806 (lane ops), 80d27e5 (add-sub-long), d052723 (multiply-long),
+c6eb8df (shift-right + sshr/ssra sign-ext).
 
 ### What landed
 1. INS/SMOV/UMOV lane ops (0f2d806): `mov v0.s[i],w1` (GPR->vector insert) and
@@ -25,16 +26,20 @@ Commits 0f2d806 (lane ops), 80d27e5 (add-sub-long), d052723 (multiply-long).
    (bit22, missed .8h), unsigned (bit28, never true -> umull sign-extended),
    acc (bit15, plain smull accumulated), translate lanes (missed 8 lanes) and
    non-exact store width.
+4. ushr/sshr (c6eb8df): plain shift-right had no gate and was swallowed by the
+   VecMovi gate (wrote a wrong immediate instead of shifting); immutable the same
+   sign-extend bug in SimdShr/SimdShrAcc (sshr/ssra shifted negative elements
+   positive). New SimdShr (immh!=0 gate) + exact esize/shift from fls(immh).
 
 ### Verified
 - cargo build --workspace: ok
-- cargo test --workspace: 121 passed / 0 failed (arm64jit 87; +4 regressions this cycle)
+- cargo test --workspace: 122 passed / 0 failed (arm64jit 88; +5 regressions this cycle)
 - elfjit harness: lane_test.elf / smov.elf return -570 (was 0);
-  logical.elf / addl.elf / mull.elf run to completion (previously stopped at
-  uaddl / mis-executed); smull .2d {7,-3}*{5,-2}={35,6}; umull .8h 0xFE*2=508
-  (proves unsigned fix); prior battery (loop1 45, byvalue 44, iso_wrd 4321,
-  vtable 42, structs/fpfun/dispatch 42, bv2 300) all unchanged.
-- HEAD: d052723 (local dev branch)
+  logical/addl/mull/shifts/shiftimm all run to completion and return correct
+  values (shiftimm 3, was 0xfffffffc; sshl .2d 256); smull .2d {7,-3}*{5,-2}={35,6};
+  umull .8h 0xFE*2=508 (proves unsigned fix); prior battery (loop1 45, byvalue
+  44, iso_wrd 4321, vtable 42, structs/fpfun/dispatch 42, bv2 300) unchanged.
+- HEAD: c6eb8df (local dev branch)
 
 ### Blocked / not satisfiable on this host (HARD GATE still unmet)
 Roblox still does NOT boot on an actual capability host. Requires:

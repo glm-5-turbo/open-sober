@@ -2807,3 +2807,38 @@ decode+translate against objdump found:
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK are available.
+
+## Session (Sep 11, 2026) — SIMD shift-by-immediate: ushr/sshr (commit c6eb8df)
+
+Continuing the cross-gcc SIMD battery, `shiftimm.elf` returned 0xfffffffc for
+`ushr v0.2s,v1.2s,#8` (expected 3) — another silent miscompile.
+
+### Root cause
+Plain shift-right-immediate (marker bits[14:12]==0b000) had NO decode gate, so
+it fell into the broad VecMovi (vector-immediate) gate and wrote a wrong
+immediate pattern instead of shifting. (shl 0b101 and usra/ssra 0b001 already had
+gates; only the plain 0b000 form was missing.)
+
+### Fix
+1. `Inst::SimdShr` gate: SIMD-reg prefix {0f,2f,4f,6f} + bits[14:12]==0b000 +
+   bit23 clear + immh(bits[22:19]) != 0 (movi/mvni always have immh==0, so they
+   are NOT reclassified — verified movi.2s #5 still VecMovi). esize from fls(immh)
+   = 1<<(fls-1); shift = 2*esize_bits - (immh:immb) — verified ushr.2s #8
+   (immh4=7) and ushr.2d #17 (immh4=13). Placed before the VecMovi gate.
+2. Translate handles shift >= esize_bits (ushr->0, sshr->sign fill) since x86
+   `shr r64,imm` clamps count.
+3. Fixed the SAME latent sign-extension bug in SimdShr AND SimdShrAcc (ssra):
+   the esize-bit source was loaded zero-extended, so a NEGATIVE element under the
+   arithmetic shift came out positive (0xffffff00 >>> 8 = 0xffffff, not -1).
+
+### Verified
+ushr.2s {0x100,0x200}->{1,2}; sshr.2s -256>>8 == -1 (was 0xffffff); decode binds
+ushr unsigned / sshr signed / esize,shift; movi.2s stays VecMovi. shiftimm.elf
+-> 3 (was 0xfffffffc); shifts.elf (sshl .2d) -> 256; prior battery + addl/mull +
+lane ops unchanged. arm64jit 88/88, workspace 122/0.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep pressing the SIMD surface as the cross-gcc battery reveals it.
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK are available.
