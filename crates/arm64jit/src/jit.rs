@@ -717,6 +717,9 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         #[cfg(debug_assertions)]
         if std::env::var_os("JIT_DUMP").is_some() {
             let raw = block.dump();
+            if let Ok(f) = std::env::var("JIT_DUMP_FILE") {
+                let _ = std::fs::write(&f, &raw);
+            }
             eprintln!("-- block@0x{pc:x} host bytes ({}):", raw.len());
             for (i, byte) in raw.iter().enumerate() {
                 eprint!("{:02x} ", byte);
@@ -3422,3 +3425,10 @@ mod tests {
             assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
         }
         }
+
+mod diag_tmp {
+    #[allow(dead_code)]
+    fn probe() {
+        eprintln!("d0x0#1={:?}", crate::decode::decode(0x9e42fc00u32 as u64 as _));
+    }
+}

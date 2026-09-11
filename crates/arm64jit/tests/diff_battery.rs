@@ -213,6 +213,119 @@ long long entry(void){ volatile long long cnt=0; long long m[24]; for(int k=0;k<
 }
 
 #[test]
+fn diff_simd_widen_init_loop() {
+    // gcc -O2 vectorized int->i64 widening init loops (movi v.4s + sxtl +
+    // sxtl2 + stp q + b.ne back-edge). Regression gate for:
+    //  (a) the sxtl2/uxtl2 upper-half source fix (Q bit), and
+    //  (b) the ARM `nop` misdecode as scvtf-fixed (system family 0xd5... was
+    //      swallowed by the ScvtfFixed gate, converting x0 -> double into a
+    //      vector reg; intermittent / address-dependent).
+    // maskf: m[k] = k & 0xf ; mod_pow2: (k*7)%16 ; times7: k*7 (shl+sub).
+    assert_diff(
+        "maskf",
+        "-O2",
+        r#"
+long long entry(void){
+    long long m[24]; for(int k=0;k<24;k++) m[k] = k & 0xf;
+    return m[3] + m[17]*1000 + m[23]*1000000;
+}
+"#,
+    );
+    assert_diff(
+        "mod_pow2",
+        "-O2",
+        r#"
+long long entry(void){
+    long long m[24]; for(int k=0;k<24;k++) m[k] = (k*7) % 16;
+    long long acc = m[3] + m[17]*1000 + m[23]*1000000;
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "times7",
+        "-O2",
+        r#"
+long long entry(void){
+    long long m[24]; for(int k=0;k<24;k++) m[k] = k*7;
+    return m[3] + m[17]*1000 + m[23]*1000000;
+}
+"#,
+    );
+    // magic-division `%101`: smull/smull2/uzp2/sshr/mls widen path.
+    // KNOWN-OPEN deterministic bug — see diff_magic_div_known_broken.
+}
+
+#[test]
+#[ignore = "open deterministic magic-division SIMD bug (see body comment)"]
+fn diff_magic_div_known_broken() {
+    // The gcc magic-division `%101` reducer (smull / smull2 / uzp2 / sshr /
+    // mls) is wrong: it yields m[0] = -101 (k*7=0 should be remainder 0), i.e.
+    // the quotient is off-by-one because of the rounding step. Deterministic
+    // (was intermittent only before the nop/scvtf fix). TODO: root-cause the
+    // rounding in the duzzer chain.
+    assert_diff(
+        "magicdiv",
+        "-O2",
+        r#"
+long long entry(void){
+    long long m[24]; for(int k=0;k<24;k++) m[k] = (k*7) % 101;
+    long long acc = m[3] + m[17]*1000 + m[23]*1000000;
+    return acc;
+}
+"#,
+    );
+}
+
+#[test]
+#[ignore = "struct_arr aggregates the open magic-division %101 bug (see note)"]
+fn diff_struct_array_fields() {
+    // struct-field offsets + register-offset LDR/STR + 2D-array pointer
+    // indexing, plus a real vectorized %101 array — the combined case that
+    // regressed under the nop misdecode.
+    assert_diff(
+        "struct_arr",
+        "-O2",
+        r#"
+struct S { char c; long long a; short s; int i[4]; };
+static long long fx(struct S *p){ p->a = p->c * 1000000 + p->s; return p->a + p->i[2]; }
+long long entry(void){
+    struct S s; s.c = 5; s.s = -7; s.i[0]=1;s.i[1]=2;s.i[2]=3;s.i[3]=4;
+    long long m[24]; for(int k=0;k<24;k++) m[k] = (k*7) % 101;
+    long long acc = fx(&s);
+    acc += m[3]*1 + m[17]*1000 + m[23]*1000000;
+    long long t[3][3]; for(int i=0;i<3;i++)for(int j=0;j<3;j++) t[i][j]=i*10+j;
+    acc += t[2][2] + t[0][1]*100 + t[1][0]*10000;
+    return acc;
+}
+"#,
+    );
+}
+
+#[test]
+#[ignore = "-O3 vectorized reduction still wrong (addp/smulh magic rounding); see note"]
+fn diff_mixed_arith_accumulate() {
+    // The -O3 optimizer-vectorized i64 reduction (+addp/smulh/mls) — previously
+    // `#[ignore]`d as intermittent; the nop fix makes it deterministic.
+    assert_diff(
+        "mixed",
+        "-O3",
+        r#"
+long long entry(void){
+    long long a[32]; for(int i=0;i<32;i++) a[i] = (long long)i*i - 3*i + 7;
+    long long s = 0; for(int i=0;i<32;i++) s += a[i];
+    long long acc = s;                    // 31*32*63/6... computed
+    for(int i=0;i<16;i++) acc = acc*3 + a[i*2];
+    int sum = 0; for(int i=0;i<100;i++) sum += i%7;
+    acc += sum * 1000000;
+    acc %= 1000000007;
+    return acc;
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_bitfield_and_shift() {
     // UBFM/SBFM/BFM/BFC: sign-extract, lsl/lsr/asr by const and var, rotate
     // (EXTR/ROR), bitfield insert, byte/halfword movzx/sx.
@@ -273,44 +386,3 @@ long long entry(void){
 "#,
     );
 }
-
-#[test]
-#[ignore = "intermittent SIMD-loop block-liveness bug (see file-end NOTE)"]
-fn diff_mixed_arith_accumulate() {
-    // INTERMITTENT (see NOTE at file end): the -O3 vectorized i64 reduction
-    // loop hits the same open SIMD-loop block-liveness bug; excluded from the
-    // permanent gate until it is deterministic. Kept here (ignored path) only
-    // as a manual diagnostic seed.
-    assert_diff(
-        "mixed",
-        "-O3",
-        r#"
-long long entry(void){
-    long long a[32]; for(int i=0;i<32;i++) a[i] = (long long)i*i - 3*i + 7;
-    long long s = 0; for(int i=0;i<32;i++) s += a[i];
-    long long acc = s;                    // 31*32*63/6... computed
-    for(int i=0;i<16;i++) acc = acc*3 + a[i*2];
-    int sum = 0; for(int i=0;i<100;i++) sum += i%7;
-    acc += sum * 1000000;
-    acc %= 1000000007;
-    return acc;
-}
-"#,
-    );
-}
-
-// NOTE: an intermittent SIMD-loop miscompile is still open (see HANDOFF):
-// gcc -O2/-O3 vectorized *int→i64 widening init loops* (movi v.4s + sxtl/
-// sxtl2 + stp q + b.ne back-edge) under jit_run's single-block back-edge
-// compilation occasionally corrupt ONE lane of the snapshot vector
-// (address/stack-layout dependent). All the individual ISA ops are verified
-// correct by deterministic linear tests (arm64jit/src/jit.rs:
-// a) and_then_sxtl_sxtl2_upper_half
-// b) and_sxtl_accumulation_two_iterations
-// c) simd_stp_q_preindex_store_and_writeback
-// — the full body run linearly over 6 iterations stores m[k]=k&0xf exactly).
-// The corrupted-lane canaries (maskf/times7/mod_pow2/regidx/struct_arr/
-// mixed) are therefore NOT permanent differential gates until the block
-// liveness bug is fixed. The differential battery above keeps only the
-// rock-solid, deterministic passing families (int div/mod, FP round/conv,
-// bitfield/shift/ror, unsigned-vs-signed compares, loop termination count).

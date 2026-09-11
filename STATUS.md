@@ -615,17 +615,32 @@ cargo build clean; cargo test --workspace 202/0.
 
 HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
 ---
-## Session (Sep 11, 2026) — differential battery; sxtl2/uxtl2 upper-half FIX (workspace 210/0)
+## Session (Sep 11, 2026) — differential battery; sxtl2 + nop/scvtf-family fixes (workspace 212/0, 3 known-broken)
 New permanent differential battery `crates/arm64jit/tests/diff_battery.rs`: runs
 the SAME C through the loader→JIT path (cross-gcc aarch64) AND a native gcc
-oracle, requiring exact equality. Surfaced two more issues:
-1. [FIXED] `sxtl2`/`uxtl2` ignored Q (upper-half source): SimdXtl lacked
-   `upper`, so `sxtl2 v.2d, v.4s` re-read the low half. decode +=`insn>>30&1`;
-   translate +=`n_half=upper?8:0` (mirrors the declared saddw2 fix). Three new
-   deterministic linear regressions in `jit.rs` run the full maskf body 6×
-   and store m[k]=k&0xf exactly.
-2. [OPEN] intermittent SIMD-loop block-liveness bug under jit_run's single
-   back-edge block: gcc -O2/-O3 int→i64 widening init loops occasionally
-   corrupt ONE snapshot lane (address/stack dependent). All ops verified
-   correct linearly; the SIMD-loop diff canaries are excluded (mixed #[ignore]).
-cargo build clean; cargo test --workspace 210/0 (1 ignored).
+oracle, requiring exact equality (JIT == native == cross-gcc, all three agreed).
+Three verified fixes landed this session; the "intermittent SIMD-loop bug" from
+the prior cycle is ROOT-CAUSED and FIXED:
+
+1. [FIXED] `sxtl2`/`uxtl2` upper-half source: SimdXtl had no `upper` field, so
+   `sxtl2 v.2d, v.4s` re-read Vn's LOW 64 bits. decode +`upper=insn>>30&1`;
+   translate +`n_half=upper?8:0`. 3 deterministic linear regressions in jit.rs.
+2. [FIXED, root cause of the intermittent class] ARM `nop` (and the whole
+   system/hint 0xd5... family) misdecoded as **ScvtfFixed**: the scalar
+   int->fp fixed gate checked only bits[29:28]==01, which 0xd5xxxxxx also
+   satisfies — so EVERY guest `nop` ran as `scvtf d<n>, x0, #56`, converting
+   the caller's x0 (often SP) into a double and overwriting a vector register
+   with address-derived garbage. That is exactly the old intermittent,
+   layout-dependent corruption. Gate now requires top byte ∈ {0x1e,0x9e}.
+3. [FIXED] ScvtfFixed sf/to_double read bit30; real `scvtf d,x,#f` (0x9e...,
+   bit30=0) decodes as Sd/Wn single. Both are bit31 (0x9e=X/D, 0x1e=W/S).
+   Decode regression `nop_is_hint_not_scvtf_fixed` pins 1-3.
+
+Two DETERMINISTIC bugs remain (washed out as "intermittent" before):
+- magic-division `%N` reducer (smull/smull2/uzp2/sshr/mls): quotient off by
+  the divisor (m[0]=-101 for k*7%101 which should be 0).
+- -O3 addp/smulh reduction (diff_mixed): deterministic wrong.
+Battery gates the fixed/passing families (maskf, mod_pow2, times7, count6,
+div/mod, FP, bitfield, unsigned-compare); magicdiv/struct_arr/mixed are
+#[ignore]d as documented-known-broken.
+cargo build clean; cargo test --workspace 212/0 (3 ignored).

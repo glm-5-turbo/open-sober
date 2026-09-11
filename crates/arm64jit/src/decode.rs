@@ -2628,14 +2628,32 @@ pub fn decode(insn: u32) -> Inst {
             // ---- scalar fixed-point int->FP: ucvtf/scvtf Dd,Xn,#fbits / Sd,Wn,#fbits ----
             // Gate: byte1 (bits 16:23)&0xfe ∈ {0x42, 0x02}; byte0 ∈ {0x9e(D), 0x1e(S)}.
             // distinct from unscaled Scvtf (byte1 0x63/0x23) and fmov/fcvt.
+            // MUST ALSO require the top byte ∈ {0x1e, 0x9e}: the old gate checked
+            // only bits[29:28]==01, which the system/hint family (0xd5xxxxxx, e.g.
+            // ARM `nop` = 0xd503201f) also satisfies — so every guest `nop` was
+            // misdecoded as `scvtf d<n>, x0, #56`, converting the caller's x0
+            // (often the stack pointer) into a double and overwriting a vector
+            // register with address-derived garbage. gcc emits nops as padding
+            // everywhere (verified: real scvtf d0,x0,#1 = 0x9e42fc00, s0,w0,#1 =
+            // 0x1e02fc00, nop = 0xd503201f).
             {
+                let top_ok = (insn as u32 >> 24) == 0x1e || (insn as u32 >> 24) == 0x9e;
                 let m1 = ((insn >> 16) & 0xff) & 0xfe;
-                if (m1 == 0x42 || m1 == 0x02) && (insn & 0x3000_0000) == 0x1000_0000 {
+                if top_ok
+                    && (m1 == 0x42 || m1 == 0x02)
+                    && (insn & 0x3000_0000) == 0x1000_0000
+                {
                     return Inst::ScvtfFixed {
                         rd: (insn & 0x1f) as u8,
                         rn: ((insn >> 5) & 0x1f) as u8,
-                        to_double: (insn >> 30) & 1 == 1,
-                        sf: (insn >> 30) & 1 == 1,
+                        // For scalar int->fp fixed-point, the source width (W vs
+                        // X) and dest width (S vs D) are BOTH set by sf=bit31
+                        // (0x9e = X/D, 0x1e = W/S). The old gate read bit30,
+                        // mis-decoding every real `scvtf d,x,#fbits` (e.g.
+                        // d0,x0,#1 = 0x9e42fc00, bit30=0) as a single (Sd/Wn)
+                        // conversion.
+                        to_double: (insn >> 31) & 1 == 1,
+                        sf: (insn >> 31) & 1 == 1,
                         unsigned: (insn >> 16) & 1 == 1,
                         fbits: (64 - ((insn >> 10) & 0x3f)) as u8,
                     };
@@ -4827,5 +4845,36 @@ mod logical_imm_regressions {
         assert_eq!(decode_fmov_imm(0x3e, true), 0x403e_0000_0000_0000); // 30.0
         assert_eq!(decode_fmov_imm(0x00, true), 0x4000_0000_0000_0000); // 2.0
         assert_eq!(decode_fmov_imm(0x68, true), 0x3fe8_0000_0000_0000); // 0.75
+    }
+
+    #[test]
+    fn nop_is_hint_not_scvtf_fixed() {
+        // REGRESSION: the scalar fixed-point int->FP gate checked only
+        // bits[29:28]==01, which the ARM system/hint family (0xd5...) also
+        // satisfies. Every guest `nop` (0xd503201f, emitted as alignment padding
+        // by gcc everywhere) was misdecoded as `scvtf d31, x0, #56`, converting
+        // the caller's x0 (often SP) into a double and overwriting a vector
+        // register with address-derived garbage — an intermittent, layout-
+        // dependent miscompile in vectorized loops. The gate now also requires
+        // the top byte ∈ {0x1e, 0x9e} (real scvtf-fixed encodings).
+        assert!(
+            matches!(decode(0xd503201f), Inst::Hint),
+            "nop must decode as Hint, got {:?}",
+            decode(0xd503201f)
+        );
+        // esb / hint-family neighbours also stay Hint.
+        assert!(matches!(decode(0xd503221f), Inst::Hint));
+        // Real scvtf/scvtf-fixed encodings still decode correctly:
+        //   scvtf d0, x0, #1  = 0x9e42fc00 (X source / D dest) ; s0,w0,#1 = 0x1e02fc00
+        assert!(matches!(
+            decode(0x9e42fc00),
+            Inst::ScvtfFixed { rd: 0, rn: 0, to_double: true, sf: true, fbits: 1, .. }
+        ));
+        assert!(matches!(
+            decode(0x1e02fc00),
+            Inst::ScvtfFixed { rd: 0, rn: 0, to_double: false, sf: false, .. }
+        ));
+        // Scalable/vector scvtf (nearest) and the unscaled scalar Scvtf intact.
+        assert!(matches!(decode(0x1e620000), Inst::Scvtf { .. }), "{:?}", decode(0x1e620000));
     }
 }

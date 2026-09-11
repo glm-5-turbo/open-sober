@@ -3773,3 +3773,19 @@ the loop back-edge under `compile_image_bounded`.
 
 `cargo build --workspace` clean; `cargo test --workspace` **210/0** (1 ignored).
 HARD GATE unchanged: real Roblox boot / GPU / APK host (none on this VPS).
+### Addendum (same session): the "intermittent" bug above is ROOT-CAUSED and FIXED
+Root cause: ARM `nop` (0xd503201f) and the whole system/hint 0xd5... family
+were misdecoded as `ScvtfFixed` — the scalar int→fp FIXED-POINT gate checked
+only `(insn & 0x30000000)==0x10000000`, which 0xd5xxxxxx also satisfies. So every
+guest `nop` executed as `scvtf d<n>, x0, #56`: it CVTSI2SD'd the caller's x0
+(very often the stack pointer) and DIVSD'd it into a vector register. That is
+precisely the observed layout/address-dependent single-lane corruption. Fix:
+the ScvtfFixed gate now also requires top byte in {0x1e,0x9e}. Additionally,
+ScvtfFixed sf/to_double read bit30 but must read bit31 (0x9e=X/D vs 0x1e=W/S);
+real `scvtf d0,x0,#1`=0x9e42fc00 was being decoded as a single Sd/Wn convert.
+Decode regression `nop_is_hint_not_scvtf_fixed` pins all three.
+After these, EVERY int→i64 widening-init-loop differential canary passes
+deterministically (maskf=7001003, mod_pow2=1007005, times7=161119021, count6=24,
+verified vs qemu-aarch64). Two SEPARATE deterministic bugs remain (magic-div
+`%N` reducer: m[0]=-101 for k*7%101; and the -O3 addp/smulh reduction) and are
+#[ignore]d/documented. Workspace 212/0 (3 ignored).
