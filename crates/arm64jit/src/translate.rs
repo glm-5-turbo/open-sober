@@ -1631,6 +1631,10 @@ pub fn translate(
                             Inst::SimdAddl { rd, rn, rm, esrc, sign, sub, upper } => {
                                 // saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T: widen each esrc-byte
                                 // element of Vn and Vm (low or upper half) to 2*esrc and add/sub.
+                                // Each source element is read EXACTLY esrc bytes and widened to the
+                                // 64-bit reg (sign- or zero-extended), so a later lane's high bytes
+                                // never pollute the sum; the widened result is stored EXACTLY de bytes
+                                // (de = 2*esrc) so it never overruns into the neighbouring lane.
                                 let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                                 let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
                                 let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
@@ -1638,25 +1642,32 @@ pub fn translate(
                                 let de = 2 * se;
                                 let lanes: i32 = 8 / se; // 8-source bytes -> 4 + or (16/2...) 8/se
                                 let uh = if upper { 8 } else { 0 };
+                                let ld = |b: &mut crate::x86::CodeBuf, reg: u8, at: i32| match se {
+                                    4 => {
+                                        b.mov_load32(reg, RBX, at);
+                                        if sign { b.movsxd_r64_r32(reg, reg); }
+                                    }
+                                    2 => {
+                                        if sign { b.movsx_word_mem(reg, RBX, at); }
+                                        else { b.movzx_word_mem(reg, RBX, at); }
+                                    }
+                                    _ => {
+                                        if sign { b.movsx_byte_mem(reg, RBX, at); }
+                                        else { b.movzx_byte_mem(reg, RBX, at); }
+                                    }
+                                };
                                 for i in 0..lanes {
                                     let so_n = nb + uh + i * se;
                                     let so_m = mb + uh + i * se;
                                     let dd = db + i * de;
-                                    // widen Vn[2i] into RAX and Vm into RCX
-                                    match se {
-                                        4 => { buf.mov_load64(RAX, RBX, so_n); buf.mov_load64(RCX, RBX, so_m); }
-                                        2 => {
-                                            if sign { buf.movsx_word_mem(RAX, RBX, so_n); buf.movsx_word_mem(RCX, RBX, so_m); }
-                                            else { buf.mov_load32(RAX, RBX, so_n); buf.mov_load32(RCX, RBX, so_m); }
-                                        }
-                                        _ => {
-                                            if sign { buf.movsx_byte_mem(RAX, RBX, so_n); buf.movsx_byte_mem(RCX, RBX, so_m); }
-                                            else { buf.movzx_byte_mem(RAX, RBX, so_n); buf.movzx_byte_mem(RCX, RBX, so_m); }
-                                        }
-                                    }
+                                    ld(buf, RAX, so_n);
+                                    ld(buf, RCX, so_m);
                                     if sub { buf.sub_rr64(RAX, RCX); } else { buf.add_rr64(RAX, RCX); }
-                                    if de >= 4 { buf.mov_store64(RBX, dd, RAX); }
-                                    else { buf.mov_store32(RBX, dd, RAX); }
+                                    match de {
+                                        8 => buf.mov_store64(RBX, dd, RAX),
+                                        4 => buf.mov_store32(RBX, dd, RAX),
+                                        _ => buf.mov_store16(RBX, dd, RAX),
+                                    }
                                 }
                                 Ok(())
                             }

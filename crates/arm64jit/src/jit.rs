@@ -1309,6 +1309,52 @@ mod tests {
     }
 
     #[test]
+    fn simd_addl_widening_all_esrc_and_signs() {
+        // saddl/uaddl/subl/usubl widen esrc-byte elements to 2*esrc and add/sub.
+        // Regression: gate only matched esrc=2 (0x..60), so esrc=4 (.2s->.2d) and
+        // esrc=1 (.8b->.8h) fell through to Unsupported; and the translate read the
+        // wrong width (esrc=4 loaded 64 bits = both lanes; esrc=2-unsigned loaded 32;
+        // esrc=1 stored 32). Encodings objdump-verified.
+        // saddl v0.2d,v1.2s,v2.2s = 0x0ea20020 (signed): {7,-2}+{3,9} = {10,7}
+        let mut st = CpuState::new();
+        st.v[2] = ((-2i32 as u32 as u64) << 32) | 7; // v1.2s lane0=7 lane1=-2
+        st.v[4] = ((9u64) << 32) | 3; // v2.2s lane0=3 lane1=9
+        exec_bytes(&mut st, &[0x20, 0x00, 0xa2, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        assert_eq!(st.v[0], 10, "saddl .2d lane0 = 7+3");
+        assert_eq!(st.v[1], 7, "saddl .2d lane1 = -2+9");
+        // uaddl v0.4s,v1.4h,v2.4h = 0x2e620020 (unsigned, esrc=2, rm=v2): {1,2,3,4}+{10,20,30,40}
+        let mut st = CpuState::new();
+        st.v[2] = (4u64 << 48) | (3 << 32) | (2 << 16) | 1;
+        st.v[4] = (40u64 << 48) | (30 << 32) | (20 << 16) | 10;
+        exec_bytes(&mut st, &[0x20, 0x00, 0x62, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        assert_eq!(st.v[0], (22u64 << 32) | 11, "uaddl .4s lanes 0,1");
+        assert_eq!(st.v[1], (44u64 << 32) | 33, "uaddl .4s lanes 2,3");
+        // uaddl v0.8h,v1.8b,v2.8b = 0x2e220020 (unsigned, esrc=1): 1..8 + 1..8
+        let mut st = CpuState::new();
+        let mut a = 0u64;
+        for i in 0..8 { a |= (i as u64 + 1) << (8 * i); }
+        st.v[2] = a;
+        st.v[4] = a;
+        exec_bytes(&mut st, &[0x20, 0x00, 0x22, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        let mk = |l0: u64, l1: u64, l2: u64, l3: u64| (l3 << 48) | (l2 << 32) | (l1 << 16) | l0;
+        assert_eq!(st.v[0], mk(2, 4, 6, 8), "uaddl .8h lanes 0..3");
+        assert_eq!(st.v[1], mk(10, 12, 14, 16), "uaddl .8h lanes 4..7");
+        // decode: saddl .2d must be SimdAddl esrc=4 signed; uaddl .2s->.2d unsigned.
+        assert!(matches!(
+            crate::decode::decode(0x0ea20020),
+            Inst::SimdAddl { esrc: 4, sign: true, sub: false, upper: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x2ea20020),
+            Inst::SimdAddl { esrc: 4, sign: false, sub: false, upper: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x2e220020),
+            Inst::SimdAddl { esrc: 1, sign: false, sub: false, upper: false, .. }
+        ));
+    }
+
+    #[test]
     fn fcvt_vec_4s_lanes_are_32bit_and_independent() {
         // Regression: `fcvtzs v0.4s, v1.4s` treats each lane as a 32-bit float and
         // writes a 32-bit int per lane. It used movq_load (reads 8 bytes = lane +

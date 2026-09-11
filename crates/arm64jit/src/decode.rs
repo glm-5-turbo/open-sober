@@ -1476,15 +1476,23 @@ pub fn decode(insn: u32) -> Inst {
             }
             // ---- SIMD add/sub-long: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T -----
             // bit12==0 (long, vs addw wide which is bit12=1); byte2 low 0x00(add)/0x20(sub).
-            // esrc = 1<<bits[23:22]; sign=bit29==0; upper=bit30.
+            // esrc (source element size in bytes) = 1<<bits[23:22] (1/2/4); sign=bit29==0;
+            // upper=bit30. The residue covers all 24 esrc×signedness×upper×add|sub forms
+            // (0x..20 esrc=1, 0x..60 esrc=2, 0x..a0 esrc=4); previously only the 8 esrc=2
+            // forms were gated, so uaddl/saddl .2d (esrc=4) and .8h (esrc=1) fell through to
+            // Unsupported. Disjoint from smull/umull (0x..c000), smlal (0x..8000), and
+            // ssubw wide (0x..3000) — verified numerically + objdump.
             let al = insn & 0xffe0_fc00;
             let alres = [
-                0x0e60_0000u32,0x0e60_2000u32,0x2e60_0000,0x2e60_2000,
+                0x0e20_0000u32,0x0e20_2000u32,0x2e20_0000,0x2e20_2000,
+                0x0e60_0000,0x0e60_2000,0x2e60_0000,0x2e60_2000,
+                0x0ea0_0000,0x0ea0_2000,0x2ea0_0000,0x2ea0_2000,
+                0x4e20_0000,0x4e20_2000,0x6e20_0000,0x6e20_2000,
                 0x4e60_0000,0x4e60_2000,0x6e60_0000,0x6e60_2000,
+                0x4ea0_0000,0x4ea0_2000,0x6ea0_0000,0x6ea0_2000,
             ];
             if alres.contains(&al) {
-                            let b1 = (insn >> 16) & 0xff;
-                            let esrc: u8 = if b1 & 0x80 != 0 { 4 } else if b1 & 0x20 != 0 { 2 } else { 1 };
+                            let esrc: u8 = 1u8 << ((insn >> 22) & 3); // 1/2/4-byte source elements
                             return Inst::SimdAddl {
                                 rd: (insn & 0x1f) as u8,
                                 rn: ((insn >> 5) & 0x1f) as u8,
