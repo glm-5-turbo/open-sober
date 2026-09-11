@@ -880,8 +880,13 @@ of this session's boot-path syscall expansion:
    Verified the full sxtl2+saddw+saddw2+addp reduction chain in isolation (red6,
    10026 == oracle).
 
-Also committed: guest_svc boot-path syscall expansion (22 AArch64 numbers) + 2 new
-fuzz generators. Workspace 298/0, build clean, tree clean.
+Also (commit 54a70b1) closed the SAME in-place widening-alias class in the three
+remaining SIMD widening ops: SimdMull (smull/umull/smlal/umlal), VecFcvtl, VecFcvtn2
+(covers the `fmov s,w`/ins/zip staging + saddw reduction gcc emits) — all snapshot the
+aliasing source to permscratch. New regression widen_in_place_smull_fcvtl_snapshot_source.
+Also committed: guest_svc boot-path syscall expansion (22 AArch64 numbers) + 2 new fuzz
+generators. Confirmation sweep 300/304 green across 19 fresh seeds (the 4 fails are all
+the two-loop bug below, no regressions). Workspace 299/0, build clean, tree clean.
 
 OPEN, documented: a real bug still reproducibly failing — **two fused accumulation
 loops (e.g. gen_signed_div's `s += a[i]/D; s += a[i]%D` pos loop THEN the negative-
