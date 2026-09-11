@@ -525,7 +525,25 @@ def gen_fixed_pt_fcvt():
     return s;
 }}
 """
-gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt]
+def gen_pairwise_reduce():
+    # NEON across-lane / pairwise reductions: sum-v-across (addv/saddlv/uaddlv),
+    # horizontal add-pair (addp), and vector sum accumulators. These emit the
+    # `addv Bd,Vn.4s` / `uaddlv`/`saddlv` family the ledger flagged as lightly
+    # covered. Integer lanes keep it exact.
+    n=random.choice([8,12,16,24])
+    ty=random.choice(["int","unsigned int","short","unsigned short","long long"])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 654321ull;
+    unsigned long long x = seedv;
+    {ty} a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=({ty})((x>>{random.choice([8,16,24,32,40])})^(x&0xffff)); }}
+    long long s=0;
+    for(int i=0;i<{n};i++) s += (long long)a[i];
+    for(int i=0;i<{n};i+=2) s ^= (long long)a[i] + a[i+1];
+    return s;
+}}
+"""
+gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt, gen_pairwise_reduce]
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
