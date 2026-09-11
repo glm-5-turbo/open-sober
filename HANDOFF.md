@@ -3906,3 +3906,61 @@ dv_arith, fv4, fv4_fmul_only.
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — 8 silent miscompiles + the long-open nondeterministic SIMD-loop bug fixed (workspace 233/0, 0 ignored)
+
+Three commits on `dev` (all `cargo build --workspace` + `cargo test --workspace` green):
+`6ffd490` (32-bit add/sub flags + ccmp/ccmn), `e1ec841` (4 FP/control-flow bugs),
+`7e2689a` (**ADDV-to-scalar stale bytes — the root-cause of the intermittent
+SIMD-loop corruption**). Opened at 230/0; no failing test (the android idempotent
+stays green). Delivered through the differential-probe harness — cross-compile the
+same C at -O2/-O3 through `elfjit`, compare against a native x86-64 oracle. HEAD of
+these runs caught 8 real bugs:
+
+1. **32-bit ADDS/SUBS flag semantics** — `!sf` flagged adds/subtracts used 64-bit
+   x86 add/sub after zero-extending, so `store_nzcv` saw SF from bit63, not bit31.
+   `adds w1,w1,w2` with 0x7fffffff+1 gave N=0 (wrong), so `int s=INT_MAX+1; s<0`
+   returned the wrong branch. Added 32-bit emitters (no REX.W) and routed `!sf`
+   paths through them.
+2. **ccmp/ccmn missing** (conditional compare) — swallowed by the logical set-flags
+   decoder (shares 0xFA/0x7A/0xBA/0x3A top bytes), corrupting NZCV so gcc's
+   `while (a<N && b!=M)` guards spun forever. Added `Inst::CcMp` (residue class
+   distinct from ANDS/BICS/SBCS; rn=[9:5] rm/imm=[20:16] cond=[15:12] nzcv=[3:0]);
+   translate mirrors Fccmp (load_nzcv -> jcc -> nzcv|compare).
+3. **CSel rn/rm==31 read the SP slot** instead of XZR — `cset/cinc/csneg`
+   (`a==0.0?1:0`) returned sp/sp+1. CSEL is data-processing: reg 31 is always XZR.
+4. **Scalar `scvtf/ucvtf Dd,Dn` `sng` discriminator inverted** (bit22=1 is DOUBLE,
+   code set sng on it) — a double scvtf truncated through the i32->f32 path.
+5. **`fcmp Dn,#0.0`** decoded as a compare against vector reg d0 (garbage) — bit3
+   (0x8) is the #0.0 discriminator, now `Fcmp.against_zero` loads literal +0.0.
+6. **FP NaN compare flags** — `store_nzcv_fp` stored C as the true ARM value and
+   Z=ZF (set for unordered too): `vnan==vnan` came out true and `nn<=0` (cset ls)
+   wrong. Now Z = ZF&&!PF (excl. unordered) and C is stored in the borrow sense
+   (CF&&!PF) that x86_cc_for_cond's ls/hi/lo/hs expect => all NaN comparisons false.
+7. **ADDV-to-scalar left stale bytes** — `addv Bd,Vn.8b` stored only 1 byte, so the
+   destination vector reg's upper bytes kept the `cnt` lane counts; gcc's
+   `fmov x2,d31` then read `[sum, pc1, pc2, ...]` as the integer popcount. This is
+   the exact **root cause of the documented intermittent SIMD-loop block-liveness
+   corruption** (one element garbage, nondeterministic, stack-layout dependent)
+   that the old maskf/times7/mod_pow2/regidx/mixed canaries hit. Now the ADDV
+   store zeros the upper bytes (64-bit store of a size-masked sum). `simdu3`
+   (popcount loop) returns exact 591 deterministically, 8/8 runs at -O2/-O3.
+
+New permanent canaries: `diff_ccmp_cond_compare`, `diff_w32_overflow_compare`,
+`diff_fp_compare_zero_and_cset`, `diff_fp_nan_compare`, `diff_addv_popcount_accumulate`
+(all differential vs native oracle). Decode regressions: `ccmp_ccmn_decode`,
+`fcmp #0.0 / d0 / fcmpe #0.0` additions.
+
+**Verification:** `cargo test --workspace` **233/0**, **0 ignored** (was 227/0);
+the 28-program differential probe suite (FP math/compare/cvt, NaN, signed-zero,
+ccmp chains, 32-bit overflow compares, NEON/16-bit/unsigned SIMD, popcount,
+branch tables, recursion) matches the native oracle at both -O2 and -O3.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery driving ISA/correctness breadth (SIMD permute/
+   wide paths, more FP reduction/reassociation shapes, struct-by-value vectors).
+2. `addv s0,v1.4s` 32-bit scalar-store path is now covered; check `saddv`/`uaddv`
+   (signed accumulator) if a case surfaces one.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).
