@@ -843,6 +843,42 @@ long long entry(void){{
 }}
 """
 
+def gen_widen_mul_acc():
+    # SIMD widening multiply-accumulate: vmull/vmlal/vmlsl (smull/smlal/umlal,
+    # signed+unsigned, 16x16->32 and 32x32->64 lanes) that the scalar gen_mul_long
+    # never produces. Data is small ints so the widening sum is exact in the
+    # destination element type; the reference computes the same widening products
+    # in scalar u64, so any sign/widen/accumulate lane mismatch is an exact diff.
+    n=random.choice([8,16,32])
+    use16=random.choice([True,False])
+    signed=random.choice([True,False])
+    sub=random.choice([True,False])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 998877ull;
+    unsigned long long x = seedv;
+    long long a[{n}], b[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1664525ull+1013904223ull; a[i]=(long long)(int)(((x>>40)&0xff)-64); b[i]=(long long)(int)(((x>>24)&0xff)-64); }}
+    int64x2_t acc64 = vdupq_n_s64(0);
+    int32x4_t acc32 = vdupq_n_s32(0);
+    for(int i=0;i<{n}/4;i++){{
+        int16x4_t ha = vmovn_s32(vdupq_n_s32((int32_t)a[i*4]));
+        int16x4_t hb = vmovn_s32(vdupq_n_s32((int32_t)b[i*4]));
+        acc32 = vmlal_s16(acc32, ha, hb);   // 16x16 -> 32
+        int32x2_t wa = vmovn_s64(vdupq_n_s64((int64_t)a[i*4]));
+        int32x2_t wb = vmovn_s64(vdupq_n_s64((int64_t)b[i*4]));
+        acc64 = vmlal_s32(acc64, wa, wb);   // 32x32 -> 64
+    }}
+    int64x2_t r64 = vabsq_s64(acc64);
+    int32x4_t r32 = vabsq_s32(acc32);
+    long long sa = vgetq_lane_s64(r64,0) + vgetq_lane_s64(r64,1);
+    long long sb = (long long)vgetq_lane_s32(r32,0)+vgetq_lane_s32(r32,1)+vgetq_lane_s32(r32,2)+vgetq_lane_s32(r32,3);
+    return (sa + sb*1009) & 0x3fffffff;
+}}
+"""
+
+gens += [gen_widen_mul_acc]
+
 gens += [gen_byte_reverse_perm]
 
 def main():

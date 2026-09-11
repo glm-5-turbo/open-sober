@@ -668,6 +668,17 @@ pub enum Inst {
         // Gate (insn & 0x0f00_c000): 0x0e00_c000 = mull, 0x0e00_8000 = mlal (accumulate).
         // unsigned=bit28; res_esize 4(.4s from .4h) or 8(.2d from .2s) by bit22; q=bit30.
         SimdMull { rd: u8, rn: u8, rm: u8, res_esize: u8, unsigned: bool, q: bool, acc: bool },
+    // ---- SIMD widening multiply BY ELEMENT: smull/umull/smlal/umlal/smlsl/umlsl
+    //      Vd.T, Vn.T, Vm.Tsb[idx] (index selects ONE element of the m operand
+    //      broadcast to every lane) ---- Q=b30, U(uns)=b29, size=b[23:22]
+    //      (1=16-bit src .4s res, 2=32-bit src .2d res), indexed operand reg
+    //      Vm = b[19:16] (4 bits, v0-v15), index = L(b21):H(b20) for 16-bit src
+    //      or just L(b21) for 32-bit src, op b[15:12] in {2=mlal acc,6=mlsl acc
+    //      sub,0xa=mull}. bit13 (0x2000) SET is the discriminator vs FP fmla-el
+    //      (op 1/5, bit13 clear) and non-widening int mla-el (op 0). Session 44:
+    //      gcc's vector*const-scalar scaling emits these and they previously
+    //      mis-decoded as FmlaEl/VecMovi (silent wrong values, fuzzer-caught).
+    SimdMullEl { rd: u8, rn: u8, rm: u8, index: u8, res_esize: u8, unsigned: bool, q: bool, acc: bool, sub: bool },
     // ---- SIMD unsigned compare-higher: cmhi Vd.4S, Vn.4S, Vm.4S ----
     // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
     // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
@@ -2349,6 +2360,48 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // The 8-bit immediate is reassembled from bits[9:5] (low) and bits[18:16]
     // (high): imm8 = abcd | (defg? === bits[18:16] << 5). Ebconfirmed against
     // 6 grounds-truth encodings incl. the actual boot blocker 0x6f00e400.
+    // ---- INTEGER widening multiply by element: smull/umull/smlal/umlal/smlsl/
+    //      umlsl Vd.T, Vn.T, Vm.Tsb[idx] ---- GCC emits these for vector *
+    //      const-scalar scaling (e.g. vmlal_lane_s16/vmlal_lane_s32 builtins).
+    //      Encoding: prefix b[28:24]=01111, Q=b30, U(uns)=b29, size=b[23:22]
+    //      (1 = 16-bit src -> .4s result, 2 = 32-bit src -> .2d), indexed
+    //      operand reg Vm = b[19:16] (4 bits: v0-v15), index = L(b21):H(b20)
+    //      for 16-bit src, or just L(b21) for 32-bit src, op b[15:12] in
+    //      {2=mlal acc, 6=mlsl acc-sub, 0xa=mull}. The bit13 (0x2000) SET is
+    //      the discriminator vs FP fmla-el (op 1/5 -> bit13 CLEAR) and
+    //      non-widening int mla-el (op 0 -> bit13 clear). MUST precede the FP
+    //      fmla-el gate below (which also matches the .2d forms via bit23 set).
+    //      Session 44: gcc vmlal_lane/vmull_lane builtins previously decoded
+    //      as FmlaEl/VecMovi (silent wrong value). Verified gates/fields
+    //      against 25 assembler ground-truth encodings.
+    if (insn & 0x1f00_0000) == 0x0f00_0000 && (insn & 0x0000_2000) != 0 {
+        let size = (insn >> 22) & 3; // b[23:22]: 1 = 16-bit src -> .4s res(4), 2 = 32-bit src -> .2d res(8)
+        // only size 1 (.4s) and 2 (.2d) are the widening forms
+        if size == 1 || size == 2 {
+            let res_esize: u8 = 2u8 << size;
+            let rm = ((insn >> 16) & 0xf) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            let index = if res_esize == 4 {
+                // 16-bit source: index = L(b21):H(b20) (2 bits)
+                ((((insn >> 21) & 1) << 1) | ((insn >> 20) & 1)) as u8
+            } else {
+                // 32-bit source: 1-bit index = L(b21)
+                ((insn >> 21) & 1) as u8
+            };
+            let op = (insn >> 12) & 0xf;
+            let acc = op != 0xa;
+            let sub = op == 0x6;
+            return Inst::SimdMullEl {
+                rd, rn, rm, index,
+                res_esize,
+                unsigned: ((insn >> 29) & 1) == 1,
+                q: (insn >> 30) & 1 == 1,
+                acc,
+                sub,
+            };
+        }
+    }
     // ---- FP multiply-accumulate by-element: fmla/fmls Vd.T, Vn, Vm.T[idx] ----
     // MUST precede the broad MOVI/mvni gate below (which matches all 0x0f/0x4f
     // prefixes and would otherwise swallow these). Indexed form: byte0 nibble
@@ -5817,6 +5870,63 @@ mod logical_imm_regressions {
             Inst::SimdRev { granule, q: true, .. } => assert_eq!(granule, 4),
             other => panic!("rev32 v0.16b -> {other:?}"),
         }
+    }
+
+    #[test]
+    fn widening_mul_by_element_decodes_not_fptsel_or_movi() {
+        // Regression (Session 44, fuzzer-caught): the integer LONG-by-element
+        // multiply (smull/umull/smlal/umlal/smlsl/umlsl with an indexed m
+        // element) previously decoded as FmlaEl (the .2d forms, sharing bit23
+        // set) or VecMovi (the .4s forms) — both SILENT wrong values. GCC emits
+        // these for vector*const-scalar scaling (vmlal_lane_s16/32 builtins).
+        // Ground truth from aarch64-gcc (assembler objdump). bit13 (0x2000) set
+        // is the discriminator vs FP fmla-el (bit13 clear).
+        let cases: &[(u32, u8, u8, u8, u8, u8, bool, bool, bool, bool)] = &[
+            // (word, rd, rn, rm, index, res_esize, unsigned, q, acc, sub)
+            (0x0f40a000, 0, 0, 0, 0, 4, false, false, false, false), // smull .4s h[0]
+            (0x0f50a000, 0, 0, 0, 1, 4, false, false, false, false), // smull .4s h[1]
+            (0x0f70a000, 0, 0, 0, 3, 4, false, false, false, false), // smull .4s h[3]
+            (0x2f60a000, 0, 0, 0, 2, 4, true,  false, false, false), // umull .4s h[2]
+            (0x0f80a000, 0, 0, 0, 0, 8, false, false, false, false), // smull .2d s[0]
+            (0x0fa0a000, 0, 0, 0, 1, 8, false, false, false, false), // smull .2d s[1]
+            (0x2f80a000, 0, 0, 0, 0, 8, true,  false, false, false), // umull .2d s[0]
+            (0x0f712020, 0, 1, 1, 3, 4, false, false, true,  false), // smlal .4s h[3]
+            (0x0fa12020, 0, 1, 1, 1, 8, false, false, true,  false), // smlal .2d s[1]
+            (0x0f816020, 0, 1, 1, 0, 8, false, false, true,  true),  // smlsl .2d s[0]
+            (0x2f512020, 0, 1, 1, 1, 4, true,  false, true,  false), // umlal .4s h[1]
+            (0x2f816020, 0, 1, 1, 0, 8, true,  false, true,  true),  // umlsl .2d s[0]
+            (0x4f51a000, 0, 0, 1, 1, 4, false, true,  false, false), // smull2 .4s h[1] (q upper)
+            (0x4f81a000, 0, 0, 1, 0, 8, false, true,  false, false), // smull2 .2d s[0]
+            (0x6f71a000, 0, 0, 1, 3, 4, true,  true,  false, false), // umull2 .4s h[3]
+            (0x6fa1a000, 0, 0, 1, 1, 8, true,  true,  false, false), // umull2 .2d s[1]
+            // the failing real-binary words:
+            (0x0f44a3de, 30, 30, 4, 0, 4, false, false, false, false), // smull v30,v30,v4.h[0]
+            (0x0f4723be, 30, 29, 7, 0, 4, false, false, true,  false), // smlal v30,v29,v7.h[0]
+            (0x0f84a3ff, 31, 31, 4, 0, 8, false, false, false, false), // smull v31,v31,v4.s[0]
+            (0x0f87237f, 31, 27, 7, 0, 8, false, false, true,  false), // smlal v31,v27,v7.s[0]
+            (0x0f8523bf, 31, 29, 5, 0, 8, false, false, true,  false), // smlal v31,v29,v5.s[0]
+        ];
+        for &(word, rd, rn, rm, index, res_esize, u, q, acc, sub) in cases {
+            match decode(word) {
+                Inst::SimdMullEl { rd: grd, rn: grn, rm: grm, index: gix, res_esize: gre, unsigned: gu, q: gq, acc: ga, sub: gs } => {
+                    assert_eq!(grd, rd, "{word:#x} rd");
+                    assert_eq!(grn, rn, "{word:#x} rn");
+                    assert_eq!(grm, rm, "{word:#x} rm");
+                    assert_eq!(gix, index, "{word:#x} index");
+                    assert_eq!(gre, res_esize, "{word:#x} res_esize");
+                    assert_eq!(gu, u, "{word:#x} unsigned");
+                    assert_eq!(gq, q, "{word:#x} q");
+                    assert_eq!(ga, acc, "{word:#x} acc");
+                    assert_eq!(gs, sub, "{word:#x} sub");
+                }
+                other => panic!("{word:#x} -> {other:?} (expected SimdMullEl)"),
+            }
+        }
+        // FP fmla-el and non-widening int mla-el must NOT be captured (bit13 clear).
+        assert!(matches!(decode(0x4fa11000), Inst::FmlaEl { .. }), "FP fmla-el must stay");
+        assert!(matches!(decode(0x2f820020), Inst::SimdMlaEl { .. }), "int MLA-el must stay");
+        // pure movi must stay VecMovi, not become a widening mul.
+        assert!(matches!(decode(0x6f00e400), Inst::VecMovi { .. }), "movi v0.2d,#0 must stay");
     }
 
     #[test]

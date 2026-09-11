@@ -3232,7 +3232,65 @@ pub fn translate(
                                                                                                         }
                                                                                                         Ok(())
                                                                                                     }
-                                                                                                                    Inst::SimdCmhi { rd, rn, rm, lanes } => {
+                                                                                                                    Inst::SimdMullEl { rd, rn, rm, index, res_esize, unsigned, q, acc, sub } => {
+                                        // Integer widening multiply by element:
+                                        // Vd[i] +=/|= Vn[i] * Vm[index], where the
+                                        // m operand is ONE element (selected by
+                                        // `index`) broadcast to every lane. Same
+                                        // widen/mul/accumulate per lane as
+                                        // SimdMull, but AM: m reads the single
+                                        // indexed element from slot(rm) instead
+                                        // of lane i. Session 44 (fuzzer-caught).
+                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                        let src_es: i32 = (res_esize as i32) / 2;
+                                        let lanes = (16 / res_esize as i32) as usize;
+                                        let uphalf = if q { 8 } else { 0 };
+                                        // m element base (guest indexed by esize bytes)
+                                        let mbase = slot(rm) + (index as i32) * src_es;
+                                        let rn_base = if rn == rd { permute_source(buf, rd, rn, false) } else { slot(rn) };
+                                        for i in 0..lanes {
+                                            let soff = uphalf + (i as i32) * src_es;
+                                            match src_es {
+                                                4 => { buf.mov_load32(RAX, RBX, rn_base+soff); buf.mov_load32(RCX, RBX, mbase); }
+                                                2 => { buf.movzx_word_mem(RAX, RBX, rn_base+soff); buf.movzx_word_mem(RCX, RBX, mbase); }
+                                                _ => { buf.movzx_byte_mem(RAX, RBX, rn_base+soff); buf.movzx_byte_mem(RCX, RBX, mbase); }
+                                            }
+                                            if !unsigned {
+                                                let se = 64 - 8 * (res_esize as u16 / 2);
+                                                buf.shl_ri8(RAX, (se % 64) as u8);
+                                                buf.sar_ri8(RAX, (se % 64) as u8);
+                                                buf.shl_ri8(RCX, (se % 64) as u8);
+                                                buf.sar_ri8(RCX, (se % 64) as u8);
+                                            }
+                                            buf.imul_rr64(RAX, RCX);
+                                            let doff = (i as i32) * (res_esize as i32);
+                                            if acc {
+                                                match res_esize {
+                                                    8 => buf.mov_load64(RDX, RBX, slot(rd)+doff),
+                                                    4 => buf.mov_load32(RDX, RBX, slot(rd)+doff),
+                                                    _ => buf.movzx_word_mem(RDX, RBX, slot(rd)+doff),
+                                                }
+                                                if sub {
+                                                    buf.sub_rr64(RDX, RAX);
+                                                } else {
+                                                    buf.add_rr64(RDX, RAX);
+                                                }
+                                                match res_esize {
+                                                    8 => buf.mov_store64(RBX, slot(rd)+doff, RDX),
+                                                    4 => buf.mov_store32(RBX, slot(rd)+doff, RDX),
+                                                    _ => buf.mov_store16(RBX, slot(rd)+doff, RDX),
+                                                }
+                                            } else {
+                                                match res_esize {
+                                                    8 => buf.mov_store64(RBX, slot(rd)+doff, RAX),
+                                                    4 => buf.mov_store32(RBX, slot(rd)+doff, RAX),
+                                                    _ => buf.mov_store16(RBX, slot(rd)+doff, RAX),
+                                                }
+                                            }
+                                        }
+                                        Ok(())
+                                    }
+                                    Inst::SimdCmhi { rd, rn, rm, lanes } => {
                                                                                                                         // cmhi Vd.4S/Vd.2S, Vn., Vm.: per 32-bit lane, all-ones
                                                                                                                         // if Vn[i] > Vm[i] (unsigned), else 0. Compare unsigned
                                                                                                                         // then cmov (cmova) an all-ones mask vs 0.
