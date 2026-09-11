@@ -488,6 +488,12 @@ fn main() {
         // process alive long enough for a real main loop to iterate/block).
         for _ in 0..4000 {
             std::thread::sleep(std::time::Duration::from_millis(10));
+            if std::env::var_os("JIT_STATS").is_some() {
+                let (c, h) = arm64jit::jit::block_cache_stats();
+                // Compiles growing = StartApp is advancing through new init code;
+                // flat compiles + rising hits = it is recycling cached hot blocks.
+                eprintln!("[elfjit] stats: compiles={c} hits={h}");
+            }
             if std::env::var_os("ELFJIT_EXIT_WHEN_IDLE").is_some()
                 && arm64jit::jit::active_guest_threads() <= baseline
             {
@@ -495,5 +501,9 @@ fn main() {
                 break;
             }
         }
+    }
+    let (compiles, hits) = arm64jit::jit::block_cache_stats();
+    if compiles > 0 || hits > 0 {
+        eprintln!("[elfjit] block-cache: {compiles} compiles / {hits} hits");
     }
 }

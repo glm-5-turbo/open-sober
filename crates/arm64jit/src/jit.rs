@@ -8,6 +8,7 @@
 // The prologue loads it into RBX (the base the translator reads/writes).
 
 use std::ptr;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -704,7 +705,12 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         124 => unsafe { libc::sched_yield() as c_long },
         // --- time ---
         113 => unsafe { libc::clock_gettime(a[0] as libc::clockid_t, a[1] as *mut libc::timespec) as c_long },
-        101 => unsafe { libc::nanosleep(a[1] as *const libc::timespec, a[2] as *mut libc::timespec) as c_long },
+        // nanosleep(const struct timespec *rqtp, struct timespec *rmtp): the
+        // aarch64 syscall passes rqtp in x0 and rmtp in x1. The guest puts the
+        // timespec in x0, so it must be read from `a[0]`, NOT `a[1]` — reading
+        // x1 handed a NULL rqtp, making every guest nanosleep EFAULT (instant
+        // return, no sleep), which turned sleep-wait loops into busy-spins.
+        101 => unsafe { libc::nanosleep(a[0] as *const libc::timespec, a[1] as *mut libc::timespec) as c_long },
         // --- process / control ---
         167 => unsafe { libc::prctl(a[0] as c_int, a[1], a[2], a[3], a[4]) as c_long },
         // --- process / user identity ---
@@ -1548,9 +1554,74 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
     Ok(r)
 }
 
+/// Caching translation-block store for the PC-driven dispatcher.
+///
+/// The dispatcher re-enters at every `br`/`blr`/`ret` boundary, so without a
+/// code cache each re-entry recompiles the same guest region from scratch —
+/// the dominant cost when a boot hot-spots on a small accessor (e.g. Roblox's
+/// per-thread TLS-block getter is translated once per `pthread_getspecific`).
+/// A block's emitted code embeds the guest `CpuState` pointer in its prologue,
+/// so the cache is keyed by `(guest_pc, state_addr)`; a guest thread reuses its
+/// own CpuState for its whole `jit_run`, so the hot path hits. Cached `JitBlock`s
+/// are intentionally leaked (never mangled) — a process-lifetime code cache for
+/// an immutable guest image (the JIT only reads/maps guest code; code patches
+/// like the mempool/lsm-map thunks are applied once at load, before execution).
+// Module-level counters for the translation-block cache (see `cached_block`).
+static BLOCK_CACHE_COMPILES: AtomicU64 = AtomicU64::new(0);
+static BLOCK_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static BLOCK_CACHE: OnceLock<Mutex<HashMap<(usize, u64, usize), &'static JitBlock>>> =
+    OnceLock::new();
+
+/// Cumulative translation-block cache activity: `(compiles, hits)`.
+/// A well-behaved hot loop hits far more than it compiles; a cache that is
+/// working shows `hits >> compiles` after a run the hot-spots on a small loop.
+pub fn block_cache_stats() -> (u64, u64) {
+    (
+        BLOCK_CACHE_COMPILES.load(Ordering::Relaxed),
+        BLOCK_CACHE_HITS.load(Ordering::Relaxed),
+    )
+}
+
+/// Drop all cached blocks (their executable mappings are leaked, so evacuating
+/// the map never dangles an in-flight block). Called at each *top-level*
+/// `jit_run` so the cache never survives a guest-image remap: the differential
+/// test suite (and any reload) maps distinct ELF images at the same fixed
+/// `JIT_BASE`, so a stale block compiled from a *previous* image's bytes at the
+/// same pc would be executed against the new image if the cache survived.
+fn clear_block_cache() {
+    if let Some(c) = BLOCK_CACHE.get() {
+        c.lock().unwrap().clear();
+    }
+}
+
+fn cached_block(
+    image: &[u8],
+    base: u64,
+    pc: u64,
+    state: *mut CpuState,
+    budget: usize,
+) -> Result<&'static JitBlock, String> {
+    let cache = BLOCK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Key on the image identity too: the differential-test suite loads many
+    // different tiny guest images at the same base with stack-local CpuStates
+    // that reuse the same addresses, so (pc, state) alone would collide across
+    // unrelated images. In the real boot the ELF image is one process-lifetime
+    // mapping, so its pointer is constant and this degenerates to (pc, state).
+    let key = (image.as_ptr() as usize, pc, state as usize);
+    // Fast path: a block already translated for this (pc, state).
+    if let Some(b) = cache.lock().unwrap().get(&key) {
+        BLOCK_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(b);
+    }
+    let blk = compile_image_bounded(image, base, pc, state, budget)?;
+    let leaked: &'static JitBlock = Box::leak(Box::new(blk));
+    cache.lock().unwrap().insert(key, leaked);
+    BLOCK_CACHE_COMPILES.fetch_add(1, Ordering::Relaxed);
+    Ok(leaked)
+}
+
 /// A block-level, PC-driven JIT executor for a guest image whose AArch64 bytes
 /// live at guest address `base` (guest vaddr == host address). This supports
-/// *indirect* control flow (`br`/`blr`) and returns from calls that the
 /// single-shot `compile_image` cannot: each reachable region is compiled via
 /// `compile_image` (which inlines static `b`/`b.cond`/`cbz`/`bl` and stops with
 /// `pc=…; ret` at a `br`/`blr`/`ret`), then run; when it returns because of such
@@ -1558,6 +1629,14 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
 /// dispatcher compiles & re-enters there. Halts when `pc == 0`.
 pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Result<u64, String> {
     unsafe { (*state).pc = entry }
+    let nesting = IN_JIT_RUN.with(|c| c.get());
+    if nesting == 0 {
+        // Top-level entry: a new guest-image session begins. Evacuate the block
+        // cache so no stale block from a different image at the same address is
+        // ever executed (see `clear_block_cache`). Nested jit_runs (host-call
+        // -> run_guest_callback) keep the cache warm.
+        clear_block_cache();
+    }
     IN_JIT_RUN.with(|c| c.set(c.get() + 1));
     let run_result = jit_run_inner(image, base, state);
     IN_JIT_RUN.with(|c| c.set(c.get() - 1));
@@ -1565,6 +1644,10 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
 }
 
 pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u64, String> {
+    // Optional progress heartbeat (JIT_STATS=1): sample once and reuse the flag
+    // so the hot-loop per-iteration check is a trivial bool, not an env lookup.
+    static LAST_STATS_SAMPLE: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+    let want_stats = std::env::var_os("JIT_STATS").is_some();
     // Epoch for the CNTVCT_EL0 readout.
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     let epoch = *EPOCH.get_or_init(Instant::now);
@@ -1592,6 +1675,21 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
             return Err("run_loop: step budget exceeded (infinite guest loop?)".into());
         }
         guard += 1;
+        // Optional time-based progress heartbeat from inside the dispatcher: report
+        // the live pc + block-cache activity every ~250 ms (JIT_STATS=1). Compiles
+        // climbing = StartApp advancing through new init code; flat compiles +
+        // rising hits = recycling cached hot blocks (a genuine spin on a loop).
+        if want_stats {
+            let now = std::time::Instant::now();
+            let last = LAST_STATS_SAMPLE.get_or_init(|| Mutex::new(now));
+            let mut last = last.lock().unwrap();
+            if now.duration_since(*last).as_millis() >= 250 {
+                *last = now;
+                drop(last);
+                let (c, h) = block_cache_stats();
+                eprintln!("[jit] step {guard} pc={:#x} block-cache: {c} compiles / {h} hits", unsafe { (*state).pc });
+            }
+        }
         // Guest signal handling, before any instruction execution:
         //  1. A cross-thread signal (posted via pending_signal) runs its
         //     handler / default disposition on THIS thread.
@@ -1634,8 +1732,9 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
             #[cfg(debug_assertions)]
             if std::env::var_os("JIT_TRACE").is_some() {
                 let s = unsafe { &*state };
+                let who = crate::resolver::name_of_call_addr(pc).unwrap_or_else(|| format!("slot{slot}"));
                 println!(
-                    "  hostcall@slot{slot} pc={pc:#x} x0={:#x} x1={:#x} x2={:#x} x30={:#x}",
+                    "  hostcall@{who} pc={pc:#x} x0={:#x} x1={:#x} x2={:#x} x30={:#x}",
                     s.x[0], s.x[1], s.x[2], s.x[30]
                 );
             }
@@ -1750,7 +1849,7 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8192)
         };
-        let block = compile_image_bounded(image, base, pc, state, block_budget)?;
+        let block = cached_block(image, base, pc, state, block_budget)?;
         #[cfg(debug_assertions)]
         if std::env::var_os("JIT_DUMP").is_some() {
             let raw = block.dump();
@@ -6073,6 +6172,34 @@ mod tests {
         let sfd = svc(&mut st);
         assert!(sfd >= 0, "signalfd4 returns a real fd, got {sfd}");
         unsafe { libc::close(sfd as i32); }
+    }
+
+    #[test]
+    fn guest_svc_nanosleep_reads_timespec_from_x0() {
+        // Regression: the aarch64 `nanosleep(rqtp, rmtp)` syscall passes rqtp in
+        // x0. The handler previously read it from x1, so every guest nanosleep
+        // EFAULT'd (NULL req, instant return) — turning sleep-wait loops into
+        // busy-spins (and making the sig-timer loader test pass only by luck of
+        // JIT slowness). x0 must be honored as the timespec pointer: a 20ms
+        // request must actually sleep ~20ms and return 0.
+        let mut st = CpuState::new();
+        let svc = |st: &mut CpuState| -> i64 { guest_svc(st as *mut CpuState) as i64 };
+        let req = libc::timespec { tv_sec: 0, tv_nsec: 20_000_000 }; // 20ms
+        st.x[8] = 101;                          // nanosleep
+        st.x[0] = (&req as *const libc::timespec) as u64; // rqtp in x0
+        st.x[1] = 0;                            // rmtp (unused)
+        let t0 = std::time::Instant::now();
+        let ret = svc(&mut st);
+        let dt = t0.elapsed();
+        assert_eq!(ret, 0, "nanosleep returns 0 on a valid request");
+        assert!(
+            dt >= std::time::Duration::from_millis(15),
+            "nanosleep actually slept ~20ms (slept {dt:?}); x0 timespec was ignored"
+        );
+        assert!(
+            dt < std::time::Duration::from_secs(1),
+            "nanosleep slept unreasonably long ({dt:?})"
+        );
     }
 
     #[test]

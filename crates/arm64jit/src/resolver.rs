@@ -736,6 +736,18 @@ fn alloc_slot(r: &mut Resolver, key: &CString, hostf: HostCall) -> Option<u64> {
     Some(addr)
 }
 
+/// Reverse-lookup an import slot address back to its symbol name (the first
+/// registered name that maps to this thunk address). Used by the JIT_TRACE
+/// hostcall dumper to say *which* import a hot loop is dispatching, instead of
+/// an anonymous slot number.
+pub fn name_of_call_addr(addr: u64) -> Option<String> {
+    let r = resolver().lock().unwrap();
+    r.slots
+        .iter()
+        .find(|(_, v)| **v == addr)
+        .map(|(k, _)| String::from_utf8_lossy(k.as_bytes()).into_owned())
+}
+
 /// Name of an import as `&str`, tolerating a trailing NUL.
 fn name_str(name: &[u8]) -> &str {
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
