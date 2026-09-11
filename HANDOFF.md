@@ -5264,6 +5264,24 @@ glGetTexLevelParameteriv(GL_TEXTURE_INTERNAL_FORMAT)==GL_RGBA8 (proves the JIT
 decompressed it, not raw-Mesa). cargo build --workspace clean; cargo test
 --workspace 343/0. HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host.
 
+3. **Headless window-presentation gate (cdab7f8, 344/0)** — proved
+   GRAPHICS_RECOMMENDATION §5 (ANativeWindow→desktop window → EGL window surface →
+   present) end-to-end: `arm64jit/tests/egl_window_present.rs` spawns Xvfb, opens
+   an X11 window via input-wrapper, and drives eglGetDisplay/Initialize/
+   ChooseConfig(window-capable)/CreateWindowSurface (the X11 Window XID as
+   native_window)/CreateContext/MakeCurrent, then glClearColor(float bridge)+
+   glClear+eglSwapBuffers — all through guest blr + the resolver bridges under
+   EGL_PLATFORM=x11 on Mesa llvmpipe. First proof a translated guest can present
+   frames to a real on-screen window on a headless box. arm64jit gained
+   input-wrapper + x11rb dev-deps.
+
+4. **JNI object-array backing (e4e8aea, 345/0)** — NewObjectArray(172)/
+   GetObjectArrayElement(173)/SetObjectArrayElement(174) were NULL/garbage in the
+   JNI function table. Backed them like the primitive arrays (shared
+   array_len_registry): object arrays are len×8 opaque jobject slots; NewObjectArray
+   allocs + optionally seeds with initialElement; Get/Set are bounds-checked
+   (get→NULL, set→no-op out of range, never fault). +regression test.
+
 ## Session (cycle 35, Sep 11, 2026) — GRAPHICS TRANSLATION LAYER: egl-wrapper + glesv2-wrapper cdylibs, input-wrapper, real-EGL JIT wiring (336/0)
 Per the worker operating rules, took the graphics translation layer
 (GRAPHICS_RECOMMENDATION.md) as the highest-leverage unblocked item — built AND
