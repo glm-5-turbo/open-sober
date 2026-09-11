@@ -362,6 +362,41 @@ pub fn current_tid() -> u64 {
     unsafe { libc::syscall(libc::SYS_gettid) as u64 }
 }
 
+thread_local! {
+    /// Guest PC of the `blr` to the host-import stub currently being executed
+    /// on this host thread (set by the dispatcher just before invoking a host
+    /// call bridge; 0 outside a hostcall). Lets cond/mutex bridges report the
+    /// guest call site of a blocking wait (which singleton/lifecycle wait the
+    /// engine main loop sits on).
+    static CURRENT_GUEST_PC: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Guest PC (address in the translated image) of the host-import `blr` the
+/// calling thread is executing, or 0 if none. Used by host-call bridges to
+/// identify the guest call site (e.g. which `pthread_cond_wait` blocks the
+/// engine main loop).
+pub fn current_guest_pc() -> u64 {
+    CURRENT_GUEST_PC.with(|c| c.get())
+}
+
+/// Set (or clear with 0) the current thread's guest hostcall PC. Internal,
+/// called by the dispatcher around a host-call bridge invocation.
+pub fn set_current_guest_pc(pc: u64) {
+    CURRENT_GUEST_PC.with(|c| c.set(pc));
+}
+
+/// Read the glibc `__owner` word (offset 8) of a guest mutex, to report in a
+/// JIT_TRACE whether a `pthread_mutex_lock` is contended (held by another
+/// thread -> the host call would block on a futex). Layout matches glibc's
+/// `pthread_mutex_t` after our `sanitize_mutex` ABI fix.
+pub fn _probe_guest_mutex_owner(m: u64) -> i32 {
+    if m == 0 {
+        return 0;
+    }
+    let p = m as *const u8;
+    unsafe { core::ptr::read_unaligned(p.add(8) as *const i32) }
+}
+
 /// Main-thread guest TLS template captured at `jit_run` setup: the raw
 /// (region_ptr, region_size) of the main image's per-thread TLS block. Spawned
 /// guest threads clone this template into their OWN leaked region so `__thread`
@@ -1739,7 +1774,14 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
                 );
             }
             let s = unsafe { &mut *state };
+            // The "current guest pc" for host-call bridges should be the guest
+            // return address (x30 = the caller of the `blr` into the host
+            // thunk), not the host-thunk slot address `pc` itself — so a cond/
+            // mutex bridge can report WHICH guest function issued the blocking
+            // call. (x30 is the next guest PC after the blr, i.e. the caller.)
+            set_current_guest_pc(s.x[30]);
             let ret = hostf(s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5], s.x[6], s.x[7]);
+            set_current_guest_pc(0);
             s.x[0] = ret;
             s.pc = s.x[30]; // return to the `blr` caller
             continue;
@@ -2717,6 +2759,27 @@ pub fn compile_image_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_guest_pc_thread_local_roundtrip() {
+        // `current_guest_pc` is a per-thread value the dispatcher sets to the
+        // guest return address before invoking a host-call bridge, so cond/
+        // mutex bridges can report which guest function issued a blocking call.
+        // Verify default-0 and set/get round-trip, and that it is thread-local
+        // (a value set on one thread is not visible on another).
+        assert_eq!(current_guest_pc(), 0);
+        set_current_guest_pc(0x102b53bb0);
+        assert_eq!(current_guest_pc(), 0x102b53bb0);
+        set_current_guest_pc(42);
+        assert_eq!(current_guest_pc(), 42);
+        set_current_guest_pc(0);
+        assert_eq!(current_guest_pc(), 0);
+        // Thread-locality: set on this thread, the worker must still see 0.
+        set_current_guest_pc(777);
+        let worker = std::thread::spawn(|| current_guest_pc());
+        assert_eq!(worker.join().unwrap(), 0);
+        set_current_guest_pc(0);
+    }
 
     #[test]
     fn current_guest_tp_is_thread_local_and_published() {

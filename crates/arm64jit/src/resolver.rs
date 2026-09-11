@@ -830,13 +830,33 @@ extern "C" fn host_mutex_lock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u
             0
         }
     };
+    if std::env::var_os("JIT_TRACE").is_some() {
+        // Probe BEFORE locking (a contended lock would otherwise block forever
+        // and never reach the post-lock report): report who currently holds the
+        // guest mutex (glibc __owner at offset 8) + the guest caller's PC.
+        let owner: i32 = if a0 != 0 {
+            crate::jit::_probe_guest_mutex_owner(a0)
+        } else {
+            0
+        };
+        let gpc = crate::jit::current_guest_pc();
+        let self_tid = crate::jit::current_tid();
+        eprintln!(
+            "[t={self_tid}] [mutex_lock] {a0:#x} kind=0x{kind:x} held_by={owner} held_by_self={} gpcreq={gpc:#x}",
+            owner == self_tid as i32
+        );
+    }
     let r = unsafe {
         sanitize_mutex(a0 as *mut u8);
+        // Blocking acquire via glibc's pthread_mutex_lock. The guest reaches
+        // this only on its slow path (real cross-thread contention); blocking on
+        // the guest's own lock word is correct shared-memory mutual exclusion.
+        // (An earlier "optimistic trylock->return 0 always" experiment let two
+        // guest threads into the same critical section and corrupted memory.
+        // The engine main loop idles here awaiting lifecycle state, which the
+        // ALooper/Java layer must feed — NOT deadlock, per the session log.)
         f(a0 as *mut u8)
     };
-    if std::env::var_os("JIT_TRACE").is_some() {
-        eprintln!("[mutex_lock] {a0:#x} kind_pre={kind:#x} -> {r}");
-    }
     r as u64
 }
 extern "C" fn host_mutex_unlock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
@@ -848,6 +868,10 @@ extern "C" fn host_mutex_unlock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5:
 }
 extern "C" fn host_cond_wait(a0: u64, a1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
     let f = *REAL_COND_WAIT.get().expect("pthread_cond_wait resolved");
+    if std::env::var_os("JIT_TRACE").is_some() {
+        let gpc = crate::jit::current_guest_pc();
+        eprintln!("[cond_wait] cond={a0:#x} mutex={a1:#x} caller_guest_pc={gpc:#x}");
+    }
     unsafe {
         sanitize_mutex(a1 as *mut u8); // mutex is arg1 (pthread_cond_wait(cond, mutex))
         f(a0 as *mut u8, a1 as *mut u8) as u64
@@ -860,6 +884,10 @@ extern "C" fn host_cond_timedwait(a0: u64, a1: u64, a2: u64, _3: u64, _4: u64, _
             *REAL_COND_TIMEDWAIT.get().expect("pthread_cond_timedwait resolved"),
         )
     };
+    if std::env::var_os("JIT_TRACE").is_some() {
+        let gpc = crate::jit::current_guest_pc();
+        eprintln!("[cond_timedwait] cond={a0:#x} mutex={a1:#x} ts={a2:#x} caller_guest_pc={gpc:#x}");
+    }
     unsafe {
         sanitize_mutex(a1 as *mut u8);
         f(a0 as *mut u8, a1 as *mut u8, a2 as *const libc::timespec) as u64
