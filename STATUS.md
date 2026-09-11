@@ -275,5 +275,7 @@ Added VecLdStrReg + VecLdStImmUnscaled + VecLdStIndexed (128-bit q classes,
 bit26=1) and bit26==0 on the two GPR gates. modmain now advances cleanly
 (honest Unsupported stop) instead of SIGSEGVing. +4 regressions, arm64jit
 111->115. Commits: 853cc44 on dev.
-next: scalar S/D register-offset (0xbc/0xfc, bit26=0) — glibc-CRT tail, not a
-Roblox boot blocker; then libloader -> libbadcpu -> services/auth.
+next: scalar S/D register-offset -> also added (FpLdStrReg, commit 921af2a,
+arm64jit 116/116, workspace 157/0); remaining scalar S unscaled/pre-post is a
+glibc-CRT tail, not a Roblox boot blocker; then libloader -> libbadcpu ->
+services/auth.

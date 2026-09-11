@@ -2540,11 +2540,17 @@ reg-offset store, pointer preserved for unscaled stur, Xn advanced for
 pre-index ldr; 1 decode: the three classes + scalar-b non-collision).
 arm64jit 115/115; workspace 156/0; build clean.
 
+**Addendum (same cycle):** scalar FP register-offset (`FpLdStrReg`) added —
+`str s0,[x0,x3,lsl#2]` (0xbc237800, memset's next path) was silently executed
+as a GPR op on the wrong register file. New decode arm (bit26=1 &&
+0x38200800 residue && bit23 clear for Q) + translate (addr in RDX, width from
+bits[31:30], S-bit index scale). `+fpl_single_reg_offset_store_with_shift`.
+arm64jit 116/116, workspace 157/0. Commit `921af2a`.
+
 ## Next (ordered, no APK/GSI/GPU on this box)
-1. Scalar S/D register-offset ld/st (top 0xbc/0xfc, **bit26=0**, e.g. `str
-   s0,[x0,x3,lsl#2]` at modmain 0x40a958, word 0xbc237800) — the remaining
-   glibc-CRT-memset wall; needs a V/opc discriminator, not the bit26 mask. This
-   is glibc-CRT-tail territory, repeatedly judged NOT a Roblox boot blocker
+1. Scalar S/D UNSCALED (`stur/ldur s0,d0`, e.g. modmain 0x40a95c word 0xbc1fc0a0)
+   and scalar pre/post-index writeback ld/st — the last of the same bit26=1
+   family; glibc-CRT-memset tail, repeatedly judged NOT a Roblox boot blocker
    (real libroblox.so boot ISA already fully decoded / exit 0).
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth (ordered
    plan).
