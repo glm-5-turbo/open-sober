@@ -841,20 +841,39 @@ extern "C" fn host_mutex_lock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u
         };
         let gpc = crate::jit::current_guest_pc();
         let self_tid = crate::jit::current_tid();
+        // Dump the guest's own bionic pthread_mutex `value` word (the 32-bit
+        // field at offset 0) — the ONE authority on ownership, per the bionic
+        // layout: bits 31-16 owner_tid, 15-14 type (1=recursive), 12-2 counter,
+        // 1-0 lock state. We read it directly (guest==host memory).
+        let bionic_word: u32 = if a0 != 0 {
+            unsafe { core::ptr::read_unaligned((a0 as *const u8) as *const u32) }
+        } else {
+            0
+        };
         eprintln!(
-            "[t={self_tid}] [mutex_lock] {a0:#x} kind=0x{kind:x} held_by={owner} held_by_self={} gpcreq={gpc:#x}",
-            owner == self_tid as i32
+            "[t={self_tid}] [mutex_lock] {a0:#x} kind=0x{kind:x} glibc_owner={owner:08x} bionic_word=0x{bionic_word:08x} bionic_owner_tid=0x{:x} bionic_type=0x{:x} bionic_cnt=0x{:x} bionic_state=0x{:x} gpcreq={gpc:#x}",
+            bionic_word >> 16,
+            (bionic_word >> 14) & 0x3,
+            (bionic_word >> 2) & 0x7ff,
+            bionic_word & 0x3,
         );
     }
     let r = unsafe {
         sanitize_mutex(a0 as *mut u8);
-        // Blocking acquire via glibc's pthread_mutex_lock. The guest reaches
-        // this only on its slow path (real cross-thread contention); blocking on
-        // the guest's own lock word is correct shared-memory mutual exclusion.
-        // (An earlier "optimistic trylock->return 0 always" experiment let two
-        // guest threads into the same critical section and corrupted memory.
-        // The engine main loop idles here awaiting lifecycle state, which the
-        // ALooper/Java layer must feed — NOT deadlock, per the session log.)
+        // Blocking acquire via glibc's pthread_mutex_lock. NOTE: this is an
+        // ABI mismatch, not a true block. The guest owns the mutex protocol on
+        // its OWN bionic `value` word (bits: 31-16 owner_tid, 15-14 type,
+        // 12-2 counter, 1-0 lock state 0/1/2). On this boot it reaches our
+        // bridge with word=0x2 — a NORMAL mutex in "locked with waiters"
+        // (state 2) — because the guest's inline fast-path set contention and
+        // expects `pthread_mutex_lock` to futex-block on that word until the
+        // holder's unlock (state 2 also routes the unlock through our bridge).
+        // glibc reads the bionic word as glibc's own lock encoding, sees no
+        // matching owner, and futex-blocks forever -> the engine main-loop idle.
+        // The real fix is a coherent bionic-encoding mutex AND cond reimplement
+        // on the guest word (futex wait/wake), done together. Weakening the
+        // mutex (trylock->return-0) corrupts memory (see session log); blocking
+        // via glibc keeps the boot stable-idle, which is the current state.
         f(a0 as *mut u8)
     };
     r as u64
