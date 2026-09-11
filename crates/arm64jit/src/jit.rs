@@ -1224,6 +1224,32 @@ mod tests {
     }
 
     #[test]
+    fn fcvtzu_handles_u64_beyond_2pow63() {
+        // Regression: `fcvtzu x0,d0` (unsigned double->u64) is valid over the
+        // whole [0,2^64) range, but x86 cvttsd2si saturates anything >= 2^63 to
+        // INT64_MAX, silently corrupting the high half. Now a two-path sequence
+        // subtracts 2^63 for d >= 2^63. fcvtzu x0,d0=0x9e790000 ; ret=0xd65f03c0
+        let code = [0x00u8, 0x00, 0x79, 0x9e, 0xc0, 0x03, 0x5f, 0xd6];
+        let conv = |bits: u64| {
+            let mut st = CpuState::new();
+            st.v[0] = bits; // d0 = low 8B of vector slot 0
+            exec_bytes(&mut st, &code, 0).expect("exec")
+        };
+        // boundary + high half (exactly representable doubles)
+        assert_eq!(conv((2.0f64.powi(63)).to_bits()), 1u64 << 63, "d = 2^63");
+        assert_eq!(
+            conv((3.0f64 * 2.0f64.powi(62)).to_bits()),
+            3u64 << 62,
+            "d = 3*2^62 in [2^63,2^64)"
+        );
+        assert_eq!(conv((2.0f64.powi(64)).to_bits()), u64::MAX, "d = 2^64 saturates");
+        // below 2^63, negatives, NaN
+        assert_eq!(conv((10.0f64).to_bits()), 10);
+        assert_eq!(conv((-1.5f64).to_bits()), 0, "negative -> 0");
+        assert_eq!(conv(f64::NAN.to_bits()), 0, "NaN -> 0");
+    }
+
+    #[test]
     fn str_d0_writes_vector_reg_not_gpr() {
         // Regression: `str d0,[x0]` must write the FP/vector register v[0]'s low
         // 64 bits to memory, not the GPR x0 slot (it used to be decoded as a GPR

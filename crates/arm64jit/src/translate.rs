@@ -1306,15 +1306,42 @@ pub fn translate(
                     buf.cmov_rr64(0x48, RAX, RCX); // cmovs RAX, RCX (neg -> 0)
                 }
             } else if unsigned {
-                // fcvtzu: truncate toward zero (fcvtzs) but to an UNSIGNED value.
-                // `cvttsd2si` is exact for d in [0,2^63); negatives are clamped to 0
-                // below. (d >= 2^63 is architecturally out-of-range; x86 clamps —
-                // an explicitly-documented limitation, NOT silent corruption.)
-                buf.cvttsd2si(RAX, 0);
-                // if RAX < 0 (d was negative) => result 0
+                // fcvtzu: truncate toward zero to an UNSIGNED 64-bit value, valid
+                // over [0, 2^64). x86 cvttsd2si is signed: exact in [0,2^63),
+                // saturates to INT64_MIN (0x8000..0) for anything >= 2^63, which
+                // silently corrupts the high half if used directly. Correct roads:
+                //   d < 2^63          : cvttsd2si exact; negative/NaN -> 0
+                //   2^63 <= d < 2^64  : 2^63 + (int64)(d - 2^63), exact
+                //   d >= 2^64         : saturate to u64::MAX
+                buf.mov_ri64(RCX, 0x43e0_0000_0000_0000); // 2^63 as a double
+                buf.movq_xmm_r64(1, RCX);
+                buf.comisd(0, 1); // CF=1 iff d < 2^63
+                let jc = buf.jcc_rel32(0x82); // JB: d < 2^63 -> signed path
+                // --- big path: d >= 2^63 ---
+                buf.subsd(0, 1); // xmm0 = d - 2^63
+                buf.cvttsd2si(RAX, 0); // RAX=(int64)(d-2^63); INT64_MIN if d>=2^64
+                buf.test_rr64(RAX, RAX);
+                let js = buf.jcc_rel32(0x88); // JS: d >= 2^64 -> clamp to MAX
+                buf.mov_ri64(RCX, 0x8000_0000_0000_0000); // 2^63
+                buf.add_rr64(RAX, RCX); // = 2^63+(d-2^63), exact in [2^63,2^64)
+                let jmp_done = buf.jmp_rel32();
+                let max_at = buf.len(); // clamp path: d >= 2^64
+                buf.mov_ri64(RAX, u64::MAX);
+                let jmp2 = buf.jmp_rel32();
+                let signed_at = buf.len(); // signed path: d < 2^63
+                buf.cvttsd2si(RAX, 0); // [0,2^63) exact; d<0 -> truncated negative
                 buf.xor_rr64(RCX, RCX);
                 buf.test_rr64(RAX, RAX);
-                buf.cmov_rr64(0x48, RAX, RCX); // cmovs RAX, RCX (RAX<0 -> 0)
+                buf.cmov_rr64(0x48, RAX, RCX); // negative d -> 0
+                let done = buf.len();
+                let mut patch = |at: usize, target: usize| {
+                    let disp = (target as i64 - (at as i64 + 4)) as i32;
+                    buf.bytes[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+                };
+                patch(jc, signed_at);
+                patch(js, max_at);
+                patch(jmp_done, done);
+                patch(jmp2, done);
             } else {
                 buf.cvttsd2si(RAX, 0); // fcvtzs: truncate toward zero
             }
