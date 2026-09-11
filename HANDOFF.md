@@ -3504,15 +3504,29 @@ is untouched by the `is_pie` gate.
   `R_AARCH64_RELATIVE` slot (parsed from `readelf -r`, whose type column is
   truncated to `R_AARCH64_RELATIV`) equals `load_bias + addend`. Without the
   apply the slot holds the raw file addend (e.g. 0x600) ≠ 0x100000600 → fails.
-- `cargo test --workspace` **184/0** (libloader 16 → 20 unit + 1 integration);
+- `cargo test --workspace` **187/0** (libloader 20 → 23 unit + 1 integration);
   `cargo build --workspace` clean (only the pre-existing decode.rs rustfmt-warn
   churn). Skips when cross-gcc absent.
 
+### Addendum (same cycle) — DT_RELR support
+`read_elf_relocations` now also materializes **`DT_RELR`** (tag 0x23, Android
+13+ / modern NDK default) when the ELF ships only `.relr.dyn` (no RELA table).
+`dt_relr_to_relatives` implements the shipped glibc/Android `DO_RELR` decode
+exactly (the low-bit-marker scheme; the upper-8-bit-delta variant was a rejected
+alternative): an even word is an offset that relocates itself and seeds
+`base = offset+8`; an odd word is a bitmap where bit *i* (1-based) → reloc at
+`base + (i-1)*8`; odd value-1 padding decodes to nothing. +3 unit tests
+(offset+bitmap bit mapping, no-prior-offset from base 0, non-multiple-of-8
+reject). Note: neither the cross nor host `ld` here supports
+`--pack-dyn-relocs=relr`, so no real `.relr.dyn` fixture is producible on this
+box — the decode is anchored to the authoritative algorithm plus hand-computed
+streams. `cargo test --workspace` **187/0**.
+
 ### Status / next
 `load_elf_image` now materializes RELATIVE relocations for PIE/shared objects,
-pending APS2 decode, all in-process (no `unpack_rela.py`). Next (ordered):
-finish libloader gap — a GOT/PLT JUMP_SLOT + GLOB_DAT resolver for the *main*
-dynamic (the APS1/other Android tags, DT_RELR) and lad elfjit's PLT binder
-already covers JUMP_SLOT; then libbadcpu ISA gaps; then services/auth. HARD
+from **(a)** standard `DT_RELA`, **(b)** Android APS2-packed `DT_ANDROID_RELA`,
+or **(c)** `DT_RELR` — all in-process (no `unpack_rela.py`). Next (ordered):
+a GLOB_DAT/JUMP_SLOT resolver for the main dynamic (arm64jit's `bind_image_plt`
+already covers JUMP_SLOT), then libbadcpu ISA gaps, then services/auth. HARD
 GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
 GPU + real-binary host (no APK/libroblox.so/GPU on this VPS).

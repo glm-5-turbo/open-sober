@@ -28,6 +28,8 @@ const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
 const DT_ANDROID_RELA: u64 = 0x6000_0011;
 const DT_ANDROID_RELASZ: u64 = 0x6000_0012;
+const DT_RELR: u64 = 0x23;
+const DT_RELRSZ: u64 = 0x24;
 
 /// AArch64 relocation type for `*(P) = B + A` (place-based absolute).
 pub const R_AARCH64_RELATIVE: u64 = 1027;
@@ -213,6 +215,8 @@ pub fn read_elf_relocations(path: &Path) -> anyhow::Result<Option<Vec<Rela>>> {
     let mut rela_vaddr: Option<u64> = None;
     let mut relasz: Option<u64> = None;
     let mut source_android = false;
+    let mut relr_vaddr: Option<u64> = None;
+    let mut relrsz: Option<u64> = None;
     for chunk in dyn_data.chunks_exact(16) {
         let tag = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
         let val = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
@@ -227,48 +231,71 @@ pub fn read_elf_relocations(path: &Path) -> anyhow::Result<Option<Vec<Rela>>> {
             DT_ANDROID_RELASZ => relasz = Some(val),
             DT_RELA if rela_vaddr.is_none() => rela_vaddr = Some(val),
             DT_RELASZ if relasz.is_none() => relasz = Some(val),
+            DT_RELR if relr_vaddr.is_none() => relr_vaddr = Some(val),
+            DT_RELRSZ if relrsz.is_none() => relrsz = Some(val),
             _ => {}
         }
     }
 
-    let (rela_vaddr, relasz) = match (rela_vaddr, relasz) {
-        (Some(v), Some(s)) => (v, s),
-        _ => return Ok(None),
-    };
+    // Prefer a full RELA/RELASZ source (it carries per-reloc addends); fall
+    // back to DT_RELR (RELATIVE-only, addend==0) when the RELA table is absent
+    // (Android 13+ / modern NDK libs routinely ship ONLY .relr.dyn).
+    match (rela_vaddr, relasz) {
+        (Some(rela_vaddr), Some(relasz)) => {
+            let rela_fo =
+                vaddr_to_file_offset(&phdrs, e_phentsize, e_phnum, rela_vaddr)
+                    .context_no_dyn()?;
+            let mut stream = vec![0u8; relasz as usize];
+            f.seek(SeekFrom::Start(rela_fo))?;
+            f.read_exact(&mut stream)?;
 
-    let rela_fo = vaddr_to_file_offset(&phdrs, e_phentsize, e_phnum, rela_vaddr)
-        .context_no_dyn()?;
-    let mut stream = vec![0u8; relasz as usize];
-    f.seek(SeekFrom::Start(rela_fo))?;
-    f.read_exact(&mut stream)?;
+            if stream.len() >= 4 && &stream[0..4] == b"APS2" {
+                tracing::info!(
+                    "{}: decoding {} bytes of APS2 packed relocations ({})\n",
+                    path.display(),
+                    stream.len(),
+                    if source_android { "DT_ANDROID_RELA" } else { "DT_RELA" }
+                );
+                return Ok(Some(decode_aps2(&stream)?));
+            }
 
-    if stream.len() >= 4 && &stream[0..4] == b"APS2" {
-        tracing::info!(
-            "{}: decoding {} bytes of APS2 packed relocations ({})\n",
-            path.display(),
-            stream.len(),
-            if source_android { "DT_ANDROID_RELA" } else { "DT_RELA" }
-        );
-        return Ok(Some(decode_aps2(&stream)?));
+            // Fall through: the stream is already standard Elf64_Rela (24 bytes
+            // each).
+            if stream.len() % 24 != 0 {
+                anyhow::bail!(
+                    "{}: non-packed reloc stream size {} not a multiple of 24",
+                    path.display(),
+                    stream.len()
+                );
+            }
+            let mut out = Vec::with_capacity(stream.len() / 24);
+            for c in stream.chunks_exact(24) {
+                out.push(Rela {
+                    r_offset: u64::from_le_bytes(c[0..8].try_into().unwrap()),
+                    r_info: u64::from_le_bytes(c[8..16].try_into().unwrap()),
+                    r_addend: i64::from_le_bytes(c[16..24].try_into().unwrap()),
+                });
+            }
+            Ok(Some(out))
+        }
+        _ => match (relr_vaddr, relrsz) {
+            (Some(relr_vaddr), Some(relrsz)) => {
+                let relr_fo =
+                    vaddr_to_file_offset(&phdrs, e_phentsize, e_phnum, relr_vaddr)
+                        .context_no_dyn()?;
+                let mut stream = vec![0u8; relrsz as usize];
+                f.seek(SeekFrom::Start(relr_fo))?;
+                f.read_exact(&mut stream)?;
+                tracing::info!(
+                    "{}: decoding {} bytes of DT_RELR relative relocations\n",
+                    path.display(),
+                    stream.len()
+                );
+                Ok(Some(dt_relr_to_relatives(&stream)?))
+            }
+            _ => Ok(None), // no relocation table
+        },
     }
-
-    // Fall through: the stream is already standard Elf64_Rela (24 bytes each).
-    if stream.len() % 24 != 0 {
-        anyhow::bail!(
-            "{}: non-packed reloc stream size {} not a multiple of 24",
-            path.display(),
-            stream.len()
-        );
-    }
-    let mut out = Vec::with_capacity(stream.len() / 24);
-    for c in stream.chunks_exact(24) {
-        out.push(Rela {
-            r_offset: u64::from_le_bytes(c[0..8].try_into().unwrap()),
-            r_info: u64::from_le_bytes(c[8..16].try_into().unwrap()),
-            r_addend: i64::from_le_bytes(c[16..24].try_into().unwrap()),
-        });
-    }
-    Ok(Some(out))
 }
 
 /// Apply `R_AARCH64_RELATIVE` relocations to an already-mapped JIT image.
@@ -306,6 +333,56 @@ pub fn apply_relatives(
         }
     }
     applied
+}
+
+/// Decode a `DT_RELR` (packed RELATIVE relocation, tag 0x23) stream into
+/// `R_AARCH64_RELATIVE` relocs with addend 0.
+///
+/// Follows the shipped glibc/Android `DO_RELR` decode exactly (the
+/// low-bit-marker scheme; the upper-8-bit-delta variant was a rejected
+/// alternative): each 8-byte word is either
+///   * an **offset** word (low bit clear): implies a RELATIVE reloc at that
+///     offset and sets `base = offset + 8`;
+///   * a **bitmap** word (low bit set): bit *i* (1..=63) set implies a RELATIVE
+///     reloc at `base + (i-1)*8`  (== previous offset + 8·i).
+/// Trailing padding words of value 1 decode to zero relocations (harmless).
+pub fn dt_relr_to_relatives(data: &[u8]) -> anyhow::Result<Vec<Rela>> {
+    if !data.is_empty() && data.len() % 8 != 0 {
+        anyhow::bail!("DT_RELR size {} is not a multiple of 8", data.len());
+    }
+
+    let mut out: Vec<Rela> = Vec::new();
+    let mut base: u64 = 0;
+    for c in data.chunks_exact(8) {
+        let entry = u64::from_le_bytes(c.try_into().unwrap());
+        if entry & 1 == 0 {
+            // Offset word: a RELATIVE reloc at `entry`; base for following
+            // bitmaps = entry + 8.
+            out.push(Rela {
+                r_offset: entry,
+                r_info: R_AARCH64_RELATIVE,
+                r_addend: 0,
+            });
+            base = entry + 8;
+        } else {
+            // Bitmap word: bit i (1-based) -> reloc at base + (i-1)*8.
+            let mut offset = base;
+            let mut e = entry;
+            while e != 0 {
+                e >>= 1;
+                if e & 1 != 0 {
+                    out.push(Rela {
+                        r_offset: offset,
+                        r_info: R_AARCH64_RELATIVE,
+                        r_addend: 0,
+                    });
+                }
+                offset += 8;
+            }
+            base = base.wrapping_add(63 * 8);
+        }
+    }
+    Ok(out)
 }
 
 /// Small helper so the module compiles without `anyhow::Context` import churn.
@@ -431,5 +508,52 @@ mod tests {
     #[test]
     fn rejects_non_aps2_magic() {
         assert!(decode_aps2(b"NOPE1234567890123456").is_err());
+    }
+
+    /// DT_RELR: an offset word (low bit clear) relocates itself and seeds the
+    /// bitmap base; bitmap bit *i* (1-based) -> reloc at previous offset + 8·i
+    /// (== base + (i-1)*8). Trailing odd-zero-ish padding (value 1) decodes to
+    /// nothing. Hand-computed, independent of the decoder.
+    #[test]
+    fn relr_offset_then_bitmap_maps_bits_to_offsets() {
+        // words: 0x1000 (offset), 0xB = 0b1011 (bit1 & bit3 set), 0x1 (pad)
+        let mut data = Vec::new();
+        for w in [0x1000u64, 0b1011, 0x1] {
+            data.extend_from_slice(&w.to_le_bytes());
+        }
+        let relas = dt_relr_to_relatives(&data).expect("decode RELR");
+        // 0x1000 (offset word), 0x1008 (bit1 -> prev+8), 0x1018 (bit3 -> prev+24)
+        let expected = [
+            (0x1000u64, 0i64),
+            (0x1008, 0),
+            (0x1018, 0),
+        ];
+        assert_eq!(relas.len(), expected.len());
+        for (r, (off, add)) in relas.iter().zip(expected.iter()) {
+            assert_eq!(r.r_offset, *off);
+            assert_eq!(r.r_addend, *add);
+            assert_eq!(r.r_type(), R_AARCH64_RELATIVE);
+        }
+    }
+
+    /// A bitmap-only stream with no preceding offset word must not panic and
+    /// must simply relocate from base=0 (matching glibc's initial base): bit1
+    /// -> base + 0 = 0.
+    #[test]
+    fn relr_bitmap_with_no_prior_offset_starts_at_zero() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0b11u64.to_le_bytes()); // marker|bit1
+        let relas = dt_relr_to_relatives(&data).expect("decode RELR");
+        assert_eq!(
+            relas.iter().map(|r| r.r_offset).collect::<Vec<_>>(),
+            vec![0u64],
+            "bit1 from base 0 should relocate at 0"
+        );
+    }
+
+    #[test]
+    fn relr_requires_multiple_of_8_bytes() {
+        let bad = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9]; // 9 bytes
+        assert!(dt_relr_to_relatives(&bad).is_err());
     }
 }
