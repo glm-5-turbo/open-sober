@@ -720,41 +720,143 @@ pub fn compile_image(
     compile_image_bounded(image, base, entry, state, 0)
 }
 
-/// Detect whether the instructions at host address `addr` are a PLT stub
+/// Bounds-checked read of a 32-bit word at guest address `addr` from `image`
+/// mapped at `base` (guest == host only when the image is at its base address,
+/// which is how elfjit maps it; the bounds check keeps this safe even for a
+/// test Vec that is not at `base`).
+fn word_at(image: &[u8], base: u64, addr: u64) -> Option<u32> {
+    if addr < base {
+        return None;
+    }
+    let off = addr - base;
+    if off + 4 > image.len() as u64 {
+        return None;
+    }
+    let o = off as usize;
+    Some(u32::from_le_bytes([
+        image[o],
+        image[o + 1],
+        image[o + 2],
+        image[o + 3],
+    ]))
+}
+
+/// Decode the reachable guest call graph starting at `entry` (bounded) and
+/// report whether any `bl` inside it targets a host-import PLT stub. Used to
+/// decide whether a guest `bl` to `entry` should be diverted through the
+/// dispatcher instead of inlined: a callee that itself calls host imports
+/// (pthread_mutex_lock, abort, syslog, ...) cannot be inlined safely, because
+/// the inner import `bl` is itself diverted via the dispatcher stub table and
+/// — when the outer routine is inlined a second time inside a larger block —
+/// that inner return-stub bookkeeping regresses (the FMOD once-routine returns
+/// "not done", w0=1, and the caller branches into a guard address). Diverting
+/// the outer `bl` makes the callee run as its own fresh `jit_run` block, whose
+/// inner imports get clean diversion every time.
+///
+/// The scan is deliberately bounded: it gives up (returns `true`, i.e. "safe
+/// to divert") after `BODY_SCAN_BUDGET` decoded instructions rather than walk
+/// an arbitrarily large function. Diverting is always *conservative* (correct,
+/// just more dispatcher round-trips), so the false-positive on give-up is safe.
+const BODY_SCAN_BUDGET: usize = 512;
+
+fn body_contains_host_plt_bl(image: &[u8], base: u64, entry: u64) -> bool {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut frontier: Vec<u64> = vec![entry];
+    let mut scanned = 0usize;
+    while let Some(start) = frontier.pop() {
+        if !seen.insert(start) {
+            continue;
+        }
+        if scanned > BODY_SCAN_BUDGET {
+            return true; // give up conservatively: treat as import-bearing
+        }
+        let mut cur = start;
+        loop {
+            // stop at a block start that a sibling frontier item already owns
+            if cur != start && seen.contains(&cur) {
+                break;
+            }
+            let Some(word) = word_at(image, base, cur) else {
+                break;
+            };
+            let inst = decode::decode(word);
+            scanned += 1;
+            if scanned > BODY_SCAN_BUDGET {
+                return true;
+            }
+            match inst {
+                Inst::B { imm, link } => {
+                    let target = cur.wrapping_add(imm as u64);
+                    if link {
+                        // a `bl` straight to a host import => this body diverts
+                        if is_host_plt_stub(image, base, target) {
+                            return true;
+                        }
+                        // otherwise a guest call: do NOT follow into the callee
+                        // body. This predicate detects only DIRECT host-import
+                        // calls in the entry's own body (the once-routine calls
+                        // pthread_mutex_lock@plt directly). Following through
+                        // guest->guest->import would mark every caller up the
+                        // whole call graph as import-bearing and defeat the
+                        // bounded-compile model. The caller's own `bl` to a
+                        // guest callee is not itself a host-import call, so we
+                        // just let the linear walk continue at the fall-through.
+                    } else {
+                        // unconditional b: follow target, stop linear walk
+                        frontier.push(target);
+                        break;
+                    }
+                }
+                Inst::BCond { imm, .. } | Inst::Cbz { imm, .. } | Inst::Tbz { imm, .. } => {
+                    frontier.push(cur.wrapping_add(imm as u64));
+                }
+                Inst::Ret
+                | Inst::Br { .. }
+                | Inst::Blr { .. }
+                | Inst::Unsupported(_)
+                | Inst::Brk { .. }
+                | Inst::Udf { .. } => break,
+                _ => {}
+            }
+            cur += 4;
+        }
+    }
+    false
+}
+
+/// Detect whether the instructions at guest address `addr` (within `image`
+/// mapped at `base`) are a PLT stub
 /// (`adrp xd,P; ldr xc,[xd,#imm]; add xd,xd,#off; br xc`) whose GOT slot holds a
 /// host-thunk address (>= HOST_THUNK_BASE). This identifies a direct guest `bl`
-/// to a host import (e.g. `bl pthread_mutex_lock@plt`). Since guest == host
-/// memory here, we read the stub bytes and the (already patched) JUMP_SLOT GOT
-/// entry straight from mapped memory. Returns false on any mismatch so this is
-/// conservative: a real guest function is never mistaken for an import stub.
-fn is_host_plt_stub(addr: u64) -> bool {
-    if addr < 0x1000 {
+/// to a host import (e.g. `bl pthread_mutex_lock@plt`). Returns false on any
+/// mismatch so this is conservative: a real guest function is never mistaken
+/// for an import stub.
+fn is_host_plt_stub(image: &[u8], base: u64, addr: u64) -> bool {
+    // No low-address guard here: reading goes through `word_at`, which is
+    // bounds-checked against `image`, so low synthetic addresses (the unit-test
+    // stub images live at 0x40) are handled safely. The old `addr < 0x1000`
+    // reject was a leftover from the raw-pointer implementation and wrongly
+    // rejected those legitimate stubs.
+    let Some(w0) = word_at(image, base, addr) else {
         return false;
-    }
+    };
     #[cfg(debug_assertions)]
     if std::env::var_os("JIT_DUMP").is_some() {
-        let dbg_p = addr as *const u8;
         eprintln!(
-            "[hps] addr={addr:#x} w0={:#010x} w1={:#010x} w2={:#010x} w3={:#010x}",
-            unsafe { std::ptr::read_unaligned(dbg_p as *const u32) },
-            unsafe { std::ptr::read_unaligned(dbg_p.add(4) as *const u32) },
-            unsafe { std::ptr::read_unaligned(dbg_p.add(8) as *const u32) },
-            unsafe { std::ptr::read_unaligned(dbg_p.add(12) as *const u32) }
+            "[hps] addr={addr:#x} w0={:#010x} w1={:#010x}",
+            w0,
+            word_at(image, base, addr + 4).unwrap_or(0)
         );
     }
-    let p = addr as *const u8;
     // word 0: adrp Xd, #page
-    let w0 = unsafe { std::ptr::read_unaligned(p as *const u32) };
     if (w0 & 0x9f00_0000) != 0x9000_0000 {
-        #[cfg(debug_assertions)]
-        if std::env::var_os("JIT_DUMP").is_some() {
-            eprintln!("[hps] {addr:#x} NOT adrp (w0 {w0:#x})");
-        }
         return false;
     }
     let d0 = w0 & 0x1f;
     // word 1: ldr Xt, [Xn, #imm]   (64-bit unsigned-offset load)
-    let w1 = unsafe { std::ptr::read_unaligned(p.add(4) as *const u32) };
+    let Some(w1) = word_at(image, base, addr + 4) else {
+        return false;
+    };
     if (w1 & 0xffc0_0000) != 0xf940_0000 {
         return false;
     }
@@ -764,12 +866,16 @@ fn is_host_plt_stub(addr: u64) -> bool {
         return false; // must load from the adrp'ed page reg (a real PLT stub)
     }
     // word 2: add Xd, Xd, #off (the AArch64 canonical PLT stub does this)
-    let w2 = unsafe { std::ptr::read_unaligned(p.add(8) as *const u32) };
+    let Some(w2) = word_at(image, base, addr + 8) else {
+        return false;
+    };
     if (w2 & 0xff00_0000) != 0x9100_0000 {
         return false;
     }
     // word 3: br Xt   — must branch to the register loaded by the `ldr` above.
-    let w3 = unsafe { std::ptr::read_unaligned(p.add(12) as *const u32) };
+    let Some(w3) = word_at(image, base, addr + 12) else {
+        return false;
+    };
     if (w3 & 0xffff_fc1f) != 0xd61f_0000 || ((w3 >> 5) & 0x1f) != dt {
         return false;
     }
@@ -822,6 +928,10 @@ pub fn compile_image_bounded(
     // still build dispatcher-return stubs for them even when the frontier drains
     // normally (otherwise their fixups index an empty stub table).
     let mut force_stubs = false;
+    // Memo of body_contains_host_plt_bl() per guest-bl target, so we scan a
+    // given callee body at most once per compile (it may be inlined from many
+    // call sites within one block).
+    let mut memo_divert: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
     // Invariant: every address in frontier is a candidate block start.
     while let Some(addr) = frontier.pop() {
         if host_of_guest.contains_key(&addr) {
@@ -858,15 +968,29 @@ pub fn compile_image_bounded(
                         // host-call bridge, so the real import never runs and the
                         // guest keeps going with a garbage return. Divert it to
                         // the dispatcher (the fixup will route to a return-stub).
-                        let hps = is_host_plt_stub(target);
+                        let hps = is_host_plt_stub(image, base, target);
+                        // A guest `bl` whose callee body itself calls a host
+                        // import (pthread_mutex_lock, abort, syslog, ...) is
+                        // also unsafe to inline: the inner import divert via
+                        // the dispatcher stub table regresses when this callee
+                        // (e.g. the FMOD one-time-init routine) is inlined a
+                        // second time inside a larger block, so it returns
+                        // "not done" and the caller branches into garbage.
+                        // Divert these too, so the callee compiles as its own
+                        // fresh block with clean inner-import diversion.
+                        let import_bearing = hps || memo_divert.get(&target).copied().unwrap_or_else(|| {
+                            let b = body_contains_host_plt_bl(image, base, target);
+                            memo_divert.insert(target, b);
+                            b
+                        });
                         #[cfg(debug_assertions)]
                         if std::env::var_os("JIT_DUMP").is_some() {
-                            eprintln!("[bl] {cur:#x} -> {target:#x} hostplt={hps}");
+                            eprintln!("[bl] {cur:#x} -> {target:#x} hostplt={hps} import_bearing={import_bearing}");
                         }
-                        if !hps {
+                        if !import_bearing {
                             frontier.push(target);
                         } else {
-                            // Diverted: don't inline this import; make sure the
+                            // Diverted: don't inline this call; make sure the
                             // stub table is built so the fixup has a real target.
                             force_stubs = true;
                         }
@@ -1082,6 +1206,109 @@ mod tests {
         let blk = compile_image(&image, 0, 0, &mut st as *mut CpuState).expect("compile");
         let r = unsafe { run(&blk, &mut st as *mut CpuState) };
         assert_eq!(r, 20, "caller(5) should be 20");
+    }
+
+    #[test]
+    fn host_plt_stub_detected_from_image_slice() {
+        // 0x40: adrp x8,#0 ; ldr x9,[x8,#8] ; add x8,x8,#0 ; br x9  (canonical PLT stub)
+        let mut image = Vec::<u8>::new();
+        while image.len() < 0x40 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0x9000_0008u32.to_le_bytes()); // 0x40 adrp x8
+        image.extend_from_slice(&0xf940_0109u32.to_le_bytes()); // 0x44 ldr x9,[x8,#8]
+        image.extend_from_slice(&0x9100_0108u32.to_le_bytes()); // 0x48 add x8,x8,#0
+        image.extend_from_slice(&0xd61f_0120u32.to_le_bytes()); // 0x4c br x9
+        assert!(is_host_plt_stub(&image, 0, 0x40), "canonical PLT stub at 0x40");
+        // A non-stub (just `ret`) is not mis-detected.
+        assert!(!is_host_plt_stub(&image, 0, 0x20), "no stub at 0x20");
+        // Out-of-range reads are rejected, not UB.
+        assert!(!is_host_plt_stub(&image, 0, 0x400), "OOB stub read rejected");
+    }
+
+    #[test]
+    fn body_contains_host_plt_bl_follows_call_graph() {
+        // caller 0x00 bl 0x20; ret
+        // callee 0x20: bl 0x40 (a host-import PLT stub); ret
+        // stub   0x40: adrp/ldr/add/br (matches is_host_plt_stub)
+        let mut image = Vec::<u8>::new();
+        image.extend_from_slice(&0x9400_0008u32.to_le_bytes()); // 0x00 bl 0x20
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x04 ret
+        while image.len() < 0x20 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0x9400_0008u32.to_le_bytes()); // 0x20 bl 0x40
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x24 ret
+        while image.len() < 0x40 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0x9000_0008u32.to_le_bytes()); // 0x40 adrp x8
+        image.extend_from_slice(&0xf940_0109u32.to_le_bytes()); // 0x44 ldr x9,[x8,#8]
+        image.extend_from_slice(&0x9100_0108u32.to_le_bytes()); // 0x48 add x8,x8,#0
+        image.extend_from_slice(&0xd61f_0120u32.to_le_bytes()); // 0x4c br x9
+        // The callee body (via its own `bl 0x40`) references a host import.
+        assert!(
+            body_contains_host_plt_bl(&image, 0, 0x20),
+            "callee 0x20 calls a host-import PLT stub"
+        );
+        // The caller body does NOT (its only `bl` is to the guest callee).
+        assert!(
+            !body_contains_host_plt_bl(&image, 0, 0x00),
+            "caller 0x00 has no direct host-import call"
+        );
+    }
+
+    #[test]
+    fn guest_bl_to_import_bearing_callee_diverts_through_dispatcher() {
+        // Same layout as body_contains_host_plt_bl test. A generous budget would
+        // normally inline the callee, but because the callee body itself calls a
+        // host-import PLT stub, the outer `bl` must be diverted to the dispatcher:
+        // running the caller block leaves CpuState.pc == 0x20 (the callee), x30
+        // == 0x04 (link), instead of the callee being compiled inline.
+        let mut image = Vec::<u8>::new();
+        image.extend_from_slice(&0x9400_0008u32.to_le_bytes()); // 0x00 bl 0x20
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x04 ret
+        while image.len() < 0x20 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0x9400_0008u32.to_le_bytes()); // 0x20 bl 0x40
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x24 ret
+        while image.len() < 0x40 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0x9000_0008u32.to_le_bytes()); // 0x40 adrp x8
+        image.extend_from_slice(&0xf940_0109u32.to_le_bytes()); // 0x44 ldr x9,[x8,#8]
+        image.extend_from_slice(&0x9100_0108u32.to_le_bytes()); // 0x48 add x8,x8,#0
+        image.extend_from_slice(&0xd61f_0120u32.to_le_bytes()); // 0x4c br x9
+
+        let mut st = CpuState::new();
+        let blk = compile_image_bounded(&image, 0, 0, &mut st as *mut CpuState, 100)
+            .expect("bounded compile");
+        let _ = unsafe { run(&blk, &mut st as *mut CpuState) };
+        // The stub wrote the diverted target into state.pc; the dispatcher would
+        // re-enter the callee next. The callee was NOT inlined into this block.
+        assert_eq!(st.pc, 0x20, "bl to import-bearing callee must divert via pc=0x20");
+        assert_eq!(st.x[30], 0x04, "bl sets x30 link to pc+4");
+    }
+
+    #[test]
+    fn guest_bl_to_import_free_callee_still_inlines() {
+        // caller 0x00 bl 0x10 ; ret ; callee 0x10 mov x0,#42 ; ret
+        let mut image = Vec::<u8>::new();
+        image.extend_from_slice(&0x9400_0004u32.to_le_bytes()); // 0x00 bl 0x10
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x04 ret
+        while image.len() < 0x10 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0xd280_0540u32.to_le_bytes()); // 0x10 mov x0,#42
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x14 ret
+
+        let mut st = CpuState::new();
+        let blk = compile_image_bounded(&image, 0, 0, &mut st as *mut CpuState, 100)
+            .expect("bounded compile");
+        let _ = unsafe { run(&blk, &mut st as *mut CpuState) };
+        // Import-free callee is inlined: its `mov x0,#42` ran inline.
+        assert_eq!(st.x[0], 42, "import-free guest callee is inlined (x0=42)");
     }
 
     #[test]
