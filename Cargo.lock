@@ -97,9 +97,11 @@ dependencies = [
 name = "arm64jit"
 version = "0.1.0-dev"
 dependencies = [
+ "input-wrapper",
  "libc",
  "libloader",
  "texture-codec",
+ "x11rb",
 ]
 
 [[package]]

@@ -11,6 +11,8 @@ libloader = { path = "../libloader" }
 texture-codec = { path = "../texture-codec" }
 
 [dev-dependencies]
+input-wrapper = { path = "../input-wrapper" }
+x11rb = "0.14"
 
 [lib]
 name = "arm64jit"
