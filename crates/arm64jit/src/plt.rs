@@ -63,7 +63,10 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
             break;
         }
     }
-    assert_ne!(dyn_link, 0, "no PT_DYNAMIC");
+    if dyn_link == 0 {
+        // Static (no dynamic segment) or otherwise no imports: nothing to bind.
+        return (0, 0);
+    }
 
     let dynp = host(el.guest_of(dyn_link));
     let (mut jmprel, mut pltrelsz, mut symtab_ref, mut strtab_ref) = (0u64, 0u64, 0u64, 0u64);
@@ -86,7 +89,10 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
             break;
         }
     }
-    assert_ne!(pltrelsz, 0, "no PLT relocs");
+    if pltrelsz == 0 {
+        // Dynamic segment present but no PLT/JUMP_SLOT relocations at all.
+        return (0, 0);
+    }
 
     let jmprel_h = host(el.guest_of(jmprel));
     let symtab_h = host(el.guest_of(symtab_ref));
