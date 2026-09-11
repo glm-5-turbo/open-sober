@@ -51,9 +51,79 @@ pub unsafe fn emulate(
         if op2 == 0xBC && inst.has_f3 {
             return emulate_count_trailing_zeros(inst, ctx);
         }
+
+        // ADCX / ADOX: 66 0F 38 F6 (CF add) / F3 0F 38 F6 (OF add).
+        // Dest = Dest + Src + (flag); modify ONLY the working flag (CF for
+        // ADCX, OF for ADOX) and leave every other status bit untouched —
+        // unlike the ordinary BMI ops which clear the arithmetic flags.
+        if op2 == 0x38 && op3 == 0xF6 {
+            return emulate_adcx_adox(inst, ctx);
+        }
     }
 
     EmulationResult::UnrecognizedInstruction
+}
+
+/// Emulate ADCX (66 0F 38 F6) / ADOX (F3 0F 38 F6): `Dest = Dest + Src + flag`,
+/// updating only the working flag (CF for ADCX, OF for ADOX) and preserving all
+/// other status bits. These are the bignum-chain adds; their whole point is to
+/// NOT clobber the other flags between limbs. Each sets its working flag to the
+/// *unsigned* carry-out of the add chain, so two independent big-number adds can
+/// be interleaved (ADCX across one operand pair riding CF, ADOX across another
+/// riding OF). `operand_size` selects 32/64-bit truncation.
+///
+/// # Safety
+/// `ctx` must be a valid ucontext pointer; inst must be a decoded ADCX/ADOX.
+unsafe fn emulate_adcx_adox(
+    inst: &DecodedInstruction,
+    ctx: *mut libc::ucontext_t,
+) -> EmulationResult {
+    let is_adox = inst.has_f3 && !inst.has_66; // ADOX = F3 prefix
+    let is_adcx = inst.has_66 && !inst.has_f3; // ADCX = 66 prefix
+    debug_assert!(is_adox || is_adcx, "adcx/adox dispatch requires 66/F3");
+
+    // Width comes from REX.W (bit 3 of rex) directly. The 0x66 / 0xF3 prefix
+    // on ADCX/ADOX is a *mandatory* opcode prefix, NOT the operand-size
+    // override, so `operand_size` (which folds 66 → 16) is the wrong source.
+    // A 64-bit ADCX is `66 48 0F 38 F6` (has_66 AND rex-W set).
+    let wide = (inst.rex & 0x08) != 0;
+    let src = get_rm_value(inst, ctx) & if wide { u64::MAX } else { 0xFFFF_FFFF };
+    let dest = get_reg(ctx, inst.reg) & if wide { u64::MAX } else { 0xFFFF_FFFF };
+
+    let carry_in = if is_adcx { get_cf(ctx) as u64 } else { get_of(ctx) as u64 };
+    // The working flag is set to the UNSIGNED carry-out of the full add chain
+    // (dest + src + flag_in). Both ADCX and ADOX use the same carry semantics,
+    // differing only in which flag they read in and write back out.
+    let (result, carry_out) = if wide {
+        let (r, c) = dest.overflowing_add(src);
+        let (r2, c2) = r.overflowing_add(carry_in);
+        (r2, (c as u64) | (c2 as u64))
+    } else {
+        // 32-bit domain: do the arithmetic on u32 values so overflow is
+        // detected at the correct width (0xFFFFFFFF+1 = 0, carry 1).
+        let d = dest as u32;
+        let s = src as u32;
+        let ci = carry_in as u32;
+        let (r, c) = d.overflowing_add(s);
+        let (r2, c2) = r.overflowing_add(ci);
+        ((r2 as u64), (c as u64) | (c2 as u64))
+    };
+
+    *get_reg_ptr(ctx, inst.reg) = result as i64;
+    if is_adcx {
+        if carry_out != 0 {
+            set_cf(ctx);
+        } else {
+            clear_cf(ctx);
+        }
+    } else if carry_out != 0 {
+        let gregs = &mut (*ctx).uc_mcontext.gregs;
+        gregs[REG_EFL] |= 0x800; // set OF (bit 11)
+    } else {
+        clear_of(ctx);
+    }
+    advance_rip(ctx, inst.len);
+    EmulationResult::Success
 }
 
 // --- BMI1 instructions (VEX.0F.38) ---
@@ -474,6 +544,30 @@ unsafe fn set_cf(ctx: *mut libc::ucontext_t) {
     gregs[idx] |= 0x1;
 }
 
+/// Read the Carry Flag (bit 0).
+unsafe fn get_cf(ctx: *mut libc::ucontext_t) -> bool {
+    let gregs = &(*ctx).uc_mcontext.gregs;
+    gregs[REG_EFL] & 0x1 != 0
+}
+
+/// Clear the Carry Flag (bit 0) without touching other flags.
+unsafe fn clear_cf(ctx: *mut libc::ucontext_t) {
+    let gregs = &mut (*ctx).uc_mcontext.gregs;
+    gregs[REG_EFL] &= !0x1;
+}
+
+/// Read the Overflow Flag (bit 11).
+unsafe fn get_of(ctx: *mut libc::ucontext_t) -> bool {
+    let gregs = &(*ctx).uc_mcontext.gregs;
+    gregs[REG_EFL] & 0x800 != 0
+}
+
+/// Clear the Overflow Flag (bit 11) without touching other flags.
+unsafe fn clear_of(ctx: *mut libc::ucontext_t) {
+    let gregs = &mut (*ctx).uc_mcontext.gregs;
+    gregs[REG_EFL] &= !0x800;
+}
+
 /// Advance RIP by instruction length.
 unsafe fn advance_rip(ctx: *mut libc::ucontext_t, len: u8) {
     let idx = REG_RIP;
@@ -852,5 +946,83 @@ mod tests {
             let v = run_rorx(&[0xC4, 0xE3, 0x7B, 0xF0, 0xCB, 0x1F], 1);
             assert_eq!(v as u64, 0x2, "32-bit rorx 1 by 31 -> 0x2 (5 moves to bit1)");
             // Flags untouched (RORX never modifies EFLAGS): CF still 0 here.
+        }
+
+        /// Run one ADCX/ADOX into a hand-set context, returning
+        /// (dest_value, cf_out, of_out) so each assertion can check the exact
+        /// flag the op is supposed to drive (ADCX→CF, ADOX→OF, other preserved).
+        /// Presets RAX/RBX (dest reg 0 / src rm 3) and a working-flag input.
+        /// Encodings (objdump-verified):
+        ///   adcx rax,rbx = 66 48 0F 38 F6 C3 ; adcx eax,ebx = 66 0F 38 F6 C3
+        ///   adox rax,rbx = F3 48 0F 38 F6 C3 ; adox eax,ebx = F3 0F 38 F6 C3
+        fn run_adc(code: &[u8], dest: u64, src: u64, flag_in: bool) -> (i64, bool, bool) {
+            unsafe {
+                let mut ctx: libc::ucontext_t = std::mem::zeroed();
+                let mut backing = code.to_vec();
+                backing.resize(8, 0xcc);
+                ctx.uc_mcontext.gregs[REG_RIP] = backing.as_ptr() as i64;
+                ctx.uc_mcontext.gregs[13] = dest as i64; // RAX = dest (reg field)
+                ctx.uc_mcontext.gregs[11] = src as i64; // RBX = rm source (slot 3)
+                // Seed BOTH working flags so we can assert the op only touches
+                // its own (ADCX) CF, (ADOX) OF.
+                if flag_in {
+                    ctx.uc_mcontext.gregs[REG_EFL] |= 0x1 | 0x800;
+                } else {
+                    ctx.uc_mcontext.gregs[REG_EFL] &= !(0x1 | 0x800);
+                }
+                let features = crate::cpuid::CpuFeatures::default();
+                let inst = decode_instruction(backing.as_ptr());
+                let res = emulate(&inst, &features, &mut ctx);
+                assert_eq!(res, EmulationResult::Success);
+                let efl = ctx.uc_mcontext.gregs[REG_EFL];
+                (
+                    ctx.uc_mcontext.gregs[13],
+                    efl & 0x1 != 0,
+                    efl & 0x800 != 0,
+                )
+            }
+        }
+
+        #[test]
+        fn adcx_uses_cf_and_preserves_of() {
+            // adcx(5,3,CF=1) = 9, CF-out 0. Values verified on real hardware
+            // (assembly driver): result 9, carry 0.
+            let (v, cf, of) = run_adc(&[0x66, 0x48, 0x0F, 0x38, 0xF6, 0xC3], 5, 3, true);
+            assert_eq!(v, 9, "5+3+CF(1)=9");
+            assert_eq!(cf, false, "no unsigned carry out");
+            assert_eq!(of, true, "ADCX must NOT clobber the OF flag");
+
+            // adcx(0xFFFF..,1,CF=0) = 0, CF-out 1 (unsigned carry).
+            let (v, cf, _of) = run_adc(&[0x66, 0x48, 0x0F, 0x38, 0xF6, 0xC3], u64::MAX, 1, false);
+            assert_eq!(v, 0, "F..+1 wraps to 0");
+            assert_eq!(cf, true, "unsigned carry-out set");
+        }
+
+        #[test]
+        fn adox_uses_of_as_unsigned_carry() {
+            // adox(0x7fff..,1,OF=0) = 0x8000.., OF-out 0 — no UNSIGNED carry,
+            // even though as a signed add it overflows. This is the crux: ADOX
+            // rides OF but treats it as an unsigned carry (verified on hardware).
+            let (v, cf, of) = run_adc(&[0xF3, 0x48, 0x0F, 0x38, 0xF6, 0xC3], 0x7fff_ffff_ffff_ffff, 1, false);
+            assert_eq!(v as u64, 0x8000_0000_0000_0000, "0x7fff..+1=0x8000..");
+            assert_eq!(of, false, "no unsigned carry, OF stays 0");
+
+            // With OF_in=1 (seeded both flags): adox adds 1 (CF untouched by
+            // ADOX carries the 1 from OF), result 0x8000..+1, and OF is cleared
+            // because there's still no unsigned carry past 64 bits.
+            let (v, cf, of) = run_adc(&[0xF3, 0x48, 0x0F, 0x38, 0xF6, 0xC3], 0x7fff_ffff_ffff_ffff, 1, true);
+            assert_eq!(v as u64, 0x8000_0000_0000_0001, "0x7fff..+1+OF_in(1)=0x8000..1");
+            assert_eq!(of, false, "still no unsigned carry out");
+            assert_eq!(cf, true, "ADOX must NOT clobber the CF flag");
+
+            // adox(0xFFFF..,1,OF=0) = 0, OF-out 1 (unsigned carry).
+            let (v, _cf, of) = run_adc(&[0xF3, 0x48, 0x0F, 0x38, 0xF6, 0xC3], u64::MAX, 1, false);
+            assert_eq!(v, 0, "F..+1 wraps to 0");
+            assert_eq!(of, true, "unsigned carry-out sets OF");
+
+            // 32-bit form (no REX.W): adox eax,ebx — zero-extends.
+            let (v, _cf, of) = run_adc(&[0xF3, 0x0F, 0x38, 0xF6, 0xC3], u64::MAX, 1, false);
+            assert_eq!(v as u64, 0, "32-bit F..+1 = 0");
+            assert_eq!(of, true, "32-bit unsigned carry-out sets OF");
         }
 }
