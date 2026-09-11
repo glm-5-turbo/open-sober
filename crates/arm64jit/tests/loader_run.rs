@@ -74,6 +74,29 @@ fn compile(workdir: &std::path::Path, name: &str, src: &str) -> PathBuf {
     elf
 }
 
+/// Compile `src` to a **PIE** (`-fPIE -pie`, dynamic/ET_DYN) aarch64 ELF —
+/// the shape of a real shared library — and return its path. Such a PIE
+/// carries `R_AARCH64_RELATIVE` data relocations for pointer globals that
+/// `load_elf_image` must materialize before the code dereferences them.
+fn compile_pie(workdir: &std::path::Path, name: &str, src: &str) -> PathBuf {
+    let c = workdir.join(format!("{name}.c"));
+    std::fs::write(&c, src).unwrap();
+    let elf = workdir.join(format!("{name}.elf"));
+    let out = Command::new("aarch64-linux-gnu-gcc")
+        .args(["-fPIE", "-pie", "-nostdlib", "-Wl,-e,entry"])
+        .arg(&c)
+        .arg("-o")
+        .arg(&elf)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cross-gcc: {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    elf
+}
+
 /// Load `elf`, bind its PLT, bootstrap guest stack/TLS/auxv (mirroring
 /// `crates/arm64jit/examples/elfjit.rs`), and run the entry through
 /// `jit_run`. Returns the guest x0 at `ret`.
@@ -183,4 +206,55 @@ fn loader_run_recursion_fib7_is_13() {
          int entry(void){ return f(7); }\n",
         13,
     );
+}
+
+#[test]
+fn loader_run_pie_relative_global_returns_42() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_pie: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = run_lock().lock().unwrap();
+    let wd = workdir("pie-rel");
+    // A REAL PIE (ET_DYN): `gptr = &shared_static` is an R_AARCH64_RELATIVE
+    // data reloc in .data.rel.ro that `load_elf_image` must apply (write
+    // base+addend into the gptr slot) before the JIT dereferences the pointer
+    // global; without the apply, *gptr reads the unrelocated link address on
+    // the NULL page and faults. Entry dereferences through the global -> 42.
+    let elf = compile_pie(
+        &wd,
+        "pie",
+        "static int shared_static = 41;\n\
+         int *gptr = &shared_static;\n\
+         int entry(void){ return *gptr + 1; }\n",
+    );
+
+    // Sanity: the fixture really is a PIE with the RELATIVE reloc.
+    let rel = Command::new("aarch64-linux-gnu-readelf")
+        .args(["-r", "--use-dynamic"])
+        .arg(&elf)
+        .output()
+        .expect("readelf missing");
+    let rel_txt = String::from_utf8_lossy(&rel.stdout);
+    assert!(
+        rel_txt.contains("R_AARCH64_RELATIVE") || rel_txt.contains("R_AARCH64_RELATIV"),
+        "PIE fixture should have an R_AARCH64_RELATIVE reloc:\n{}",
+        rel_txt
+    );
+
+    match run_elf(&elf) {
+        Ok(v) => {
+            assert_eq!(
+                v, 42,
+                "pie: entry() -> {v}, expected 42 (RELATIVE not applied?)"
+            );
+            eprintln!("\x1b[32mPASS\x1b[0m pie: entry() -> {v} via RELATIVE-relocated global");
+        }
+        Err(e) => panic!("pie: jit_run failed: {e}"),
+    }
+    let _ = std::fs::remove_dir_all(&wd);
 }

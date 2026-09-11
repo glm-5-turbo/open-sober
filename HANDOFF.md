@@ -3546,3 +3546,15 @@ expected values **verified on real hardware** `_pext_u64`/`_pdep_u64` (this
 host has BMI2): pext(0xFF,0b1010)=3, pext(8,0b1010)=2, pdep(3,0b1010)=10,
 pdep(0xFF,0b10101010)=170, plus 32-bit forms and a PEXT-vs-BZHI discriminating
 case. `cargo test --workspace` **189/0** (libbadcpu 16 → 18).
+
+### Addendum (same cycle) — loader→JIT end-to-end PIE + RELATIVE regression
+Validated and regression-locked the full **`load_elf_image` → RELATIVE apply →
+JIT execute** chain on a REAL PIE: cross-compiled `-fPIE -pie -nostdlib` aarch64
+binary (`int *gptr = &shared_static; entry(){ return *gptr+1; }`) — the compiler
+emits one `R_AARCH64_RELATIVE` in `.data.rel.ro` (offset 0x20008, addend
+0x20000 = &shared_static). Without application `*gptr` derefs the unrelocated
+link address (NULL page) and faults; with it, `gptr = base+0x20000` and
+`entry() -> 42`. Verified by hand (`elfjit ./pie.elf -> 42`) and locked as
+`loader_run_pie_relative_global_returns_42` in `crates/arm64jit/tests/
+loader_run.rs` (new `compile_pie` helper; asserts the fixture really carries a
+RELATIVE reloc). `cargo test --workspace` **190/0**.

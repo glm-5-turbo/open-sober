@@ -504,9 +504,10 @@ pointer globals/vtables.
 
 ### Gate (verified this cycle)
 - cargo build --workspace: clean
-- cargo test --workspace: 189 passed / 0 failed
-  (libloader 16 -> 23 unit + 1 integration; libbadcpu 16 -> 18, PEXT/PDEP)
-- HEAD: bfa5c6b (local `dev`)
+- cargo test --workspace: 190 passed / 0 failed
+  (libloader 16 -> 23 unit + 1 integration; libbadcpu 16 -> 18;
+  loader_run 4 -> 5 incl. PIE+RELATIVE e2e)
+- HEAD: bfa5c6b, then PIE-e2e commit (next) (local `dev`)
 
 ### Honest remaining
 - The pre-existing `crates/libloader/tests` skips cleanly when cross-gcc absent.
