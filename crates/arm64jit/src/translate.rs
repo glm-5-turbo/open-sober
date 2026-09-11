@@ -66,6 +66,59 @@ fn stg_if_writable(buf: &mut CodeBuf, g: u32) {
     }
 }
 
+/// Transfer `size` bytes (B=1/H=2/S=4/D=8) between the low bytes of the guest
+/// vector slot `vslot` (into CpuState via RBX) and the memory address held in
+/// host register `addr`. `ld=true` loads [addr]->slot; `ld=false` stores
+/// slot->[addr]. Only the low `size` bytes of the 16-byte slot are touched —
+/// upper lanes stay preserved (ARM scalar `ldr d0` keeps the high 64 bits).
+/// Shared by the scalar FP/SIMD immediate forms (FpLdStImm, FpLdStImmUnscaled,
+/// FpLdStImmWb).
+#[inline]
+fn fp_scalar_xfer(
+    buf: &mut CodeBuf,
+    addr: u8,
+    vslot: i32,
+    size: u8,
+    ld: bool,
+) -> Result<(), String> {
+    match (size, ld) {
+        (8, true) => {
+            buf.mov_load64(RAX, addr, 0);
+            buf.mov_store64(RBX, vslot, RAX);
+        }
+        (8, false) => {
+            buf.mov_load64(RAX, RBX, vslot);
+            buf.mov_store64(addr, 0, RAX);
+        }
+        (4, true) => {
+            buf.mov_load32(RAX, addr, 0);
+            buf.mov_store32(RBX, vslot, RAX);
+        }
+        (4, false) => {
+            buf.mov_load32(RAX, RBX, vslot);
+            buf.mov_store32(addr, 0, RAX);
+        }
+        (2, true) => {
+            buf.movzx_word_mem(RAX, addr, 0);
+            buf.mov_store16(RBX, vslot, RAX);
+        }
+        (2, false) => {
+            buf.movzx_word_mem(RAX, RBX, vslot);
+            buf.mov_store16(addr, 0, RAX);
+        }
+        (1, true) => {
+            buf.movzx_byte_mem(RAX, addr, 0);
+            buf.mov_store8(RBX, vslot, RAX);
+        }
+        (1, false) => {
+            buf.movzx_byte_mem(RAX, RBX, vslot);
+            buf.mov_store8(addr, 0, RAX);
+        }
+        (s, _) => return Err(format!("fp_scalar_xfer size {s} not implemented")),
+    }
+    Ok(())
+}
+
 /// Zero-extend the low 32 bits of x86 reg `r` into its upper half. AArch64
 /// writes to a W (32-bit) register always zero the upper 32 bits of the
 /// corresponding X register; x86 64-bit ops leave them stale, so a 32-bit data
@@ -3972,6 +4025,34 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 buf.movdqu_store(RAX, 0, 0);
             }
             // Xn += imm9 (pre and post both advance the base register).
+            ldg(buf, RCX, rn as u32);
+            if imm9 != 0 {
+                buf.lea64(RCX, RCX, imm9);
+            }
+            stg(buf, rn as u32, RCX);
+            Ok(())
+        }
+        Inst::FpLdStImmUnscaled { vt, rn, imm9, size, ld } => {
+            // Scalar ldur/stur: addr = x[rn] + imm9 (signed), no writeback.
+            ldg(buf, RDX, rn as u32);
+            if imm9 != 0 {
+                buf.lea64(RDX, RDX, imm9);
+            }
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            fp_scalar_xfer(buf, RDX, vslot, size, ld)?;
+            Ok(())
+        }
+        Inst::FpLdStImmWb { vt, rn, imm9, size, ld, pre } => {
+            // Scalar pre/post-index ldr/str with base writeback.
+            //   pre:  addr = x[rn] + imm9, then Xn += imm9
+            //   post: addr = x[rn],        then Xn += imm9
+            ldg(buf, RAX, rn as u32);
+            if pre && imm9 != 0 {
+                buf.lea64(RAX, RAX, imm9); // pre-add the offset into the address
+            }
+            let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
+            fp_scalar_xfer(buf, RAX, vslot, size, ld)?;
+            // base register advances by imm9 for both pre and post index.
             ldg(buf, RCX, rn as u32);
             if imm9 != 0 {
                 buf.lea64(RCX, RCX, imm9);

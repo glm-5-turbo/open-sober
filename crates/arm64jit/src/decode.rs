@@ -260,6 +260,29 @@ pub enum Inst {
         size: u8, // 1/2/4/8
         ld: bool,
     },
+    // ---- FP/SIMD SCALAR (B/H/S/D) UNSCALED immediate load/store ----
+    // (`ldur <s>t,[xN,#simm9]` / `stur`). Signed imm9 in bits[20:12], no
+    // writeback. Same address math as VecLdStImmUnscaled (128-bit Q) but the
+    // scalar widths transfer only `size` bytes into the low bytes of v[vt].
+    FpLdStImmUnscaled {
+        vt: u8,
+        rn: u8,
+        imm9: i32,
+        size: u8, // 1/2/4/8
+        ld: bool,
+    },
+    // ---- FP/SIMD SCALAR (B/H/S/D) PRE/POST-index writeback load/store ----
+    // (`ldr/str <s>t,[xN,#simm9]!` (pre) / `[xN],#simm9` (post)). Signed imm9
+    // in bits[20:12]; Xn advances by imm9 after the transfer (a real side
+    // effect, like the Q VecLdStIndexed forms). `pre` selects pre-index.
+    FpLdStImmWb {
+        vt: u8,
+        rn: u8,
+        imm9: i32,
+        size: u8, // 1/2/4/8
+        ld: bool,
+        pre: bool,
+    },
     // ---- SIMD/NEON vector move-immediate (movi Vd.<T>, #imm) ----
     // `lo`/`hi` are the low/high 64-bit halves of the 128-bit result, already
     // expanded to the element size (each byte/word/dword lane set to #imm).
@@ -1370,6 +1393,63 @@ pub fn decode(insn: u32) -> Inst {
         let rn = b(insn, 5, 9) as u8;
         let vt = b(insn, 0, 4) as u8;
         return Inst::VecLdStImm { vt, rn, imm, ld };
+    }
+
+    // ---- FP/SIMD SCALAR immediate load/store: UNSCALED (LDUR/STUR) + PRE/POST ----
+    // -index writeback (LDR/STR <s>t, signed imm9). Same scalar B/H/S/D widths
+    // as FpLdStImm below, but with a SIGNED imm9 (bits[20:12]) instead of a
+    // size-scaled one, and (for the writeback forms) a post/pre base update.
+    // Fixed bits distinguish this from the neighbours: bit26=1 (vector file, vs
+    // the GPR LdStrImmWb whose 0xfc/0xbc top bytes overlap); bit25=0 (immediate,
+    // not the register-offset FpLdStrReg); bit24=0 (unscaled/indexed, not the
+    // size-scaled 0x3d FpLdStImm below); bit23=0 (scalar, not the 128-bit Q
+    // VecLdSt* gates which set bit23); bits[29:27]=111 (the fixed 111 opcode
+    // field, verified vs stur d0=0xfc008020 / ldur s0=0xbc5fc020 etc).
+    if (insn & 0x0400_0000) != 0 // bit26 = V (vector register file)
+        && (insn & 0x0200_0000) == 0 // bit25 = 0: immediate offset
+        && (insn & 0x0020_0000) == 0 // bit21 = 0: NOT register-offset (FpLdStrReg sets bit21)
+        && (insn & 0x0100_0000) == 0 // bit24 = 0: unscaled/indexed (not scaled)
+        && (insn & 0x0080_0000) == 0 // bit23 = 0: scalar (not 128-bit Q)
+        && (insn & 0x3800_0000) == 0x3800_0000 // bits[29:27] = 111
+    {
+        let size = match (insn >> 30) & 0x3 {
+            0 => 1, // b
+            1 => 2, // h
+            2 => 4, // s
+            _ => 8, // d
+        };
+        let ld = (insn >> 22) & 1 == 1;
+        let imm9 = (((insn >> 12) & 0x1ff) as i32) << 23 >> 23; // sign-ext 9 bits
+        let rn = b(insn, 5, 9) as u8;
+        let vt = (insn & 0x1f) as u8;
+        return match (insn >> 10) & 0x3 {
+            0 => Inst::FpLdStImmUnscaled {
+                vt,
+                rn,
+                imm9,
+                size,
+                ld,
+            },
+            // bits[11:10] = 01 post-index, 11 pre-index (mirror the GPR
+            // LdStrImmWb gates 0x3800_0400 post / 0x3800_0c00 pre).
+            1 => Inst::FpLdStImmWb {
+                vt,
+                rn,
+                imm9,
+                size,
+                ld,
+                pre: false,
+            },
+            3 => Inst::FpLdStImmWb {
+                vt,
+                rn,
+                imm9,
+                size,
+                ld,
+                pre: true,
+            },
+            _ => Inst::Unsupported((insn >> 10) & 0x3), // 2 = unprivileged LDTR/STTR
+        };
     }
 
     // ---- FP/SIMD scalar-register load/store (ldr/str d0,s0,h0,b0,[xN,#imm]) ----
@@ -3375,6 +3455,72 @@ mod tests {
         }
         // register-offset ldr x3,[x0,x2] = 0xf8626803 MUST stay LdStrReg.
         assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
+    }
+
+    #[test]
+    fn fp_scalar_unscaled_and_wb_ground_truth() {
+        // Scalars (B/H/S/D) LDUR/STUR (unscaled) + LDR/STR pre/post-index
+        // writeback, bit26=1 vector file. Words taken from aarch64-linux-gnu-as
+        // objdump (`ldur/stur` + `ldr/str ... [x1,#imm]!` / `[x1],#imm`).
+        for (w, _kind, size, ld, pre, imm9) in [
+            // (word, kind, size, ld, pre, imm9)
+            (0x3c5fb020u32, "unsc", 1u8, true, false, -5i32), // ldur b0,[x1,#-5]
+            (0x7c407020u32, "unsc", 2u8, true, false, 7i32),  // ldur h0,[x1,#7]
+            (0xbc5fc020u32, "unsc", 4u8, true, false, -4i32), // ldur s0,[x1,#-4]
+            (0xfc408020u32, "unsc", 8u8, true, false, 8i32),  // ldur d0,[x1,#8]
+            (0x3c1fb020u32, "unsc", 1u8, false, false, -5i32), // stur b0,[x1,#-5]
+            (0x7c007020u32, "unsc", 2u8, false, false, 7i32), // stur h0,[x1,#7]
+            (0xbc1fc020u32, "unsc", 4u8, false, false, -4i32), // stur s0,[x1,#-4]
+            (0xfc008020u32, "unsc", 8u8, false, false, 8i32), // stur d0,[x1,#8]
+            (0xbc404420u32, "wb", 4u8, true, false, 4i32),   // ldr s0,[x1],#4 post
+            (0xbc404c20u32, "wb", 4u8, true, true, 4i32),    // ldr s0,[x1,#4]! pre
+            (0xfc5f8420u32, "wb", 8u8, true, false, -8i32),  // ldr d0,[x1],#-8 post
+            (0xfc5f8c20u32, "wb", 8u8, true, true, -8i32),   // ldr d0,[x1,#-8]! pre
+            (0xbc004420u32, "wb", 4u8, false, false, 4i32),  // str s0,[x1],#4 post
+            (0xfc1f8420u32, "wb", 8u8, false, false, -8i32), // str d0,[x1],#-8 post
+        ] {
+            match decode(w) {
+                Inst::FpLdStImmUnscaled {
+                    vt,
+                    rn,
+                    imm9: i,
+                    size: s,
+                    ld: l,
+                } => {
+                    assert_eq!((vt, rn), (0, 1), "{w:#x}");
+                    assert_eq!(i, imm9, "{w:#x}");
+                    assert_eq!(s, size, "{w:#x}");
+                    assert_eq!(l, ld, "{w:#x}");
+                }
+                Inst::FpLdStImmWb {
+                    vt,
+                    rn,
+                    imm9: i,
+                    size: s,
+                    ld: l,
+                    pre: p,
+                } => {
+                    assert_eq!((vt, rn), (0, 1), "{w:#x}");
+                    assert_eq!(i, imm9, "{w:#x}");
+                    assert_eq!(s, size, "{w:#x}");
+                    assert_eq!(l, ld, "{w:#x}");
+                    assert_eq!(p, pre, "{w:#x}");
+                }
+                other => panic!("expected scalar FP ld/st for {w:#x}, got {other:?}"),
+            }
+        }
+        // Neighbours must NOT decode into the scalar-immediate family:
+        // scaled scalar (ldr d0,[x1] = 0xfd400020) stays FpLdStImm;
+        // scalar register-offset (ldr s3,[x1,x2,lsl#2] = 0xbc627823) stays
+        // FpLdStrReg; 128-bit q original (ldur q0 = 0x3cc08020) stays
+        // VecLdStImmUnscaled; GPR (ldur x0,[x1,#-8] = 0xf85f8020) is LdStrImmWb.
+        assert!(matches!(decode(0xfd400020), Inst::FpLdStImm { .. }), "scaled d");
+        assert!(matches!(decode(0xbc627823), Inst::FpLdStrReg { .. }), "reg-offset s");
+        assert!(
+            matches!(decode(0x3cc08020), Inst::VecLdStImmUnscaled { .. }),
+            "q unscaled"
+        );
+        assert!(matches!(decode(0xf85f8020), Inst::LdStrImmWb { .. }), "gpr");
     }
 
     #[test]

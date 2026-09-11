@@ -2059,6 +2059,52 @@ mod tests {
     }
 
     #[test]
+    fn fp_scalar_unscaled_ldur_stur_roundtrip() {
+        // Scalars B/H/S/D unscaled ldur/stur transfer `size` bytes between the
+        // low bytes of the vector slot v[vt] and [Xn+imm9]. Round-trip a double
+        // buffer and confirm both the slot and the memory end up
+        // correct.  stur d0,[x1,#-8] ; ldur d1,[x1,#-8] ; ret
+        let code = [0x20u8, 0x80, 0x1f, 0xfc, 0x21, 0x80, 0x5f, 0xfc, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut buf = [0xdead_beef_cafe_f00du64; 2];
+        let mut st = CpuState::new();
+        st.x[1] = (buf.as_ptr() as u64).wrapping_add(8); // [x1-8] -> buf[0]
+        st.v[0] = 0x8899_aabb_ccdd_eeff; // d0
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(buf[0], 0x8899_aabb_ccdd_eeff, "stur d0 wrote memory");
+        assert_eq!(st.v[2], 0x8899_aabb_ccdd_eeff, "ldur d1 read it back");
+    }
+
+    #[test]
+    fn fp_scalar_post_index_writeback_advances_base() {
+        // ldr s0,[x1],#4 (post-index) reads 4 bytes from [x1] into s0 and
+        // advances x1 by +4. Word verified by aarch64-linux-gnu-as.
+        let code = [0x20u8, 0x44, 0x40, 0xbc, 0xc0, 0x03, 0x5f, 0xd6]; // ldr s0,[x1],#4 ; ret
+        let mut store = 0x1234_5678u64;
+        let mut st = CpuState::new();
+        let base = (&store as *const u64) as u64;
+        st.x[1] = base;
+        st.v[0] = 0xffff_ffff_ffff_ffff; // pre-fill s0
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.v[0] & 0xffff_ffff, 0x1234_5678, "s0 loaded from [x1]");
+        assert_eq!(st.x[1], base.wrapping_add(4), "post-index advanced Xn by 4");
+    }
+
+    #[test]
+    fn fp_scalar_pre_index_writeback_applies_offset_before_load() {
+        // ldr d0,[x1,#-8]! (pre-index) reads 8 bytes from [x1-8] and advances
+        // x1 to x1-8. Word verified by aarch64-linux-gnu-as.
+        let code = [0x20u8, 0x8c, 0x5f, 0xfc, 0xc0, 0x03, 0x5f, 0xd6]; // ldr d0,[x1,#-8]! ; ret
+        let mut store = 0x1122_3344_5566_7788u64;
+        let mut st = CpuState::new();
+        let base = (&store as *const u64) as u64;
+        st.x[1] = base.wrapping_add(8); // address AFTER the -8 offset
+        st.v[0] = 0;
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.v[0], 0x1122_3344_5566_7788, "d0 loaded from [x1-8]");
+        assert_eq!(st.x[1], base, "pre-index wrote Xn back to x1-8");
+    }
+
+    #[test]
     fn ldr_reg_sext_sign_extends_into_dest() {
         // Regression: register-offset `ldrsh w0,[x1,x0]` (0x78e06820) loaded the
         // signed value into RCX but wrote RAX (= the effective ADDRESS) into the
