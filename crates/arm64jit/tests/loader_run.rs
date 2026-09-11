@@ -1007,3 +1007,78 @@ fn loader_run_deep_dep_chain_transitive_returns_44() {
     eprintln!("\x1b[32mPASS\x1b[0m chain2: entry() -> 44 via 2-level transitive DT_NEEDED closure");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// The guest thread model: `clone` (syscall 220) spawns a real host thread
+/// that re-enters `jit_run` at the post-svc PC and continues the guest,
+/// sharing the image memory (guest==host). The child here publishes a value to
+/// a shared global (via its own stack, its own tid), then thread-exits; the
+/// parent busy-waits on the flag with a bounded spin and returns what it read.
+/// This proves the child actually RAN on a distinct host thread reading the
+/// SAME guest address space, and that its thread-local exit (93) unwound its
+/// `jit_run` without killing the parent.
+#[test]
+fn loader_run_clone_spawns_guest_thread_shared_memory() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_clone: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("clone-thread");
+
+    let src = r#"
+volatile long g_shared = 0;
+
+int entry(void){
+    // The child's stack lives in the image's .bss (real mapped memory shared
+    // with the child thread, since guest==host).
+    static char stack[65536] __attribute__((aligned(16)));
+
+    // Raw AArch64 clone(2): x0=flags, x1=newsp, x2=ptid, x3=tls, x4=ctid.
+    // CLONE_VM(0x100)|FS(0x200)|FILES(0x400)|SIGHAND(0x800) = 0xF00.
+    register long x8 asm("x8") = 220;
+    register long x0 asm("x0") = 0xF00;
+    // The guest resumes at the post-svc PC WITHOUT the caller's `sub sp,#0x20`
+    // prologue (the child is a fresh thread), so its frame locals live at
+    // [sp+#8..#28] — ABOVE sp. Point child_stack below the buffer top so those
+    // positive-offset locals land inside the mapped .bss stack region.
+    register long x1 asm("x1") = (long)(stack + 65536 - 128);
+    register long x2 asm("x2") = 0;
+    register long x3 asm("x3") = 0;
+    register long x4 asm("x4") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    long tid = x0; // parent -> child tid, child -> 0
+
+    if (tid == 0) {
+        // ---- child thread ----
+        int acc = 0;
+        for (int i = 0; i < 64; i++) acc += i; // 2016, real compute on child stack
+        g_shared = 6 * 7 + (acc == 2016 ? 0 : 1000); // 42 if the loop ran correctly
+        // thread-local exit (93) — must NOT kill the parent's process
+        register long x8c asm("x8") = 93;
+        register long x0c asm("x0") = 0;
+        asm volatile("svc #0" :: "r"(x8c), "r"(x0c) : "memory");
+        return -2; // unreachable (thread exit unwinds jit_run first)
+    }
+
+    // ---- parent thread: bounded spin for the child's publish ----
+    long spins = 0;
+    while (g_shared == 0 && spins < 1000000000L) { spins++; }
+    return g_shared == 0 ? -1 : (int)g_shared;
+}
+"#;
+
+    let elf = compile(&wd, "clone", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "clone-thread: entry() -> {v}, expected 42 (child did not publish/sum 2016?)"
+        ),
+        Err(e) => panic!("clone-thread: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m clone-thread: guest thread wrote 42 to shared memory");
+    let _ = std::fs::remove_dir_all(&wd);
+}

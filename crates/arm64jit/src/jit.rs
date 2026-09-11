@@ -8,6 +8,7 @@
 // The prologue loads it into RBX (the base the translator reads/writes).
 
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -46,6 +47,15 @@ pub struct CpuState {
     /// v26.8h` writes rd==rn while still reading rn's high half). Kept after
     /// `cntvct` so VECTOR_BASE (272) is unchanged.
     pub permscratch: [u64; 4], // 32 bytes = 2 × 16-byte vectors
+    /// Post-svc PC: the guest address of the instruction *after* the `svc`
+    /// currently being dispatched (recorded by the Svc translate arm). A
+    /// `clone` child thread re-enters `jit_run` at this address, and a
+    /// thread-local `exit` returns from the block with this unchanged while
+    /// zeroing `pc`. Kept after `permscratch` so VECTOR_BASE (272) is fixed.
+    pub svc_next: u64,
+    /// Guest thread id assigned by the clone handler (positive u64; 0 = main).
+    /// Distinct per spawned thread, stable for the thread's lifetime.
+    pub tid: u64,
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
@@ -64,6 +74,10 @@ pub const TPIDR_OFF: i32 = VECTOR_BASE + 64 * 8; // 784
 pub const CNTVCT_OFF: i32 = TPIDR_OFF + 8; // 792
 /// Byte offset of `CpuState.permscratch` — right after `cntvct` (792..800).
 pub const PERMSCRATCH_OFF: i32 = CNTVCT_OFF + 8; // 800
+/// Byte offset of `CpuState.svc_next` — right after permscratch (800..832).
+pub const SVC_NEXT_OFF: i32 = PERMSCRATCH_OFF + 32; // 832
+/// Byte offset of `CpuState.tid` — right after `svc_next` (832..840).
+pub const TID_OFF: i32 = SVC_NEXT_OFF + 8; // 840
 
 impl CpuState {
     pub fn new() -> Self {
@@ -76,6 +90,8 @@ impl CpuState {
             tpidr: 0,
             cntvct: 0,
             permscratch: [0; 4],
+            svc_next: 0,
+            tid: 0,
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {
@@ -250,6 +266,25 @@ static HOST_CALLS: Mutex<[Option<HostCall>; HOST_THUNK_MAX]> = Mutex::new([None;
 static HOST_FLOAT_CALLS: Mutex<[Option<HostFloatCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_FLOAT32_CALLS: Mutex<[Option<HostFloat32Call>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_GLES_CALLS: Mutex<[Option<HostGlesCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
+
+/// Execution context of the active `jit_run` call: the raw guest image bytes
+/// (as loaded/mapped — lives for the whole run, process-lifetime for elfjit)
+/// plus the guest address the image starts at. A `clone` (syscall 220) child
+/// thread re-enters `jit_run` with the SAME image so it continues the guest
+/// program. The image is process-lifetime (mmap'd by libloader / leaked by the
+/// run harness), so storing a raw pointer here is sound for the child's borrow.
+struct ExecCtx {
+    image_addr: usize,
+    image_len: usize,
+    base: u64,
+}
+static EXEC_CTX: Mutex<Option<ExecCtx>> = Mutex::new(None);
+
+/// Guest thread ids handed out to `clone` children (atomic, monotonic, nonzero
+/// for children; the main image keeps tid 0). Distinct -> distinct guest tids;
+/// exact numeric values are unspecified (guest only compares/prints, doesn't
+/// rely on kernel pid semantics).
+static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 
 /// Register `f` as the host call for guest slot `i`. Returns the guest address
 /// the caller should resolve a JUMP_SLOT/intra-image `blr` target to so that the
@@ -473,16 +508,28 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     // back as -1 + errno; we convert to the kernel's -errno convention.
     let ret: c_long = match nr {
         // --- process / exit ---
-        93 | 94 => { // exit(93) / exit_group(94)
+        93 | 94 => {
+            // exit(93) / exit_group(94). exit_group ALWAYS ends the whole
+            // process (kernel semantics). exit(93): on a spawned child tid it
+            // terminates ONLY that guest thread (set state.pc = 0; the Svc
+            // translate arm early-returns the block on pc==0, so the child's
+            // jit_run unwinds and its host thread ends); on the main thread
+            // (tid==0) it is the last thread, so it ends the process.
             if std::env::var("JIT_TRACE_SVC").is_ok() {
-                eprintln!("guest_svc: exit_group({}) from guest", a[0]);
+                eprintln!("guest_svc: exit/exit_group({}) from guest tid={}", a[0], s.tid);
             }
-            // A guest exit_group is a raw kernel call: terminate immediately
-            // without Rust's stdout flush / destructor walk (a guest `exit`
-            // must NOT run host language-level cleanup, and Rust's atexit stdio
-            // flush crashed under elfjit when stdout was redirected). Guest
-            // writes went directly to fd 1, so nothing is lost by _exit.
-            unsafe { libc::_exit(a[0] as c_int) };
+            if nr == 94 || s.tid == 0 {
+                // A guest exit_group / main-thread exit is a raw kernel call:
+                // terminate immediately without Rust's stdout flush / destructor
+                // walk (a guest `exit` must NOT run host language-level cleanup,
+                // and Rust's atexit stdio flush crashed under elfjit when stdout
+                // was redirected). Guest writes went directly to fd 1, so nothing
+                // is lost by _exit.
+                unsafe { libc::_exit(a[0] as c_int) };
+            }
+            // Spawned-child's thread-local exit: halt just this guest thread.
+            s.pc = 0;
+            a[0] as c_long
         }
         // --- basic I/O ---
         63 => unsafe { libc::read(a[0] as c_int, a[1] as *mut c_void, a[2] as usize) as c_long },
@@ -538,8 +585,91 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         175 => unsafe { libc::geteuid() as c_long },
         176 => unsafe { libc::getgid() as c_long },
         177 => unsafe { libc::getegid() as c_long },
-        178 => unsafe { libc::gettid() as c_long },
+        178 => {
+            // gettid: the REAL host thread id (libc::gettid()). A spawned child
+            // has its own host thread, so it naturally reports a distinct id —
+            // mirroring kernel gettid (each clone child is a distinct tid). The
+            // guest `tid` field is used internally for thread-local exit, not
+            // exposed here.
+            unsafe { libc::gettid() as c_long }
+        }
         173 => unsafe { libc::getppid() as c_long },
+        // --- clone (220): spawn a guest child thread on a real host thread. ---
+        220 => {
+            // AArch64 clone(flags, child_stack, parent_tid, child_tid, tls, ...).
+            // We implement the VM-sharing thread case (CLONE_VM/THREAD/SIGHAND/
+            // FS/FILES/SETTLS — what pthread_create uses): the child re-enters
+            // `jit_run` on a new host thread from the post-svc PC with a fresh
+            // stack + tls, sharing the parent's address space (guest==host, so
+            // memory is inherently shared). flags that fork a NEW process/VM
+            // (no CLONE_VM) can't be honored meaningfully -> -EINVAL.
+            let flags = a[0];
+            const CLONE_VM: u64 = 0x0000_0100;
+            // const CLONE_FS: u64 = 0x0000_0200;
+            // const CLONE_FILES: u64 = 0x0000_0400;
+            // const CLONE_SIGHAND: u64 = 0x0000_0800;
+            const CLONE_THREAD: u64 = 0x0001_0000;
+            const CLONE_SETTLS: u64 = 0x0008_0000;
+            const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+            const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+            let child_stack = a[1];
+            let parent_tid = a[2] as *mut u32;
+            let tls = a[3];
+            let child_tid = a[4] as *mut u32;
+            if flags & CLONE_VM == 0 {
+                // A real process-fork (new VM) isn't the thread model we run.
+                (-libc::EINVAL) as c_long
+            } else {
+                let tid = NEXT_TID.fetch_add(1, Ordering::SeqCst);
+                // Clone the parent register file; the child diverges below.
+                let mut child = s.clone();
+                child.tid = tid;
+                child.x[0] = 0; // clone returns 0 to the child
+                if child_stack != 0 {
+                    child.x[31] = child_stack; // new stack pointer
+                }
+                if flags & CLONE_SETTLS != 0 {
+                    child.tpidr = tls; // new TLS base
+                }
+                // Parent-side TID store: *parent_tid = child tid (meaningful when
+                // the child stores into the parent's memory; here identical).
+                if flags & CLONE_PARENT_SETTID != 0 {
+                    unsafe { parent_tid.write_volatile(tid as u32) };
+                }
+                if flags & CLONE_CHILD_SETTID != 0 {
+                    unsafe { child_tid.write_volatile(tid as u32) };
+                }
+                let _ = flags & CLONE_THREAD; // no separate thread group tracked
+                // Re-enter jit_run on a host thread from the post-svc PC.
+                let post_svc = s.svc_next;
+                let ctx_guard = EXEC_CTX.lock().unwrap();
+                match ctx_guard.as_ref() {
+                    Some(ctx) => {
+                        // Extract Send-able pieces (the raw pointer as usize) so
+                        // the closure can reconstruct the process-lifetime image
+                        // slice inside the spawned thread.
+                        let img_addr = ctx.image_addr;
+                        let img_len = ctx.image_len;
+                        let base = ctx.base;
+                        drop(ctx_guard);
+                        std::thread::spawn(move || {
+                            // SAFETY: image bytes are process-lifetime (mmap'd by
+                            // libloader / leaked by the run harness), so the slice
+                            // reconstructed from the raw address remains valid for
+                            // the child's whole run.
+                            let image: &[u8] = unsafe {
+                                std::slice::from_raw_parts(img_addr as *const u8, img_len)
+                            };
+                            // The child runs to its thread-local exit, then pc==0
+                            // halts jit_run and the host thread ends.
+                            let _ = jit_run(image, base, post_svc, &mut child as *mut CpuState);
+                        });
+                        tid as c_long
+                    }
+                    None => (-libc::ENOSYS) as c_long, // no active exec context yet
+                }
+            }
+        }
         98 => unsafe {
             // futex: only FUTEX_WAIT(0)/FUTEX_WAKE(1) forwarded to the host. Others return 0.
             let op = a[1] as i32;
@@ -965,6 +1095,13 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         unsafe { (*st).cntvct = ticks };
     };
     unsafe { (*state).pc = entry }
+    // Register the active image so a `clone` child host thread can re-enter
+    // `jit_run` on the same program. The image is process-lifetime.
+    *EXEC_CTX.lock().unwrap() = Some(ExecCtx {
+        image_addr: image.as_ptr() as usize,
+        image_len: image.len(),
+        base,
+    });
     let mut guard: u64 = 0;
     const MAX_STEPS: u64 = 20_000_000; // safety net against an infinite guest loop
     loop {

@@ -1475,6 +1475,12 @@ pub fn translate(
             // Route the supervisor call to the host `guest_svc` dispatcher (this
             // is the hookpoint for real AArch64->host syscall routing).
             let addr = crate::jit::guest_svc as usize as u64;
+            // Record the post-svc guest address (pc+4) into CpuState.svc_next
+            // BEFORE the call. `clone` (220) re-enters jit_run at this address
+            // for the child thread, so the child continues right after the svc.
+            // pc is the current instruction's guest address (translate passes it).
+            buf.mov_ri64(RAX, pc.wrapping_add(4));
+            buf.mov_store64(RBX, crate::jit::SVC_NEXT_OFF, RAX); // state.svc_next = pc+4
             // guest_svc(st) is extern "C" fn(*mut CpuState)->u64: arg0 (state)
             // must go in RDI explicitly. RDI at block entry does hold the state
             // pointer (we are f(state)), so the FIRST inline call worked by
@@ -1492,6 +1498,16 @@ pub fn translate(
             buf.call_r64(RAX); // guest_svc(st); returns the syscall result in RAX
             buf.add_ri64(4, 8); // RSP += 8  ->  back to block-entry alignment
             stg(buf, 0, RAX); // system value -> guest x0 (AArch64 return reg)
+            // Thread-exit early-return: guest_svc sets state.pc == 0 to halt the
+            // current guest thread (a spawned child's `exit`/thread-local-exit,
+            // syscall 220's child, etc.). In that case jit_run's caller sees
+            // pc==0 and unwinds — but this *inlined* svc would otherwise continue
+            // into the next guest instruction. So: if state.pc == 0, `ret` from
+            // the block now. The `jne` skips the single-byte `ret` when pc != 0.
+            buf.mov_load64(RAX, RBX, crate::jit::PC_OFF); // RAX = state.pc
+            buf.test_rr64(RAX, RAX);
+            buf.jne_rel8(1); // if pc != 0, jump over the 1-byte `ret`
+            buf.ret(); // pc == 0: return from block (jit_run halts this thread)
             Ok(())
         }
         Inst::Brk { imm } => {

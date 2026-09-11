@@ -1016,6 +1016,18 @@ impl CodeBuf {
         self.b(cc);
         self.patch_here()
     }
+    /// jne short (75 rel8) — used to skip a fixed-length (e.g. 1-byte `ret`)
+    /// block when a condition holds. `disp` is the signed rel8 (jump target =
+    /// address after this 2-byte instruction + disp).
+    pub fn jne_rel8(&mut self, disp: u8) {
+        self.b(0x75);
+        self.b(disp);
+    }
+    /// jz short (74 rel8) — same shape as `jne_rel8`.
+    pub fn jz_rel8(&mut self, disp: u8) {
+        self.b(0x74);
+        self.b(disp);
+    }
     /// cmovcc r64, r/m64  (0F 40+cc), `cc` = cmov-ccode 2nd byte *after* jcc-0x40
 /// (e.g. 0x45 = cmovne). ModRM reg=rd(dst), rm=rs(src). Caller passes
 /// `x86_cc_for_cond(cond) - 0x40`.
