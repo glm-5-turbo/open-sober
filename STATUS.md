@@ -398,3 +398,16 @@ battery as regression ground truth (dpoly/dsum/dmat/ddiv/dscale/dclamp/
 ddmat2 / fdivf/dloop/mixed/dstruct/dneg/fmat/drec / fma1). arm64jit 124/124,
 workspace 173/0. HEAD 578faaf local dev. HARD GATE unchanged (real libroblox.so
 boot on GPU/APK host).
+---
+## Cycle addendum — shifted-register add/sub clobber + fclamp fix (workspace 174/0, commit 9cc0f16)
+Third cross-gcc FP battery (all -O2: fma-heavy Horner, quadratic-formula div,
+clamp, mixed div) surfaced one more silent miscompile: **apply_shift_const** wrote
+the shift count into RCX then `shl rcx,cl`, but both AddSubReg/AddSubExt callers
+pass x==RCX (the Rm value) — so `add x1,x2,x0,lsl#3` became x2+24 CONSTANT and
+-O2 double-array loops read the same element each iteration (fclamp 10 vs 9).
+Fixed to immediate-shift C1/4..7. fclamp 9. +regression. arm64jit 125/125,
+workspace 174/0; full 3-batch FP battery + core C battery all match ground
+truth. (dnorm.elf degenerates to +inf overflow = C UB; not counted.)
+Cycle total across sunday's grind: 6 FP/SIMD miscompile fixes + scalar FMA3,
+all regression-locked. HEAD 9cc0f16 local dev. HARD GATE unchanged (real
+libroblox.so boot + GPU host).

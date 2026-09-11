@@ -3359,3 +3359,25 @@ This session net: 5 FP/SIMD correctness fixes (fsub-vs-shll, FP-compare N flag,
 ld1-2reg deinterleave, FMOV-imm [16,30], FMADD) + the FMADD feature. Next:
 keep pressing -O2/FP-contracted programs, single-precision struct args, more
 div/compare edges; then libloader gaps. HARD GATE unchanged.
+
+## Session (Sep 11, 2026) — shifted-register add/sub clobber bug (commit 9cc0f16)
+Fourth FP milestone. The -O2 loop version of fclamp (double clamp across an
+array) returned 10 vs 9; straight-line clamp worked. Root cause:
+`apply_shift_const(buf, x, kind, amt)` wrote the shift amount into RCX
+(`mov rcx, amt`) then `shl rcx, cl`, but both callers (AddSubReg, AddSubExt)
+pass x == RCX (the Rm value being shifted) — so the value was clobbered and the
+operand became `amt<<amt` instead of `Rm<<amt`. `add x1,x2,x0,lsl#3` (the
+ubiquitous array-index idiom) computed x2+24 CONSTANT, so -O2 double-array loops
+read the SAME element each iteration (fclamp: all 5 reads of a[2]=2.0 -> sum
+10). Fixed to the immediate-shift C1 /4..7 ib forms (no CL scratch). fclamp
+10->9. +regression add_shifted_register_... (lsl#3/lsr#2/asr#1/plain add)
+verified vs shadd.o encodings. arm64jit 125/125, workspace 174/0; full battery
+unchanged. (dnorm.elf: its Newton reciprocal-sqrt overflows to +inf = UB in C,
+not a JIT bug — excluded.)
+Lesson: emitters that use a fixed scratch register must never be handed that
+same register as an operand. apply_shift_const's CL scratch collided with the
+RCX operand; immediate-shift forms sidestep it entirely.
+Session net: 6 FP/SIMD correctness fixes + FMADD/FMA3 feature, all committed
+with regression tests. Next: keep pressing -O2/loop/array coverage (the
+fclamp class is now unblocked), single-precision struct args, division
+edges; then libloader gaps. HARD GATE unchanged.
