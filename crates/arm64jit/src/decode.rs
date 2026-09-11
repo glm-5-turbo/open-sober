@@ -780,7 +780,14 @@ fn decode_fmov_imm(imm8: u32, f64: bool) -> u64 {
     let e = (imm8 >> 4) & 7;
     let m = imm8 & 0xf;
     let mut ex = ((e + 1) & 7) as i32; // exponent in one 3-bit 2's-complement
-    if ex >= 4 {
+    // The 3-bit field E maps to the true exponent e: E 0..3 -> e 1..4, E 4..7
+    // -> e -3..0 (i.e. e = E+1 for E<4, e = E-7 for E>=4). The wrap threshold is
+    // AFTER +4: `(E+1)` hits 5 for E=4 onward, so only values >= 5 wrap to
+    // negative. BUGFIX: this was `>= 4`, which wrongly wrapped E=3 (e should be
+    // +4 = 16.0..30.0) to -4 (0.0625..) and silently corrupted every FMOV-imm in
+    // [16.0, 30.0] (sample rates / half-texel / corner constants). Verified
+    // against the assembler for 0.125..30.0.
+    if ex >= 5 {
         ex -= 8;
     }
     // value = (1 + m/16) * 2^ex, composed as IEEE-754 bits directly.
@@ -4638,5 +4645,13 @@ mod logical_imm_regressions {
         assert_eq!(decode_fmov_imm(0x60, true), 0x3fe0_0000_0000_0000); // 0.5
         assert_eq!(decode_fmov_imm(0x70, true), 0x3ff0_0000_0000_0000); // 1.0
         assert_eq!(decode_fmov_imm(0x80, true), 0xc000_0000_0000_0000); // -2.0
+        // REGRESSION (Session 99): the exponent wrap threshold was `>=4`, which
+        // wrongly mapped E=3 (true exponent +4) to -4, corrupting every FMOV-imm
+        // in [16.0, 30.0]. Threshold is `>=5`: 16.0/1.8e1/30.0 must decode exactly
+        // (verified against the assembler's encodings for 0.125..30.0).
+        assert_eq!(decode_fmov_imm(0x30, true), 0x4030_0000_0000_0000); // 16.0
+        assert_eq!(decode_fmov_imm(0x3e, true), 0x403e_0000_0000_0000); // 30.0
+        assert_eq!(decode_fmov_imm(0x00, true), 0x4000_0000_0000_0000); // 2.0
+        assert_eq!(decode_fmov_imm(0x68, true), 0x3fe8_0000_0000_0000); // 0.75
     }
 }
