@@ -335,8 +335,24 @@ def gen_fma_chain():
     for(int i=0;i<{n};i++){{ acc+=a[i]/b[i]; }}        // division
     return (long long)(acc*1e3);
 }}"""
-gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce, gen_fma_chain]
 
+
+def gen_mask_extract():
+    # Stress vector AND-masks + 64-bit lane movi immediates + extraction.
+    # The MOVI Vd.2D,#imm immediate bug lived here (0xffff -> 0x03 mask).
+    n=random.choice([8,12,16,24])
+    w=random.choice([8,12,16,20,24,28,32,40,48])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 271828ull;
+    unsigned long long x = seedv;
+    unsigned long long a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*2862933555777941757ull+3037000493ull; a[i]=(x>>{w})&0xffff; }}
+    unsigned long long s=0;
+    for(int i=0;i<{n};i++){{ s+=a[i]*7; s^=a[i]>>3; }}
+    return (long long)s;
+}}"""
+
+gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce, gen_fma_chain, gen_mask_extract]
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
