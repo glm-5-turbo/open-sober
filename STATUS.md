@@ -411,3 +411,14 @@ truth. (dnorm.elf degenerates to +inf overflow = C UB; not counted.)
 Cycle total across sunday's grind: 6 FP/SIMD miscompile fixes + scalar FMA3,
 all regression-locked. HEAD 9cc0f16 local dev. HARD GATE unchanged (real
 libroblox.so boot + GPU host).
+---
+## Cycle addendum — LdStPair D-stride + 4th -O2 battery (workspace 175/0, commit 1eb7c0a)
+New -O2 battery (3x3 int matmul, struct double-array, byte scan, 64-bit loop,
+short array) surfaced one more silent miscompile: **LdStPair fp_d stride was
+rt*8** but Dn = low 8B of the 16-byte Vn slot (rt*16), so `ldp d29,d28` loaded
+the wrong offsets and a follow-on fmadd read stale vector slots
+(structfield.elf 128 vs 52). Fixed both directions. structfield 52.
+Battery: m3 structfield bytes iloop shorts = 45/52/5/150/24, all = native.
+arm64jit 126/126, workspace **175/0**. Cycle total: 7 FP/SIMD miscompile fixes
++ scalar FMA3, all regression-locked. HEAD 1eb7c0a local dev. HARD GATE
+unchanged (real libroblox.so boot + GPU host).

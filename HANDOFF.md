@@ -3381,3 +3381,24 @@ Session net: 6 FP/SIMD correctness fixes + FMADD/FMA3 feature, all committed
 with regression tests. Next: keep pressing -O2/loop/array coverage (the
 fclamp class is now unblocked), single-precision struct args, division
 edges; then libloader gaps. HARD GATE unchanged.
+
+## Session (Sep 11, 2026) — LdStPair D-register stride bug + 4th -O2 battery (commit 1eb7c0a)
+Fifth FP milestone. A 4th cross-gcc battery (all -O2, exploiting the now-fixed
+shifted-register indexing: 3x3 int matmul, struct{double x,y} array walk,
+byte-scan, 64-bit loop, short array) surfaced one more real bug:
+structfield.elf (loop `ldp d29,d28,[x0],#16` + `fmadd`) returned 128 vs 52.
+Root cause: the LdStPair `fp_d` branch located each D-register at
+VECTOR_BASE + rt*8, but a guest Dn is the LOW 8 bytes of its 16-BYTE vector
+slot (VECTOR_BASE + rt*16) — so `ldp d29,d28` wrote 8-byte values to
+0x1f8/0x1f0 instead of 0x2e0/0x2d0, and the follow-on fmadd read the stale
+vector slots (still the initial q-pair array literal). Fixed both load+store
+to *16 (q128 already used *16). structfield 128->52.
+- 4th battery results (all match native): m3=45, structfield=52, bytes=5,
+  iloop=150, shorts=24, plus the earlier fclamp/fhorner/fquad/fdivmix.
+  +regression ldst_pair_d_registers_use_16_byte_vector_stride.
+arm64jit 126/126, workspace 175/0; full 4-batch FP battery + core C battery
+all green. dnorm (Newton reciprocal-sqrt that overflows to +inf = C UB) stays
+excluded as degenerate.
+Session net: 7 FP/SIMD correctness fixes + FMADD feature, each regression-locked.
+Next: keep pressing -O2 arrays/structs (now unblocked), single-precision wider
+structs, then libloader gaps. HARD GATE unchanged.
