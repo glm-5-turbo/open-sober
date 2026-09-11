@@ -935,6 +935,41 @@ unsigned long long entry(void){
 }
 
 #[test]
+fn diff_ld4_st4_matrix_transpose() {
+    // ld4/st4 (opcode 0b0000 / 0b0100 structure DEINTERLEAVE) silently
+    // miscompiled: the op field folded ld4 into the single-register
+    // consecutive-load path — matmul C[i][j] returned 20 vs oracle 5248
+    // (gcc loads matrices transposed via `ld4 {v24-v27}, [sp]`). Fixed by
+    // giving ld4/st4/ld3/st3 true deinterleave: Vd[j][i] = mem[base+i*N*es+j*es].
+    assert_diff(
+        "ld4_matmul",
+        "-O3",
+        r#"
+long long entry(void){
+    float A[4][4],B[4][4],C[4][4];
+    for(int i=0;i<4;i++)for(int j=0;j<4;j++){A[i][j]=(float)(i*4+j+1);B[i][j]=(float)(j*4+i+2);C[i][j]=0;}
+    for(int i=0;i<4;i++)for(int k=0;k<4;k++)for(int j=0;j<4;j++) C[i][j]+=A[i][k]*B[k][j];
+    float s=0; for(int i=0;i<4;i++)for(int j=0;j<4;j++) s+=C[i][j];
+    return (long long)s;
+}
+"#,
+    );
+    assert_diff(
+        "st4_transpose",
+        "-O3",
+        r#"
+long long entry(void){
+    float m[4][4], t[4][4];
+    for(int i=0;i<4;i++)for(int j=0;j<4;j++) m[i][j]=(float)(i*2+j);
+    for(int i=0;i<4;i++)for(int j=0;j<4;j++) t[j][i]=m[i][j];
+    float s=0; for(int i=0;i<4;i++){for(int j=0;j<4;j++) s += t[i][j]*((i==j)?11.0f:(j==i+1?7.0f:1.0f));}
+    return (long long)(s*2);
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_double_vector_arith() {
     // The .2d double-lane vector family (fmla v.2d / fmul v.2d / fcvtzs v.2d),
     // the double sibling of the .4s group above.

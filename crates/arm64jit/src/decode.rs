@@ -340,6 +340,14 @@ pub enum Inst {
     // which DEINTERLEAVE). nreg∈{1,2,3,4}; post is the writeback amount.
     Ld1N { rd: u8, rn: u8, nreg: u8, q: bool, post: i32 },
     St1N { rd: u8, rn: u8, nreg: u8, q: bool, post: i32 },
+    // ---- ld3/st3 and ld4/st4: structure DEINTERLEAVE loads (gcc's
+    // matrix-transpose idiom). Unlike ld1-multiple (consecutive), memory holds
+    // the vectors' elements interleaved: Vd[j][i] = mem[base + i*N + j] where N
+    // is the register count (3 or 4). esize is the element size in bytes.
+    Ld3N { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
+    St3N { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
+    Ld4N { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
+    St4N { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
     // ---- scalar udiv/sdiv Wd/Wd/Wm ----
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
@@ -2026,20 +2034,44 @@ pub fn decode(insn: u32) -> Inst {
         let block = if q { 16 } else { 8 } as i32;
         let wb = if (insn >> 23) & 1 == 1 { true } else { false };
         let op = (insn >> 12) & 0xf;
+        // Element size for the structure (deinterleave) forms: bits[11:10].
+        let size = (insn >> 10) & 0x3;
+        let esize = 1u8 << size;
         if op == 0x8 {
-            // LD2 / ST2 — deinterleave (existing behavior).
+            // LD2 / ST2 — deinterleave 2 registers (existing behavior).
             let post = if wb { block * 2 } else { 0 };
             return if ld {
                 Inst::Ld2 { rd, rn, q, post }
             } else {
                 Inst::St2 { rd, rn, q, post }
             };
-        } else {
-            // LD1 / ST1 multiple — register count from opcode.
+        }
+        // LD4/ST4 (op=0b0000) and LD3/ST3 (op=0b0100) are structure
+        // DEINTERLEAVE loads — the disassembler prints them as ld4{..}/ld3{..}.
+        // They must NOT fall through to the ld1-multiple (consecutive) path.
+        if op == 0x0 {
+            let post = if wb { block * 4 } else { 0 };
+            return if ld {
+                Inst::Ld4N { rd, rn, q, post, esize }
+            } else {
+                Inst::St4N { rd, rn, q, post, esize }
+            };
+        }
+        if op == 0x4 {
+            let post = if wb { block * 3 } else { 0 };
+            return if ld {
+                Inst::Ld3N { rd, rn, q, post, esize }
+            } else {
+                Inst::St3N { rd, rn, q, post, esize }
+            };
+        }
+        {
+            // LD1 / ST1 multiple — register count from opcode (CONSECUTIVE,
+            // no deinterleave).
             let nreg: u8 = match op {
                 0x2 => 4,
                 0x6 => 3,
-                0x7 | 0x0 => 1,
+                0x7 => 1,
                 0xa => 2,
                 _ => 0, // unsupported structure width
             };

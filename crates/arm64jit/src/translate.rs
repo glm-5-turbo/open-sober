@@ -3744,6 +3744,98 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                // ---- ld3/st3: structure DEINTERLEAVE (3 registers) ----
+                // Memory holds {V0.e0,V1.e0,V2.e0, V0.e1,...}: element i of
+                // reg j (j in 0..3) is at byte offset i*(3*es) + j*es.
+                Inst::Ld3N { rd, rn, q, post, esize } => {
+                    let v = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let total = if q { 16 } else { 8 } as i32;
+                    let es = esize as i32;
+                    let nelems = total / es;
+                    ldg(buf, RDX, rn as u32);
+                    for j in 0..3i32 {
+                        for i in 0..nelems {
+                            for b in 0..es {
+                                buf.movzx_byte_mem(RAX, RDX, i * 3 * es + j * es + b);
+                                buf.mov_store8(RBX, v((rd as i32 + j) as u8) + i * es + b, RAX);
+                            }
+                        }
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
+                Inst::St3N { rd, rn, q, post, esize } => {
+                    let v = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let total = if q { 16 } else { 8 } as i32;
+                    let es = esize as i32;
+                    let nelems = total / es;
+                    ldg(buf, RDX, rn as u32);
+                    for j in 0..3i32 {
+                        for i in 0..nelems {
+                            for b in 0..es {
+                                buf.movzx_byte_mem(RAX, RBX, v((rd as i32 + j) as u8) + i * es + b);
+                                buf.mov_store8(RDX, i * 3 * es + j * es + b, RAX);
+                            }
+                        }
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
+                // ---- ld4/st4: structure DEINTERLEAVE (4 registers) ----
+                // Memory holds {V0.e0,V1.e0,V2.e0,V3.e0, V0.e1,...}: element i
+                // of reg j (j in 0..4) is at byte offset i*(4*es) + j*es, es =
+                // element size in bytes.
+                Inst::Ld4N { rd, rn, q, post, esize } => {
+                    let v = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let total = if q { 16 } else { 8 } as i32; // bytes per vector
+                    let es = esize as i32;
+                    let nelems = total / es;
+                    ldg(buf, RDX, rn as u32);
+                    for j in 0..4i32 {
+                        for i in 0..nelems {
+                            // copy es bytes: mem[i*(4es)+j*es .. +es] -> v[rd+j]+i*es
+                            for b in 0..es {
+                                buf.movzx_byte_mem(RAX, RDX, i * 4 * es + j * es + b);
+                                buf.mov_store8(RBX, v((rd as i32 + j) as u8) + i * es + b, RAX);
+                            }
+                        }
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
+                Inst::St4N { rd, rn, q, post, esize } => {
+                    let v = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let total = if q { 16 } else { 8 } as i32;
+                    let es = esize as i32;
+                    let nelems = total / es;
+                    ldg(buf, RDX, rn as u32);
+                    for j in 0..4i32 {
+                        for i in 0..nelems {
+                            for b in 0..es {
+                                buf.movzx_byte_mem(RAX, RBX, v((rd as i32 + j) as u8) + i * es + b);
+                                buf.mov_store8(RDX, i * 4 * es + j * es + b, RAX);
+                            }
+                        }
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
                 Inst::Ld1N { rd, rn, nreg, q, post } => {
                     // ld1 {Vt, Vt2, ..}, [Xn]: load `nreg` CONSECUTIVE (q?16:8)-byte
                     // blocks of memory into V[rd], V[rd+1], .. (no deinterleave) —

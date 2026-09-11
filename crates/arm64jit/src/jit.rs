@@ -1859,6 +1859,34 @@ mod tests {
     }
 
     #[test]
+    fn ld4_st4_decode_to_structure_deinterleave() {
+        // Regression: the structure-load gate folded opcode 0b0000 (ld4/st4)
+        // into the single-register consecutive path (0x7|0x0 => nreg 1), so
+        // `ld4 {v24.4s-v27.4s},[x0]` loaded ONE 16B block instead of
+        // deinterleaving four 4s vectors (matmul garbage: 20 vs 5248), and
+        // 0b0100 (ld3/st3) was Unsupported. Each must now decode to its own
+        // structure-DEINTERLEAVE Inst (never the consecutive Ld1N/St1N).
+        use crate::decode::decode;
+        // ld4 {v24.4s-v27.4s},[x0] = 0x4c400818 ; st4 = 0x4c000818
+        // ld3 {v24.4s-v26.4s},[x0] = 0x4c404818 ; ld1 {v24.4s} = 0x4c407818
+        for (w, ty) in [
+            (0x4c400818u32, "ld4"),
+            (0x4c000818u32, "st4"),
+            (0x4c404818u32, "ld3"),
+            (0x4c407818u32, "ld1single"),
+        ] {
+            let i = crate::decode::decode(w);
+            let name = format!("{i:?}");
+            match ty {
+                "ld4" => assert!(name.starts_with("Ld4N"), "ld4 word {w:#x} decoded {i:?}"),
+                "st4" => assert!(name.starts_with("St4N"), "st4 word {w:#x} decoded {i:?}"),
+                "ld3" => assert!(name.starts_with("Ld3N"), "ld3 word {w:#x} decoded {i:?}"),
+                _ => assert!(name.starts_with("Ld1N"), "ld1-1reg word {w:#x} decoded {i:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn mrs_dczid_el0_returns_block_size() {
         // Regression: `mrs x0, dczid_el0` (0xd53b00e0) — read by glibc's CRT to
         // size its DC ZVA memset path — was previously Unsupported, halting any
