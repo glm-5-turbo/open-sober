@@ -660,11 +660,9 @@ updated: 2026-09-11T06:06:26Z
 
 ---
 cycle: 17
-status: cycle_end (committed, tests green) HEAD 7e2689a
-last_agent_claim: 8 silent arm64jit miscompiles fixed, incl. root-cause of the
+status: cycle_end (committed, tests green) HEAD 5cbe6ce
+last_agent_claim: 9 silent arm64jit miscompiles fixed, incl. root-cause of the
   long-open nondeterministic SIMD-loop corruption (ADDV-to-scalar stale bytes).
-  Commits 6ffd490 (32-bit add/sub flags + ccmp/ccmn), e1ec841 (CSel XZR, scvtf
-  sng, fcmp #0.0, NaN-compare flags), 7e2689a (ADDV zeros upper dst bytes).
-  Delivered via differential-probe harness (cross-gcc + elfjit vs native x86-64
-  oracle at -O2/-O3). Workspace `cargo test --workspace` 233/0, 0 ignored.
+  Commits 6ffd490, e1ec841, 7e2689a (ADDV), 5cbe6ce (CMN C-flag polarity),
+  Workspace `cargo test --workspace` 234/0, 0 ignored.
 updated: 2026-09-11T06:50:00Z
