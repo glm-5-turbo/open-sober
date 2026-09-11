@@ -856,3 +856,44 @@ status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T10:41:01Z
 ---
+
+---
+## Session close (2026-09-11, cycle 27) — gen_signed_div fuzz campaign: 3 more silent JIT miscompiles fixed (workspace 298/0)
+Extended `fuzz_jit.py` with two new generators (signed-div / widen-byte-LUT) and ran
+a fresh sweep. It surfaced a class of REAL silent miscompiles the older generators
+(the long, looped morphologies) had never exercised — gcc -O3 fully-unrolled /
+software-pipelined straight-line blocks. All three fixed + regression-tested, on top
+of this session's boot-path syscall expansion:
+
+1. **32-bit shifted-register ASR sign bug** (a3e6056). `apply_shift_const` did a 64-bit
+   `sar` on a zero-extended W operand, so `sub w1,w1,w2,asr#31` (gcc's magic-division
+   sign-correction) turned a negative dividend's `-1` into `+1`; signed quotients &
+   remainders were off by 2/element (a/3, a/5, /17 all corrupt). Now sign-extends
+   (movsxd) before the sar. Fixed 3 of the 5 original fuzz failures.
+2. **In-place widening sxtl/uxtl (rd==rn)** (a3e6056). `sxtl v30.2d,v30.2s` writes the
+   widened 8-byte lane0 at byte0, clobbering the narrow source bytes lane1 reads at
+   byte4; gcc's vector-reduction idiom dropped lane1 (plain and shrn-gen sums wrong).
+   Now snapshots Vn to permscratch when rd aliases rn.
+3. **In-place saddw/saddw2 narrow-source alias (rd==rm)** (e313a77). Same class for the
+   add-wide op: `saddw v31.2d,v29.2d,v31.2s` clobbers Vm.s[1] before it's read
+   (reduced sums off by a lane, addp 1001 vs 1003). Snapshot the aliasing source.
+   Verified the full sxtl2+saddw+saddw2+addp reduction chain in isolation (red6,
+   10026 == oracle).
+
+Also committed: guest_svc boot-path syscall expansion (22 AArch64 numbers) + 2 new
+fuzz generators. Workspace 298/0, build clean, tree clean.
+
+OPEN, documented: a real bug still reproducibly failing — **two fused accumulation
+loops (e.g. gen_signed_div's `s += a[i]/D; s += a[i]%D` pos loop THEN the negative-
+divisor loop) in ONE function** miscompile at ANY size (n=4 reproduces:
+pos + neg /7, oracle 406144671 vs jit 78184144; pos alone PASSES, neg alone PASSES,
+each per-element q/r PASSES, and the full vector accumulation chain PASSES in
+isolation). The failing code is fully-unrolled straight-line scalar magic-division
+feeding vectors via ins/zip1/saddw — the scalar registers are reused across the two
+fused computations and one clobbers the other's live value. Suspect: a scalar
+translate arm (smull/sdiv/lsl/sub) corrupting a guest reg in a large straight-line
+block under software-pipelining. Needs a JIT per-instruction register tracer
+(persist: store-based [pc, v-slot] ring in CpuState, emits PLAIN stores — host calls
+mid-block are illegal because guest x31==host RSP). Repro kept at fuzz_jit.py
+gen_signed_div (FUZZFAIL_50_8, 9001_1, 9003_16). HARD GATE unchanged (no
+GPU/APK/libroblox.so on this box).
