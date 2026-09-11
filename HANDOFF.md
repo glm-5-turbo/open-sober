@@ -1,5 +1,65 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep XX, 2026, hermes-worker) — block cache + nanosleep fix; main-loop wall characterized as slow init, not deadlock (workspace 389/0)
+
+Commit `152dce9` (dev). Two real bottlenecks to StartApp forward-speed removed:
+
+1. **Translation-block cache (the big one).** The PC-driven dispatcher
+   (`jit_run_inner`) recompiled a region from scratch on every `blr`/`br`/`ret`
+   re-entry. A boot hot-spotting on a small accessor (Roblox's TLS-block getter
+   `0x2b9dee0` → 160 of ~1271 traced block-execs, each `pthread_getspecific`)
+   retranslated that code ~once per call — the dominant cost once the guest is
+   churning TLS blocks. `cached_block()` keys on `(image, pc, state)` and leaks a
+   process-lifetime `JitBlock` (never munmaps). Evacuated at each *top-level*
+   `jit_run` (safe: leaked) so distinct ELF images at the same `JIT_BASE`
+   (the `diff_battery` suite maps each test at 0x100000000) never run a stale
+   block — this correctness fix is what makes the whole thing safe. Real boot:
+   **767 compiles / 5691 hits**. New `block_cache_stats()` + `JIT_STATS`
+   per-dispatcher heartbeat.
+   - **Regression caught & explained by the cache:** the `loader_run_timer_signal
+     _delivers_sigalm` test started failing once the loop got fast. Bisect showed
+     guest nanosleep was never *actually sleeping* (see #2), so the 20000-iter
+     spin loop finished before 2×100ms timer ticks; the test only passed by luck
+     of uncached-JIT slowness stretching it past 200ms. Fixing #2 made it pass
+     deterministically (0.23s) regardless of JIT speed. Lesson: a *fast* JIT
+     exposes races the slow one masked — run the timing/signal loader tests after
+     any perf work.
+
+2. **nanosleep syscall arg fix (real boot bug).** aarch64 `nanosleep` passes
+   `rqtp` in x0, but `guest_svc` read it from a[1] (x1) → NULL req → EFAULT in
+   ~1.5µs, no sleep. So every guest sleep-wait was really a busy-spin. Now reads
+   `a[0]` (rqtp) / `a[1]` (rmtp). Regression test
+   `guest_svc_nanosleep_reads_timespec_from_x0`. This matters for the boot: any
+   guest `sleep`/`usleep`/wait that Roblox does now blocks the guest properly
+   instead of hot-spinning the core.
+
+### Main-loop wall, now characterized precisely (NOT a deadlock)
+`--startapp` drives the real `GameActivity_initializeNativeCode` (0x258b144 →
+region `0x284dxxx`, TLS-block accessor `0x2b9dee0` = `ldar x22,[x0+0x10]; cbz`
++ `pthread_getspecific`, wrapper `0x284d524`, vtable-check `0x284f874/880`). A
+12s JIT_TRACE reaches **236 distinct blocks, growing across the window
+(30→69 distinct block-sites in first/last 100 execs)** → the guest is *advancing
+through new init code*, just slowly, and makes no guest `svc` once settled.
+So the next lever is NOT a decoder gap, NOT an ALooper wait — it's either
+(a) more JIT/perf so it grinds through the ~thousands of TLS-block allocs faster,
+or (b) finding the specific singleton whose init never *completes* and seeding it
+(Session-11 guard/flag pattern), or (c) driving the awaited looper/app-command
+state so the main loop dispatches a real frame/render instead of init-churning.
+
+### Diagnostics added
+- `resolver::name_of_call_addr()` reverse slot → name; JIT_TRACE now prints e.g.
+  `hostcall@pthread_getspecific` (identified the main-loop hot import).
+- `JIT_STATS=1` prints a per-250ms dispatcher heartbeat: `[jit] step N pc=... block-cache: C compiles / H hits`. Compiles climbing = new code; flat + hits rising = genuine loop spin.
+- elfjit prints `[elfjit] block-cache: C compiles / H hits` on clean exit.
+
+Repro (see STATUS.md for full):
+```
+cargo build -p arm64jit --example elfjit
+timeout 30 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144
+JIT_STATS=1 timeout 30 ... 0x258b144       # progress heartbeat
+JIT_TRACE=1 timeout 12 ... 0x258b144 | grep hostcall@ | sort | uniq -c | sort -rn
+```
+
 ## Session (Sep 11, 2026, hermes-worker) — POST-JNI_OnLoad game-start: `--startapp` boot stage; real libroblox reaches the ENGINE MAIN LOOP (workspace 388/0)
 
 Commit `a4f94d1` (dev). The real `libroblox.so` 2.738.1397 boot advances from
