@@ -855,12 +855,16 @@ fn decode_logical_mask(n: u32, immr: u32, imms: u32, datasize: u64) -> Option<u6
     let welem = if r == 0 {
         ones
     } else {
-        // Rotate right by R **within the esize-bit element** (ARM ROR on an
-        // esize-bit value). A full-u64 `rotate_right` pushes the high 4-bit
-        // element into bits 63.. which `& esize_mask` would then discard — so
-        // use a shift-based esize-local rotate.
+        // Rotate right by R **within the esize-bit element** (ARM DecodeBitMasks
+        // uses ROR — rotate right). A left-rotate here was a silent miscompile
+        // for rotation-asymmetric masks (e.g. `mov x0,#0xffffffff80000001`);
+        // only rotation-symmetric masks (0xCCCC, 0x5555, single-bit, all-ones)
+        // produced the same value under both, which is why tests passed. Rotate
+        // in the esize-bit domain so the high element bits don't leak: `v >> r`
+        // (top (esize-r) bits move down) OR `v << (esize-r)` (the r low bits
+        // wrap to the top within esize), masked back to esize bits.
         let r = r as usize;
-        (ones << r | ones >> (esize as usize - r)) & esize_mask
+        (ones >> r | ones << (esize as usize - r)) & esize_mask
     };
     // Replicate the `esize`-bit element across the full `datasize` register.
     let mut mask: u64 = 0;
@@ -4707,6 +4711,38 @@ mod logical_imm_regressions {
             }
             other => panic!("fmla v29.4s,v21,v2.s[0] -> {other:?}"),
         }
+    }
+
+    #[test]
+    fn logic_imm_rotation_asymmetric_mask_ror() {
+        // DecodeBitMasks rotates the element RIGHT (ROR). A left-rotate here
+        // silently miscompiled every rotation-asymmetric mask; only symmetric
+        // ones (0xCCCC/0x5555/single-bit/all-ones) matched under both directions.
+        // Real compiler encoding `mov x0,#0xffffffff80000001` = 0xb26187e0.
+        match decode(0xb26187e0) {
+            Inst::LogicImm { mask, op: 1, sf: true, rd: 0, rn: 31, .. } => {
+                assert_eq!(
+                    mask, 0xffffffff80000001,
+                    "mov x0,#0xffffffff80000001 must decode ROR(right); got {mask:#x}"
+                );
+            }
+            other => panic!("mov x0,#0xffffffff80000001 -> {other:?}"),
+        }
+
+        // A second rotation-asymmetric case from real gcc: `mov x0,#0x3ffffffc`
+        // = 0xb27e6fe0 (sf=0, 32-bit datasize path exercises the esize!=64 mask).
+        let w = decode(0xb27e6fe0);
+        assert!(
+            matches!(w, Inst::LogicImm { mask: 0x3ffffffc, .. }),
+            "mov w0,#0x3ffffffc -> {w:?}"
+        );
+
+        // Sanity: the symmetric cases must be UNCHANGED under the fix.
+        assert!(matches!(
+            decode(0xb202e7e8),
+            Inst::LogicImm { mask: 0xcccc_cccc_cccc_cccc, .. }
+        ));
+        assert!(matches!(decode(0xb24002c8), Inst::LogicImm { mask: 0x1, .. }));
     }
 
     #[test]
