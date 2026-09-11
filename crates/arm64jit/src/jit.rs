@@ -389,6 +389,32 @@ unsafe fn write_guest_stat(buf: u64, s: &libc::stat) {
     }
 }
 
+/// Write an AArch64 `struct statfs` (as-generic 64-bit layout, 120 bytes) at
+/// `buf`, from the host `libc::statfs`. The leading fields through `f_frsize`
+/// (offset 72) are byte-identical on both arches; the aarch64 `f_flags`(80) and
+/// `f_spare[4]`(88..119) are not present in the glibc struct, so we zero them
+/// (a guest free-space check only needs blocks/bfree/bavail/files/bsize/frsize,
+/// all of which match exactly).
+unsafe fn write_guest_statfs(buf: u64, s: &libc::statfs) {
+    unsafe {
+        let p = buf as *mut u64;
+        let w = buf as *mut u32;
+        std::ptr::write_volatile(p.add(0), s.f_type as u64); // f_type   @0
+        std::ptr::write_volatile(p.add(1), s.f_bsize as u64); // f_bsize  @8
+        std::ptr::write_volatile(p.add(2), s.f_blocks as u64); // f_blocks @16
+        std::ptr::write_volatile(p.add(3), s.f_bfree as u64); // f_bfree  @24
+        std::ptr::write_volatile(p.add(4), s.f_bavail as u64); // f_bavail @32
+        std::ptr::write_volatile(p.add(5), s.f_files as u64); // f_files  @40
+        std::ptr::write_volatile(p.add(6), s.f_ffree as u64); // f_ffree  @48
+        let fsidp = &s.f_fsid as *const _ as *const u32;
+        std::ptr::write_volatile(w.add(14), *fsidp); // f_fsid @56 (2 x u32)
+        std::ptr::write_volatile(w.add(15), *fsidp.add(1)); // f_fsid @60
+        std::ptr::write_volatile(p.add(8), s.f_namelen as i64 as u64); // f_namelen @64
+        std::ptr::write_volatile(p.add(9), s.f_frsize as u64); // f_frsize @72
+        // f_flags @80 + f_spare[4] @88..119 stay zeroed (aarch64-only fields).
+    }
+}
+
 pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     let s = unsafe { &mut *st };
     let nr = s.x[8];
@@ -608,6 +634,76 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         223 => unsafe { // fadvise64(223): fd, off, len, advice (aarch64 __NR3264_fadvise64)
             libc::syscall(libc::SYS_fadvise64, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize) as c_long
         },
+        // --- CPU affinity / scheduler probes (Android/bionic detects core count
+        // at startup; a game engine sizes its worker pool from this) ---
+        204 => unsafe { // sched_getaffinity(204): pid, cpusetsize, mask*. cpu_set_t is
+            // a bitmask, byte-identical across arches — forward via raw syscall so
+            // the guest mask buffer is written in place.
+            libc::syscall(libc::SYS_sched_getaffinity, a[0] as usize, a[1] as usize, a[2] as usize) as c_long
+        },
+        122 => unsafe { // sched_setaffinity(122)
+            libc::syscall(libc::SYS_sched_setaffinity, a[0] as usize, a[1] as usize, a[2] as usize) as c_long
+        },
+        // --- resource limits (host layout identical: struct rlimit64/__rlimit) ---
+        261 => unsafe { // prlimit64(261): pid, resource, new_limit, old_limit
+            libc::prlimit(a[0] as libc::pid_t, a[1] as u32, a[2] as *const libc::rlimit, a[3] as *mut libc::rlimit) as c_long
+        },
+        // --- CPU id / round-trip timing ---
+        168 => unsafe { // getcpu(168): cpu*, node*, tcache*. Trivial 3-int writes, no struct.
+            libc::syscall(libc::SYS_getcpu, a[0] as usize, a[1] as usize, a[2] as usize) as c_long
+        },
+        103 => unsafe { // setitimer(103): which, new_value, old_value (struct itimerval)
+            libc::setitimer(a[0] as c_int, a[1] as *const libc::itimerval, a[2] as *mut libc::itimerval) as c_long
+        },
+        102 => unsafe { // getitimer(102)
+            libc::getitimer(a[0] as c_int, a[1] as *mut libc::itimerval) as c_long
+        },
+        // --- file I/O durability / sizing (same semantics both arches) ---
+        82 => unsafe { libc::fsync(a[0] as c_int) as c_long },
+        83 => unsafe { libc::fdatasync(a[0] as c_int) as c_long },
+        45 => unsafe { libc::truncate(a[0] as *const c_char, a[1] as libc::off_t) as c_long },
+        46 => unsafe { libc::ftruncate(a[0] as c_int, a[1] as libc::off_t) as c_long },
+        // --- filesystem space (statfs/fstatfs, 43/44) ---
+        43 => {
+            // AArch64 statfs (43): path, struct statfs*. Write the guest layout,
+            // same fields as the 64-bit asm-generic struct the host fills.
+            unsafe {
+                let mut fs = core::mem::MaybeUninit::<libc::statfs>::zeroed().assume_init();
+                let r = libc::statfs(a[0] as *const c_char, &mut fs);
+                if r == 0 { write_guest_statfs(a[1], &fs); }
+                r as c_long
+            }
+        }
+        44 => {
+            unsafe {
+                let mut fs = core::mem::MaybeUninit::<libc::statfs>::zeroed().assume_init();
+                let r = libc::fstatfs(a[0] as c_int, &mut fs);
+                if r == 0 { write_guest_statfs(a[1], &fs); }
+                r as c_long
+            }
+        }
+        // --- data plumbing ---
+        71 => unsafe { // sendfile(71): out, in, offset*, count (aarch64 __NR3264_sendfile)
+            libc::sendfile(a[0] as c_int, a[1] as c_int, a[2] as *mut libc::off_t, a[3] as usize) as c_long
+        },
+        84 => unsafe { // sync_file_range(84): fd, off, nbytes, flags
+            libc::syscall(libc::SYS_sync_file_range, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize) as c_long
+        },
+        // --- memory control (no struct layouts involved) ---
+        227 => unsafe { libc::msync(a[0] as *mut c_void, a[1] as usize, a[2] as c_int) as c_long },
+        228 => unsafe { libc::mlock(a[0] as *const c_void, a[1] as usize) as c_long },
+        229 => unsafe { libc::munlock(a[0] as *const c_void, a[1] as usize) as c_long },
+        232 => unsafe { libc::mincore(a[0] as *mut c_void, a[1] as usize, a[2] as *mut u8) as c_long },
+        // --- file metadata ownership / timestamps ---
+        53 => unsafe { // fchmodat(53): dirfd, path, mode, flags
+            libc::fchmodat(a[0] as c_int, a[1] as *const c_char, a[2] as libc::mode_t, a[3] as c_int) as c_long
+        },
+        54 => unsafe { libc::fchownat(a[0] as c_int, a[1] as *const c_char, a[2] as libc::uid_t, a[3] as libc::gid_t, a[4] as c_int) as c_long },
+        55 => unsafe { libc::fchown(a[0] as c_int, a[1] as libc::uid_t, a[2] as libc::gid_t) as c_long },
+        88 => unsafe { libc::utimensat(a[0] as c_int, a[1] as *const c_char, a[2] as *const libc::timespec, a[3] as c_int) as c_long },
+        // --- session / process group ---
+        156 => unsafe { libc::getsid(a[0] as c_int) as c_long },
+        157 => unsafe { libc::setsid() as c_long },
         _ => {
             eprintln!(
                 "guest_svc: unhandled AArch64 syscall {nr} -> -ENOSYS (a0={:#x} a1={:#x} a2={:#x})",
@@ -4235,6 +4331,136 @@ mod tests {
         st.x[8] = 35; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = fc2.as_ptr() as u64; st.x[2] = 0;
         assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "unlinkat");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn guest_svc_boot_io_affinity_limits_roundtrip() {
+        // Exercise the boot-path batch: CPU-affinity probes, prlimit64, getcpu,
+        // itimers, statfs/fstatfs, truncate/ftruncate, fsync/fdatasync, sendfile,
+        // utimensat/fchmodat, getsid, msync/mlock/munlock/mincore. All must return
+        // real results (or a valid -errno), never -ENOSYS.
+        let mut st = CpuState::new();
+        let svc = |st: &mut CpuState| -> i64 { guest_svc(st as *mut CpuState) as i64 };
+
+        // Get/Set affinity (204/122) for the current process: getcpu count > 0.
+        let mut mask = [0u8; 128];
+        st.x[8] = 204; st.x[0] = 0; st.x[1] = mask.len() as u64; st.x[2] = mask.as_mut_ptr() as u64;
+        let n = svc(&mut st);
+        assert!(n > 0, "sched_getaffinity returns cpu-set size, got {n}");
+        assert!(mask.iter().any(|&b| b != 0), "affinity mask non-zero");
+        // Safe set: rebuild a mask containing cpu 0 only.
+        let mut one = [0u8; 128]; one[0] = 1;
+        st.x[8] = 122; st.x[0] = 0; st.x[1] = one.len() as u64; st.x[2] = one.as_mut_ptr() as u64;
+        assert_eq!(svc(&mut st), 0, "sched_setaffinity cpu0");
+
+        // prlimit64(261): read RLIMIT_NOFILE into the old-limit struct.
+        let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        st.x[8] = 261; st.x[0] = 0; st.x[1] = libc::RLIMIT_NOFILE as u64;
+        st.x[2] = 0; st.x[3] = (&mut rl as *mut libc::rlimit) as u64;
+        assert_eq!(svc(&mut st), 0, "prlimit64 RLIMIT_NOFILE get");
+        assert!(rl.rlim_cur > 0, "RLIMIT_NOFILE cur>0");
+
+        // getcpu(168): writes three ints.
+        let (mut cpu, mut node) = (-1i32, -1i32);
+        st.x[8] = 168; st.x[0] = (&mut cpu as *mut i32) as u64; st.x[1] = (&mut node as *mut i32) as u64; st.x[2] = 0;
+        assert_eq!(svc(&mut st), 0, "getcpu");
+        assert!(node >= 0, "getcpu node>=0"); // cpu may read arbitrary; kernel writes real
+
+        // getitimer(102)/setitimer(103): ITIMER_REAL readback returns 0 (no alarm).
+        let mut itv = libc::itimerval { it_interval: libc::timeval{tv_sec:0,tv_usec:0}, it_value: libc::timeval{tv_sec:0,tv_usec:0} };
+        st.x[8] = 102; st.x[0] = libc::ITIMER_REAL as u64; st.x[1] = (&mut itv as *mut libc::itimerval) as u64;
+        assert_eq!(svc(&mut st), 0, "getitimer ITIMER_REAL");
+
+        // statfs(43) on "/" — the leading fields must be non-zero (space check).
+        let croot = std::ffi::CString::new("/").unwrap();
+        let mut fsb = [0u8; 120];
+        st.x[8] = 43; st.x[0] = croot.as_ptr() as u64; st.x[1] = fsb.as_mut_ptr() as u64;
+        assert_eq!(svc(&mut st), 0, "statfs /");
+        let bsize = u64::from_le_bytes(fsb[8..16].try_into().unwrap());
+        let blocks = u64::from_le_bytes(fsb[16..24].try_into().unwrap());
+        assert!(bsize > 0 && blocks > 0, "statfs bsize/blocks populated ({bsize}/{blocks})");
+
+        // temp file for sizing / durability / metadata tests.
+        let f = std::env::temp_dir().join(format!("svc_boot_{}.bin", std::process::id()));
+        std::fs::write(&f, b"0123456789").unwrap();
+        let cf = std::ffi::CString::new(f.to_str().unwrap()).unwrap();
+        // openat(56) O_RDWR.
+        st.x[8] = 56; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = cf.as_ptr() as u64;
+        st.x[2] = (libc::O_RDWR | libc::O_CLOEXEC) as u64; st.x[3] = 0o644;
+        let fd = svc(&mut st) as i32;
+        assert!(fd >= 0, "openat for boot batch");
+
+        // fstatfs(44) on fd.
+        let mut fsb2 = [0xffu8; 120];
+        st.x[8] = 44; st.x[0] = fd as u64; st.x[1] = fsb2.as_mut_ptr() as u64;
+        assert_eq!(svc(&mut st), 0, "fstatfs fd");
+        // ftruncate(46) to 5 bytes -> size 5.
+        st.x[8] = 46; st.x[0] = fd as u64; st.x[1] = 5;
+        assert_eq!(svc(&mut st), 0, "ftruncate to 5");
+        // fstat(80) size must now be 5.
+        let mut gbuf = [0u8; 128];
+        st.x[8] = 80; st.x[0] = fd as u64; st.x[1] = gbuf.as_mut_ptr() as u64;
+        assert_eq!(svc(&mut st), 0, "fstat");
+        assert_eq!(i64::from_le_bytes(gbuf[48..56].try_into().unwrap()), 5, "fstat size==5 after ftruncate");
+        // fsync(82) and fdatasync(83) succeed.
+        st.x[8] = 82; st.x[0] = fd as u64;
+        assert_eq!(svc(&mut st), 0, "fsync");
+        st.x[8] = 83; st.x[0] = fd as u64;
+        assert_eq!(svc(&mut st), 0, "fdatasync");
+        // truncate(45) path to 3.
+        st.x[8] = 45; st.x[0] = cf.as_ptr() as u64; st.x[1] = 3;
+        assert_eq!(svc(&mut st), 0, "truncate to 3");
+        assert_eq!(std::fs::read(&f).unwrap().len(), 3, "file now 3 bytes");
+        // utimensat(88) set now -> 0.
+        let ts = [libc::timespec{tv_sec: 1_000_000, tv_nsec: 0}, libc::timespec{tv_sec: 1_000_000, tv_nsec: 0}];
+        st.x[8] = 88; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = cf.as_ptr() as u64;
+        st.x[2] = ts.as_ptr() as u64; st.x[3] = 0;
+        assert_eq!(svc(&mut st), 0, "utimensat");
+        // fchmodat(53) 0600 -> 0, mode reflects it.
+        st.x[8] = 53; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = cf.as_ptr() as u64; st.x[2] = 0o600; st.x[3] = 0;
+        assert_eq!(svc(&mut st), 0, "fchmodat 0600");
+        unsafe { libc::close(fd); }
+
+        // sendfile(71): copy the 3-byte file into a new output file.
+        let out = std::env::temp_dir().join(format!("svc_boot_out_{}.bin", std::process::id()));
+        std::fs::write(&out, b"").unwrap();
+        let cout = std::ffi::CString::new(out.to_str().unwrap()).unwrap();
+        st.x[8] = 56; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = cout.as_ptr() as u64;
+        st.x[2] = (libc::O_RDWR | libc::O_CLOEXEC) as u64; st.x[3] = 0o644;
+        let ofd = svc(&mut st) as i32;
+        st.x[8] = 56; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = cf.as_ptr() as u64;
+        st.x[2] = (libc::O_RDONLY | libc::O_CLOEXEC) as u64; st.x[3] = 0;
+        let ifd = svc(&mut st) as i32;
+        st.x[8] = 71; st.x[0] = ofd as u64; st.x[1] = ifd as u64; st.x[2] = 0; st.x[3] = 3;
+        assert_eq!(svc(&mut st), 3, "sendfile copies 3 bytes");
+        unsafe { libc::close(ofd); libc::close(ifd); }
+        assert_eq!(std::fs::read(&out).unwrap(), b"012", "sendfile content");
+
+        // getsid(156) returns a valid sid.
+        st.x[8] = 156; st.x[0] = 0;
+        assert!(svc(&mut st) > 0, "getsid(0) valid");
+
+        // msync(227)/mlock(228)/munlock(229)/mincore(232) on an anon page.
+        let m = unsafe { libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ|libc::PROT_WRITE, libc::MAP_PRIVATE|libc::MAP_ANONYMOUS, -1, 0) };
+        assert!(m != libc::MAP_FAILED);
+        unsafe { std::ptr::write_volatile(m as *mut u8, 7); } // fault in the page
+        st.x[8] = 227; st.x[0] = m as u64; st.x[1] = 4096; st.x[2] = libc::MS_SYNC as u64;
+        assert_eq!(svc(&mut st), 0, "msync MS_SYNC");
+        st.x[8] = 228; st.x[0] = m as u64; st.x[1] = 4096;
+        let ml = svc(&mut st);
+        assert!(ml == 0 || ml == -libc::EPERM as i64, "mlock (tolerate EPERM) got {ml}");
+        if ml == 0 {
+            st.x[8] = 229; st.x[0] = m as u64; st.x[1] = 4096;
+            assert_eq!(svc(&mut st), 0, "munlock");
+        }
+        let mut vec = [0u8; 1];
+        st.x[8] = 232; st.x[0] = m as u64; st.x[1] = 4096; st.x[2] = vec.as_mut_ptr() as u64;
+        assert_eq!(svc(&mut st), 0, "mincore");
+        assert_eq!(vec[0] & 1, 1, "mincore page resident");
+        unsafe { libc::munmap(m, 4096); }
+
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]
