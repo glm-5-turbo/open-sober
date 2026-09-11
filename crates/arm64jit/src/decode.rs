@@ -6180,6 +6180,25 @@ mod logical_imm_regressions {
     }
 
     #[test]
+    fn fp_pairwise_three_op_decodes_correctly() {
+        use crate::decode::{decode, Inst};
+        // Session (cycle 44i): fmaxp/fminp/faddp Vd,Vn,Vm (3-same) were
+        // Unsupported; only the 2-reg (0x7e) reduce was handled.
+        // faddp v1.2s,v2.2s,v3.2s (0x2e23d441): add
+        assert!(matches!(decode(0x2e23d441), Inst::SimdFpPair3 { rd:1, rn:2, rm:3, add:true, min:false, .. }), "got {:?}", decode(0x2e23d441));
+        // fmaxp v1.4s,v2,v3 (0x6e23f441): q=1, add=false, min=false
+        assert!(matches!(decode(0x6e23f441), Inst::SimdFpPair3 { add:false, min:false, nm:false, q:true, .. }), "got {:?}", decode(0x6e23f441));
+        // fminp (0x2ea3f441): min=true
+        assert!(matches!(decode(0x2ea3f441), Inst::SimdFpPair3 { min:true, add:false, .. }), "got {:?}", decode(0x2ea3f441));
+        // fmaxnmp (0x2e23c441): nm=true
+        assert!(matches!(decode(0x2e23c441), Inst::SimdFpPair3 { nm:true, .. }), "got {:?}", decode(0x2e23c441));
+        // self-aliased fmaxp v31.2s,v31,v30 (0x2e3ef7ff): rm encoded in bit16+
+        assert!(matches!(decode(0x2e3ef7ff), Inst::SimdFpPair3 { rd:31, rn:31, rm:30, .. }), "got {:?}", decode(0x2e3ef7ff));
+        // plain fadd (0x0e23d441, prefix 0x0e) must NOT be captured as FpPair3
+        assert!(matches!(decode(0x0e23d441), Inst::VecFpArith { op: 0, .. }), "got {:?}", decode(0x0e23d441));
+    }
+
+    #[test]
     fn mul_decodes_as_multiply_not_bitwise_logical() {
         // Regression: NEON element-wise `mul` shares bits[11:10] with the
         // vector AND/ORR/BIC family but sets bit15 (byte1 0x8c..0x9f vs
