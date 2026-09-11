@@ -1962,6 +1962,87 @@ mod tests {
     }
 
     #[test]
+    fn fcvtzs_fixed_point_fbits_scales() {
+        // Regression: fixed-point fcvtzs/fcvtzu Rd, Fn, #fbits (result =
+        // trunc(Fn * 2^fbits)) was misdecoded as `SimdMull` (smull x0,w31,w24)
+        // by the widening-multiply gate, so every *2^fbits scale in libc /
+        // gcc -O3 fixed-point math (e.g. `(long long)(s*4)` folding into
+        // fcvtzs #2) silently dropped the scale — v64f returned 5 vs 436.
+        // Encodings: top16 0x1e18/0x1e58/0x9e18/0x9e58 (signed) or the same with
+        // bit16 set (unsigned); fbits = 64 - field. Verified vs qemu: 3.25>>#2
+        // = 13, 3.25>>#4 = 52, s 2.5>>#3 = 20, fcvtzu 3.75>>#1 = 7.
+        // fcvtzs x0, d31, #2 = 0x9e58fbe0; fcvtzs x0,s31,#5 = 0x9e18efe0;
+        // fcvtzu x0, d31, #3 = 0x9e59f7e0.
+        use crate::decode::decode;
+        assert!(
+            matches!(decode(0x9e58fbe0), Inst::FcvtToInt { fbits: 2, sf: true, unsigned: false, src_sng: false, .. }),
+            "fcvtzs x0,d31,#2 must decode FcvtToInt{{fbits:2}}, got {:?}",
+            decode(0x9e58fbe0)
+        );
+        assert!(
+            matches!(decode(0x9e59f7e0), Inst::FcvtToInt { fbits: 3, sf: true, unsigned: true, .. }),
+            "fcvtzu x0,d31,#3 must decode unsigned fbits 3, got {:?}",
+            decode(0x9e59f7e0)
+        );
+        assert!(
+            matches!(decode(0x9e18efe0), Inst::FcvtToInt { fbits: 5, src_sng: true, .. }),
+            "fcvtzs x0,s31,#5 must decode single fbits 5, got {:?}",
+            decode(0x9e18efe0)
+        );
+    }
+
+    #[test]
+    fn ld1_multireg_post_index_decode_and_advance() {
+        // Regression: post-indexed multi-register ld1/st1 {Vt..,Vt+n},[Xn],#imm
+        // set bit23 (bases 0x..cc0 ld / 0x..c80 st), which the structure-multiple
+        // gate's four no-post bases missed — so gcc's
+        // `ld1 {v26.16b,v27.16b}, [x1], #32` fell through to the single-vector
+        // Ld1V gate: only 16 bytes were loaded and Xn advanced by just #16.
+        // A -O2 double dot-product (fmadd loop) accumulated garbage (165 vs 470).
+        // Each must decode to its nreg-correct Inst with post = nreg*block.
+        use crate::decode::decode;
+        let cases: &[(u32, &str, u32)] = &[
+            (0x4cdfa03a, "Ld1N", 2), // ld1 2reg post #32
+            (0x4cdf703a, "Ld1N", 1), // ld1 1reg post #16
+            (0x4cdf603a, "Ld1N", 3), // 3reg post #48
+            (0x4c9fa03a, "St1N", 2), // st1 2reg post #32
+            (0x4cdf803a, "Ld2", 0), // ld2 2reg post #32
+            (0x4cdf003a, "Ld4N", 4), // ld4 post #64
+        ];
+        for (w, kind, nreg) in cases {
+            let i = decode(*w);
+            let name = format!("{i:?}");
+            assert!(
+                name.starts_with(kind),
+                "{w:#x} must decode {kind}, got {name}"
+            );
+            if *nreg > 0 && (name.starts_with("Ld1N") || name.starts_with("St1N")) {
+                assert!(
+                    name.contains(&format!("nreg: {nreg}")),
+                    "{w:#x} must have nreg {nreg}, got {name}"
+                );
+            }
+        }
+        // End-to-end: ld1 {v26,v27},[x1],#32 from a 64-byte buffer then read back.
+        use crate::jit::{exec_bytes};
+        let mut st = CpuState::new();
+        let mem = Box::leak(vec![0u8; 128].into_boxed_slice());
+        for i in 0..64u32 { mem[i as usize] = i as u8; }
+        st.x[1] = mem.as_ptr() as u64; // base
+        let code = [
+            0x3a, 0xa0, 0xdf, 0x4c, // ld1 {v26.16b,v27.16b},[x1],#32
+            0xc0, 0x03, 0x5f, 0xd6,
+        ];
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[1], mem.as_ptr() as u64 + 32, "xn advances by 32");
+        let (l26, h26) = st.get_v(26);
+        assert_eq!(l26, u64::from_le_bytes(mem[0..8].try_into().unwrap()), "v26 low");
+        assert_eq!(h26, u64::from_le_bytes(mem[8..16].try_into().unwrap()), "v26 high");
+        let (l27, _) = st.get_v(27);
+        assert_eq!(l27, u64::from_le_bytes(mem[16..24].try_into().unwrap()), "v27 low = bytes 16..24");
+    }
+
+    #[test]
     fn ld4_st4_decode_to_structure_deinterleave() {
         // Regression: the structure-load gate folded opcode 0b0000 (ld4/st4)
         // into the single-register consecutive path (0x7|0x0 => nreg 1), so

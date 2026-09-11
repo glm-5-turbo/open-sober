@@ -1048,6 +1048,41 @@ unsigned long long entry(void){
 }
 "#,
     );
+    assert_diff(
+        "fcvtzs_fixed_scale",
+        "-O3",
+        r#"
+long long entry(void){
+    double a[4]={3.5, -1.25, 9.75, 0.5};
+    double s=0; for(int i=0;i<4;i++) s+=a[i]*a[i];
+    return (long long)(s*4);
+}
+"#,
+    );
+    assert_diff(
+        "fcvtzs_fixed_scale_neg",
+        "-O2",
+        r#"
+long long entry(void){
+    float v = -2.75f;
+    long long r = (long long)(v * 8.0f);    // fcvtzs s,#3
+    long long r2 = (long long)(v * 32.0f);  // fcvtzs s,#5
+    return r*1000 + r2;
+}
+"#,
+    );
+    assert_diff(
+        "fma_ld1_postidx",
+        "-O2",
+        r#"
+long long entry(void){
+    const double a[4]={1.5,2.5,3.5,4.5};
+    const double b[4]={2.0,3.0,4.0,5.0};
+    double acc=0; for(int i=0;i<4;i++) acc += a[i]*b[i];
+    return (long long)(acc*10);
+}
+"#,
+    );
 }
 
 #[test]

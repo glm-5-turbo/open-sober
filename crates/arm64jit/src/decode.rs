@@ -480,6 +480,7 @@ pub enum Inst {
            sf: bool,   // 64-bit dest (X)
            unsigned: bool, // unsigned result (uclamp negatives to 0 / u64 result)
            src_sng: bool, // source is single (S) not double (D)
+           fbits: u8,   // 0 = plain convert; >0 = fixed-point scale (result = Fn*2^fbits)
        },
         // ---- FP convert from signed integer (scvtf: Wn|Xn -> Sd|Dd) ----
         Scvtf {
@@ -2024,9 +2025,16 @@ pub fn decode(insn: u32) -> Inst {
     //   0xA = LD1/ST1 2-register, 0x7/0x0 = 1-register, 0x6 = 3-reg, 0x2 = 4-reg
     //         -> LD1/ST1 MULTIPLE loads/stores `nreg` CONSECUTIVE (q?16:8)-byte
     //         vectors (NO deinterleave) — the compiler's array-literal idiom.
-    // post-index writeback when bit23=1 (advance Xn by the total bytes).
+    // post-index writeback when bit23=1 (advance Xn by the total bytes). The
+    // POST-INDEX forms set bit23, giving bases 0x..cc0 (ld) / 0x..c80 (st);
+    // those were missing and the 2/3/4-register post-indexed ld1 (gcc's
+    // `ld1 {v26.16b,v27.16b}, [x1], #32`) fell through to the single-vector
+    // Ld1V gate — loaded only 16B with the wrong pointer advance (fma -O2
+    // accumulated garbage: returns 165 vs oracle 470).
     let sc = insn & 0xffc0_0000;
-    if sc == 0x0c40_0000 || sc == 0x4c40_0000 || sc == 0x0c00_0000 || sc == 0x4c00_0000 {
+    if sc == 0x0c40_0000 || sc == 0x4c40_0000 || sc == 0x0c00_0000 || sc == 0x4c00_0000
+        || sc == 0x0cc0_0000 || sc == 0x4cc0_0000 || sc == 0x0c80_0000 || sc == 0x4c80_0000
+    {
         let q = (insn & 0x4000_0000) != 0;
         let ld = (insn & 0x0040_0000) != 0; // L bit22
         let rd = (insn & 0x1f) as u8;
@@ -2798,6 +2806,7 @@ pub fn decode(insn: u32) -> Inst {
                     sf,
                     unsigned: false,
                     src_sng: false,
+                    fbits: 0,
                 };
             }
             let rn = ((insn >> 5) & 0x1f) as u8;
@@ -2809,6 +2818,7 @@ pub fn decode(insn: u32) -> Inst {
                 sf,
                 unsigned: false,
                 src_sng: true, // single (S) source
+                fbits: 0,
             };
         }
     }
@@ -2834,6 +2844,7 @@ pub fn decode(insn: u32) -> Inst {
             sf,
             unsigned: true,
             src_sng: !sz,
+            fbits: 0,
         };
     }
 
@@ -2864,6 +2875,7 @@ pub fn decode(insn: u32) -> Inst {
                     sf: (insn >> 31) & 1 == 1, // Xd (64-bit) when 0x9e, Wd (32-bit) when 0x1e
                     unsigned,
                     src_sng: !szd,
+                    fbits: 0,
                 };
             }
         }
@@ -3260,7 +3272,33 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                         let rd = (insn & 0x1f) as u8;
                                                                                                                         return Inst::SimdMul { rd, rn, rm, lanes };
                                                                                                                             }
-                                                                                                                        // ---- SIMD widening multiply smull/umull & smlal/umlal (0x0f00_c000/8000 gate) ----
+                                                                                                                        // ---- scalar FP fixed-point convert to int: fcvtzs/fcvtzu Rd, Fn, #fbits ----
+        // (result = trunc(Fn * 2^fbits)). top16 0x1e18/0x1e58/0x9e18/0x9e58
+        // (signed) and the same with bit16 set for unsigned (0x1e19..).
+        // fbits = 64 - bits[15:10]. MUST precede the SimdMull gate, which
+        // otherwise swallows these (fcvtzs x0,d31,#2 = 0x9e58fbe0 came out as
+        // `smull x0, w31, w24`, dropping the *2^fbits scale entirely).
+        if {
+            let top = insn >> 16;
+            (top & 0xfff0) == 0x1e50 || (top & 0xfff0) == 0x9e50
+                || (top & 0xfff0) == 0x1e10 || (top & 0xfff0) == 0x9e10
+        } {
+            let unsigned = (insn >> 16) & 1 == 1; // fcvtzu (0x..9) vs fcvtzs (0x..8)
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            let sz = (insn >> 22) & 1 == 1; // source double (D) vs single (S)
+            let fbits = (64u32 - ((insn >> 10) & 0x3f)) as u8;
+            return Inst::FcvtToInt {
+                rd,
+                rn,
+                mode: 0, // truncate
+                sf: (insn >> 31) & 1 == 1,
+                unsigned,
+                src_sng: !sz,
+                fbits,
+            };
+        }
+        // ---- SIMD widening multiply smull/umull & smlal/umlal (0x0f00_c000/8000 gate) ----
                                                                                                                                                                                         // acc = which gateway matched: c000 = plain mul, 8000 = accumulate (smlal).
                                                                                                                                                                                         // res_esize = 2 << bits[23:22] (source elem = 2^bits => result = 2x):
                                                                                                                                                                                         //   .8b->.8h res2, .4h->.4s res4, .2s->.2d res8.
@@ -4943,7 +4981,7 @@ mod logical_imm_regressions {
         }
         // fcvtpu x9, s0 = 0x9e290009 (real libroblox) => round +inf, unsigned, single-src.
         match decode(0x9e290009) {
-            Inst::FcvtToInt { rd, rn, mode, sf, unsigned, src_sng } => {
+            Inst::FcvtToInt { rd, rn, mode, sf, unsigned, src_sng, .. } => {
                 assert_eq!(rd, 9);
                 assert_eq!(rn, 0);
                 assert_eq!(mode, 3); // round toward +inf

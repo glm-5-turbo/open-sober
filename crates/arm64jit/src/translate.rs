@@ -1918,6 +1918,7 @@ pub fn translate(
             sf,
             unsigned,
             src_sng,
+            fbits,
         } => {
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             if src_sng {
@@ -1927,6 +1928,14 @@ pub fn translate(
                 buf.cvtss2sd(0, 0);
             } else {
                 buf.movq_load(0, RBX, vslot(rn)); // d-source (low 8B) -> xmm0
+            }
+            if fbits > 0 {
+                // Fixed-point scale: result = Fn * 2^fbits, then truncate-to-int.
+                // Load 2^fbits as a double and multiply.
+                let scale_bits = (1.0f64 * 2.0f64.powi(fbits as i32)).to_bits();
+                buf.mov_ri64(RAX, scale_bits);
+                buf.movq_xmm_r64(1, RAX);
+                buf.mulsd(0, 1);
             }
             if mode == 2 {
                 buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
