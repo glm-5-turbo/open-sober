@@ -4498,13 +4498,25 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             stg(buf, rd as u32, RAX);        // quotient -> Rd
             Ok(())
         }
-        Inst::SimdVShift { rd, rn, rm, esize, signed_ } => {
-            // ushl/sshl Vd.T, Vn.T, Vm.T : per-lane variable shift. Vn[i] << Vm[i].
+        Inst::SimdVShift { rd, rn, rm, esize, signed_, q } => {
+            // ushl/sshl Vd.T, Vn.T, Vm.T : per-lane variable shift.
+            // Each count lane C is a SIGNED esize-bit value:
+            //   C >= 0 -> result = V << C          (left)
+            //   C <  0 -> result = V >> -C         (right; sshl = arithmetic, ushl = logical)
+            //   |C| >= B (B = esize*8):
+            //       left  shift by >= B -> 0
+            //       right shift by >= B -> ushl: 0, sshl: sign-fill (= sign bit replicated)
+            // The scalar count is masked by x86's `shl/shr/sar r64, cl` to low 6 bits,
+            // so out-of-range shifts must be guarded explicitly (else shl by 64 wraps).
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            let lanes = 16 / (esize as i32);
+            let lanes = if q { 16 / (esize as i32) } else { 8 / (esize as i32) };
+            let bbits = (esize as i32) * 8;
+            let wmask: u64 = if esize == 8 { u64::MAX } else { (1u64 << bbits) - 1 };
             for i in 0..lanes {
                 let src = vslot(rn) + (i as i32) * (esize as i32);
                 let cnt = vslot(rm) + (i as i32) * (esize as i32);
+                let dst = vslot(rd) + (i as i32) * (esize as i32);
+                // load value V -> RAX, count C -> RCX (zero-extended)
                 match esize {
                     8 => buf.mov_load64(RAX, RBX, src),
                     4 => buf.mov_load32(RAX, RBX, src),
@@ -4517,8 +4529,104 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     2 => buf.movzx_word_mem(RCX, RBX, cnt),
                     _ => buf.movzx_byte_mem(RCX, RBX, cnt),
                 }
-                buf.shl_cl64(RAX);            // R<<...: shl by CL (low byte of RCX)
-                let dst = vslot(rd) + (i as i32) * (esize as i32);
+                // sign-extend the count lane to its element width
+                match esize {
+                    8 => {}
+                    4 => buf.movsxd_r64_r32(RCX, RCX),
+                    2 => {
+                        buf.shl_ri8(RCX, 48);
+                        buf.sar_ri8(RCX, 48);
+                    }
+                    _ => {
+                        buf.shl_ri8(RCX, 56);
+                        buf.sar_ri8(RCX, 56);
+                    }
+                }
+                let mut done_jumps: Vec<usize> = Vec::new(); // jump offsets that target the final store
+                let mut fixed: Vec<(usize, usize)> = Vec::new(); // (jump, fixed internal label)
+                buf.test_rr64(RCX, RCX); // set SF (sign) from the sign-extended count
+                let jneg = buf.jcc_rel32(0x88); // JS: count < 0 -> right path
+                // ---- left path (C >= 0) ----
+                if bbits < 64 {
+                    buf.cmp_ri64(RCX, bbits as u32);
+                    let jbig = buf.jcc_rel32(0x83); // JAE: C >= B -> result 0
+                    buf.shl_cl64(RAX);
+                    if wmask != u64::MAX {
+                        buf.mov_ri64(RDX, wmask);
+                        buf.and_rr64(RAX, RDX);
+                    }
+                    done_jumps.push(buf.jmp_rel32()); // jdone
+                    let big_at = buf.len();
+                    buf.mov_ri64(RAX, 0);
+                    done_jumps.push(buf.jmp_rel32()); // jbigfall (big -> store)
+                    fixed.push((jbig, big_at));
+                } else {
+                    // 64-bit, C in [0,63]: shl by CL is exact (x86 masks to low 6 bits)
+                    buf.shl_cl64(RAX);
+                    done_jumps.push(buf.jmp_rel32()); // jdone
+                }
+                // ---- right path (C < 0): -C = -(RCX) ----
+                let right_at = buf.len();
+                buf.neg_r64(RCX); // RCX = -C = magnitude
+                if signed_ {
+                    // sshl: arithmetic right shift, sign-extend the element's sign first
+                    match esize {
+                        4 => buf.movsxd_r64_r32(RAX, RAX),
+                        2 => {
+                            buf.shl_ri8(RAX, 48);
+                            buf.sar_ri8(RAX, 48);
+                        }
+                        1 => {
+                            buf.shl_ri8(RAX, 56);
+                            buf.sar_ri8(RAX, 56);
+                        }
+                        _ => {}
+                    }
+                }
+                if bbits < 64 {
+                    buf.cmp_ri64(RCX, bbits as u32);
+                    let jbigr = buf.jcc_rel32(0x83); // JAE: magnitude >= B
+                    if signed_ {
+                        buf.sar_cl64(RAX); // sshl: arithmetic right shift
+                    } else {
+                        buf.shr_cl64(RAX); // ushl: logical right shift
+                    }
+                    if wmask != u64::MAX {
+                        buf.mov_ri64(RDX, wmask);
+                        buf.and_rr64(RAX, RDX);
+                    }
+                    done_jumps.push(buf.jmp_rel32()); // jdoner
+                    let sign_or_zero = buf.len();
+                    // out-of-range right shift: ushl -> 0; sshl -> sign-fill
+                    if signed_ {
+                        // result = (V < 0) ? wmask : 0 ... but V already sign-extended.
+                        buf.test_rr64(RAX, RAX);
+                        let jnsz = buf.jcc_rel32(0x89); // JNS: V >= 0 -> 0
+                        buf.mov_ri64(RAX, wmask);
+                        done_jumps.push(buf.jmp_rel32()); // jz (wmask -> store)
+                        let zero_at = buf.len();
+                        buf.mov_ri64(RAX, 0);
+                        fixed.push((jnsz, zero_at));
+                    } else {
+                        buf.mov_ri64(RAX, 0);
+                    }
+                    fixed.push((jbigr, sign_or_zero));
+                } else {
+                    buf.sar_cl64(RAX); // 64-bit, C in [1,63] so sar is fine
+                }
+                // patch to final store
+                let done = buf.len();
+                for &at in &done_jumps {
+                    let disp = (done as i64 - (at as i64 + 4)) as i32;
+                    buf.bytes[at..at + 4].copy_from_slice(&disp.to_le_bytes());
+                }
+                for (at, tgt) in &fixed {
+                    let disp = (*tgt as i64 - (*at as i64 + 4)) as i32;
+                    buf.bytes[*at..*at + 4].copy_from_slice(&disp.to_le_bytes());
+                }
+                let disp_neg = (right_at as i64 - (jneg as i64 + 4)) as i32;
+                buf.bytes[jneg..jneg + 4].copy_from_slice(&disp_neg.to_le_bytes());
+                // store lane result to Vd[i]
                 match esize {
                     8 => buf.mov_store64(RBX, dst, RAX),
                     4 => buf.mov_store32(RBX, dst, RAX),
@@ -4869,9 +4977,10 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                                                                                                                                                                     let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                                                                                                                                                                                     // Emit 64-bit field of concat starting at byte `start` into `dst`.
                                                                                                                                                                                     let emit_bytes64 = |buf: &mut crate::x86::CodeBuf, dst: u8, start: usize| {
-                                                                                                                                                                                        let wi = start / 8;
-                                                                                                                                                                                        let sh = (start % 8) as u8; // bytes -> bits
-                                                                                                                                                                                        if sh == 0 {
+                                                                                                                                                                                                                                            let wi = start / 8;
+                                                                                                                                                                                                                                            // sh = bit offset within the concat word (start is in BYTES)
+                                                                                                                                                                                                                                            let sh = ((start % 8) * 8) as u8;
+                                                                                                                                                                                                                                            if sh == 0 {
                                                                                                                                                                                             // aligned: 8 bytes directly from one concat word
                                                                                                                                                                                             match wi {
                                                                                                                                                                                                 0 => buf.mov_load64(dst, RBX, slot(rn)),

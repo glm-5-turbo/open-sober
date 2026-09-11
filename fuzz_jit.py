@@ -561,7 +561,42 @@ def gen_pairwise_reduce():
     return s;
 }}
 """
-gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt, gen_pairwise_reduce]
+def gen_varshift():
+    # Variable shift-by-register: lslv/lsrv/asrv (and rorv) Rd,Rn,Rm where BOTH
+    # the value and the shift count are runtime data (not compile-time constants),
+    # with 32- and 64-bit lanes. gcc emits the lslv/lsrv/asrv/rorv encodings only
+    # when the amount is genuinely data-dependent; constant-integer shifts emit
+    # UBFM/EXTR instead. Covers the VarShiftVar translate arm (count masked to
+    # sf?0x3f:0x1f, W sign-extends before asrv, zero-extends result).
+    n=random.choice([16,24,32,48])
+    width=random.choice(["unsigned long long","long long","unsigned int","int"])
+    seed=random.choice([864209, 13579, 975310, 424242])
+    # Shift counts must stay < element width: ARM `shl/sshl` by >= width yields 0,
+    # while native x86 masks `cl` mod width (UB region differs by ISA). Oracle here
+    # is native gcc, so keep counts in [0, width_bits) to compare like-for-like.
+    wbits = 64 if "long long" in width else 32
+    max_shift = wbits - 1
+    sh_mask = random.choice([7, 15, 31, max_shift])
+    sh_mask = min(sh_mask, max_shift)
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = {seed}ull;
+    unsigned long long x = seedv;
+    {width} a[{n}], sh[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull;
+        a[i]=({width})((x>>{random.choice([8,17,31,45])}) ^ (x & 0xffff));
+        sh[i]=({width})((x >> 37) & {sh_mask});
+        if(({width})sh[i] < 0) sh[i] = ({width})0 - sh[i];
+    }}
+    {width} s1=0,s2=0,s3=0;
+    for(int i=0;i<{n};i++){{
+        s1 ^= ({width})(a[i] << sh[i]);
+        s2 |= ({width})(a[i] >> sh[i]);
+    }}
+    for(int i=0;i<{n};i+=2) s3 += ({width})(a[i] << (sh[i]&7)) - ({width})(a[i] >> ({width})(sh[i]&15));
+    return (long long)(s1*131 + s2*17 + s3*3) ^ 0xf00baaull;
+}}
+"""
+gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt, gen_pairwise_reduce, gen_varshift]
 
 # -shared self-import shape: exported module functions calling each OTHER via
 # @plt (and optionally recursing). Exercises the binder's own-export JUMP_SLOT

@@ -356,7 +356,7 @@ pub enum Inst {
     // ---- scalar udiv/sdiv Wd/Wd/Wm ----
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
-    SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool },
+    SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool, q: bool },
     // ---- scalar FP max/min (fmax/fmin/fmaxnm/fminnm) ----
     FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
     // ---- FP horizontal reduction cross vector: fmaxv/fminv Sd, Vn.4s ----
@@ -2658,16 +2658,24 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                         }
 
                         // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
-                        // Gate &0x3f00_0c00 in {0x2e00_0400 (ushl Q=0), 0x4e00_0400 (sshl), 0x6e00_0400 (ushl Q1)}.
-                        // sign = bit29. Per-lane shifts by the count in the matching Vm lane.
-                        let vsh = insn & 0x3f00_0c00;
-                            if (vsh == 0x2e00_0400 || vsh == 0x4e00_0400 || vsh == 0x6e00_0400) && (insn & 0x0000_4000) != 0 {
+                        // Mask ffe0_fc00 keeps bit31 (q), bit29 (U: 1=ushl, 0=sshl),
+                        // bits23:22 (size), and the {000x_0000}100 opcode field.
+                        // gcc emits ushl for unsigned lanes, sshl for signed. Note:
+                        // U (bit29) is NOT a sign flag — ushl (unsigned) sets it to 1,
+                        // sshl (signed) clears it. signed_=true means sshl (arithmetic).
+                        let vsh = insn & 0xffe0_fc00;
+                        if matches!(vsh, 0x2e20_4400 | 0x2e60_4400 | 0x2ea0_4400
+                                       | 0x6e20_4400 | 0x6e60_4400 | 0x6ea0_4400
+                                       | 0x6ee0_4400 | 0x0e20_4400 | 0x0e60_4400
+                                       | 0x0ea0_4400 | 0x4e20_4400 | 0x4e60_4400
+                                       | 0x4ea0_4400 | 0x4ee0_4400) {
                             return Inst::SimdVShift {
                                 rd: (insn & 0x1f) as u8,
                                 rn: ((insn >> 5) & 0x1f) as u8,
                                 rm: ((insn >> 16) & 0x1f) as u8,
                                 esize: (1u8 << ((insn >> 22) & 0x3)),
-                                signed_: (insn >> 29) & 1 == 1,
+                                signed_: (insn >> 29) & 1 == 0,
+                                q: (insn >> 30) & 1 == 1,
                             };
                         }
 

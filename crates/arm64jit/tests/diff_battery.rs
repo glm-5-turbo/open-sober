@@ -145,6 +145,58 @@ fn assert_diff(tag: &str, opt: &str, src: &str) {
 // ---- Canaries ----
 
 #[test]
+fn diff_simd_ext_unaligned_xor_reduce() {
+    // Byte-copy `ext VD.16B, Vn, Vm, #imm` with UNALIGNED imm (4): the SimdExt
+    // translate computed the shift as `start%8` BYTES but used it as a BIT count
+    // (shr/shl by 4 instead of 32), corrupting every non-{0,8} immediate. gcc's
+    // horizontal XOR-reduce over lanes emits `ext #8` + `ext #4`; before the fix
+    // the final xor was wrong. Found via the new gen_varshift fuzz campaign.
+    assert_diff(
+        "simd_ext_unaligned",
+        "-O3",
+        r#"
+typedef int i32;
+volatile unsigned long long seedv = 424242ull;
+long long entry(void){
+    unsigned long long x = seedv;
+    i32 a[32];
+    for(int i=0;i<32;i++){ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=(i32)((x>>8)^(x&0xffff)); }
+    i32 s1=0;
+    for(int i=0;i<32;i++) s1 ^= a[i];   // gcc -O3 vectorizes + cross-lane ext reduce
+    return (long long)(s1*131) ^ 0xf00baaull;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_simd_var_reg_shift_2d() {
+    // ushl/sshl Vd.2d, Vn.2d, Vm.2d: 64-bit lanes, variable shift by the SIGNED
+    // count lane. The old vshift gate `&0x3f000c00 {0x2e,0x4e,0x6e}` wrongly
+    // masked-out bit29 (the U bit) AND the 2d size bits, so sshl.2d (masked
+    // 0x0e...) never decoded; the translate always used 16/esize lanes (ignored q)
+    // and did a plain shl (no negative-count arithmetic right shift for sshl).
+    // Bounded counts (<64) so native oracle and ARM agree.
+    assert_diff(
+        "simd_var_reg_shift_2d",
+        "-O3",
+        r#"
+typedef unsigned long long u64;
+volatile unsigned long long seedv = 864209ull;
+long long entry(void){
+    unsigned long long x = seedv;
+    u64 a[24], c[24];
+    for(int i=0;i<24;i++){ x=x*6364136223846793005ull+1442695040888963407ull;
+        a[i]=(u64)((x>>8)^(x&0xffff)); c[i]=(u64)((x>>37)&7); }
+    u64 s1=0, s2=0;
+    for(int i=0;i<24;i++){ s1 ^= (u64)(a[i] << c[i]); s2 |= (u64)(a[i] >> c[i]); }
+    return (long long)(s1*131 + s2*17);
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_i64_div_mod_sign() {
     // SDIV/UDIV signedness + `msr`/magic-multiply division-by-constant: i64
     // (incl. negative dividend/divisor) and u64 modulo.

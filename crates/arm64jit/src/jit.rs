@@ -4074,6 +4074,101 @@ mod tests {
     }
 
     #[test]
+    fn simd_var_reg_shift_2d_reference() {
+        // ushl/sshl Vd.2d, Vn.2d, Vm.2d : per-lane variable shift by the SIGNED
+        // count lane. Positive count -> left; negative -> right (sshl=arithmetic,
+        // ushl=logical). Ground-truth values hand-computed.
+        // encodings: sshl v2.2d,v0.2d,v1.2d = 0x4ee24420, ushl = 0x6ee24420.
+        //   lane layout: d-reg n is v[n*2] (v is flat).
+        fn lane_r(r: usize) -> usize { r * 2 }
+
+        // --- sshl, positive counts {3,4}: v0={10,20} -> {10<<3=80, 20<<4=320}
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 10u64; st.v[lane_r(0) + 1] = 20u64; // v0
+        st.v[lane_r(1)] = 3u64;  st.v[lane_r(1) + 1] = 4u64;  // v1 counts
+        let mut code = [0x02u8, 0x44, 0xe1, 0x4e].to_vec(); // sshl v2.2d, v0.2d, v1.2d
+        code.extend_from_slice(&[0xc0u8, 0x03, 0x5f, 0xd6]); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec sshl +pos");
+        assert_eq!(st.v[lane_r(2)], 80, "sshl d2[0] = 10<<3");
+        assert_eq!(st.v[lane_r(2) + 1], 320, "sshl d2[1] = 20<<4");
+
+        // --- sshl, NEGATIVE counts {-1,-2}: v0={10,20} -> arith right {5, 5}
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 10u64; st.v[lane_r(0) + 1] = 20u64;
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64) - 1; // -1, -2
+        exec_bytes(&mut st, &code, 0).expect("exec sshl -neg");
+        assert_eq!(st.v[lane_r(2)], 5, "sshl 10>>1");
+        assert_eq!(st.v[lane_r(2) + 1], 5, "sshl 20>>2");
+
+        // --- ushl, negative counts: logical right {5, 5} same for positive vals
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 10u64; st.v[lane_r(0) + 1] = 20u64;
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64) - 1;
+        let mut ucode = [0x02u8, 0x44, 0xe1, 0x6e].to_vec(); // ushl v2.2d, v0.2d, v1.2d
+        ucode.extend_from_slice(&[0xc0u8, 0x03, 0x5f, 0xd6]); // ret
+        exec_bytes(&mut st, &ucode, 0).expect("exec ushl -neg");
+        assert_eq!(st.v[lane_r(2)], 5, "ushl 10>>1");
+        assert_eq!(st.v[lane_r(2) + 1], 5, "ushl 20>>2");
+
+        // --- ushl/usign logical vs sshl arith: negative value, right shift
+        // v0 = {0xF0, 0xF0} are POSITIVE 64-bit lanes -> sshl>1 = 0x78 (arith==logical
+        // for positive values). To check sign-fill, use a negative lane (bit63 set).
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 0xF0u64; // positive: sshl -1 -> 0x78
+        st.v[lane_r(0) + 1] = (!0u64); // -1: sshl -1 -> sign-fill => !0
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64); // -1 both
+        exec_bytes(&mut st, &code, 0).expect("exec sshl arith");
+        assert_eq!(st.v[lane_r(2)], 0x78u64, "sshl 0xF0(pos)>>1 = 0x78");
+        assert_eq!(st.v[lane_r(2) + 1], !0u64, "sshl -1>>1 sign-fill = !0");
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 0xF0u64; st.v[lane_r(0) + 1] = 0x00F0_0000_0000_0000u64;
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64);
+        exec_bytes(&mut st, &ucode, 0).expect("exec ushl logical");
+        assert_eq!(st.v[lane_r(2)], 0x78u64, "ushl 0xF0>>1 zero-fill (logical)");
+    }
+
+    #[test]
+    fn simd_var_reg_shift_4s_reference() {
+        // ushl/sshl Vd.4s, Vn.4s, Vm.4s: 32-bit lanes. sshl code byte3 0x4e (not 0x4e),
+        // sshl v2.4s,v0.4s,v1.4s = 0x4ea24402 base with rd2,rn0,rm1 -> 0x4ea14402.
+        // lane r low 32 bits of v[r*2].
+        fn lane_r(r: usize) -> usize { r * 2 }
+        // --- sshl positive {3,4}: v0={10,20} -> {10<<3=80, 20<<4=320}
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 10; st.v[lane_r(0) + 1] = 20; // v0 (32-bit lanes in low words)
+        st.v[lane_r(1)] = 3;  st.v[lane_r(1) + 1] = 4;  // counts
+        let code = [0x02u8, 0x44, 0xa1, 0x4e]; // sshl v2.4s, v0.4s, v1.4s
+        exec_bytes(&mut st, &code, 0).expect("exec sshl 4s pos");
+        assert_eq!(st.v[lane_r(2)] & 0xffffffff, 80, "sshl 4s lane0 = 10<<3");
+        assert_eq!(st.v[lane_r(2) + 1] & 0xffffffff, 320, "sshl 4s lane1 = 20<<4");
+
+        // --- sshl NEGATIVE {-1,-2}: 10>>1=5, 20>>2=5
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 10; st.v[lane_r(0) + 1] = 20;
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64) - 1;
+        exec_bytes(&mut st, &code, 0).expect("exec sshl 4s neg");
+        assert_eq!(st.v[lane_r(2)] & 0xffffffff, 5, "sshl 4s 10>>1");
+        assert_eq!(st.v[lane_r(2) + 1] & 0xffffffff, 5, "sshl 4s 20>>2");
+
+        // --- sshl sign-fill: 0xF0000000 (=-0x10000000) signed >>1 -> 0xF8000000
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 0xF000_0000u64; st.v[lane_r(0) + 1] = 0x1000_0000u64;
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64);
+        exec_bytes(&mut st, &code, 0).expect("exec sshl 4s sign-fill");
+        assert_eq!(st.v[lane_r(2)] & 0xffffffff, 0xF800_0000u64, "sshl 4s arith sign-fill (neg val >>1)");
+        assert_eq!(st.v[lane_r(2) + 1] & 0xffffffff, 0x0800_0000u64, "sshl 4s pos val >>1");
+
+        // --- ushl logical vs sshl: ushl 0xF0000000 >>1 -> 0x78000000 (no sign fill)
+        let ucode = [0x02u8, 0x44, 0xa1, 0x6e]; // ushl v2.4s, v0.4s, v1.4s
+        let mut st = CpuState::new();
+        st.v[lane_r(0)] = 0xF000_0000u64; st.v[lane_r(0) + 1] = 0x1000u64;
+        st.v[lane_r(1)] = (!0u64); st.v[lane_r(1) + 1] = (!0u64);
+        exec_bytes(&mut st, &ucode, 0).expect("exec ushl 4s logical");
+        assert_eq!(st.v[lane_r(2)] & 0xffffffff, 0x7800_0000u64, "ushl 4s logical (no sign-fill)");
+        assert_eq!(st.v[lane_r(2) + 1] & 0xffffffff, 0x800u64, "ushl 4s 0x1000>>1");
+    }
+
+    #[test]
     fn fp_scalar_double_ieee() {
         // Encodings verified from objdump of /tmp/fp2.s. NOTE: d-reg `dk` lives in
         // Rust array element `v[k*2]` (v is flat [u64;64] = 32 x two 64-bit lanes).
