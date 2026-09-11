@@ -5848,3 +5848,32 @@ fuzz sweeps across 3 fresh seeds: 0 fail. `cargo test --workspace` **369/0**
 The two cycle-44 fixes (rev16 `8e00bdc`, LONG-by-element `39150c4`) were both
 differential-fuzzer finds — new targeted generators is the highest-yield
 bug-hunt on this APK-less box. HARD GATE unchanged.
+
+## Cycle 44c (Sep 11, 2026) — saturating-narrow + MSL immediates fixed; gen_sat_narrow fuzzer (370/0)
+
+Third fuzzer-won battle this cycle. `gen_sat_narrow` (vqmovn_s32/vqmovn_u32/
+vqmovun_s32 forced through NEON, with a matching clamp reference) failed
+**18/40** and exposed FOUR real JIT bugs, each silent (wrong value, no trap):
+1. **rev32 gate stole the unsigned-dst SaturatNarrow** — sqxtun/uqxtn have a
+   0x2e prefix with bit23 set, which the rev32 gate (granule 4) wrongly
+   claimed (`0x2e614bff → SimdRev`), so the unsigned family never ran. Added
+   bit15==0 (byte1 top-nibble 0) to the rev32 gate — genuine rev32 has
+   byte1=0x08 (top nibble 0), sqxtun has 0x2b.
+2. **SaturatNarrow decode was wrong in 3 places**: byte2 must be MASKED
+   (`& 0xf8`) not exact (sqxtun byte2 is 0x2b, carries reg bits → was missed);
+   src/dst-signed misderived — now from U(bit29)+byte2 (sqxtn dst+src signed,
+   uqxtn both unsigned, sqxtun dst unsigned + src signed); dst_esize now from
+   the full byte1 nibble (0x2→1, 0x6→2, 0xa→4) so `sqxtn .2s,.2d` gets 4 bytes.
+3. **SaturatNarrow clamp used the wrong max for signed dest** — always 0xffff;
+   positive overflow of a signed dst saturated to 65535 not 32767 (the
+   `+0x7fff7fff` vs `-0x8000` oracle diff). Fixed to signed-aware maxv.
+4. **MSL movi/mvni (vector immediate, cmode 0xc/0xd) was captured by the
+   SIMD shl gate** (missing bit15==0 check — movi-msl fell in as a shift), and
+   the MSL branch never inverted for mvni (op==1). Both fixed; `mvni v.4s,
+   #0xff,msl8` now gives per-lane 0xffff0000 as ground-truth requires.
+
+Regression `saturating_narrow_variants_decode_correctly` (11 encodings incl
+the squared-byte2 0x2b forms) + movi-msl16/mvni-msl8 + shl/ushr-stay-shifts.
+Verified sat-narrow 40/40 (was 22/40), each variant 25/25, clean fuzz sweeps.
+cargo test --workspace **370/0** (arm64jit lib 208). Commit `7599867`.
+HARD GATE unchanged.
