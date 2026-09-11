@@ -361,15 +361,22 @@ pub fn translate(
             shift,
             sh_amt,
             sf,
+            sp_operand,
             ..
         } => {
-            // rn/Rd XZR-vs-SP: in ADD/SUB the non-flag-setting form uses SP for
-            // rn=31 and rd=31 (e.g. function prologue `sub sp, sp, #N`), but when
-            // the S (flags) bit is set rn=31 and rd=31 are XZR — `negs w1,w0`
-            // (subs w1, wzr, w0) must read rn=31 as ZERO, not SP, or it computes
-            // `sp - w0`. Rm is always a GPR (XZR=0), never SP.
-            if s && rn == 31 {
-                buf.mov_ri64(RAX, 0);
+            // rn/Rd XZR-vs-SP: the shift-register form (bit21=0) uses register 31 as
+            // XZR (zero) in EVERY operand — `neg x6,x6` (sub x6,xzr,x6) must read rn=31
+            // as 0, NOT SP. Only the extended-register form (bit21=1, e.g. `sub sp,sp,
+            // x1`) treats rn=31 and rd=31 as the stack pointer. qemu-verified:
+            //   neg x6,x6 = 0xcb0603e6 (bit21=0) -> rn=31 is XZR
+            //   sub sp,sp,x1 = 0xcb2163ff (bit21=1) -> rn=31, rd=31 are SP.
+            // `negs w1,w0` (subs,w1,wzr,w0; bit21=0, S=1) must read rn=31 as XZR too.
+            // Rm is always a GPR (XZR=0), never SP.
+            let rn_is_sp = sp_operand && rn == 31;
+            if rn_is_sp {
+                ldg(buf, RAX, 31); // extended form reads rn=31 as SP
+            } else if rn == 31 {
+                buf.mov_ri64(RAX, 0); // shifted form reads rn=31 as XZR
             } else {
                 ldg(buf, RAX, rn as u32);
             }
@@ -391,8 +398,12 @@ pub fn translate(
             if s {
                 store_nzcv(buf);
             }
-            // rd==31 writes SP for ADD/SUB; only cmp/cmn (s==1, rd==31) discards.
-            if rd != 31 || !s {
+            // rd==31: shifted-register form (bit21=0) discards the result (XZR) —
+            // `neg xd,xm` does NOT touch SP. Only the extended-register form
+            // (bit21=1, `sub sp,sp,x0`) writes rd=31 as the stack pointer; and
+            // cmp/cmn (s==1) discard regardless. So write iff rd is a real reg,
+            // or rd=31 in the SP-operand form that isn't a pure compare.
+            if rd != 31 || (sp_operand && !s) {
                 if !sf {
                     zext_w(buf, RAX); // W write zero-extends into X
                 }
@@ -542,7 +553,22 @@ pub fn translate(
                         }
                         Ok(())
                     }
-                    Inst::MulDiv { div, signed, rd, rn, rm, ra, sf } => {
+                    Inst::MulHigh { rd, rn, rm, signed } => {
+                    // umulh/smulh Xd, Xn, Xm: high 64 bits of the 128-bit product.
+                    // x86 one-operand mul/imul: RDX:RAX = RAX * rm, high in RDX.
+                    ldg(buf, RAX, rn as u32);  // multiplicand
+                    ldg(buf, RCX, rm as u32);  // multiplier
+                    if signed {
+                        buf.imul_high_r64(RCX); // RDX:RAX = RAX*RCX (signed)
+                    } else {
+                        buf.mul_high_r64(RCX);  // RDX:RAX = RAX*RCX (unsigned)
+                    }
+                    if rd != 31 {
+                        stg(buf, rd as u32, RDX); // high half -> Rd
+                    }
+                    Ok(())
+                }
+                Inst::MulDiv { div, signed, rd, rn, rm, ra, sf } => {
                         if div {
                             // UDIV/SDIV: RAX = Rn / Rm (quotient). Dividend in
                             // RDX:RAX, divisor in RCX.
@@ -1056,13 +1082,19 @@ pub fn translate(
         Inst::SysReg { sysreg, rt, read } => {
             // sysreg==0: tpidr_el0 (CpuState.tpidr). sysreg==1: cntfrq_el0
             // (counter tick rate in Hz) read as a fixed constant. Decode only
-            // produces these two; write to cntfrq is not generated.
+            // produces these; write to cntfrq is not generated.
+            //
+            // NOTE: rt is a GUEST register index. The value must be committed to
+            // the guest file with stg(buf, rt, <host>) — a bare buf.mov_ri64(rt,
+            // ..) only writes HOST register rt and the guest slot stays stale
+            // (latent bug: every mrs xN,<cnt|nzcv|dczid> was a silent no-op).
             if sysreg == 1 {
                 // mrs xN, cntfrq_el0  ->  xN = 100_000_000 (100 MHz counter).
                 // Constant Hz: the guest divides/downscales counter deltas with
                 // this, so a fixed, self-consistent rate is honest for boot.
                 if read && rt != 31 {
-                    buf.mov_ri64(rt, 100_000_000);
+                    buf.mov_ri64(RAX, 100_000_000);
+                    stg(buf, rt as u32, RAX);
                 }
                 return Ok(());
             }
@@ -1070,14 +1102,16 @@ pub fn translate(
                 // mrs xN, cntvct_el0  ->  xN = CpuState.cntvct (live monotonic
                 // counter, stamped by the run loop between guest blocks).
                 if read && rt != 31 {
-                    buf.mov_load64(rt, RBX, crate::jit::CNTVCT_OFF);
+                    buf.mov_load64(RAX, RBX, crate::jit::CNTVCT_OFF);
+                    stg(buf, rt as u32, RAX);
                 }
                 return Ok(());
             }
             if sysreg == 4 {
                 // mrs xN, nzcv  ->  xN = CpuState.nzcv (packed N=31,Z=30,C=29,V=28).
                 if read && rt != 31 {
-                    buf.mov_load32(rt, RBX, NZCV_OFF);
+                    buf.mov_load32(RAX, RBX, NZCV_OFF);
+                    stg(buf, rt as u32, RAX);
                 }
                 if !read && rt != 31 {
                     // msr nzcv, xN: shift xN's low 4 flag bits up to NZCV@28..31.
@@ -1088,10 +1122,20 @@ pub fn translate(
                 }
                 return Ok(());
             }
+            if sysreg == 5 {
+                // mrs xN, dczid_el0  ->  xN = 0x4 (16-byte DC ZVA block, DZP=0).
+                if read && rt != 31 {
+                    buf.mov_ri64(RAX, 0x4);
+                    stg(buf, rt as u32, RAX);
+                }
+                return Ok(());
+            }
             if read {
-                // Rt = [RBX + TPIDR_OFF]
+                // Rt = [RBX + TPIDR_OFF]  (commit to the guest slot, same fix as
+                // the other MRS reads: rt is a guest register, not a host one)
                 if rt != 31 {
-                    buf.mov_load64(rt, RBX, crate::jit::TPIDR_OFF);
+                    buf.mov_load64(RAX, RBX, crate::jit::TPIDR_OFF);
+                    stg(buf, rt as u32, RAX);
                 }
             } else {
                 // tpidr_el0 = Rt
@@ -2829,7 +2873,18 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                 else { buf.movsx_byte_mem(RAX, RBX, off); }
                             }
                         }
-                        if unsigned { buf.shr_ri8(RAX, shift); } else { buf.sar_ri8(RAX, shift); }
+                        let esize_bits = (esize as i32) * 8;
+                        if (shift as i32) >= esize_bits {
+                            if unsigned {
+                                buf.xor_rr64(RAX, RAX);
+                            } else {
+                                buf.sar_ri8(RAX, 63);
+                            }
+                        } else if unsigned {
+                            buf.shr_ri8(RAX, shift);
+                        } else {
+                            buf.sar_ri8(RAX, shift);
+                        }
                         let dst = vslot(rd) + (i as i32) * (esize as i32);
                         match esize {
                             8 => buf.mov_load64(RCX, RBX, dst),

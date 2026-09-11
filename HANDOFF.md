@@ -2842,3 +2842,54 @@ lane ops unchanged. arm64jit 88/88, workspace 122/0.
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK are available.
+
+## Session (Sep 11, 2026) — SIMD/sysreg correctness sweep: 4 real bugs + 3 ISA walls (127/0)
+Continuing the cross-gcc battery. Two previously-"correct" paths and three
+newly-hit instructions were wrong; all fixed + qemu-verified + regression-locked.
+
+### 1. SimdShrAcc (usra/ssra) esize/shift decode bug (silent, real)
+The ShrAcc decode derived esize from the 3-bit tagless immh via trailing_zeros,
+which collapses EVERY esize>=4 shift to esize=1/shift=0 — ssra silently
+accumulated WITHOUT shifting. Battery exposed: ssra .2d #2 of {-8,-16} returned
+-24 not -6; ssra .4s #2 returned 72 not 18. Decode now mirrors the verified
+SimdShr gate (full immh incl bit22, fls esize, shift = 2*esize_bits-(immh:immb)),
+and the unsigned discriminator is bit29 (was bit11). Translate also guards
+shift>=esize_bits (mirror SimdShr). qemu: -6 / 18 / 1.
+
+### 2. neg reads rn=31 as XZR, not SP (AddSubReg, silent, real)
+`neg xd,xm` = `sub xd, xzr, xm` (shifted-register, bit21=0) — rn=31 MUST be XZR
+(=0). The translate read rn=31 as SP for every non-S op, so neg(x6) computed
+sp-x6. Root cause: bit21 is the form discriminator (qemu: neg=0xcb0603e6 bit21=0
+-> XZR; sub sp,sp,x1=0xcb2163ff bit21=1 -> SP). Added `sp_operand` (bit21) to
+Inst::AddSubReg and applied on both read (rn) and write (rd) sides. Regression
+`neg_reads_rn31_as_xzr_not_sp`.
+
+### 3. SysReg MRS reads were silent no-ops (LATENT, all of them)
+The translate wrote `buf.mov_ri64(rt,..)` where rt is a GUEST register index —
+the value landed in a stray x86 reg, never committed to the guest file. So every
+`mrs xN,<cntfrq|cntvct|nzcv|dczid|tpidr>` returned 0/garbage. Decode-side tests
+passed because they only bind Inst fields; exec was never exercised (cf/dz
+battery proved it: cntfrq + dczid both returned 0 before). Fixed all four read
+paths (+ MRS via `stg`), and the msr-tpidr write kept as-is.
+
+### 4. New ISA walls crossed
+- dczid_el0 (`mrs x0,dczid_el0` = 0xd53b00e0): glibc CRT reads it to size its DC
+  ZVA memset; returns 0x4 (16-byte block, DZP=0). sysreg 5.
+- umulh/smulh (high 64 of 128-bit product): gate top 0x9b && bit22 set
+  (separates from madd/msub where bit22=0), signed = bit23. x86 F7/4,F7/5
+  one-operand mul/imul (RDX:RAX = RAX*rm). Verified vs qemu.
+
+### Verification
+- `cargo build --workspace` clean; `cargo test --workspace` 127/0 (arm64jit 93).
+- Battery (all qemu-verified): ssra_2d=-6, ssra_4s=18, ushr=1, shl=24, shlimm=27,
+  neg_d=2, cf(cntfrq)=100000000, dz(dczid)=4, mulh_e=2.
+- modmain.elf (full glibc CRT) now advances past dczid + umulh/smulh to the next
+  wall: MTE `stg x0,[x0]` (0xd9200800, __libc_mtag_tag_region) — memory tagging.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. MTE stg/ldg/stzg memory-tagging no-op (unblocks full glibc-linked programs).
+2. Continue the SIMD surface as the cross-gcc battery reveals it; then real
+   `svc` syscall routing on actual use (real AArch64->x86-64 table; mmap 222 etc.).
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof remains blocked (no libroblox.so/APK, no GPU) —
+   HARD GATE on a capable host (`elfjit ... 0x1f0db20 --jni` run log).

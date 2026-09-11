@@ -1225,6 +1225,97 @@ mod tests {
     }
 
     #[test]
+    fn neg_reads_rn31_as_xzr_not_sp() {
+        // Regression: `neg x6,x6` = `sub x6, xzr, x6` (0xcb0603e6) is the SHIFTED-
+        // register add/sub form (bit21=0), where register 31 in the rn operand is
+        // XZR (=0), NOT the stack pointer. Previously the non-S path read rn=31 as
+        // SP, so neg(x6) computed sp - x6 instead of 0 - x6 (qemu: x6=2 -> -2).
+        //   neg x6,x6 = 0xcb0603e6 ; mov x0,x6 = 0xaa0603e0 ; ret = 0xd65f03c0
+        let code = [0xe6u8, 0x03, 0x06, 0xcb, 0xe0, 0x03, 0x06, 0xaa, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.x[6] = 2;
+        st.x[31] = 0x1234_5678_9abc_def0; // SP set apart so any SP-read is visible
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0xffff_ffff_ffff_fffe, "neg(x6=2) = -2, must not be sp-2");
+    }
+
+    #[test]
+    fn mrs_dczid_el0_returns_block_size() {
+        // Regression: `mrs x0, dczid_el0` (0xd53b00e0) — read by glibc's CRT to
+        // size its DC ZVA memset path — was previously Unsupported, halting any
+        // full glibc-linked program at __libc_start_main. Returns a 16-byte block
+        // (0x4, DZP=0), which is a valid, self-consistent value.
+        //   mrs x0, dczid_el0 = 0xd53b00e0 ; mov x4,x0 = 0xaa0003e4 ; ret
+        let code = [0xe0u8, 0x00, 0x3b, 0xd5, 0xe4, 0x03, 0x00, 0xaa, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[0], 0x4, "dczid_el0 -> x0 = 16-byte DC ZVA block");
+        assert_eq!(r, 0x4, "x0 = dczid value");
+    }
+
+    #[test]
+    fn sysreg_mrs_reads_commit_to_guest_register() {
+        // Regression: the SysReg MRS write path used `buf.mov_ri64(rt, ..)` with
+        // rt as a HOST register index, so every `mrs xN, <cntfrq|cntvct|nzcv|
+        // dczid|tpidr>` dumped the value into a stray x86 reg and left the guest
+        // slot stale — a silent no-op (verify: cf/dz battery returned 0 before).
+        // Now each read commits via stg. cntfrq_el0 = 100 MHz, dczid = 4 bytes.
+        //   mrs x0,cntfrq_el0 = 0xd53be000 ; mrs x4,dczid_el0 = 0xd53b00e4
+        //   mrs x7,tpidr_el0 = 0xd53bd047 ; ret
+        let code = [
+            0x00, 0xe0, 0x3b, 0xd5, // mrs x0, cntfrq_el0
+            0xe4, 0x00, 0x3b, 0xd5, // mrs x4, dczid_el0
+            0x47, 0xd0, 0x3b, 0xd5, // mrs x7, tpidr_el0
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.tpidr = 0x1234_5678_9abc_def0;
+        exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[0], 100_000_000, "cntfrq_el0 -> guest x0");
+        assert_eq!(st.x[4], 0x4, "dczid_el0 -> guest x4");
+        assert_eq!(st.x[7], st.tpidr, "tpidr_el0 -> guest x7");
+    }
+
+    #[test]
+    fn mulh_high_product_umulh_smulh() {
+        // Regression: umulh/smulh (high 64 of 128-bit product) were Unsupported —
+        // a common compiler/glibc idiom (modmain.elf stopped on `umulh x2,x3,x6`).
+        // Encodings objdump-verified: umulh x2,x3,x6 = 0x9bc67c62, smulh = 0x9b467c62.
+        // hand-rolled (objdump-verified): umulh x2,x3,x6=0x9bc67c62 ; smulh x4,x5,x6=0x9b467ca4 ; ret
+        let code = [
+            0x62, 0x7c, 0xc6, 0x9b, // umulh x2, x3, x6
+            0xa4, 0x7c, 0x46, 0x9b, // smulh x4, x5, x6
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[3] = 0x10000_0000u64; // 2^32
+        st.x[6] = 0x10000_0000u64; // 2^32
+        st.x[5] = 0xffff_ffff_ffff_ffffu64; // -1
+        exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[2], 1, "umulh(2^32 * 2^32) high = 1");
+        assert_eq!(
+            st.x[4],
+            0xffff_ffff_ffff_ffff,
+            "smulh(-1 * 2^32): -1*2^32 = -2^32, 128-bit high = all-ones"
+        );
+
+        // decode binds: umulh (bit23=1,unsigned), smulh (bit23=0,signed); the
+        // MulDiv madd alias (mul x0,x1,x0=0x9b007c20, bit22=0) must NOT be MulHigh.
+        assert!(matches!(
+            crate::decode::decode(0x9bc67c62),
+            Inst::MulHigh { signed: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x9b467c62),
+            Inst::MulHigh { signed: true, .. }
+        ));
+        assert!(!matches!(
+            crate::decode::decode(0x9b007c20),
+            Inst::MulHigh { .. }
+        ));
+    }
+
+    #[test]
     fn fcvtzu_handles_u64_beyond_2pow63() {
         // Regression: `fcvtzu x0,d0` (unsigned double->u64) is valid over the
         // whole [0,2^64) range, but x86 cvttsd2si saturates anything >= 2^63 to
@@ -1446,6 +1537,47 @@ mod tests {
         assert!(matches!(
             crate::decode::decode(0x0f0004a0),
             Inst::VecMovi { .. }
+        ));
+    }
+
+    #[test]
+    fn simd_ssra_usra_shift_accumulate_esize_correct() {
+        // Regression: SimdShrAcc (usra/ssra Vd += Vn>>imm) derived esize from the
+        // 3-bit tagless immh via trailing_zeros, collapsing EVERY esize>=4 shift to
+        // esize=1/shift=0 — so ssra silently accumulated WITHOUT shifting
+        // (ssra .2d #2 returned -8-16=-24 not -2-4=-6). Mirror SimdShr's verified
+        // full-immh (bit22) esize + 2*esize_bits shift. Encodings objdump-verified.
+        // ssra v4.2d,v3.2d,#2 = 0x4f7e1464 (real word) with v3={-8,-16} -> {-2,-4}.
+        // real encoding uses rn=v3 (bits5:9=3, so CpuState.v[2*3]), rd=v4(0x4).
+        // ssra v4.2d,v3.2d,#2 = 0x4f7e1464 ; then mov x0,v4.d[0]=0x4e083c80
+        // mov x1,v4.d[1]=0x4e183c81 ; add x0,x0,x1=0x8b010000 ; ret (objdump)
+        let code = [
+            0x64, 0x14, 0x7e, 0x4f,
+            0x80, 0x3c, 0x08, 0x4e,
+            0x81, 0x3c, 0x18, 0x4e,
+            0x00, 0x00, 0x01, 0x8b,
+            0xc0, 0x03, 0x5f, 0xd6,
+        ];
+        let mut st = CpuState::new();
+        st.v[2 * 3] = 0xffff_ffff_ffff_fff8u64;      // v3.d[0] = -8
+        st.v[2 * 3 + 1] = 0xffff_ffff_ffff_fff0u64;  // v3.d[1] = -16
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r as u64, 0xffff_ffff_ffff_fffa, "ssra .2d #2 of {{-8,-16}} = {{-2,-4}}, sum -6");
+        assert_eq!(st.v[2 * 4] as u64, 0xffff_ffff_ffff_fffe, "v4.d[0] = -8>>2 = -2");
+
+        // decode binds: ssra .4s #2 (0x4f3e1464) -> esize 4, shift 2, signed;
+        // usra .4s #2 (0x6f3e1464) -> unsigned.
+        assert!(matches!(
+            crate::decode::decode(0x4f3e1464),
+            Inst::SimdShrAcc { esize: 4, shift: 2, unsigned: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x6f3e1464),
+            Inst::SimdShrAcc { esize: 4, shift: 2, unsigned: true, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x4f7e1464),
+            Inst::SimdShrAcc { esize: 8, shift: 2, unsigned: false, .. }
         ));
     }
 

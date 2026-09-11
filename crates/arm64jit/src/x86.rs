@@ -515,6 +515,28 @@ impl CodeBuf {
         self.b(0xAF);
         self.b(modrm(3, rd & 7, rs & 7)); // Intel: ModRM.reg=dst, rm=src => AF C1 = eax<-eax*ecx
     }
+    /// mul r/m64 — UNSIGNED one-operand multiply: RDX:RAX = RAX * rm. 49? 48 F7 /4.
+    /// (umulh uses this; result high half lands in RDX.)
+    pub fn mul_high_r64(&mut self, rm: u8) {
+        if rm >= 8 {
+            self.b(0x49);
+        } else {
+            self.b(0x48);
+        }
+        self.b(0xF7);
+        self.b(modrm(3, 4, rm & 7));
+    }
+    /// imul r/m64 — SIGNED one-operand multiply: RDX:RAX = RAX * rm. 48 F7 /5.
+    /// (smulh uses this; high half in RDX.)
+    pub fn imul_high_r64(&mut self, rm: u8) {
+        if rm >= 8 {
+            self.b(0x49);
+        } else {
+            self.b(0x48);
+        }
+        self.b(0xF7);
+        self.b(modrm(3, 5, rm & 7));
+    }
     /// movsxd r64, r/m32 — sign-extend a 32-bit operand into r64. 48 63 /r.
         pub fn movsxd_r64_r32(&mut self, rd: u8, rs: u8) {
             self.b(0x48);

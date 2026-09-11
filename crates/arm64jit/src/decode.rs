@@ -65,6 +65,10 @@ pub enum Inst {
         s: bool,
         shift: ShiftKind,
         sh_amt: u8,
+        // bit21: 0 = shifted-register form (regs 31 are XZR), 1 = extended-register
+        // form (rn/rd 31 are SP). Distinguishes `neg` (0xcb0603e6, bit21=0, rn=31
+        // must read XZR=0) from `sub sp,sp,x1` (0xcb2163ff, bit21=1, rn=31 = SP).
+        sp_operand: bool,
     },
     // ---- add/subtract with carry: adc/sbc/adcs/sbcs Xd, Xn, Xm ----
     AddCarry {
@@ -94,6 +98,15 @@ pub enum Inst {
         cond: u8,
         op: u8, // 0=csel,1=csinc,2=csinv,3=csneg
         sf: bool,
+    },
+    // ---- integer multiply HIGH: umulh/smulh Xd, Xn, Xm (high 64 of 128-bit
+    // product). X-only. Gate: top 0x9b && bit22 set (separates from the madd/
+    // msub/udiv/sdiv MulDiv family where bit22=0). signed = bit23 (smulh=0).
+    MulHigh {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        signed: bool,
     },
     // ---- load/store (unsigned immediate offset) ----
     LdStrImm {
@@ -903,6 +916,11 @@ pub fn decode(insn: u32) -> Inst {
             s,
             shift,
             sh_amt,
+            // bit21=1 marks the extended-register (SP-operand) form, where rn=31
+            // and rd=31 are the stack pointer. bit21=0 (shifted register) uses XZR
+            // for 31 (qemu-verified: `neg`=0xcb0603e6 rn31=XZR vs `sub sp,sp,x1`
+            // =0xcb2163ff rn31=SP). n (bit21) is this discriminator.
+            sp_operand: b(insn, 21, 21) == 1,
         };
     }
 
@@ -936,6 +954,23 @@ pub fn decode(insn: u32) -> Inst {
         // op = bits[11:10]: 00=csel,01=csinc,10=csinv,11=csneg
         let op = b(insn, 10, 11) as u8;
         return Inst::CSel { rd, rn, rm, cond, op, sf };
+    }
+
+    // ---- integer multiply-high: umulh/smulh Xd, Xn, Xm ----
+    // top byte 0x9b AND bit22 set (0x00400000) is the high-multiply marker that
+    // separates it from the madd/msub/udiv/sdiv MulDiv family (bit22=0).
+    // signed = bit23 clear (umulh=0x9bC7.. has bit23=1, smulh=0x9b47.. has 0).
+    // Verified vs objdump: umulh x2,x3,x6 = 0x9bc67c62, smulh = 0x9b467c62.
+    if (insn >> 24) & 0xff == 0x9b && (insn & 0x0040_0000) != 0 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        return Inst::MulHigh {
+            rd,
+            rn,
+            rm,
+            signed: (insn & 0x0080_0000) == 0, // bit23: 0 => smulh, 1 => umulh
+        };
     }
 
     // ---- integer multiply/divide register (madd/msub/udiv/sdiv) ----
@@ -1289,27 +1324,34 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- SIMD shift-right accumulate (usra/ssra Vd.T, Vn.T, #imm): Vd += Vn >> imm.
-    // Same 0x0f/0x0f/0x4f/0x6f prefix family as shl but the ACCUM marker is bit12
+    // Same 0x0f/0x2f/0x4f/0x6f prefix family as shl but the ACCUM marker is bit12
     // ((insn & 0x0000_7000)==0x0000_1000, vs shl's 0x5000 and ushr's 0x0000).
-    // unsigned=bit11 (0x6f/0x6e -> usra). shift = esize_bits - (tagless immh:immb).
-    // acc=bit12; bit23 clear is the shift-by-imm discriminator vs fmla-el
-    // (fmla-el requires bit23 set; usra/ssra shift-imm leave it clear).
+    // unsigned=bit29 (top 0x6f->usra / 0x4f->ssra, same as SimdShr; NOT bit11).
+    // bit23 clear is the shift-by-imm discriminator vs fmla-el (fmla-el requires
+    // bit23 set; usra/ssra shift-imm leave it clear).
+    // esize + shift mirrored from the verified SimdShr gate below: immh is the
+    // FULL bits[22:19] (bit22 = size-tag, NOT droppable), esize from its MSB,
+    // right-shift amount = 2*esize_bits - (immh:immb). The old derivation took
+    // only 3 bits via (insn>>19)&0x7 + trailing_zeros, which collapsed EVERY
+    // esize>=4 shift to esize=1/shift=0, silently making ssra accumulate
+    // without shifting (e.g. ssra .2d #2 returned -8-16=-24 not -2-4=-6).
     if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f)
-        && (insn & 0x0000_7000) == 0x0000_1000 && (insn & 0x0080_0000) == 0 {
-        let immh = (insn >> 19) & 0x7;
-        let es2 = if immh == 0 { 3 } else { immh.trailing_zeros() };
-        let esize: u8 = 1 << es2;
-        let immh4: u32 = (insn >> 19) & 0xf;         // immh incl. the size-tag top bit
-        let val = if immh4 == 0 { 0 } else { immh4 & ((1u32 << (32 - immh4.leading_zeros() - 1)) - 1) };
-                let full: u32 = (val << 3) | ((insn >> 16) & 0x7);
-                let cap: u32 = (esize as u32) * 8;
-                let shift: u32 = if full < cap { cap - full } else { 0 };
+        && (insn & 0x0000_7000) == 0x0000_1000 && (insn & 0x0080_0000) == 0
+        && (insn & 0x0078_0000) != 0 // immh != 0, exclude the movi/mvni imm family
+    {
+        let immh4: u32 = (insn >> 19) & 0xf;
+        let fls = 32 - immh4.leading_zeros(); // highest set bit, 1-indexed
+        let esize: u8 = 1u8 << (fls - 1);
+        let esize_bits = 8 * esize as u32;
+        let full: u32 = (immh4 << 3) | ((insn >> 16) & 0x7);
+        let max = 2 * esize_bits;
+        let shift: u8 = if full < max { (max - full) as u8 } else { 0 };
         return Inst::SimdShrAcc {
             rd: (insn & 0x1f) as u8,
             rn: ((insn >> 5) & 0x1f) as u8,
             esize,
-            shift: shift as u8,
-            unsigned: (insn >> 11) & 1 == 1,
+            shift,
+            unsigned: (insn >> 29) & 1 == 1,
         };
     }
 
@@ -2685,6 +2727,15 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 4, rt, read };
         }
+        // mrs xN, dczid_el0 = 0xd53b00e0: op1=3, CRn=0, CRm=0, op2=7. The data-
+        // cache-zeroing block-size register. BS field (bits[3:0]) = log2(block
+        // size) in bytes; bit4 (DZP) = 1 means DC ZVA is prohibited. GLIBC's CRT
+        // reads this to size its DC ZVA memset streaming; return a sane 16-byte
+        // block (0x4), DZP=0. Verified encoding against objdump of modmain.elf.
+        if op1 == 3 && crn == 0 && crm == 0 && op2 == 7 && read {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 5, rt, read }; // dczid_el0 -> 0x4
+        }
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
@@ -2969,6 +3020,7 @@ mod tests {
                 s,
                 shift,
                 sh_amt,
+                sp_operand,
             } => {
                 assert_eq!(rd, 0);
                 assert_eq!(rn, 0);
@@ -2978,6 +3030,7 @@ mod tests {
                 assert!(!s);
                 assert_eq!(shift, ShiftKind::Lsl);
                 assert_eq!(sh_amt, 1);
+                assert!(!sp_operand, "0x0b add shifted-reg has bit21=0");
             }
             other => panic!("expected AddSubReg, got {:?}", other),
         }
@@ -3583,6 +3636,15 @@ mod logical_imm_regressions {
                 assert!(read);
             }
             other => panic!("mrs cntvct_el0 -> {other:?}"),
+        }
+        // mrs x0, dczid_el0 (0xd53b00e0, from glibc __libc_start_main) => sysreg 5.
+        match decode(0xd53b00e0) {
+            Inst::SysReg { sysreg, rt, read } => {
+                assert_eq!(sysreg, 5);
+                assert_eq!(rt, 0);
+                assert!(read);
+            }
+            other => panic!("mrs dczid_el0 -> {other:?}"),
         }
         // fmov d6, d0 = 0x1e604006 (real libroblox) => register FP copy.
         match decode(0x1e604006) {
