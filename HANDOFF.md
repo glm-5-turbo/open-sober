@@ -3853,3 +3853,56 @@ diff_byte_scan_strlen new; all green un-ignored; 3 decode regressions added
 logical). Workspace 220/0, **0 ignored**. Commits ab24b32 (fix) — prior
 d239e8c/3b4ff25 (signed path). Difference: JIT and qemu-aarch64 now agree on
 both the signed and unsigned magic-division kernels exactly.
+---
+
+## Session (Sep 11, 2026) — 6 silent vector-FP/NEON miscompiles fixed; workspace 227/0, 0 ignored
+
+Commits `ea84aff` (fixes + unit tests) + `059151a` (differential canaries) on `dev`.
+Opened at 220/0 (no failing test — the android idempotent test stays green). Extended
+the differential battery into the **.4s/.2d single/double-precision float-vector
+SIMD** family (a 3D engine's vertex/matrix math is ~all of it) that the older
+integer/double batteries never touched, with volatile seeds so gcc can't constant-fold
+while still vectorizing. It immediately flushed out **SIX silent miscompiles** — every
+one would corrupt pixels/coordinates/audio on a real host:
+
+1. **VecIntToFp** — `scvtf/ucvtf Vd.4s/.2s` (and signed `.2d`, `0x4e21d800` family) were
+   misdecoded as **SimdMull** (widening multiply); every vector int->float made garbage.
+2. **VecFpArith** — `fadd/fsub/fmul/fdiv/fmax/fmin/fmaxnm/fminnm Vd.2s/.4s` (2-source)
+   were misdecoded as integer SIMD (`SimdAddB`/`Simd4s`/`SimdMull`). Only FMLA
+   (accumulate) and the `.2d` double forms (Simd2dFp) were handled; the two-source
+   single-precision family was entirely MISSING. Added `divss` x86 emitter.
+3. **SimdMlaEl** — integer `mla/mls Vd.4s, Vn, Vm.s[idx]` (by-element) misdecoded as
+   **VecMovi** (gcc int->float init `mla v5.4s,v18,{loop}.s[0]` corrupts the a*scalar
+   product). Gate: top nibble 0x0f + bit29 set (FP fmla-el is bit29 CLEAR) + bit23 set
+   (excludes smlal/umlal-by-el byte1 0x42); `.4s` index = (bit11<<1)|bit21.
+4. **Permute ordering** — `zip1` (and zip2/uzp1/uzp2) now decoded BEFORE the
+   `WidenShl` (shll) gate. Real `zip1 Vd.4s` has byte2 0x38 (same as shll) and was
+   misdecoded as a widening shift; the old guard only excluded the 0x39/0x3b byte2
+   variants. Added an early compact permute gate (zip1/zip2/uzp1/uzp2 on 0x3f20fc00).
+5. **SimdFmulEl cross-lane alias bug** — the broadcast element was re-read *inside* the
+   lane loop, so when `rd==rm` (`fmul v17.4s, v7.4s, v17.s[0]`) lane 0's write clobbered
+   the element before lanes 1-3 read it → every lane after 0 wrong. Now broadcast once
+   up front (the FmlaEl "load into xmm2 before the loop" pattern).
+6. **VecFpCmp** — `fcmeq/fcmgt/fcmge Vd.4s/.2s/.2d` (compare→all-ones mask) misdecoded
+   as **SimdVShift**; gcc's float-vs-const count loop returned garbage. Gate = byte2
+   0xe4 after the 0xffe0fc00 mask (NOT raw bits15:8, which include rn). New
+   comiss/comisd + setcc + movzx + neg x86 emitters; per-lane mask = all-ones or 0.
+
+New unit tests: `vector_fp_arith_ground_truth` (fmla/fmul-by-el/fmla2d/scvtf/fadd,
+incl. negative scvtf lanes, fmov-imm broadcast, fmov-s,w), `vector_fp_by_element_highreg_and_2d`
+(exact gcc high-reg by-element + .2d words). New permanent differential canaries:
+fv_arith, fv_sub_neg, fv_f2i, fv_f2i_neg, fv_i2f, fv_fmla_scalar, fv_cmp_count,
+dv_arith, fv4, fv4_fmul_only.
+
+**Verification:** `cargo build --workspace` clean; `cargo test --workspace` **227/0**,
+**0 ignored** (was 220/0). Full differential battery 17/17 (every case a live gate).
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep pressing the SIMD float/FP vector breadth (single-precision struct-by-value
+   with vector lanes, fmla-by-element chains, more -O3 reduction shapes); then widen into
+   the remaining integer-permute/wide paths the new float canaries may expose.
+2. `fv_cmp_count`-style FP compares are now real (setcc-based); add fcmlt/fcmle
+   (operand-swapped gt/ge) if a battery case needs them.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).

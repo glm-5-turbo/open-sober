@@ -644,3 +644,11 @@ Battery gates the fixed/passing families (maskf, mod_pow2, times7, count6,
 div/mod, FP, bitfield, unsigned-compare); magicdiv/struct_arr/mixed are
 #[ignore]d as documented-known-broken.
 cargo build clean; cargo test --workspace 212/0 (3 ignored).
+cycle: 15
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+cycle: 16
+status: cycle_end
+last_agent_claim: float-vector SIMD correctness: 6 silent NEON/FP miscompiles fixed; workspace 227/0, 0 ignored (was 220/0)
+updated: 2026-09-11T05:52:40Z
+---
