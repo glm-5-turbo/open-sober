@@ -5291,6 +5291,27 @@ mod tests {
     }
 
     #[test]
+    fn saturating_narrowing_shift_sqshrn() {
+        // sqshrn v0.8b, v1.8h, #4 (0x0f0c9420): v0[i] = sat_i8(v1.h[i] >> 4).
+        // v1.8h = [1000, 500, -1000, -500, 300, 200, -300, -200]
+        //   >>4: [62,31,-63,-32,18,12,-19,-13] all in i8 range.
+        let mkv = |lanes: [i16; 8]| -> u128 { let mut r: u128 = 0; for (i,v) in lanes.iter().enumerate(){ r |= (((*v as u16) as u128) << (16*i)); } r };
+        let mut st = CpuState::new();
+        let val = mkv([1000,500,-1000,-500,300,200,-300,-200]);
+        st.v[2] = (val & 0xffff_ffff_ffff_ffff) as u64;   // v1 low 8h? v1.h[0..3]
+        st.v[3] = (val >> 64) as u64;                     // v1.h[4..7]
+        let mut c = Vec::new();
+        c.extend_from_slice(&0x0f0c_9420u32.to_le_bytes()); // sqshrn v0.8b,v1.8h,#4
+        c.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        exec_bytes(&mut st, &c, 0).expect("exec sqshrn");
+        let lo = st.v[0];
+        let got: Vec<i8> = (0..8).map(|i| ((lo >> (8*i)) & 0xff) as i8).collect();
+        let exp: Vec<i8> = [1000>>4, 500>>4, -1000>>4, -500>>4, 300>>4, 200>>4, -300>>4, -200>>4]
+            .iter().map(|v| *v as i8).collect();
+        assert_eq!(got, exp, "sqshrn lanes");
+    }
+
+    #[test]
     fn smin_signed_lane_min() {
         // smin v0.2s, v0.2s, v1.2s (wall 0x0ea16c00): v0[i] = min_signed(v0[i], v1[i]).
         let mut st = CpuState::new();

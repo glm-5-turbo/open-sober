@@ -328,6 +328,13 @@ pub enum Inst {
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
     // ---- SIMD shift-right accumulate: usra/ssra Vd.T, Vn.T, #imm (Vd += Vn >> imm) ----
     SimdShrAcc { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
+    // ---- SIMD saturating narrowing shift: sqshrn/uqshrn/sqshrun Vd.T, Vn.T, #imm ----
+    // Right-shifts each esize-byte source element by `shift`, then saturating-
+    // narrows to esize/2 bytes (like SaturatNarrow with a pre-shift). ΔSG from
+    // plain ssra/usra (SimdShrAcc) is bit15 (0x8000) set; dst signed = bit29
+    // clear (sqshrn); src signed for the unsigned-dst forms: sqshrun (signed
+    // src, byte2 bit4 clear) vs uqshrn (unsigned src, byte2 bit4 set).
+    SatNarrowShift { rd: u8, rn: u8, src_esize: u8, dst_esize: u8, shift: u8, src_signed: bool, dst_signed: bool, q: bool },
     // ---- SIMD plain shift-right immediate: ushr/sshr Vd.T, Vn.T, #imm ----
     // Marker bits[14:12]==0b000 (vs shl 0b101, usra/ssra 0b001); immh!=0 separates
     // from the modifed-immediate movi/mvni (which always have immh==0). unsigned =
@@ -337,7 +344,7 @@ pub enum Inst {
     // Shift each DOUBLE-width source element right, truncate to the dest element
     // (dest is half the source width). `upper` (shrn2) writes the high dest
     // half. Distinguishable from plain ushr/sshr by bit15 (0x8000) set.
-    SimdShrn { rd: u8, rn: u8, esrc: u8, shift: u8, upper: bool },
+    SimdShrn { rd: u8, rn: u8, esrc: u8, shift: u8, upper: bool, round: bool },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
     Ld2 { rd: u8, rn: u8, q: bool, post: i32, esize: u8 },
     // ---- SIMD st2 (structure store of two vectors) ----
@@ -2116,6 +2123,43 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         };
     }
 
+    // ---- SIMD saturating narrowing shift: sqshrn/uqshrn/sqshrun Vd.T, Vn.T, #imm ----
+    // Same 0x0f/0x2f/0x4f/0x6f prefix + b[14:12]==0b001 accumulate marker as the
+    // usra/ssra gate below, but bit15 (0x8000) is SET (ssra/usra clear it). The
+    // source elements are twice the destination width; we saturate then narrow.
+    //   dst_signed = bit29 clear (sqshrn); for unsigned dst (bit29 set):
+    //     src_signed = byte2 bit4 clear (sqshrun: 0x84)  vs uqshrn (0x94).
+    if matches!((insn >> 24) & 0xff, 0x0f | 0x2f | 0x4f | 0x6f)
+        && (insn & 0x0080_0000) == 0
+        && (insn & 0x8000) != 0 // narrowing-shift marker (shrn/rshrn/sqshrn family)
+        && (insn & 0x80000) != 0 // valid narrowing-shift immh has bit19 set (immh4 in 1,3,7); by-element mul uses 0xc
+        && ((insn & 0x1000) != 0 || (insn & 0x2000_0000) != 0) // sat: sqshrn/uqshrn (bit12) or sqshrun (bit29=unsigned)
+        && (insn & 0x0078_0000) != 0 // immh != 0, exclude movi/mvni family
+    {
+        let immh4: u32 = (insn >> 19) & 0xf;
+        let blen = 32 - immh4.leading_zeros(); // highest set bit position (1-indexed, immh4 nonzero)
+        let src_esize: u8 = 1u8 << blen;      // source element width (2x dst)
+        let esize_bits = 8 * src_esize as u32;
+        let full: u32 = (immh4 << 3) | ((insn >> 16) & 0x7);
+        let shift: u8 = if full < esize_bits { (esize_bits - full) as u8 } else { 0 };
+        let dst_signed = (insn >> 29) & 1 == 0;
+        let src_signed = if dst_signed {
+            true // sqshrn: signed src
+        } else {
+            ((insn >> 8) & 0x10) == 0 // sqshrun (signed src) vs uqshrn (unsigned)
+        };
+        return Inst::SatNarrowShift {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            src_esize,
+            dst_esize: src_esize / 2,
+            shift,
+            src_signed,
+            dst_signed,
+            q: (insn >> 30) & 1 == 1,
+        };
+    }
+
     // ---- SIMD shift-right accumulate (usra/ssra Vd.T, Vn.T, #imm): Vd += Vn >> imm.
     // Same 0x0f/0x2f/0x4f/0x6f prefix family as shl but the ACCUM marker is bit12
     // ((insn & 0x0000_7000)==0x0000_1000, vs shl's 0x5000 and ushr's 0x0000).
@@ -2172,12 +2216,13 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             //   esrc_bits=64, full=48 -> shift=16.
             let shift = if full < esrc_bits { (esrc_bits - full) as u8 } else { 0 };
             return Inst::SimdShrn {
-                rd: (insn & 0x1f) as u8,
-                rn: ((insn >> 5) & 0x1f) as u8,
-                esrc,
-                shift,
-                upper: (insn >> 30) & 1 == 1, // Q bit: shrn2 (Q=1) writes upper half
-            };
+                            rd: (insn & 0x1f) as u8,
+                            rn: ((insn >> 5) & 0x1f) as u8,
+                            esrc,
+                            shift,
+                            upper: (insn >> 30) & 1 == 1,
+                            round: (insn & 0x800) != 0, // bit11: 0=shrn(truncate), 1=rshrn(round)
+                        };
         }
     }
 
@@ -6075,6 +6120,37 @@ mod logical_imm_regressions {
     }
 
     #[test]
+    fn sat_narrow_shift_and_rshrn_decode_correctly() {
+        use crate::decode::{decode, Inst};
+        // Session (cycle 44h): sqshrn/uqshrn/sqshrun were decoding as SimdShrAcc
+        // (non-saturating) and rshrn as shrn (no rounding add).
+        // sqshrn v31.8b, v31.8h, #4 (0x0f0c97ff): src_esize 2, dst 1, shift 4
+        let sqshrn = decode(0x0f0c97ff);
+        assert!(matches!(sqshrn, Inst::SatNarrowShift { src_esize: 2, dst_esize: 1, shift: 4, src_signed: true, dst_signed: true, .. }), "got {sqshrn:?}");
+        // uqshrn v31.8b, v31.8h, #4 (0x2f0c97ff): unsigned -> src/dst false
+        let uqshrn = decode(0x2f0c97ff);
+        assert!(matches!(uqshrn, Inst::SatNarrowShift { src_signed: false, dst_signed: false, .. }), "got {uqshrn:?}");
+        // sqshrun v1.8b, v2.8h, #4 (0x2f0c8441): dst unsigned, src signed
+        let sqshrun = decode(0x2f0c8441);
+        assert!(matches!(sqshrun, Inst::SatNarrowShift { src_signed: true, dst_signed: false, .. }), "got {sqshrun:?}");
+        // shrn v1.4h, v2.4s, #3 (0x0f1d8441): plain, no round
+        let shrn = decode(0x0f1d8441);
+        assert!(matches!(shrn, Inst::SimdShrn { round: false, shift: 3, .. }), "got {shrn:?}");
+        // rshrn (0x0f1d8c41): round=true
+        let rshrn = decode(0x0f1d8c41);
+        assert!(matches!(rshrn, Inst::SimdShrn { round: true, shift: 3, .. }), "got {rshrn:?}");
+        // by-element widen mul must NOT be captured as SatNarrowShift
+        assert!(matches!(decode(0x2f60a000), Inst::SimdMullEl { .. }), "got {:?}", decode(0x2f60a000));
+    }
+
+    #[test]
+    fn sat_narrow_shift_gate_not_capturing_by_element_mul() {
+        use crate::decode::{decode, Inst};
+        assert!(matches!(decode(0x2f60a000), Inst::SimdMullEl { .. }), "got {:?}", decode(0x2f60a000));
+        assert!(matches!(decode(0x4f60a000), Inst::SimdMullEl { .. }), "got {:?}", decode(0x4f60a000));
+    }
+
+    #[test]
     fn mul_decodes_as_multiply_not_bitwise_logical() {
         // Regression: NEON element-wise `mul` shares bits[11:10] with the
         // vector AND/ORR/BIC family but sets bit15 (byte1 0x8c..0x9f vs
@@ -6255,13 +6331,13 @@ mod logical_imm_regressions {
         // (both from aarch64-linux-gnu-as). Must decode to SimdShrn with a
         // DOUBLE-width source (esrc=8) and shift=16, NOT a plain equal-size SimdShr.
         match decode(0x0f3087fc) {
-            Inst::SimdShrn { rd, rn, esrc, shift, upper } => {
+            Inst::SimdShrn { rd, rn, esrc, shift, upper, .. } => {
                 assert_eq!((rd, rn, esrc, shift, upper), (28, 31, 8, 16, false));
             }
             other => panic!("shrn v28.2s,v31.2d,#16 -> SimdShrn, got {other:?}"),
         }
         match decode(0x4f3087fc) {
-            Inst::SimdShrn { rd, rn, esrc, shift, upper } => {
+            Inst::SimdShrn { rd, rn, esrc, shift, upper, .. } => {
                 assert_eq!((rd, rn, esrc, shift, upper), (28, 31, 8, 16, true));
             }
             other => panic!("shrn2 v28.4s,v31.2d,#16 -> SimdShrn, got {other:?}"),

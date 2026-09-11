@@ -883,6 +883,39 @@ gens += [gen_widen_mul_acc]
 
 
 
+def gen_narrow_shift():
+    # vshrn/vrshrn (SIMD shift-right-keep-high-narrow) + vqshrn (saturated
+    # narrowing shift). Family is decoded as ShrAcc/ShrNarrow but never
+    # fuzzed directly. Small u16 data keeps sums/extends exact; reference
+    # reproduces the keep-high-narrow in scalar.
+    n = random.choice([8, 16])
+    which = random.choice(["shrn", "rshrn", "qshrn"])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 314159ull;
+    unsigned long long x = seedv;
+    uint16_t a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1ull; a[i]=(uint16_t)((x>>48)&0xff); }}
+    long long acc=0;
+    if ("{which}"=="shrn") {{
+        uint32x4_t va = vmull_u16(vld1_u16(a), vdup_n_u16(1)); // widen so shft is safe
+        uint16x4_t s = vshrn_n_u32(va, 4); // u16 = high(32-bit)>>4
+        uint16_t o[4]; vst1_u16(o, s);
+        for(int k=0;k<4;k++) acc += (long long)o[k]*(1+(k%5));
+    }} else if ("{which}"=="rshrn") {{
+        uint32x4_t va = vmull_u16(vld1_u16(a+4), vdup_n_u16(1));
+        uint16x4_t s = vrshrn_n_u32(va, 3);
+        uint16_t o[4]; vst1_u16(o, s);
+        for(int k=0;k<4;k++) acc += (long long)o[k]*(1+(k%3));
+    }} else {{
+        int16x8_t vs = vld1q_s16((int16_t*)a);
+        int8x8_t s = vqshrn_n_s16(vs, 4);
+        int8_t o[8]; vst1_s8(o, s);
+        for(int k=0;k<8;k++) acc += (long long)o[k]*(1+(k&3));
+    }}
+    return acc & 0x3fffffff;
+}}
+"""
 def gen_pairwise_dot():
     # addp (pairwise add within a vector), and smaxv/sminv/umaxv/uminv
     # horizontal reductions. Both families are decoded but never fuzzed;
@@ -968,7 +1001,7 @@ long long entry(void){{
 }}
 """
 
-gens += [gen_high_narrow, gen_pairwise_dot]
+gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift]
 
 def gen_sat_narrow():
     # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on

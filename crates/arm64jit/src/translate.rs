@@ -3819,6 +3819,60 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
+                Inst::SatNarrowShift { rd, rn, src_esize, dst_esize, shift, src_signed, dst_signed, q } => {
+                    // sqshrn/uqshrn/sqshrun Vd.T, Vn.T, #imm: shift each src element
+                    // (width src_esize) right by `shift` (arith if src_signed else
+                    // logical), then saturate narrow to dst_esize (src_esize/2).
+                    // SELF-ALIAS (gcc emits sqshrn v31,v31 in narrowing loops): the
+                    // dest bytes overlap the source bytes, so snapshot the source
+                    // to scratch when rd==rn (permute_source).
+                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let src = permute_source(buf, rd, rn, false);
+                    let se = src_esize as i32;
+                    let de = dst_esize as i32;
+                    let lanes = if q { 16 / de } else { 8 / de };
+                    // clamp bounds for the DST (dst_esize bytes)
+                    let maxv: i64 = if dst_signed {
+                        if de == 2 { 0x7fff } else { 0x7f }
+                    } else if de == 2 { 0xffff } else { 0xff };
+                    let minv: i64 = if dst_signed {
+                        if de == 2 { -0x8000 } else { -0x80 }
+                    } else { 0 };
+                    for i in 0..lanes {
+                        let src_off = (i as i32) * se;
+                        let dst_off = (i as i32) * de;
+                        // load src element, sign/zero-extend to 64
+                        match se {
+                            2 => {
+                                if src_signed { buf.movsx_word_mem(RAX, RBX, src+src_off); }
+                                else { buf.movzx_word_mem(RAX, RBX, src+src_off); }
+                            }
+                            _ => {
+                                buf.mov_load32(RAX, RBX, src+src_off);
+                                if src_signed { buf.shl_ri8(RAX, 32); buf.sar_ri8(RAX, 32); }
+                            }
+                        }
+                        // right-shift: arith for signed src, logical for unsigned
+                        if src_signed { buf.sar_ri8(RAX, shift); } else { buf.shr_ri8(RAX, shift); }
+                        // clamp low
+                        buf.mov_ri64(RCX, minv as u64);
+                        buf.cmp_rr64(RAX, RCX);
+                        buf.cmov_rr64(0x4c, RAX, RCX); // RAX=minv if RAX<minv
+                        // clamp high
+                        buf.mov_ri64(RCX, maxv as u64);
+                        buf.cmp_rr64(RAX, RCX);
+                        buf.cmov_rr64(0x4f, RAX, RCX); // RAX=maxv if RAX>maxv
+                        match de {
+                            2 => buf.mov_store16(RBX, slot(rd)+dst_off, RAX),
+                            _ => buf.mov_store8(RBX, slot(rd)+dst_off, RAX),
+                        }
+                    }
+                    if !q {
+                        buf.mov_ri64(RAX, 0);
+                        buf.mov_store64(RBX, slot(rd) + 8, RAX);
+                    }
+                    Ok(())
+                }
                 Inst::Ld1V { rd, rn, bytes } => {
                     // ld1 {Vt.T}, [Xn], #imm: load `bytes` (16 or 8) contiguous bytes
                     // from guest address x[rn] into V[rd], then x[rn] += bytes.
@@ -4344,15 +4398,15 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
-                Inst::SimdShrn { rd, rn, esrc, shift, upper } => {
-                    // shrn/shrn2 Vd.T, Vn.U, #imm: shift each DOUBLE-width source
-                    // element (esrc bytes) right by `shift`, truncate to the
-                    // HALF-width dest element (esrc/2 bytes). shrn (upper=false)
-                    // writes the low dest lanes; shrn2 (upper=true) writes the
-                    // high dest lanes. src lane i (stride esrc) -> dst lane i
-                    // (stride esrc/2). e.g. shrn v28.2s, v31.2d, #16:
-                    // src .2D at bytes 0,8 -> dst .2S at bytes 0,4 (shrn2: 8,12).
+                Inst::SimdShrn { rd, rn, esrc, shift, upper, round } => {
+                    // shrn/shrn2/rshrn/rshrn2 Vd.T, Vn.U, #imm: shift each DOUBLE-width
+                    // source element (esrc bytes) right by `shift`, truncate (shrn) or
+                    // round (rshrn: add 2^(shift-1) before shifting) to the HALF-width
+                    // dest element (esrc/2 bytes). shrn writes low/high dest lanes by
+                    // `upper`; rshrn rounds. SELF-ALIAS (gcc emits shrn v31,v31) snapshots
+                    // the source to scratch so the dest writes don't clobber later reads.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let src = permute_source(buf, rd, rn, false);
                     let es = esrc as i32;         // source element bytes
                     let ds = (esrc as i32) / 2;   // dest element bytes
                     let src_lanes = 16 / es;      // source elements in 128-bit reg
@@ -4360,10 +4414,14 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     for i in 0..src_lanes {
                         // load DOUBLE-width source lane, zero-extended
                         match esrc {
-                            8 => buf.mov_load64(RAX, RBX, vslot(rn) + i * es),
-                            4 => buf.mov_load32(RAX, RBX, vslot(rn) + i * es),
-                            2 => buf.movzx_word_mem(RAX, RBX, vslot(rn) + i * es),
-                            _ => buf.movzx_byte_mem(RAX, RBX, vslot(rn) + i * es),
+                            8 => buf.mov_load64(RAX, RBX, src + i * es),
+                            4 => buf.mov_load32(RAX, RBX, src + i * es),
+                            2 => buf.movzx_word_mem(RAX, RBX, src + i * es),
+                            _ => buf.movzx_byte_mem(RAX, RBX, src + i * es),
+                        }
+                        if round && (shift as i32) >= 1 {
+                            // rshrn: add 1 << (shift-1) to round-half-up
+                            buf.add_ri64(RAX, 1u32 << (shift - 1));
                         }
                         if (shift as i32) >= es * 8 {
                             buf.xor_rr64(RAX, RAX);
