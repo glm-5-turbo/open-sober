@@ -427,7 +427,12 @@ fn main() {
             eprintln!("arm64jit run_loop stopped: {e}");
             std::process::exit(1);
         }
-        Ok(r) => println!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r),
+        Ok(r) => {
+            // stderr is unbuffered; if this line appears BEFORE the SIGSEGV dump,
+            // the fault is in post-run teardown, not the boot loop itself.
+            eprintln!("[elfjit] jit_run returned Ok({r:#x}) — entering post-run phase");
+            println!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r);
+        }
     }
     // Let spawned worker guest threads (pthread_create/clone children started
     // during boot) run to completion before the process exits, so jit_run on a

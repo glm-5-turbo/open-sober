@@ -1,6 +1,38 @@
 # Open Sober — Agent Handoff
 
-## 🟢 REAL-BINARY JNI_OnLoad SUCCESS (latest frontier — this cycle)
+## 🟢 REAL-BINARY JNI_OnLoad SUCCESS + `.dynstr`-call vector closed (this cycle)
+
+**The real `libroblox.so` (2.738.1397) boots through `arm64jit`
+(`elfjit <libroblox.so> 0x2173ff4 --jni`) and main-thread `JNI_OnLoad` returns
+`0x10006` (JNI_VERSION_1_6) reproducibly.** This cycle (commit `6e9fd4e`,
+workspace 388/0):
+
+1. **Closed a real indirect-call-into-`.dynstr` vector.** `plt::bind_glob_dat`
+   left unresolvable *function* GLOB_DAT/ABS64 slots at their original value
+   (0 or stale `.dynstr` symbol-name pointer); a guest `blr` through one jumped
+   into `.dynstr` (SIGSEGV with register file full of ASCII symbol strings —
+   "pthread_setspecific", "memset", "pthread_cond_broadcast"). Now bound to a
+   host-call stub. Real binary result: **67 GLOB_DAT bound / 11 unresolved**
+   (was 63/15); the fault's `guestpc` is now a real guest address, not ASCII.
+   Regression test `loader_run_unresolved_func_globdat_binds_safe_stub` (fn
+   import via `int (*gfp)(int)` binds to host thunk 0x7f0000002008).
+2. **Fault diagnostics enriched** (elfjit): full host-x86 register dump,
+   `rbx_matches_gueststate` (is the faulting RBX the thread's registered
+   CpuState?), guest-thread table `(host_tid:guest_tid,state)`, nesting-aware
+   `in_jit_run` counter.
+
+**Current wall (precise, unbuffered-stderr-proven):** main's `jit_run` returns
+Ok(0x10006); the SIGSEGV is in the **post-run phase** (worker guest thread,
+tid=1, start_routine `0x284d168`, is running when main's dispatch ends).
+`rip=0x10284d6be` is a guest `.text` address in the
+`JNIActivityLifecycleCallbacks_nativeOnDestroyed` region executed as x86 —
+a **host path calls a guest function pointer natively**, not a translated-block
+fault. `rbx_matches_gueststate=false` ⇒ the guest-register dump is an artifact
+of a garbage RBX; trust the host regs/rip, not guestpc. Next: find which host
+call path dispatches guest `0x284d6b4` during worker/teardown (guest signal
+handler outside the cooperative dispatcher, an atexit/on_destroy callback
+routed to guest natively, or the worker start_routine dispatched down a
+non-`jit_run` host path). See `docs/` run-log + `runs/STATUS.md`.
 
 **The real `libroblox.so` (2.738.1397, extracted via `sober-core::apk::extract_libs`
 to `~/.cache/open-sober/robbox/libroblox.so`) now boots through `arm64jit`
