@@ -48,6 +48,24 @@ def build_pair(src, tag):
         q=run_qemu_exact(src,tag)
     return e, j, q
 
+# shared-library (-shared -fPIC) build: exported module functions calling each
+# OTHER and themselves go through `@plt`, whose JUMP_SLOTs the binder must
+# resolve to the module's OWN guest addresses (self-imports), and recursion
+# must divert cleanly. A -(pi e) -nostdlib static ELF never exercises this.
+def build_pair_shared(src, tag):
+    open(f"fx_{tag}.c","w").write(src)
+    r=subprocess.run(["aarch64-linux-gnu-gcc","-O3","-w","-shared","-fPIC","-nostdlib",
+                      "-Wl,-e,entry",f"fx_{tag}.c","-o",f"fx_{tag}.elf"],
+                     capture_output=True,text=True)
+    if r.returncode!=0:
+        return None,None,None
+    e=getentry(f"fx_{tag}.elf")
+    j=run_elfjit(f"fx_{tag}.elf", e) if e else None
+    q=run_qemu(src,tag)
+    if q is None:
+        q=run_qemu_exact(src,tag)
+    return e, j, q
+
 # program generators: return C source with long long entry(void)
 def gen_arith():
     # random u64 arithmetic with LCG + shifts/xors and a fold
@@ -544,14 +562,52 @@ def gen_pairwise_reduce():
 }}
 """
 gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt, gen_pairwise_reduce]
+
+# -shared self-import shape: exported module functions calling each OTHER via
+# @plt (and optionally recursing). Exercises the binder's own-export JUMP_SLOT
+# resolution + the import-bearing recursion divert. Runs only under
+# build_pair_shared (-shared -fPIC).
+def gen_selfimport():
+    kind=random.choice(["calls","recursive","deep"])
+    if kind=="calls":
+        n=random.randint(3,6)
+        fns=[]
+        body="long long entry(void){\n"
+        for i in range(n):
+            fns.append(f"long long g{i}(long long x){{ return x*{random.choice([2,3,5,7,11,13])}+{random.randint(0,99)}; }}")
+            body+=f"    x = g{i}(x);\n" if i==0 else f"    x = g{i}(x) + g{random.randint(0,i-1)}(x);\n"
+        body+="    return x;\n}\n"
+        pre="long long x = 3;\n" if random.random()<0.5 else "long long x = seedv;\n"
+        body="    volatile unsigned long long seedv=12345ull;\n    "+pre+body
+        return "\n".join(fns)+"\n"+body
+    if kind=="recursive":
+        # recursion only makes sense BEFORE entry; keep bounded.
+        d=random.randint(6,12)
+        return (f"long long rec(long long n){{ return n<=0 ? {random.randint(1,9)} : rec(n-1)+{random.randint(2,9)}; }}\n"
+                f"long long entry(void){{ volatile unsigned long long seedv=1ull; return rec({random.randint(d-3,d)}); }}\n")
+    # deep: nested calls through several exported helpers then a fold
+    fns=[]
+    for i in range(4):
+        fns.append(f"long long h{i}(long long x){{ return x^{random.randint(1,3)} + {random.randint(5,50)}; }}")
+    ch=" + ".join(f"h{i}(x)" for i in range(4))
+    return ("\n".join(fns)+"\n"
+            f"long long entry(void){{ volatile unsigned long long seedv=77771ull; long long x=(long long)(seedv>>{random.choice([3,7,11,13])}); return {ch}; }}\n")
+gens_shared=[gen_selfimport]
+
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
         tag=f"{seed0}_{i}"
-        # mix static JIT-only generators with loader-mode (PIE+globals) ones
-        if random.random() < 0.35:
+        # mix static JIT-only generators with loader-mode (PIE+globals) ones,
+        # and a slice of -shared self-import shapes (binder own-export + import-
+        # bearing recursion coverage)
+        r=random.random()
+        if r < 0.30:
             src=random.choice([gen_globals_pie, gen_pie_callchain])()
             e,j,q=build_pair_mode(src,tag,"pie")
+        elif r < 0.55:
+            src=random.choice(gens_shared)()
+            e,j,q=build_pair_shared(src,tag)
         else:
             src=random.choice(gens)()
             e,j,q=build_pair(src,tag)
