@@ -56,8 +56,11 @@ unsafe fn install_fault_debug() {
             let x30 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(240) as *const u64) } else { 0 };
             let name = if sig == libc::SIGSEGV { "SIGSEGV" } else if sig == libc::SIGILL { "SIGILL" } else { "SIGFAULT" };
             let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            // Diagnostic: dump the LocalStorageManager static-map global on fault
+            // to confirm whether our boot-time seed persisted.
+            let lsm_global = unsafe { *(0x10726f8c0u64 as *const u64) };
             let s = format!(
-                "\n[{name}] tid={tid} fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x}\n  raw[]= {hex}\n"
+                "\n[{name}] tid={tid} fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x} lsm_map_global=0x{lsm_global:x}\n  raw[]= {hex}\n"
             );
             let b = s.as_bytes();
             libc::write(2, b.as_ptr() as *const libc::c_void, b.len());
@@ -167,9 +170,82 @@ fn main() {
     let tail_start = (full_end as usize + 0xfff) & !0xfff;
     const TAIL_SIZE: usize = 384 * 1024 * 1024;
     match libloader::elf::reserve_guest_tail(tail_start, TAIL_SIZE) {
-        Ok(s) => println!("[tail] reserved {TAIL_SIZE}B guest RW tail @0x{s:x}"),
+        Ok(_s) => println!("[tail] reserved {TAIL_SIZE}B guest RW tail @0x{tail_start:x}"),
         Err(e) => eprintln!("[tail] warn: guest-tail reserve skipped: {e}"),
     }
+
+    // Route the LocalStorageManager static hash-map's bucket-array allocator
+    // (`0x1d97744`, receives its byte size in x0) to host calloc, so the
+    // unseeded per-object MemoryPool empty free-list returns a real zeroed
+    // buffer. The map's lazy init then stores a valid non-NULL bucket array
+    // into its header global (0x726f8c0) instead of NULL, so the hash-lookup
+    // reader (0x1d99e30: `ldr x8,[0x726f8c0]; ...; ldar x8,[x8]; ldr x0,[x8,idx<<3]`)
+    // finds a real map instead of derefing a NULL bucket.
+    match arm64jit::jit::route_allocator_x0_to_calloc(el.guest_of(0x1d97744), 0x1_0000_0000) {
+        Ok(tp) => println!("[lsm-map] allocator 0x1d97744 routed to host calloc(x0) (thunk @ {tp:#x})"),
+        Err(e) => eprintln!("[lsm-map] warn: allocator route skipped: {e}"),
+    }
+
+    // Disable the LSM map's lazy-init store that would clobber our seed.
+    //
+    // The init at 0x1d975f8 does `str x0,[x22,#2240]` writing its (routed)
+    // allocator result into the map global 0x726f8c0, then memsets and builds a
+    // two-level bucket structure into that discarded buffer. The reader
+    // (0x1d99e40/0x1d99e4c/0x1d99e50) instead requires the global to point at a
+    // bucket array whose every slot (key>>29) is a pointer to a zeroed
+    // sub-array (indexed by (key>>16)&0x1fff); a bare all-zero calloc leaves
+    // bucket slots NULL and the reader derefs NULL. `seed_static_empty_map`
+    // below constructs exactly the required layout, so NOP the init store to
+    // keep that seed authoritative. Guest insn -> NOP (0xd503201f).
+    let init_store = el.guest_of(0x1d975f8);
+    {
+        let page = init_store & !0xfff;
+        if unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE) } == 0 {
+            unsafe { *(init_store as *mut u32) = 0xd503_201fu32 };
+            unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC) };
+            println!("[lsm-map] NOP'd LSM init store at 0x{init_store:x} (guest 0x{:x}) to keep seeded empty map", 0x1d975f8);
+        } else {
+            eprintln!("[lsm-map] warn: could not mprotect init-store page RW");
+        }
+    }
+
+    // Seed the LocalStorageManager C++ static hash-map whose .bss base global
+    // (guest 0x10726f8c0 = 0x726f000+0x8c0) is 0 because its constructor never
+    // ran (.init_array is empty). The reader (0x1d99e40) does
+    //   ldr x8,[0x726f8c0]; add x8,x8,key>>29<<3; ldar x8,[x8]; ldr x0,[x8,idx<<3]
+    // and faults on the NULL bucket (`key` is a heap/guest pointer, so
+    // key>>29 lands up to ~0xb00 buckets in). Seed a real zeroed region as the
+    // bucket array, with every bucket slot pointing at a shared (also-zeroed,
+    // non-overlapping) sub-array slot, so any lookup reads 0 -> "not found".
+    // (Fallback: if the guest later overwrites it with a real map, all the better.)
+    unsafe fn seed_static_empty_map(map_global_guest: u64) {
+        const BUCKETS: usize = 0x400000; // key>>29: pointers ~0x56.. give idx ~0x2b2a7; grant headroom
+        const SLOT_STRIDE: usize = 8;
+        const SLOT_REGION: usize = 0x10000; // (key>>16)&0x1fff max index * 8
+        let buckets_bytes = BUCKETS * SLOT_STRIDE;
+        let total = buckets_bytes + SLOT_REGION;
+        let buf = Box::leak(vec![0u8; total].into_boxed_slice());
+        let bufp = buf.as_mut_ptr();
+        let base = bufp as u64;
+        let sub = base + buckets_bytes as u64;
+        // Every bucket slot points at `sub` (a zeroed shared sub-array), so
+        // `ldar x8,[bucket[key>>29]]` returns a non-null pointer and
+        // `ldr x0,[x8, idx<<3]` reads 0 -> cbz -> return NULL (not found).
+        let slots = std::slice::from_raw_parts_mut(bufp.cast::<u64>(), BUCKETS);
+        for s in slots {
+            *s = sub;
+        }
+        *(map_global_guest as *mut u64) = base;
+        println!("[lsm-map] seeded static empty LocalStorageManager map: global 0x{map_global_guest:x} -> bucket array 0x{base:x} ({} buckets, shared zero sub @0x{sub:x})", BUCKETS);
+    }
+    fn link_to_guest(el0: &libloader::elf::LoadedElf, link: u64) -> u64 {
+        el0.guest_of(link)
+    }
+    unsafe { seed_static_empty_map(link_to_guest(&el, 0x726f000 + 0x8c0)) };
+    // Read back the seed to confirm it landed where the guest reads it.
+    let g_chk = link_to_guest(&el, 0x726f000 + 0x8c0);
+    let v_chk = unsafe { *(g_chk as *const u64) };
+    println!("[lsm-map] readback global 0x{g_chk:x} = 0x{v_chk:x} (must be non-zero)", );
 
     println!(
         "running entry guest=0x{:x} host=0x{:x} (segment base guest=0x{:x} size=0x{:x})",

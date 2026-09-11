@@ -1768,11 +1768,16 @@ extern "C" fn mempool_calloc(
 /// thread-block init, whose arena is never seeded because the real pool-init
 /// never runs under the JIT.
 pub fn route_mempool_big_alloc_to_host(patch_site: u64, image_base: u64) -> Result<u64, String> {
+    // Host fn: TLS-block pool big-allocator passes its byte size in **x1**.
+    // Routing it to host calloc lets an unseeded per-thread MemoryPool arena
+    // return a real zeroed buffer instead of NULL, so the TLS-block init can
+    // proceed. (The LSM map allocator 0x1d97744 takes size in x0 — handled by
+    // route_allocator_x0_to_calloc.)
     let host_thunk = register_host_call_auto(mempool_calloc);
     // Thunk (all instructions the JIT decodes — no literal-load):
-    //   mov x0, x1            aa0103e0     @ +0
-    //   ldr x17, [x16, #16]   f9400a11     @ +4  (x16 == thunk page, set by the
-    //                                             patch's `adrp x16, page`)
+    //   mov x0, x1            aa0103e0     @ +0   (size lives in x1 here)
+    //   ldr x17, [x16, #16]   f9400a11     @ +4   (x16 == thunk page, set by
+    //                                             the patch's `adrp x16, page`)
     //   br x17                d61f0220     @ +8
     //   <host_thunk addr, 8B>               @ +16
     let mut thunk: [u8; 24] = [0; 24];
@@ -1781,11 +1786,51 @@ pub fn route_mempool_big_alloc_to_host(patch_site: u64, image_base: u64) -> Resu
     thunk[8..12].copy_from_slice(&0xd61f_0220u32.to_le_bytes()); // br x17
     thunk[16..24].copy_from_slice(&host_thunk.to_le_bytes());
 
+    place_calloc_patch(patch_site, image_base, &thunk, image_base + 0x62d_9000)
+}
+
+/// Host fn taking the byte size in **x0** (the LSM map bucket-array allocator
+/// `0x1d97744` receives its size in x0, unlike the TLS-block allocator which
+/// uses x1). Returns `calloc(1, x0)`.
+extern "C" fn mempool_calloc_x0(
+    size: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    unsafe { libc::calloc(1, size as usize) as u64 }
+}
+
+/// Route a Roblox allocator whose byte size arrives in **x0** to a host
+/// `calloc(1, x0)`, so an unseeded per-object MemoryPool empty free-list
+/// returns a real zeroed buffer instead of NULL (which the guest stores over a
+/// map header global, leaving a NULL map for later reads). The LocalStorageManager
+/// static hash-map's bucket array is allocated by `0x1d97744` (size in x0);
+/// routing it lets the guest's own map init succeed and build a valid map.
+pub fn route_allocator_x0_to_calloc(patch_site: u64, image_base: u64) -> Result<u64, String> {
+    let host_thunk = register_host_call_auto(mempool_calloc_x0);
+    // Thunk: `ldr x17,[x16,#16]; br x17` (no size move — x0 already holds it),
+    // then the host-thunk addr.
+    let mut thunk: [u8; 24] = [0; 24];
+    thunk[4..8].copy_from_slice(&0xf940_0a11u32.to_le_bytes()); // ldr x17,[x16,#16]
+    thunk[8..12].copy_from_slice(&0xd61f_0220u32.to_le_bytes()); // br x17
+    thunk[16..24].copy_from_slice(&host_thunk.to_le_bytes());
+    // Use a second thunk slot in the gap (the TLS-route owns 0x62d9000..+0x18).
+    place_calloc_patch(patch_site, image_base, &thunk, image_base + 0x62d_9800)
+}
+
+/// Shared tail of the calloc-routing thunk installers: plant `thunk` in the
+/// first mapped inter-segment gap of the guest image and overwrite `patch_site`
+/// with `adrp x16, thunk_page; br x16`.
+#[allow(clippy::too_many_arguments)]
+fn place_calloc_patch(
+    patch_site: u64,
+    image_base: u64,
+    thunk: &[u8; 24],
+    thunk_addr: u64,
+) -> Result<u64, String> {
     // Place the thunk in the first mapped inter-segment gap of the guest image
     // (text seg ends 0x1062d8190, next rw seg starts 0x1062dc1c0 — gap 0x4030).
     // It must be inside [image_base, image_base+image_len) for the dispatcher's
-    // bounds check to accept the pc. 0x100000000 + 0x62d9000 lands in the gap.
-    let thunk_addr = image_base + 0x62d_9000;
+    // bounds check to accept the pc. 0x100000000 + 0x62d9000 lands in the gap;
+    // the second route uses 0x62d9800 to avoid overwriting the first thunk.
     let gap_page = thunk_addr & !0xfff;
     unsafe {
         // Make the gap page writable so we can plant the thunk (the JIT only
