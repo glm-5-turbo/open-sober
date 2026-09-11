@@ -200,7 +200,8 @@ pub enum Inst {
         preidx: bool,
         size_64: bool, // false => 32-bit W pair
         q128: bool,    // true => 128-bit SIMD pair (ldp/stp q)
-        fp_d: bool,    // true => 64-bit FP/vector d-pair (ldp/stp d)
+        fp_d: bool,    // true => 64-bit FP/vector d-pair (ldp/stp d, 0x6d/0x6c)
+        fp_s: bool,    // true => 32-bit FP/vector s-pair (ldp/stp s, 0x2d/0x2c)
         sext: bool,    // true => ldpsw (sign-extend 32-bit loads to 64-bit X regs)
     },
     // ---- SIMD/NEON 128-bit vector load/store (ldr q0,[xN,#imm] / str q) ----
@@ -3298,8 +3299,13 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
     if matches!(insn >> 24, 0x29 | 0x69 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d | 0x6c | 0x2c) {
         let q128 = (insn >> 24) & 0xff == 0xad || (insn >> 24) & 0xff == 0xac; // 128-bit SIMD pair (ldp/stp q)
-        let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x2d
-            || (insn >> 24) & 0xff == 0x6c || (insn >> 24) & 0xff == 0x2c; // FP/vec d pair (offset+indexed)
+        // FP/vector pairs: bit30 == 1 => 64-bit d-pair (0x6d/0x6c), bit30 == 0
+        // => 32-bit s-pair (0x2d/0x2c). BUGFIX (Session 99): 0x2c/0x2d were
+        // lumped into fp_d (scale 8), so `ldp s29,s28` read 8 bytes per reg and
+        // post-indexed by 2x — fstruct.elf (-O2 float struct walk) returned
+        // garbage. Splitting gives the 32-bit s-pair scale 4 / 4-byte transfer.
+        let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x6c;
+        let fp_s = (insn >> 24) & 0xff == 0x2d || (insn >> 24) & 0xff == 0x2c;
         let sext_en = (insn >> 24) & 0xff == 0x69; // ldpsw: sign-ext the 32-bit pair to 64-bit
         let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
@@ -3309,6 +3315,8 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
             16
         } else if fp_d {
             8 // d-pairs are 64-bit FP/vector registers
+        } else if fp_s {
+            4 // s-pairs are 32-bit FP/vector registers
         } else if size_64 {
             8
         } else {
@@ -3327,6 +3335,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
             size_64,
             q128,
             fp_d,
+            fp_s,
             sext: sext_en,
         };
     }
@@ -3694,6 +3703,7 @@ mod tests {
                 size_64,
                 q128,
                 fp_d,
+                fp_s,
                 sext,
             } => {
                 assert_eq!(rt, 0);
@@ -3719,6 +3729,7 @@ mod tests {
                 size_64,
                 q128,
                 fp_d,
+                fp_s,
                 sext,
             } => {
                 assert_eq!(rt, 29);

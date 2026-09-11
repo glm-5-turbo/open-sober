@@ -3882,12 +3882,15 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             size_64,
             q128,
             fp_d,
+            fp_s,
             sext,
         } => {
             let esize = if q128 {
                 16i32
             } else if fp_d {
                 8i32
+            } else if fp_s {
+                4i32
             } else if size_64 {
                 8i32
             } else {
@@ -3924,6 +3927,27 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     } else {
                         buf.mov_load64(RAX, RBX, reg_off); // rax <- v
                         buf.mov_store64(RDX, mem_off, RAX); // [addr] <- rax
+                    }
+                }
+                if writeback {
+                    ldg(buf, RAX, rn as u32);
+                    buf.add_ri64(RAX, wb_off as u32);
+                    stg(buf, rn as u32, RAX);
+                }
+                return Ok(());
+            }
+            if fp_s {
+                // 32-bit FP/vector s-pair: each reg is the LOW 4 bytes of its
+                // 16-byte vector slot, at VECTOR_BASE + rt*16. 4-byte transfers.
+                let v0 = crate::jit::VECTOR_BASE + (rt as i32) * 16;
+                let v1 = crate::jit::VECTOR_BASE + (rt2 as i32) * 16;
+                for (reg_off, mem_off) in [(v0, access_off), (v1, access_off + esize)] {
+                    if ld {
+                        buf.mov_load32(RAX, RDX, mem_off); // eax <- [addr]
+                        buf.mov_store32(RBX, reg_off, RAX); // v low4 <- eax
+                    } else {
+                        buf.mov_load32(RAX, RBX, reg_off); // eax <- v low4
+                        buf.mov_store32(RDX, mem_off, RAX); // [addr] <- eax
                     }
                 }
                 if writeback {

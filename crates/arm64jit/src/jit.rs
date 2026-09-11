@@ -2864,6 +2864,36 @@ mod tests {
     }
 
     #[test]
+    fn ldst_pair_s_registers_use_4_byte_transfers() {
+        // REGRESSION (Session 99): byte3 0x2c/0x2d (single-precision FP pair)
+        // was lumped into fp_d (scale 8), so `ldp s0,s1,[x0]` read 8 bytes per
+        // reg and post-indexed 2x — fstruct.elf (-O2 float-struct walk) returned
+        // 0x391c0000 garbage and fmat2.elf (2D float det) returned -108. Now the
+        // 32-bit s-pair uses scale 4 and 4-byte transfers (low 4B of each 16B
+        // vector slot: sN = VECTOR_BASE + N*16). Encodings from ldps.o.
+        let mut st = CpuState::new();
+        let vals: [u32; 4] = [0x1122_3344, 0x5566_7788, 0x99aa_bbcc, 0xdd00_1122];
+        let mut buf = Vec::new();
+        for v in vals {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let bb = Box::leak(buf.into_boxed_slice());
+        let orig = bb.as_ptr() as u64;
+        st.set(0, orig);
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x2d40_0400u32.to_le_bytes()); // ldp s0,s1,[x0]
+        code.extend_from_slice(&0x2cc1_0c02u32.to_le_bytes()); // ldp s2,s3,[x0],#8
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec ldp s-pair");
+        assert_eq!((st.v[0] & 0xffff_ffff) as u32, vals[0] as u32, "s0");
+        assert_eq!((st.v[2] & 0xffff_ffff) as u32, vals[1] as u32, "s1");
+        // second ldp reads from same x0 (no pre-advance), then +8.
+        assert_eq!((st.v[4] & 0xffff_ffff) as u32, vals[0] as u32, "s2");
+        assert_eq!((st.v[6] & 0xffff_ffff) as u32, vals[1] as u32, "s3");
+        assert_eq!(st.x[0], orig + 8, "post-index s-pair advanced x0 by 8");
+    }
+
+    #[test]
     fn add_shifted_register_applies_shift_to_source_not_clobbered() {
         // REGRESSION (Session 99): apply_shift_const wrote the shift amount into
         // RCX (the very register holding the Rm value) then `shl rcx, cl`, so
