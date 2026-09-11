@@ -4168,7 +4168,7 @@ mod tests {
         assert_eq!(r, 1, "fcvtl widens 1.0f -> (double)1.0 -> fcvtzs 1");
     }
 
-    #[test]
+#[test]
     fn host_float_call_bridge_atan2_via_blr() {
         // Float-ABI bridge through the dispatcher: a guest `blr x16` where x16 =
         // a registered float thunk reads guest v0/v1 (as f64) and the host f64
@@ -4228,11 +4228,46 @@ mod tests {
                 );
             }
 
+        
+
+    #[test]
+    fn bit_vs_bif_bitwise_insert_semantics() {
+        // BIT Vd,Vn,Vm: (Vn & Vm)|(Vd & ~Vm); BIF: (Vn & ~Vm)|(Vd & Vm) -- the
+        // complement (which operand is masked by Vm vs ~Vm). The two share the
+        // SimdSel residue; the gate now routes only BSL(bit23=0) to SimdSel and
+        // BIT/BIF (both bit23=1) to SimdBit with the bif flag (bit14).
+        use crate::decode::decode;
+        // bit v15.16b,v16.16b,v17.16b = 0x6eb11e0f ; bif = 0x6ef11e0f (asm-verified)
+        assert!(matches!(decode(0x6eb11e0f), Inst::SimdBit { bif: false, .. }));
+        assert!(matches!(decode(0x6ef11e0f), Inst::SimdBit { bif: true, .. }));
+        // bsl v6.16b,v7.16b,v8.16b = 0x6e681ce6 stays a select.
+        assert!(matches!(decode(0x6e681ce6), Inst::SimdSel { .. }));
+
+        // v15_in (dest) = 0x1122334455667788 ; v16 (mask) = 0x00FF00FF00FF00FF ;
+        // v17 (source) = 0xAABBCCDDEEFF0011.
+        let bit_code = [0x0fu8, 0x1e, 0xb1, 0x6e, 0xc0, 0x03, 0x5f, 0xd6]; // bit v15,v16,v17; ret
+        let bif_code = [0x0fu8, 0x1e, 0xf1, 0x6e, 0xc0, 0x03, 0x5f, 0xd6]; // bif v15,v16,v17; ret
+        let run = |code: &[u8]| -> u64 {
+            let mut st = CpuState::new();
+            st.v[30] = 0x1122334455667788; // v15 slot (2*15)
+            st.v[32] = 0x00FF00FF00FF00FF; // v16 mask (2*16)
+            st.v[34] = 0xAABBCCDDEEFF0011; // v17 (2*17)
+            let _ = exec_bytes(&mut st, code, 0).expect("exec");
+            st.v[30] // low 64 of v15 after the insert
+        };
+        // Real instruction semantics: bit v15,v16,v17 -> Vd=v15, Vn=v16, Vm=v17
+        // (Vm is the MASK). Values: Vd=0x1122334455667788, Vn=0x00FF00FF00FF00FF,
+        // Vm=0xAABBCCDDEEFF0011. Verified against the bit/BIF formulas (below).
+        // BIT = (Vn & Vm)|(Vd & ~Vm) ; BIF = (Vn & ~Vm)|(Vd & Vm).
+        assert_eq!(run(&bit_code), 0x11bb33dd11ff7799, "bit insert");
+        assert_eq!(run(&bif_code), 0x660066446600ee, "bif insert (opposite select)");
+    }
+
         #[test]
         fn vec128_reg_offset_store_preserves_base_and_writes_16b() {
-            // str q0,[x0,x3] = 0x3ca36800 must write 16 bytes at [x0+x3] and NOT
-            // modify x0. Pre-fix it mis-decoded as `ldrsb x0,[x0,x3]` (a byte
-            // sign-extend load INTO x0), silently corrupting the caller (memset
+            // str q0, [x0, x3] = 0x3ca36800 (128-bit register-offset store) must
+            // NOT decode as a 1-byte GPR sign-extend load INTO x0 (bit26=1 picks
+            // the vector file), which silently corrupted the caller (memset
             // clobbered x0, then `str w5,[x0,#4]` faulted at 0x4).
             let code = [
                 0x00, 0x68, 0xa3, 0x3c, // str q0, [x0, x3]

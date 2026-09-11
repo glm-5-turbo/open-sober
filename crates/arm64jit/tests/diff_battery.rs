@@ -1628,3 +1628,44 @@ long long entry(void){
 "#,
     );
 }
+
+
+#[test]
+fn diff_int64_to_int32_narrowing_bif() {
+    // gcc -O2 int64->int32 truncation (with large negative values that need
+    // sign handling) compiles through smull/saddl/saddw + cmeq + BIT/BIF +
+    // uzp. Guards the bit-vs-bif decode fix: BIF was silently decoded as BSL
+    // (the opposite mask select) because the SimdSel gate ignored bit23, and
+    // the narrowing pipeline's bif produced wrong lanes. jit==oracle.
+    assert_diff(
+        "narrow_bif",
+        "-O2",
+        r#"
+long long entry(void){
+    long long i64[16]; int i32[16];
+    for(int k=0;k<16;k++) i64[k] = (long long)(k*k*7 + (k%3==0?-3000000000LL:0));
+    for(int k=0;k<16;k++) i32[k] = (int)i64[k];      // int64->int32 truncate
+    long long acc = 0;
+    for(int k=0;k<16;k++) acc += (long long)i32[k];
+    return acc;
+}
+"#,
+    );
+    // The full round-trip (int64 -> int32 -> short) also uses bsl/bit and the
+    // post-indexed single store path.
+    assert_diff(
+        "narrow_bif_full",
+        "-O2",
+        r#"
+long long entry(void){
+    long long i64[16]; int i32[16]; short i16[16];
+    for(int k=0;k<16;k++) i64[k] = (long long)(k*k*7 + (k%3==0?-3000000000LL:0));
+    for(int k=0;k<16;k++) i32[k] = (int)i64[k];
+    for(int k=0;k<16;k++) i16[k] = (short)i32[k];
+    long long acc = 0;
+    for(int k=0;k<16;k++) acc += (long long)i16[k]*1000 + i32[k];
+    return acc;
+}
+"#,
+    );
+}

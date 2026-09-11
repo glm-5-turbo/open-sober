@@ -4596,22 +4596,26 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     Ok(())
                 }
                 // (2 x 64-bit halves). RAX/RCX/RDX/RDI scratch.
-                                                                                                                                                                                Inst::SimdBit { rd, rn, rm } => {
-                                                                                                                                                                                    let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                                                                                                                                                                                    for off in [0i32, 8] {
-                                                                                                                                                                                        buf.mov_load64(RAX, RBX, slot(rn) + off); // RAX = Vn
-                                                                                                                                                                                        buf.mov_load64(RCX, RBX, slot(rm) + off); // RCX = Vm
-                                                                                                                                                                                        buf.and_rr64(RAX, RCX); // RAX = Vn & Vm
-                                                                                                                                                                                        buf.mov_load64(RDX, RBX, slot(rd) + off); // RDX = old Vd
-                                                                                                                                                                                        buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
-                                                                                                                                                                                        buf.xor_rr64(RCX, RDI); // RCX = ~Vm
-                                                                                                                                                                                        buf.and_rr64(RDX, RCX); // RDX = Vd & ~Vm
-                                                                                                                                                                                        buf.or_rr64(RAX, RDX); // (Vn&Vm)|(Vd&~Vm)
-                                                                                                                                                                                                                                                                                                                                                                                buf.mov_store64(RBX, slot(rd) + off, RAX);
-                                                                                                                                                                                                                                                                                                                                                                        }
-                                                                                                                                                                                    Ok(())
-                                                                                                                                                                                }
-                                                                                                                                                                                Inst::SimdExt { rd, rn, rm, imm, q } => {
+                                                                                                                                                                                Inst::SimdBit { rd, rn, rm, bif } => {
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            for off in [0i32, 8] {
+                // BIT (bif=false): (Vn&Vm)|(Vd&~Vm); BIF (bif=true): (Vn&~Vm)|(Vd&Vm).
+                // RAX = (sel & Vm), RDX = (keep & ~Vm), result = RAX|RDX, where
+                // (sel,keep) = (Vn,Vd) for BIT and (Vd,Vn) for BIF.
+                let (sel, keep) = if bif { (rd, rn) } else { (rn, rd) };
+                buf.mov_load64(RAX, RBX, slot(sel) + off); // source taken where Vm=1
+                buf.mov_load64(RCX, RBX, slot(rm) + off); // RCX = Vm
+                buf.and_rr64(RAX, RCX); // RAX = sel & Vm
+                buf.mov_load64(RDX, RBX, slot(keep) + off); // source taken where Vm=0
+                buf.mov_ri64(RDI, 0xffff_ffff_ffff_ffff);
+                buf.xor_rr64(RCX, RDI); // RCX = ~Vm
+                buf.and_rr64(RDX, RCX); // RDX = keep & ~Vm
+                buf.or_rr64(RAX, RDX); // (sel&Vm)|(keep&~Vm)
+                buf.mov_store64(RBX, slot(rd) + off, RAX);
+            }
+            Ok(())
+        }
+        Inst::SimdExt { rd, rn, rm, imm, q } => {
                                                                                                                                                                                     // ext Vd, Vn, Vm, #imm: Vd = the 128(64)-bit window of the
                                                                                                                                                                                     // concatenation {Vn(high), Vm(low)} starting at byte `imm`.
                                                                                                                                                                                     // concat words W[0..3] = Vm.lo, Vm.hi, Vn.lo, Vn.hi (byte

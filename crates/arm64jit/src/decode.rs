@@ -707,10 +707,12 @@ pub enum Inst {
     // Gate: prefix {0x0e,0x2e,0x4e,0x6e} + byte2 {0x28 (x.un/u-un), 0x48 (xtn)}.
     // dst_esize 1(b from h) or 2(h from s) by b1 bit6; src_signed=bit29 clear/unsigned etc.
     SaturatNarrow { rd: u8, rn: u8, dst_esize: u8, src_signed: bool, dst_signed: bool, q: bool },
-    // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
-    // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B bit-select, real 0x6ea11c40;
-    // distinct from orr16 0x4ea01c00 by bit31). Out = (Vn & Vm) | (Vd & ~Vm).
-    SimdBit { rd: u8, rn: u8, rm: u8 },
+    // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B / bif Vd.16B.. ----
+    // Gates (insn & 0xffe0_fc00): BIT 0x6ea01c00 (16B) / 0x2ea01c00 (8B),
+    // BIF 0x6ee01c00 / 0x2ee01c00 (bit14 = the "insert-if-FALSE" op; distinct
+    // from orr16 0x4ea01c00 by bit31). bit (bif=false): (Vn & Vm)|(Vd & ~Vm);
+    // bif (bif=true): (Vn & ~Vm)|(Vd & Vm).
+    SimdBit { rd: u8, rn: u8, rm: u8, bif: bool },
     // ---- SIMD extract immediate: ext Vd.16B/Vd.8B, Vn., Vm., #imm ----
     // Byte-shift extract. Gate (insn & 0xffe0_0400) == 0x6e000000 (16B, Q=1) /
     // 0x2e000000 (8B, Q=0); imm = bits[15:11] (byte count, 0..15 for 16B,
@@ -1949,8 +1951,11 @@ pub fn decode(insn: u32) -> Inst {
     // same 0x2e/0x6e column (fdiv v0.2d = 0x6e61fc00, fmul v0.2d = 0x6e61dc00,
     // byte1 low 0xdc/0xfc = bits[15:13] SET) were being swallowed as a bitwise
     // select, silently corrupting double arithmetic into pandn/pand logic. They
-    // now fall through to Simd2dFp.
-    if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e) && (insn & 0x0000_1c00) == 0x1c00 && (insn & 0x0040_0000) != 0 && (insn & 0x0000_e000) == 0 {
+    // now fall through to Simd2dFp. Also requires bit23 CLEAR: BIT/BIF set it
+    // (0x80_0000) and are the bitwise-insert ops (handled by SimdBit) -- only
+    // BSL (bit23=0) selects here. Without the guard, BIF (which shares bit22
+    // with BSL) was silently decoded as BSL with the opposite mask semantics.
+    if matches!((insn >> 24) & 0x3f, 0x2e | 0x6e) && (insn & 0x0000_1c00) == 0x1c00 && (insn & 0x0040_0000) != 0 && (insn & 0x0080_0000) == 0 && (insn & 0x0000_e000) == 0 {
         return Inst::SimdSel {
             rd: (insn & 0x1f) as u8,
             rn: ((insn >> 5) & 0x1f) as u8,
@@ -3725,21 +3730,19 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 && 
                                                                                                                                                                                                                                                                                                                                                                             let q = ((insn >> 30) & 1) == 1;
                                                                                                                                                                                                                                                                                                                                                                             return Inst::SimDup { rd, rn, esize, src_idx, q };
                                                                                                                                                                                                                                                                                                                                                                         }
-                                                                                                                                                                                                                                                                                                                                                                    // ---- SIMD bitwise insert: bit Vd.16B, Vn.16B, Vm.16B ----
-                                                                                                                                        // Gate (insn & 0xffe0_fc00)==0x6ea01c00 (16B; real 0x6ea11c40). Disjoint
-                                                                                                                                        // from orr16 (0x4ea01c00, bit31) and cmhi (0x6ea03400). Out=(Vn&Vm)|(Vd&~Vm).
-                                                                                                                                        if (insn & 0xffe0_fc00) == 0x6ea0_1c00 {
-                                                                                                                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
-                                                                                                                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                                                                                                                    let rd = (insn & 0x1f) as u8;
-                                                                                                                                                                                                                    return Inst::SimdBit { rd, rn, rm };
-                                                                                                                                                                                                                }
-                                                                                                                                                                                                                if (insn & 0xffe0_fc00) == 0x2ea0_1c00 {
-                                                                                                                                                                                                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
-                                                                                                                                                                                                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                                                                                                                                                                                            let rd = (insn & 0x1f) as u8;
-                                                                                                                                                                                                                                                                                            return Inst::SimdBit { rd, rn, rm };
-                                                                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                                                                                                                                                    // ---- SIMD bitwise insert: bit/bif Vd.16B,Vn.16B,Vm.16B (16B) & Vd.8B (8B) ----
+        // Gates: (insn & 0xffe0_fc00) in {0x6ea01c00 BIT16B, 0x6ee01c00 BIF16B,
+        // 0x2ea01c00 BIT8B, 0x2ee01c00 BIF8B} (real words 0x6ea11c40 etc).
+        // Disjoint from orr16 (0x4ea01c00, bit31) and cmhi (0x6ea03400).
+        // bif = bit22 (0x0040_0000) SET (insert-if-FALSE; bit and bif words differ by bit22). The SimdSel gate above
+        // requires bit23 CLEAR so only BSL selects there; BIT/BIF both fall here.
+        if matches!(insn & 0xffe0_fc00, 0x6ea0_1c00 | 0x6ee0_1c00 | 0x2ea0_1c00 | 0x2ee0_1c00) {
+            let rm = ((insn >> 16) & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            return Inst::SimdBit { rd, rn, rm, bif: (insn & 0x0040_0000) != 0 };
+        }
+        
                                                                                                                                                                                                                                                                                         // ---- SIMD extract immediate: ext Vd.16B/Vd.8B, Vn., Vm., #imm ----
                                                                                                         // Gate (insn & 0xffe0_0400) == 0x6e000000 (16B, Q=1) / 0x2e000000
                                                                                                         // (8B, Q=0). Verified disjoint from Ucvtf2d (0x6e60d800), SimdCmhi
@@ -5373,10 +5376,11 @@ mod logical_imm_regressions {
         }
         // bit v0.16b, v2.16b, v1.16b = 0x6ea11c40 (real libroblox audio mix) => SimdBit.
         match decode(0x6ea11c40) {
-            Inst::SimdBit { rd, rn, rm } => {
+            Inst::SimdBit { rd, rn, rm, bif } => {
                 assert_eq!(rd, 0);
                 assert_eq!(rn, 2);
                 assert_eq!(rm, 1);
+                assert!(!bif);
             }
             other => panic!("bit v0.16b,v2.16b,v1.16b -> {other:?}"),
         }
