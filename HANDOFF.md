@@ -5812,6 +5812,22 @@ gap is fp16 (`fcvtl` `.4h`/`fcvtn` `.4h`), deferred — a real project, not a
 one-liner. Thread-model remaining: per-thread TLS init-image copies for clone
 children (needs a real multilib guest). HARD GATE unchanged.
 
+## Cycle 44f (Sep 11, 2026) — 3-same ADDP + MODIMM ORR/BIC RMW (375/0)
+
+Commit `84e0d71` (dev). gen_pairwise_dot (addp/vpaddq/smaxv/sminv/umaxv/
+uminv) found two silent-miscompile families:
+1. **3-same ADDP Vd.T,Vn.T,Vm.T** (byte2&0xf8==0xb8, bit10 set) was decoded as
+   SimdArithUnary (neg/abs) or Unsupported. bit10=0 two-reg neg/abs vs
+   bit10=1 3-same ADDP. Added SimdAddp with a self-alias-safe translate
+   (permute_source snapshot so `addp v31,v31,v31` reductions survive; exact
+   width loads/stores).
+2. **MODIMM ORR/BIC are read-modify-write**, not MOVI/MVNI. Odd cmode
+   (bit0=1) with op0/orr + op1/bic; the decoder wrote lo/hi flatly, so
+   `bic v.4h,#0xff,lsl#8` REPLACED lanes with the mask (all 0x00ff) instead of
+   ANDing — every gcc -O3 value-truncation was wrong. Added VecMovi.kind
+   {0=write,1=AND,2=OR} from cmode LSB + op; translate ANDs/ORs in place.
+Workspace green at 375/0. HARD GATE unchanged.
+
 ## Cycle 44b (Sep 11, 2026) — integer LONG multiply by element fixed; widen-mul fuzz generator (369/0)
 
 ### The bug (silent-miscompile, fuzzer-caught)
