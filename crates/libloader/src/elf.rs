@@ -341,6 +341,8 @@ pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
 
     // Lay each segment at base + (p_vaddr - min_vaddr). Guest vaddr of every
     // byte == its host address (identity mapping), which is what the JIT needs.
+    // NOTE: we do NOT mprotect inside this loop — relocations below must run
+    // while the whole image is still writable (the initial mmap is RW).
     let mut segments: Vec<LoadedSegment> = Vec::new();
     for ph in &loads {
         let offset_in_image = (ph.p_vaddr - base_page) as usize;
@@ -359,10 +361,57 @@ pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
         }
         // Zero-fill .bss (memsz > filesz) — fresh mmap is already zeroed.
 
-        // Apply final protection for this segment's [host, host+memsz).
+        segments.push(LoadedSegment {
+            guest_vaddr: host_ptr, // guest == host
+            vaddr: host_ptr,
+            memsz: ph.p_memsz,
+            fd: -1,
+            prot: MemProt::from_elf(ph.p_flags),
+        });
+    }
+
+    // Apply R_AARCH64_RELATIVE relocations for PIE / shared objects (which the
+    // real Roblox APK libs and their Android/GSI dependencies are). A *real*
+    // loader materializes these from DT_ANDROID_RELA (APS2-packed) or DT_RELA
+    // before the code can dereference pointer globals/vtables. This must run
+    // before the mprotect below takes the image out of write.
+    let mut applied_rel = 0usize;
+    if info.is_pie {
+        if let Some(relas) = crate::android_relocs::read_elf_relocations(path)? {
+            applied_rel = crate::android_relocs::apply_relatives(
+                &relas,
+                base,
+                info.base_load_addr,
+                |link| {
+                    // guest==host for load_elf_image: guest_of(link) ==
+                    // base + (link - min_vaddr). Only accept targets inside a
+                    // real PT_LOAD segment.
+                    let guest = base as u64 + link.wrapping_sub(min_vaddr);
+                    if segments
+                        .iter()
+                        .any(|s| guest >= s.guest_vaddr && guest < s.guest_vaddr + s.memsz)
+                    {
+                        Some(guest)
+                    } else {
+                        None
+                    }
+                },
+            );
+        }
+    }
+    if applied_rel > 0 {
+        info!(
+            "Applied {applied_rel} R_AARCH64_RELATIVE relocations to '{}'",
+            path.display()
+        );
+    }
+
+    // Apply final protection for each segment's [host, host+memsz).
+    for seg in segments.iter_mut() {
+        let host_ptr = seg.guest_vaddr;
         let prot_addr = align_down_u64(host_ptr, 0x1000) as usize;
-        let prot_end = align_up_u64(host_ptr + ph.p_memsz, 0x1000) as usize;
-        let posix = MemProt::from_elf(ph.p_flags).to_posix();
+        let prot_end = align_up_u64(host_ptr + seg.memsz, 0x1000) as usize;
+        let posix = seg.prot.to_posix();
         if unsafe { libc::mprotect(prot_addr as *mut libc::c_void, prot_end - prot_addr, posix) } != 0
         {
             anyhow::bail!(
@@ -371,14 +420,6 @@ pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
                 std::io::Error::last_os_error()
             );
         }
-
-        segments.push(LoadedSegment {
-            guest_vaddr: host_ptr, // guest == host
-            vaddr: host_ptr,
-            memsz: ph.p_memsz,
-            fd: -1,
-            prot: MemProt::from_elf(ph.p_flags),
-        });
     }
 
     // Relocate the recorded entry to guest space so callers can run it directly.
