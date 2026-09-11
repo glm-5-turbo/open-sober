@@ -44,6 +44,8 @@ def build_pair(src, tag):
     e=getentry(f"fx_{tag}.elf")
     j=run_elfjit(f"fx_{tag}.elf", e) if e else None
     q=run_qemu(src,tag)
+    if q is None:
+        q=run_qemu_exact(src,tag)
     return e, j, q
 
 # program generators: return C source with long long entry(void)
@@ -387,7 +389,143 @@ def gen_widen_byte_lut():
     return s1*131 + s2*7 + (long long)b[0]*{step};
 }}"""
 
+
+def run_qemu_exact(src, tag):
+    # 64-bit-exact oracle for programs whose host-native compile fails (e.g.
+    # <arm_neon.h> intrinsics that don't exist on x86). Cross-compile src with a
+    # write+itoa _start wrapper and run under qemu-aarch64; return the decimal
+    # output (unsigned long long view of entry()), like run_qemu. qemu computes
+    # with real AArch64 NEON/FP, so it is a correct oracle for the vector ISA.
+    open(f"q_{tag}.c","w").write(src)
+    r=subprocess.run(["aarch64-linux-gnu-gcc","-O3","-w","-static","-nostdlib","-Wl,-e,_start",
+                      f"q_{tag}.c","wrap.S","-o",f"q_{tag}.elf"],
+                     capture_output=True,text=True)
+    if r.returncode!=0:
+        return None
+    r=subprocess.run(["qemu-aarch64","-L","/usr/aarch64-linux-gnu",f"q_{tag}.elf"],
+                     capture_output=True,text=True,timeout=25)
+    if r.returncode!=0:
+        return None
+    return r.stdout.strip()
+
 gens=[gen_arith, gen_byte, gen_shift_matrix, gen_float, gen_float2, gen_2d_mix, gen_sat_shifts, gen_mul_long, gen_loop_branch, gen_bfield_extract, gen_sat_arith, gen_3d_accum, gen_128_struct, gen_float_reduce, gen_fma_chain, gen_mask_extract, gen_signed_div, gen_widen_byte_lut]
+def gen_neon_byelem():
+    # Force NEON *by-element* fmla/fmul (vmlaq_n/vfmaq_n) + lane ins/get.
+    # Lanes are small binary-exact ints and the accumulator stays exact in
+    # float32, so any structural lane/operand miscompute shows as a real
+    # diff (not FMA-vs-mul+add ULP noise).
+    n=random.choice([4,8,12,16])
+    c=random.choice([0.5,1.0,2.0,4.0,-1.0,-2.0])
+    idx=random.choice([0,1,2,3])
+    ex=random.choice([0,1,2,3])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 777333ull;
+    unsigned long long x = seedv;
+    float fa[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1664525ull+1013904223ull; fa[i]=(float)(int)(((x>>40)&0x7f)-64); }}
+    float32x4_t v = vdupq_n_f32(0.0f);
+    float scalar_acc = 0.0f;
+    for(int i=0;i<{n};i++){{
+        v = vmlaq_n_f32(v, vdupq_n_f32(fa[i]), {c}f);
+        scalar_acc += fa[i]*{c}f;
+    }}
+    // lane insert/extract round-trip with exact offsets
+    float32x4_t one = vdupq_n_f32(1.0f);
+    float32x4_t w = vsetq_lane_f32(vgetq_lane_f32(v,{idx})+1.0f, one, {ex});
+    v = vaddq_f32(v, w);
+    float s = 0; for(int l=0;l<4;l++) s += vgetq_lane_f32(v,l);
+    long long ref = (long long)(scalar_acc + 1.0);
+    long long got = (long long)s;
+    return got - ref;
+}}
+"""
+def gen_neon_tbl_bitmix():
+    # Bitwise select/tbl-heavy vector mixing (bsl/bit/bif + vext + vrbit)
+    n=random.choice([8,16])
+    half=n//2
+    m=random.choice([0x55555555,0xAAAAAAAA,0xF0F0F0F0,0x12345678])
+    ex=random.choice([1,2,3])
+    sh=random.choice([1,5,17,31])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 414243ull;
+    unsigned long long x = seedv;
+    uint32_t a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=(uint32_t)x; }}
+    uint32x4_t av = vld1q_u32(a);
+    uint32x4_t bv = vld1q_u32(a+{half});
+    uint32x4_t mmask = vdupq_n_u32({m});
+    uint32x4_t s1 = vbslq_u32(mmask, av, bv);
+    uint32x4_t s2 = vextq_u32(s1, av, {ex});
+    uint32x4_t s3 = vrev64q_u32(s2);
+    uint32_t r[4]; vst1q_u32(r, s3);
+    long long acc=0; for(int i=0;i<4;i++) acc = acc*131 + (long long)r[i];
+    for(int i=0;i<{n};i+=2) acc += (long long)a[i]>>{sh};
+    return acc;
+}}
+"""
+
+def gen_bfi_64():
+    # 64-bit bitfield insert/set (bfi/bfiz/sbfiz on GPRs) — gcc emits these for
+    # packed struct fields / color / bit flags; the ubfiz/sbfiz OLD bug lived in
+    # this immr>imms overlap.
+    n=random.choice([4,8,12])
+    pos=random.choice([1,3,5,7,8,9,15,17,24,31,33,40,48,57,63])
+    wid=random.choice([1,2,3,4,8,12,16])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 715517ull;
+    unsigned long long x = seedv;
+    unsigned long long a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1103515245ull+12345ull; a[i]=x; }}
+    unsigned long long acc=0;
+    for(int i=0;i<{n};i++){{
+        unsigned long long field = (a[i] >> {random.choice([1,8,24,32,40,48,56])}) & ((1ull<<{wid})-1);
+        acc |= (field << {pos});
+        acc ^= a[i] & 0xffff;
+        acc = (acc*131) ^ (acc>>17);
+    }}
+    return (long long)acc;
+}}
+"""
+def gen_tbz_branches():
+    # Bit-test branches (tbz/tbnz when the mask is a compile-time const power of 2)
+    # + switch jump tables with sparse high values forcing tbz-based branches.
+    n=random.choice([16,32,64])
+    k=random.choice([0,1,3,7,8,15,20,31,33,40,55,63])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 990077ull;
+    unsigned long long x = seedv;
+    long long a[{n}], s=0;
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=(long long)x; }}
+    for(int i=0;i<{n};i++){{
+        long long v=a[i];
+        if(v & (1ull<<{k})) s += (v>>1);            // tbnz
+        else if(v & (1ull<<{random.choice([1,5,9,17,25,33,41,63])})) s += (v<<1);  // tbnz
+        else if((v%(13|1))==0) s ^= (v>>3);
+        s = s*7;
+    }}
+    return s;
+}}
+"""
+def gen_fixed_pt_fcvt():
+    # Fixed-point float->int (fcvtzs/fcvtzu #fbits): (long long)(f*2^k) unfolded
+    # via volatile — exercises the #fbits scaling path (was misdecoded as smull).
+    n=random.choice([8,16,24])
+    bits=random.choice([1,2,3,4,8,12,16,20])
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 246802ull;
+    unsigned long long x = seedv;
+    double a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1664525ull+1013904223ull; a[i]=((double)((x>>40)&0x3fff)-2048.0)/256.0; }}
+    volatile double k = {1<<bits} ;
+    long long s=0;
+    for(int i=0;i<{n};i++) s += (long long)((double)(a[i]*k));
+    for(int i=0;i<{n};i+=2) s -= (long long)(a[i]/2.0);
+    return s;
+}}
+"""
+gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt]
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
