@@ -1384,6 +1384,25 @@ mod tests {
     }
 
     #[test]
+    fn udiv_computes_quotient() {
+        // Regression: unsigned `udiv x5, x0, x1` (0x9ac10805) returned 0 for
+        // every input — the x86 emitter's `div r64` used group-3 /0 (TEST)
+        // instead of /6 (DIV), so `48 f7 c1` decoded as `test rcx,eax` and the
+        // quotient never reached the destination. Fixed div_r64/div_r32 to /6.
+        let code = [0x05u8, 0x08, 0xc1, 0x9a, 0xc0, 0x03, 0x5f, 0xd6]; // udiv x5,x0,x1; ret
+        let mut st = CpuState::new();
+        st.x[0] = 100;
+        st.x[1] = 10;
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[5], 10, "udiv x5,100,10 = 10");
+        // divisor greater than dividend -> 0 quotient
+        st.x[0] = 7;
+        st.x[1] = 20;
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(st.x[5], 0, "7/20 = 0");
+    }
+
+    #[test]
     fn neg_reads_rn31_as_xzr_not_sp() {
         // Regression: `neg x6,x6` = `sub x6, xzr, x6` (0xcb0603e6) is the SHIFTED-
         // register add/sub form (bit21=0), where register 31 in the rn operand is

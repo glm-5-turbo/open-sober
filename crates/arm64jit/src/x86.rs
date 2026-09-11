@@ -486,16 +486,16 @@ impl CodeBuf {
     pub fn cdq(&mut self) {
         self.b(0x99);
     }
-    /// div r64 — unsigned divide RDX:RAX by r64; quotient RAX, remainder RDX. 48 F7 /0.
+    /// div r64 — unsigned divide RDX:RAX by r64; quotient RAX, remainder RDX. 48 F7 /6.
     pub fn div_r64(&mut self, divr: u8) {
         self.b(0x48);
         self.b(0xF7);
-        self.b(modrm(3, 0, divr & 7)); // /0
+        self.b(modrm(3, 6, divr & 7)); // /6 (group-3 DIV; /0 would be TEST)
     }
-    /// div r32 — unsigned divide EDX:EAX by r32; quotient EAX, remainder EDX. F7 /0.
+    /// div r32 — unsigned divide EDX:EAX by r32; quotient EAX, remainder EDX. F7 /6.
     pub fn div_r32(&mut self, divr: u8) {
         self.b(0xF7);
-        self.b(modrm(3, 0, divr & 7));
+        self.b(modrm(3, 6, divr & 7));
     }
     /// idiv r64 — signed divide: RDX:RAX / r64; quotient RAX, remainder RDX. 48 F7 /7.
     pub fn idiv_r64(&mut self, divr: u8) {
