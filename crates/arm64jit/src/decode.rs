@@ -378,6 +378,11 @@ pub enum Inst {
     //      three-operand FMAXP Vd,Vn,Vm handled elsewhere). min = bit15;
     //      nm (fmaxnm/fminnm) = bit13 skip-NaN. ----
     FpPair { rd: u8, rn: u8, sz: bool, min: bool, nm: bool },
+    // ---- SIMD FP 3-same pairwise: faddp/fmaxp/fminp/fmaxnmp/fminnmp
+    // Vd.T, Vn.T, Vm.T -- pairwise-reduce each source into the first/second
+    // halves of Vd (like integer ADDP but FP, with skip-NaN nm). Q=0 (.2s)
+    // and Q=1 (.4s) forms; rm required.
+    SimdFpPair3 { rd: u8, rn: u8, rm: u8, add: bool, min: bool, nm: bool, q: bool },
     // ---- switchable FP multiply-accumulate: fmla/fmls Vd.4s/.2s/.2d, Vn, Vm ----
     Fmla {
         rd: u8,
@@ -3435,6 +3440,30 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     let rn = ((insn >> 5) & 0x1f) as u8;
                     let min = (insn & 0x0080_0000) != 0;
                     return Inst::FMaxV { rd, rn, min };
+                }
+
+                // ---- FP 3-same pairwise: faddp/fmaxp/fminp/fmaxnmp/fminnmp Vd.T,Vn.T,Vm.T ----
+                // per-source pairwise reduce (halves of Vd = reduce(Vn), reduce(Vm)),
+                // Q=0 .2s / Q=1 .4s. bit16 SET. prefix 0x2e/0x6e. bit13 set=min/max;
+                // bit13 clear&bit12 set=faddp; bit13 clear&bit12 clear=fmaxnm/fminnm;
+                // min=bit23.
+                if matches!((insn >> 24) & 0xff, 0x2e | 0x6e)
+                    && (insn & 0x0040_0000) == 0 // .2s/.4s only (no .2d 3-op)
+                    && matches!(insn & 0xffe0_fc00,
+                        0x2e20_c400 | 0x2ea0_c400 | 0x2e20_d400 | 0x2ea0_d400
+                        | 0x2e20_f400 | 0x2ea0_f400
+                        | 0x6e20_c400 | 0x6ea0_c400 | 0x6e20_d400 | 0x6ea0_d400
+                        | 0x6e20_f400 | 0x6ea0_f400)
+                {
+                    let rd = (insn & 0x1f) as u8;
+                    let rn = ((insn >> 5) & 0x1f) as u8;
+                    let rm = ((insn >> 16) & 0x1f) as u8;
+                    let b13 = (insn & 0x2000) != 0;
+                    let b12 = (insn & 0x1000) != 0;
+                    let add = !b13 && b12;
+                    let nm = !b13 && !b12;
+                    let min = (insn & 0x0080_0000) != 0;
+                    return Inst::SimdFpPair3 { rd, rn, rm, add, min, nm, q: (insn >> 30) & 1 == 1 };
                 }
 
                 // ---- FP pairwise two-register reduction: fmaxp/fminp/fmaxnmp/

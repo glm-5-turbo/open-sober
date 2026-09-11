@@ -2199,31 +2199,56 @@ pub fn translate(
                                                                                                                     }
                                                                                                                     Ok(())
                                                                                                                 }
-                                                                                                    Inst::FpPair { rd, rn, sz, min, nm } => {
-                                                                                                        // fmaxp/fminp/fmaxnmp/fminnmp Vd, Vn:
-                                                                                                        // pairwise reduce Vn's two elements (.2s or
-                                                                                                        // .2d) into a scalar result in Vd. x86
-                                                                                                        // maxss/sd ignore NaN (ok for fmaxp/nm here).
-                                                                                                        let _ = nm; // skip-NaN; maxss/sd ~= fmaxnm path
-                                                                                                        let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-                                                                                                        if sz {
-                                                                                                            // Vd.D = max/min(Vn.D[0], Vn.D[1])
-                                                                                                            buf.movq_load(0, RBX, vslot(rn));
-                                                                                                            buf.movq_load(1, RBX, vslot(rn) + 8);
-                                                                                                            if min { buf.minsd(0, 1); } else { buf.maxsd(0, 1); }
-                                                                                                            buf.movq_store(RBX, vslot(rd), 0);
-                                                                                                        } else {
-                                                                                                            // Vd.S = max/min(Vn.S[0], Vn.S[1])
-                                                                                                            buf.mov_load32(RAX, RBX, vslot(rn));
-                                                                                                            buf.movd_xmm_r32(0, RAX);
-                                                                                                            buf.mov_load32(RAX, RBX, vslot(rn) + 4);
-                                                                                                            buf.movd_xmm_r32(1, RAX);
-                                                                                                            if min { buf.minss(0, 1); } else { buf.maxss(0, 1); }
-                                                                                                            buf.movd_r32_xmm(RAX, 0);
-                                                                                                            buf.mov_store32(RBX, vslot(rd), RAX);
-                                                                                                        }
-                                                                                                        Ok(())
-                                                                                                    }
+                                                                                                    Inst::SimdFpPair3 { rd, rn, rm, add, min, nm, q } => {
+                                                                                                                                                                        // faddp/fmaxp/fminp/fmaxnmp/fminnmp Vd.T,Vn.T,Vm.T:
+                                                                                                                                                                        // halves of Vd = pairwise-reduce Vn (low half) then Vm.
+                                                                                                                                                                        // Q=0 (.2s): 2 src lanes -> 1 dst lane each.
+                                                                                                                                                                        // Q=1 (.4s): 4 src lanes -> 2 dst lanes each.
+                                                                                                                                                                        let _ = nm;
+                                                                                                                                                                        let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                                                                        let nsrc = if q { 4 } else { 2 };
+                                                                                                                                                                        let mut dst_idx = 0;
+                                                                                                                                                                        for perreg in 0..2 {
+                                                                                                                                                                            let base = if perreg == 0 { vslot(rn) } else { vslot(rm) };
+                                                                                                                                                                            for i in 0..nsrc / 2 {
+                                                                                                                                                                                buf.mov_load32(RAX, RBX, base + 4 * (2 * i));
+                                                                                                                                                                                buf.movd_xmm_r32(0, RAX);
+                                                                                                                                                                                buf.mov_load32(RAX, RBX, base + 4 * (2 * i + 1));
+                                                                                                                                                                                buf.movd_xmm_r32(1, RAX);
+                                                                                                                                                                                if add { buf.addss(0, 1); }
+                                                                                                                                                                                else if min { buf.minss(0, 1); } else { buf.maxss(0, 1); }
+                                                                                                                                                                                buf.movd_r32_xmm(RAX, 0);
+                                                                                                                                                                                buf.mov_store32(RBX, vslot(rd) + 4 * dst_idx, RAX);
+                                                                                                                                                                                dst_idx += 1;
+                                                                                                                                                                            }
+                                                                                                                                                                        }
+                                                                                                                                                                        Ok(())
+                                                                                                                                                                    }
+                                                                                                                                                                        Inst::FpPair { rd, rn, sz, min, nm } => {
+                                                                                                                                                                        // fmaxp/fminp/fmaxnmp/fminnmp Vd, Vn:
+                                                                                                                                                                        // pairwise reduce Vn's two elements (.2s or
+                                                                                                                                                                        // .2d) into a scalar result in Vd. x86
+                                                                                                                                                                        // maxss/sd ignore NaN (ok for fmaxp/nm here).
+                                                                                                                                                                        let _ = nm; // skip-NaN; maxss/sd ~= fmaxnm path
+                                                                                                                                                                        let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                                                                        if sz {
+                                                                                                                                                                            // Vd.D = max/min(Vn.D[0], Vn.D[1])
+                                                                                                                                                                            buf.movq_load(0, RBX, vslot(rn));
+                                                                                                                                                                            buf.movq_load(1, RBX, vslot(rn) + 8);
+                                                                                                                                                                            if min { buf.minsd(0, 1); } else { buf.maxsd(0, 1); }
+                                                                                                                                                                            buf.movq_store(RBX, vslot(rd), 0);
+                                                                                                                                                                        } else {
+                                                                                                                                                                            // Vd.S = max/min(Vn.S[0], Vn.S[1])
+                                                                                                                                                                            buf.mov_load32(RAX, RBX, vslot(rn));
+                                                                                                                                                                            buf.movd_xmm_r32(0, RAX);
+                                                                                                                                                                            buf.mov_load32(RAX, RBX, vslot(rn) + 4);
+                                                                                                                                                                            buf.movd_xmm_r32(1, RAX);
+                                                                                                                                                                            if min { buf.minss(0, 1); } else { buf.maxss(0, 1); }
+                                                                                                                                                                            buf.movd_r32_xmm(RAX, 0);
+                                                                                                                                                                            buf.mov_store32(RBX, vslot(rd), RAX);
+                                                                                                                                                                        }
+                                                                                                                                                                        Ok(())
+                                                                                                                                                                    }
                                                                                                         Inst::FMaxV { rd, rn, min } => {
                                                                                                         // fmaxv/fminv Sd, Vn.4s: reduce the 4
                                                                                                         // single-precision lanes of Vn to a max/

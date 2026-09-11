@@ -916,6 +916,39 @@ long long entry(void){{
     return acc & 0x3fffffff;
 }}
 """
+def gen_fp_pairwise():
+    op = random.choice(['faddp','fmaxp','fminp'])
+    x = random.randrange(1<<64)
+    a = []
+    for i in range(8):
+        x = (x*6364136223846793005+1) & ((1<<64)-1)
+        a.append((x>>48)&0x7fff)
+    a0,a1,a2,a3,a4,a5 = a[0],a[1],a[2],a[3],a[4],a[5]
+    if op == 'faddp':
+        body = (
+            f"float32x2_t r = vpadd_f32(vld1_f32((float*)(long long[]){{{a0},{a1}}}), vld1_f32((float*)(long long[]){{{a2},{a3}}}));\n"
+            f"        float32x2_t r2 = vpadd_f32(r, vld1_f32((float*)(long long[]){{{a4},{a5}}}));\n"
+        )
+    else:
+        body = (
+            f"float32x2_t va = vld1_f32((float*)(long long[]){{{a0},{a1}}});\n"
+            f"        float32x2_t vb = vld1_f32((float*)(long long[]){{{a2},{a3}}});\n"
+            f"        float32x2_t r;\n"
+            f"        __asm__ __volatile__(\"{op} %0.2s, %1.2s, %2.2s\" : \"=w\"(r) : \"w\"(va), \"w\"(vb));\n"
+            f"        float32x2_t r2;\n"
+            f"        __asm__ __volatile__(\"{op} %0.2s, %1.2s, %2.2s\" : \"=w\"(r2) : \"w\"(r), \"w\"(vb));\n"
+        )
+    asm_c = '{' + f'{a0},{a1}' + '}'
+    return f"""
+#include <arm_neon.h>
+long long entry(void){{
+    {body}
+    float o[2]; vst1_f32(o, r2);
+    long long acc=0; for(int i=0;i<2;i++) acc += (long long)(o[i]*100000.0f)*(1+i);
+    return acc & 0x3fffffff;
+}}
+"""
+
 def gen_pairwise_dot():
     # addp (pairwise add within a vector), and smaxv/sminv/umaxv/uminv
     # horizontal reductions. Both families are decoded but never fuzzed;
@@ -1001,7 +1034,7 @@ long long entry(void){{
 }}
 """
 
-gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift]
+gens += [gen_high_narrow, gen_pairwise_dot, gen_narrow_shift, gen_fp_pairwise]
 
 def gen_sat_narrow():
     # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on
