@@ -7,22 +7,26 @@ started: 2026-09-11T01:20:42Z
 ## Cycle (Sep 11, 2026) — JIT ABI correctness sprint
 status: session-end (committed, tests green)
 last_agent_claim: fixed four real silent miscompiles in arm64jit found via a real
-  cross-gcc battery run through `elfjit`. 116 workspace tests green (arm64jit 82),
-  battery 12/12. Commits b8b5e62, e5d78d3 (code) + docs.
+  cross-gcc battery run through `elfjit`. 116 workspace tests green (arm64jit 83),
+  battery 12/12. Commits b8b5e62, e5d78d3, 7c11be3 (code) + docs.
 
 ### What landed
 1. LdStPair offset-form ignored its immediate -> struct-by-value reads garbage.
 2. ADD/SUB rn==31 read SP when S set (`negs w1,w0` = `sp-w0` not `-w0`).
 3. 32-bit W writes did not zero-extend (`mov w0,w1` carried 0xffffffffffffffff).
 4. scalar fcvtzu saturated at 2^63-1 instead of the correct u64 over [0,2^64).
-Plus JIT_BUDGET debug knob and a bounded-truncation fall-through pc bug.
+5. FcvVec FP->int vector: .4s lanes were read/written as 64-bit (clobbering the
+   neighbour lane), and the .2d form was mis-decoded as .4s (esize=bit22, not
+   bit20).
+Plus LogicReg rm==31-as-SP, JIT_BUDGET debug knob, and a bounded-truncation
+fall-through pc bug.
 
 ### Verified
 - cargo build --workspace: ok
-- cargo test --workspace: 116 passed / 0 failed (was 113 before; +3 regressions)
+- cargo test --workspace: 117 passed / 0 failed (was 113; +4 regressions this cycle)
 - cross-gcc battery via elfjit: loop1 45, structs/dispatch/fpfun/vtable 42,
   byvalue 44, bv2 300, signmod 12, iso_wrd 4321, iso_arith 300 — all correct
-- HEAD: e5d78d3 (local dev branch)
+- HEAD: 7c11be3 (local dev branch)
 
 ### Blocked / not satisfiable on this host (HARD GATE still unmet)
 Roblox still does NOT boot on an actual capability host. Requires:

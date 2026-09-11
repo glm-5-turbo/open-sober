@@ -2704,3 +2704,16 @@ session). Next items on the JIT path: **FcvVec 4S-lane** conversion (uses
 movq/cvttsd2si on 4-byte lanes), SIMD SMOV/UMOV lane->GPR and remaining
 FP-vs-int lane ops, then libloader gaps -> libbadcpu gaps -> services/auth.
 Real-binary/GPU boot remains blocked (no libroblox.so/APK, no GPU) — HARD GATE.
+
+### Addendum (same session) — FcvVec FP->int vector (commits 7c11be3)
+- **`.4s` lane width bug**: FcvVec converted each 4-byte S lane as a double
+  (`movq_load` reads 8 bytes = the lane *and the next lane*) and wrote 8 bytes
+  back (`movq_store` clobbered the neighbour lane), so multi-lane float->int
+  vectors were corrupt. Now loads the 32-bit float, `cvtss2sd`s it, stores a
+  32-bit int per lane (`mov_store32`).
+- **`.2d` decode bug**: `fcvtzs v0.2d` (0x4ee1b820) has bit20=0 just like `.4s`,
+  so `esize=(insn>>20)&1` mis-decoded the 64-bit form as esize=4. The real
+  discriminator is **bit22** (0x400000). +`fcvt_vec_4s_lanes_are_32bit_and_independent`
+  covers .4s (independent lanes), .2d signed, and .2d unsigned negative-clamp.
+- arm64jit now 83, workspace 117/0. Each fix was a silent data-corruption bug
+  that would have produced wrong pixels/audio/coordinates in a real Roblox run.
