@@ -460,3 +460,16 @@ SIMD layout); mask 0xfffffc00, gate at decode top. vadd 360=native.
 +regression addv_horizontal_sum_across_4s_lanes. arm64jit 134/134, workspace
 **179/0**, all 8 batches + core + FMA green. Cycle net: 11 miscompile fixes +
 FMA + ADDV. HEAD 6290937. HARD GATE unchanged.
+---
+## SESSION WRAP (Sep 11) — arm64jit hardened; 45/45 battery, workspace 179/0
+9th (-O3/64-bit magic div, SIMD vmacc, FP recursion, bit-rot) and 10th (-O3
+float->int conversion boundaries, fcvtzs, affine FMA) batteries were BOTH clean.
+Definitive sweep: **45/45 cross-gcc programs across 10 batches match native
+exactly**; `cargo test --workspace` **179/0**; `arm64jit` 134/134.
+Full back-half fixes (11 commints): sdiv/udiv signedness inversion (MulDiv
+bit17->bit10, dae2e05), MSUB direction ra-rn*rm (ccbf55c), LdStPair s-pair scale
+4 (8d2d57b), ADDV horizontal add w/ bits9:5 Vn + top-of-decode gate (6290937),
+plus pre-compaction WidenShl, FP-compare N, ld1-2reg, FMOVimm, FMA3,
+apply_shift_const, d-pair stride. All regression-locked.
+JIT now robust for FP/int/SIMD/conversion under -O2/-O3 after 11 bug classes.
+HARD GATE unchanged (reproducible boot + GPU artifact on real host).
