@@ -344,16 +344,18 @@ pub fn bind_image_plt(
             crate::resolver::resolve_float(&name),
             crate::resolver::resolve_float32(&name),
             crate::resolver::resolve_egl(&name),
+            crate::resolver::resolve_gles_int(&name),
         ) {
-            (Some(a), _, _, _, _)
-            | (None, Some(a), _, _, _)
-            | (None, None, Some(a), _, _)
-            | (None, None, None, Some(a), _)
-            | (None, None, None, None, Some(a)) => {
+            (Some(a), _, _, _, _, _)
+            | (None, Some(a), _, _, _, _)
+            | (None, None, Some(a), _, _, _)
+            | (None, None, None, Some(a), _, _)
+            | (None, None, None, None, Some(a), _)
+            | (None, None, None, None, None, Some(a)) => {
                 wr64(host(el.guest_of(r_offset)), a);
                 resolved += 1;
             }
-            (None, None, None, None, None) => pending.push((name, r_offset)),
+            (None, None, None, None, None, None) => pending.push((name, r_offset)),
         }
     }
 

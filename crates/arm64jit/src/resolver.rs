@@ -122,6 +122,169 @@ pub fn resolve_egl(name: &[u8]) -> Option<u64> {
     alloc_slot(&mut r, &key, hostf)
 }
 
+/// GLES entry points whose ABI is integer/pointer-only AND take at most 8
+/// integer args — i.e. they are safe through the JIT integer `HostCall`.
+/// (Float-taking `gl*` and >8-arg forms like glTexImage2D are excluded: their
+/// ABI needs a float bridge / stack args the integer HostCall cannot express.)
+/// Generated from the exact system GLES headers (glesv2-wrapper/gen_forward.py).
+pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
+    b"glActiveTexture\0",
+    b"glAttachShader\0",
+    b"glBindAttribLocation\0",
+    b"glBindBuffer\0",
+    b"glBindFramebuffer\0",
+    b"glBindRenderbuffer\0",
+    b"glBindTexture\0",
+    b"glBlendEquation\0",
+    b"glBlendEquationSeparate\0",
+    b"glBlendFunc\0",
+    b"glBlendFuncSeparate\0",
+    b"glBufferData\0",
+    b"glBufferSubData\0",
+    b"glCheckFramebufferStatus\0",
+    b"glClear\0",
+    b"glClearStencil\0",
+    b"glColorMask\0",
+    b"glCompileShader\0",
+    b"glCompressedTexImage2D\0",
+    b"glCopyTexImage2D\0",
+    b"glCopyTexSubImage2D\0",
+    b"glCreateProgram\0",
+    b"glCreateShader\0",
+    b"glCullFace\0",
+    b"glDeleteBuffers\0",
+    b"glDeleteFramebuffers\0",
+    b"glDeleteProgram\0",
+    b"glDeleteRenderbuffers\0",
+    b"glDeleteShader\0",
+    b"glDeleteTextures\0",
+    b"glDepthFunc\0",
+    b"glDepthMask\0",
+    b"glDetachShader\0",
+    b"glDisable\0",
+    b"glDisableVertexAttribArray\0",
+    b"glDrawArrays\0",
+    b"glDrawElements\0",
+    b"glEnable\0",
+    b"glEnableVertexAttribArray\0",
+    b"glFinish\0",
+    b"glFlush\0",
+    b"glFramebufferRenderbuffer\0",
+    b"glFramebufferTexture2D\0",
+    b"glFrontFace\0",
+    b"glGenBuffers\0",
+    b"glGenFramebuffers\0",
+    b"glGenRenderbuffers\0",
+    b"glGenTextures\0",
+    b"glGenerateMipmap\0",
+    b"glGetActiveAttrib\0",
+    b"glGetActiveUniform\0",
+    b"glGetAttachedShaders\0",
+    b"glGetAttribLocation\0",
+    b"glGetBooleanv\0",
+    b"glGetBufferParameteriv\0",
+    b"glGetError\0",
+    b"glGetFramebufferAttachmentParameteriv\0",
+    b"glGetIntegerv\0",
+    b"glGetProgramInfoLog\0",
+    b"glGetProgramiv\0",
+    b"glGetRenderbufferParameteriv\0",
+    b"glGetShaderInfoLog\0",
+    b"glGetShaderPrecisionFormat\0",
+    b"glGetShaderSource\0",
+    b"glGetShaderiv\0",
+    b"glGetString\0",
+    b"glGetTexParameteriv\0",
+    b"glGetUniformLocation\0",
+    b"glGetUniformiv\0",
+    b"glGetVertexAttribPointerv\0",
+    b"glGetVertexAttribiv\0",
+    b"glHint\0",
+    b"glIsBuffer\0",
+    b"glIsEnabled\0",
+    b"glIsFramebuffer\0",
+    b"glIsProgram\0",
+    b"glIsRenderbuffer\0",
+    b"glIsShader\0",
+    b"glIsTexture\0",
+    b"glLinkProgram\0",
+    b"glPixelStorei\0",
+    b"glReadPixels\0",
+    b"glReleaseShaderCompiler\0",
+    b"glRenderbufferStorage\0",
+    b"glScissor\0",
+    b"glShaderBinary\0",
+    b"glShaderSource\0",
+    b"glStencilFunc\0",
+    b"glStencilFuncSeparate\0",
+    b"glStencilMask\0",
+    b"glStencilMaskSeparate\0",
+    b"glStencilOp\0",
+    b"glStencilOpSeparate\0",
+    b"glTexParameteri\0",
+    b"glTexParameteriv\0",
+    b"glUniform1i\0",
+    b"glUniform1iv\0",
+    b"glUniform2i\0",
+    b"glUniform2iv\0",
+    b"glUniform3i\0",
+    b"glUniform3iv\0",
+    b"glUniform4i\0",
+    b"glUniform4iv\0",
+    b"glUseProgram\0",
+    b"glValidateProgram\0",
+    b"glVertexAttribPointer\0",
+    b"glViewport\0",
+];
+
+/// One-time `dlopen` of Mesa's real `libGLESv2.so.2` (RTLD_NOW|RTLD_LOCAL) so
+/// integer-ABI `gl*` imports resolve to real Mesa instead of the NULL/0 catch-all.
+/// RTLD_LOCAL (NOT GLOBAL) is deliberate: if GLES went global, the general
+/// `resolve()` RTLD_DEFAULT scan would also grab float-taking `gl*` (e.g.
+/// glClearColor) and bind them through the integer HostCall, corrupting their xmm
+/// args. Local scope keeps GLES names visible only to `resolve_gles_int`'s
+/// whitelist, so float ABI stays on the NULL/0 stub.
+fn gles_handle() -> *mut libc::c_void {
+    static H: OnceLock<usize> = OnceLock::new();
+    let addr = *H.get_or_init(|| {
+        let candidates: &[&[u8]] = &[b"libGLESv2.so.2\0", b"libGLESv2.so\0"];
+        for path in candidates {
+            let h = unsafe {
+                libc::dlopen(path.as_ptr() as *const libc::c_char, libc::RTLD_NOW | libc::RTLD_LOCAL)
+            };
+            if !h.is_null() { return h as usize; }
+        }
+        0
+    });
+    addr as *mut libc::c_void
+}
+
+/// Resolve an integer-ABI `gl*` import against Mesa's real libGLESv2. Only names in
+/// [`GLES_INT_NAME_LIST`] (pure integer/pointer args, <=8) are safe through the integer
+/// HostCall; float-taking GLES or >8-arg forms return `None` (fall to the NULL/0 stub).
+pub fn resolve_gles_int(name: &[u8]) -> Option<u64> {
+    let ns = name_str(name);
+    if !ns.starts_with("gl") {
+        return None;
+    }
+    if !GLES_INT_NAME_LIST.iter().any(|c| c[..c.len()-1] == *ns.as_bytes()) {
+        return None;
+    }
+    let key = CString::new(name).ok()?;
+    {
+        let r = resolver().lock().unwrap();
+        if let Some(addr) = r.slots.get(&key) { return Some(*addr); }
+    }
+    let mh = gles_handle();
+    if mh.is_null() { return None; }
+    let sym = key.as_ptr();
+    let ptr = unsafe { sym_from(mh, sym) };
+    if ptr.is_null() { return None; }
+    let hostf: HostCall = unsafe { std::mem::transmute(ptr) };
+    let mut r = resolver().lock().unwrap();
+    alloc_slot(&mut r, &key, hostf)
+}
+
 /// Give an import name a host call slot. If the host symbol is found via
 /// `dlsym`, register it and return the thunk's *guest address*; if the name
 /// can't be resolved on the host, return `None` (caller must decide how to
@@ -622,5 +785,41 @@ mod tests {
         // Must NOT dlopen/allocate for GLES or unrelated names (float ABI, not wired).
         assert!(resolve_egl(b"glViewport\0").is_none());
         assert!(resolve_egl(b"strlen\0").is_none());
+    }
+
+    /// Integer-ABI GLES imports (gl* with integer/pointer args, <=8) must resolve to
+    /// real Mesa and actually execute — same graphics-wiring gate as resolve_egl, for
+    /// the GLES texture/state/draw pipeline. Float-taking GLES must be rejected (their
+    /// ABI is not expressible through the integer HostCall).
+    #[test]
+    fn resolve_gles_int_binds_real_mesa_for_integer_abi_names() {
+        // glGetError() -> GLenum, integer ABI, in the whitelist.
+        let Some(slot) = resolve_gles_int(b"glGetError\0") else {
+            eprintln!("skipping: Mesa GLES (libGLESv2.so.2) not present on this host");
+            return;
+        };
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0
+        let mut st = CpuState::new();
+        st.x[16] = slot;
+        let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
+        // GL_NO_ERROR (0) is a valid Mesa result; the guarantee is that real Mesa GLES
+        // executed (no segfault / no crash). Without a current context Mesa returns 0
+        // cleanly; the point is it didn't dispatch to the old NULL/0 stub and crash on
+        // a garbage fn pointer while marshalling xmm/stack args.
+        let _ = r;
+    }
+
+    #[test]
+    fn resolve_gles_int_rejects_float_abi_and_unknown() {
+        // glClearColor takes GLfloat args -> MUST NOT resolve through the integer HostCall.
+        assert!(resolve_gles_int(b"glClearColor\0").is_none());
+        // glTexImage2D has 9 args (stack-arg beyond the 8 the HostCall can express).
+        assert!(resolve_gles_int(b"glTexImage2D\0").is_none());
+        // Non-GLES names rejected.
+        assert!(resolve_gles_int(b"strlen\0").is_none());
+        // Integer-ABI GLES that is NOT in the shipped Mesa GLESv2 (should be absent).
+        assert!(resolve_gles_int(b"glTotallyFake\0").is_none());
     }
 }
