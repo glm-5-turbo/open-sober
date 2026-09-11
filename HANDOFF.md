@@ -4109,3 +4109,36 @@ Regression: `sqadd_uqadd_respect_lane_width_and_sign`,
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — fixed-point fcvtzs #fbits + post-index multi-reg ld1 (workspace 253/0)
+
+Commit `97417af`. Two more silent arithmetic/load bugs from the differential
+battery:
+
+1. **Fixed-point FP->int** (`fcvtzs/fcvtzu Rd, Fn, #fbits`, result = trunc(Fn *
+   2^fbits)) was misdecoded as `SimdMull` (smull x0,w31,w24) by the widening-
+   multiply gate — every *2^fbits scale silently dropped. gcc -O3 folds
+   `(long long)(s*4)` into fcvtzs #2; the double square-sum `v64f` returned 5 vs
+   oracle 436. Added an `fbits` field to `FcvtToInt`, decoded the fixed-point
+   encodings (top16 0x1e18/0x1e58/0x9e18/0x9e58 signed, +bit16 unsigned; fbits =
+   64 - bits[15:10]) before SimdMull, and scale xmm0 by 2^fbits in translate.
+   vs qemu: 3.25>>#2 = 13, >>#4 = 52, s 2.5>>#3 = 20, fcvtzu 3.75>>#1 = 7.
+2. **Post-indexed multi-register ld1/st1** `{Vt..,Vt+n},[Xn],#imm` sets bit23
+   (bases 0x..cc0 ld / 0x..c80 st), which the structure-multiple gate's four
+   no-post bases missed — `ld1 {v26.16b,v27.16b},[x1],#32` fell through to the
+   single-vector Ld1V gate: loaded only 16B and advanced Xn by 16 not 32. An
+   -O2 double dot-product (fmadd loop + shifted-register add addressing)
+   accumulated 165 vs oracle 470. Added the 4 post-index bases.
+
+Regression: `fcvtzs_fixed_point_fbits_scales`, `ld1_multireg_post_index_decode_and_advance`;
+differential canaries `fcvtzs_fixed_scale`(/neg), `fma_ld1_postidx`.
+cargo build clean; `cargo test --workspace` 253/0. HEAD `97417af`.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping ISA/correctness breadth (structure
+   load/store widths, more SIMD lane/permute/wide paths, FP reduction shapes).
+2. Move up to the runtime side: FMOD "divert guest bl-to-once through the
+   dispatcher" and JNI function-table stubs per RECOMMENDATION.md.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).
