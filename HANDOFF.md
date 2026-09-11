@@ -4698,3 +4698,16 @@ loader-mode via fuzz_jit.py). No known-open JIT correctness items remain.
 Workspace 290/0, build clean, ~18 focused commits on dev. Next (RECOMMENDATION
 order): more boot-path syscalls, libloader/libbadcpu/services gaps, or more fuzz
 coverage. HARD GATE unchanged (no GPU/APK/libroblox.so on this box).
+
+## Session (Sep 11, 2026) — scalar ucvtf S-form FIXED (291/0) + fuzz gens
+
+Silent FP miscompile found by expanding the differential fuzzer with
+fma-chain/128-bit-struct/float-reduce generators: scalar ucvtf S-form
+(0x7e21db18, gcc emits `ldr sD,[sp]` + `ucvtf sD,sD` for `(float)volatile_u32`)
+decoded with sng=true but the translate arm ignored it and always did the 64-bit
+D-form convert, silently dropping the value (audio/down-mix u32->float). Fixed,
+sensitivity-proven (166908 vs 222908 without the fix). commit 48863d1.
+Open (deeper, still characterizing): vectorized div/multiply reduction pipeline
+(`a[i]/b[i]` -> ushr.2d + and + uzp1 + scvtf + fmla fmul fdiv) gives value
+collapse (63 vs 729251) not reproducible in minimal isolated hand-asm; next
+step is tracing that specific op mix.
