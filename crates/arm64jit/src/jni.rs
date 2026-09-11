@@ -222,6 +222,9 @@ extern "C" fn jni_new_int_array(
     jni_new_array_raw(len as usize, 4)
 }
 
+/// jint GetArrayLength(JNIEnv*, jarray): object arrays are backed the same way as
+/// primitive arrays (a guest-addressable buffer + byte length), so this shared
+/// accessor works for them too. See note below about byte-length reporting.
 extern "C" fn jni_get_array_length(
     _e: u64, arr: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
@@ -234,6 +237,62 @@ extern "C" fn jni_get_array_length(
         Some(&b) => b as u64,
         None => 0,
     }
+}
+
+/// NewObjectArray(jint length, jclass elementClass, jobject initialElement):
+/// allocate a backing buffer of `length` pointer-sized jobject slots, optionally
+/// seeding each with `init` (usually NULL). Every slot holds an opaque
+/// guest-addressable handle, so an object array is just an 8-byte-element array.
+extern "C" fn jni_new_object_array(
+    _e: u64, len: u64, _elem_class: u64, init: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let addr = jni_new_array_raw(len as usize, 8);
+    if addr != 0 && init != 0 {
+        let n = len as usize;
+        unsafe {
+            for i in 0..n {
+                *((addr as *mut u64).add(i)) = init;
+            }
+        }
+    }
+    addr
+}
+
+/// GetObjectArrayElement(JNIEnv*, jobjectArray array, jsize index) -> jobject:
+/// read the opaque handle stored at `array[index]` (bounds-checked). Returns
+/// NULL on an out-of-range index (JNI semantics) rather than faulting.
+extern "C" fn jni_get_object_array_element(
+    _e: u64, arr: u64, index: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let total = array_len_registry().lock().unwrap().get(&arr).copied().unwrap_or(0);
+    if total == 0 || arr == 0 {
+        return 0;
+    }
+    let idx = index as usize;
+    let elems = total / 8;
+    if idx >= elems {
+        return 0; // out of range -> NULL (JNI getObjectArrayElement returns NULL)
+    }
+    unsafe { *((arr as *const u64).add(idx)) }
+}
+
+/// SetObjectArrayElement(JNIEnv*, jobjectArray array, jsize index, jobject val):
+/// write the opaque handle `val` into `array[index]` (bounds-checked). No-op
+/// (returning void) on an out-of-range index.
+extern "C" fn jni_set_object_array_element(
+    _e: u64, arr: u64, index: u64, val: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let total = array_len_registry().lock().unwrap().get(&arr).copied().unwrap_or(0);
+    if total == 0 || arr == 0 {
+        return 0;
+    }
+    let idx = index as usize;
+    let elems = total / 8;
+    if idx >= elems {
+        return 0;
+    }
+    unsafe { *((arr as *mut u64).add(idx)) = val; }
+    0
 }
 
 /// Get<Primitive>ArrayElements: return the buffer pointer; `*isCopy` = 0 (no copy).
@@ -453,9 +512,9 @@ pub fn build_jni() -> (u64, u64) {
         functions[GET_STRING_UTF_LEN] = reg(jni_get_string_utf_length);
         functions[GET_STRING_UTF_CHARS] = reg(jni_get_string_utf_chars);
         functions[GET_ARRAY_LEN] = reg(jni_get_array_length);
-        functions[NEW_OBJECT_ARRAY] = voidp;
-        functions[GET_OBJ_ARR_ELEM] = voidp;
-        functions[SET_OBJ_ARR_ELEM] = ok;
+        functions[NEW_OBJECT_ARRAY] = reg(jni_new_object_array);
+        functions[GET_OBJ_ARR_ELEM] = reg(jni_get_object_array_element);
+        functions[SET_OBJ_ARR_ELEM] = reg(jni_set_object_array_element);
         // Primitive-array creation + accessors (authoritative NDK offsets). These
         // previously fell to the NULL/voidp default, so Roblox texture/file/GL-buffer
         // jbyteArray/jintArray work returned garbage or crashed.
@@ -667,6 +726,48 @@ mod tests {
     fn jni_entry_point_builds() {
         let (env, vm) = build_jni();
         assert!(env > 0 && vm > 0);
+    }
+
+    /// Object-array accessors: NewObjectArray seeds the backing with `init`,
+    /// Set/GetObjectArrayElement round-trip an opaque jobject handle, and an
+    /// out-of-range index is bounds-checked (get -> NULL, set -> no-op) instead of
+    /// faulting. This was `voidp`/`voidp`/`ok` (returning garbage) before wired.
+    #[test]
+    fn jni_object_array_roundtrip_and_bounds() {
+        use super::jni_new_object_array;
+        // NewObjectArray(len=3, class=NULL, init=someHandle) -> backing buffer.
+        let init: u64 = 0x1234_5678_9abc_def0;
+        let arr = jni_new_object_array(0, 3, 0, init, 0, 0, 0, 0);
+        assert_ne!(arr, 0, "NewObjectArray returned a backing buffer");
+
+        // init seeded every element.
+        let v0 = super::jni_get_object_array_element(0, arr, 0, 0, 0, 0, 0, 0);
+        let v1 = super::jni_get_object_array_element(0, arr, 1, 0, 0, 0, 0, 0);
+        let v2 = super::jni_get_object_array_element(0, arr, 2, 0, 0, 0, 0, 0);
+        assert_eq!(v0, init, "element 0 seeded with initialElement");
+        assert_eq!(v1, init, "element 1 seeded");
+        assert_eq!(v2, init, "element 2 seeded");
+
+        // SetObjectArrayElement(index=1, newHandle) round-trips.
+        let newh: u64 = 0xdead_beef_cafe_1234;
+        super::jni_set_object_array_element(0, arr, 1, newh, 0, 0, 0, 0);
+        assert_eq!(
+            super::jni_get_object_array_element(0, arr, 1, 0, 0, 0, 0, 0),
+            newh,
+            "Set/GetObjectArrayElement round-trip"
+        );
+        // Other elements untouched.
+        assert_eq!(super::jni_get_object_array_element(0, arr, 0, 0, 0, 0, 0, 0), init);
+
+        // Bounds: index 3 (== len) is out of range.
+        assert_eq!(
+            super::jni_get_object_array_element(0, arr, 3, 0, 0, 0, 0, 0),
+            0,
+            "out-of-range get returns NULL"
+        );
+        // Set at a bogus index must not corrupt valid memory.
+        super::jni_set_object_array_element(0, arr, 3, 42, 0, 0, 0, 0);
+        assert_eq!(super::jni_get_object_array_element(0, arr, 2, 0, 0, 0, 0, 0), init);
     }
 
     /// End-to-end: register a native method binding whose guest fnPtr is a
