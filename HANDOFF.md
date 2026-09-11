@@ -2507,3 +2507,37 @@ writes the live vm handle. `jni_vm_getenv` (GetEnv @ slot 7) writes `*penv`.
 2. `libbadcpu` ISA gaps; then services/auth.
 3. Real-binary/GPU boot verification remains blocked (no APK/libroblox.so, no
    GPU) — HARD GATE on a capable host.
+
+## Session (Sep 11, 2026) — JIT correctness: XZR/SP, FP/vector loads, static-ELF loader (commits b0c3237, f1707e2, df470fa)
+
+Unblocked running real compiled aarch64 C through elfjit (loader+dispatcher)
+by making `bind_image_plt` skip static ELFs instead of panicking (b0c3237),
+then used cross-gcc test programs to regression-test actual control flow. This
+EXPOSED (and fixed) two latent correctness bugs the old panic had masked:
+
+1. **XZR vs SP in store source / load dest** (f1707e2). `str xzr,[..]` (used
+   everywhere to zero-init) loaded CpuState.x[31] = the STACK POINTER and
+   stored it — verified A1 returned ~0x7fa14f7eb015 instead of 5. Loads to
+   x31 (`ldr xzr`) also clobbered SP. Added `ldg_src`/`stg_if_writable` and
+   applied at every GPR ld/st site + LdStPair rt/rt2.
+
+2. **FP/vector-register loads/stores touched the GPR file** (df470fa). The GPR
+   ld/st gate `(insn & 0x3b000000)==0x39000000` left bit26 (GPR-vs-FP selector)
+   unmasked: `str d0`/`ldr d0` (0xFD..) read/wrote x[rt] not v[rt], `str s0`
+   (0xBD..) the same, and `str q6`/`ldr q7` (0x3D8/0x3DC) decoded as 1-BYTE GPR
+   loads — the VecLdStImm 128-bit gate was unreachable dead code. Fixed the GPR
+   gate to mask bit26, made q fall through to VecLdStImm, and added a new
+   `FpLdStImm` class handling B/H/S/D scalar loads/stores into/out of
+   CpuState.v[vt] (upper lanes preserved).
+
+Both verified with new tests; arm64jit 69 -> 72, workspace 106/0, build clean.
+
+### Remaining (honest, not blocking the committed work)
+- fp_only (no-loop FP `scale()` call, inlined): after correct FP decode, stops
+  at "pc 0x4004000000000000 outside image" — a control-flow/x30 interaction in
+  the inlined-callee `ret` beneath the bounded dispatcher. No longer
+  segfaults/corrupts (clean diagnostic). Not on the previously-validated Roblox
+  boot ISA, so it doesn't contradict the "boot instruction space covered" claim.
+- int_only (loop w/ backward branch): still hangs — deeper loop/branch issue.
+- These are synthetic-program paths; next session should root-cause the inlined
+  `ret`/dispatcher x30 interaction (high value for FP graphics/audio).
