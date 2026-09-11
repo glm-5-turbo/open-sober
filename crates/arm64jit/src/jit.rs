@@ -845,8 +845,9 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
                 (-libc::ESRCH) as c_long
             }
         }
-        107 => unsafe { libc::timer_create(a[0] as libc::clockid_t, a[1] as *mut libc::sigevent, a[2] as *mut libc::timer_t) as c_long },
-        110 => unsafe { libc::timer_settime(a[0] as libc::timer_t, a[1] as c_int, a[2] as *const libc::itimerspec, a[3] as *mut libc::itimerspec) as c_long },
+        107 => crate::jit::guest_timer_create(a[0], a[1], a[2]),
+        110 => crate::jit::guest_timer_settime(a[0], a[1], a[2], a[3]),
+        109 => crate::jit::guest_timer_delete(a[0]),
         // --- common Android boot-path gaps (ARGID asm-generic table) ---
         115 => unsafe { // clock_nanosleep(115): clockid, flags, req, rem
             libc::syscall(libc::SYS_clock_nanosleep, a[0] as usize, a[1] as c_int, a[2] as usize, a[3] as usize) as c_long
@@ -1118,6 +1119,156 @@ fn post_signal_to_thread(sig: u32, tid_arg: i64) -> bool {
         }
     }
     false
+}
+
+/// A guest POSIX interval timer. `timer_create` (107) / `timer_settime` (110) /
+/// `timer_delete` (109) are routed here instead of the host POSIX timers: a
+/// host `timer_settime` expiry raises a *host* signal that never reaches the
+/// guest's `SIG_ACTIONS` handler table. Instead we run one host worker thread
+/// per armed guest timer that sleeps the interval then POSTS the expiry signal
+/// into the owning guest thread's blocked-aware pending_mask (`post_signal_to_
+/// thread`). The owner's dispatcher loop drains it and runs its registered
+/// handler — real timer→guest-signal dispatch using the cycle-40/41 model.
+struct GuestTimer {
+    /// Host tid of the guest thread that created the timer (the signal target).
+    owner_host_tid: i32,
+    /// Signal to raise on expiry (aarch64 sigevent.sigev_signo; default SIGALRM).
+    signo: u32,
+    /// Stop flag shared with the worker thread; a clone is moved into the
+    /// worker so it stays valid even after the slot is freed by timer_delete.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Guest timer table (index = the timer_t handle the guest holds +1, since
+/// POSIX timer_t is an opaque non-null pointer).
+static GUEST_TIMERS: Mutex<Vec<Option<GuestTimer>>> = Mutex::new(Vec::new());
+/// Next free guest timer id (the value handed back as the timer_t).
+static NEXT_TIMER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// `timer_create(107)`: clockid, sigevent*, timer_t*. Returns 0 and writes a
+/// non-null guest timer_t (id+1) into `*timerid`. Reads the aarch64 sigevent
+/// `sigev_signo` (offset 8) so the guest can pick the signal; default SIGALRM.
+fn guest_timer_create(clockid: u64, sevp: u64, timerid: u64) -> i64 {
+    if timerid == 0 {
+        return (-libc::EINVAL) as i64;
+    }
+    // Default signal SIGALRM(14), unless the guest supplied a sigevent with a
+    // SIGEV_SIGNAL notify and an explicit sigev_signo.
+    let mut signo = libc::SIGALRM as u32;
+    if sevp != 0 {
+        // aarch64 struct sigevent: sigev_value @0 (8), sigev_signo @8 (4),
+        // sigev_notify @12 (4), sigev_notify_thread_id @16.
+        let notify = unsafe { std::ptr::read_unaligned((sevp + 12) as *const i32) };
+        if notify == libc::SIGEV_SIGNAL as i32 {
+            signo = unsafe { std::ptr::read_unaligned((sevp + 8) as *const u32) };
+        }
+    }
+    let _ = clockid;
+    let id = NEXT_TIMER_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let owner = unsafe { libc::gettid() };
+    let mut table = GUEST_TIMERS.lock().unwrap();
+    // Always append so table index == id-1 exactly (handles are stable tokens).
+    table.push(Some(GuestTimer {
+        owner_host_tid: owner,
+        signo,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }));
+    drop(table);
+    // SAFETY: guest passed a writable timer_t*.
+    unsafe { std::ptr::write_unaligned(timerid as *mut u64, id) };
+    0
+}
+
+/// Read an aarch64 `struct itimerspec` (two timespecs, 16 bytes) from guest
+/// memory. Returns (value_ns, interval_ns).
+unsafe fn read_itimerspec(p: u64) -> (i64, i64) {
+    let tv = unsafe { std::ptr::read_unaligned(p as *const u64) };
+    let tn = unsafe { std::ptr::read_unaligned((p + 8) as *const i64) };
+    let iv = unsafe { std::ptr::read_unaligned((p + 16) as *const u64) };
+    let ine = unsafe { std::ptr::read_unaligned((p + 24) as *const i64) };
+    let tv_ns = tv * 1_000_000_000 + tn as u64;
+    let iv_ns = iv * 1_000_000_000 + ine as u64;
+    (tv_ns as i64, iv_ns as i64)
+}
+
+/// `timer_settime(110)`: timer_t, flags, new_value*, old_value*. Arms a host
+/// worker thread that sleeps `it_value` then posts the timer's signal to the
+/// owning guest thread (blocked-aware pending); if `it_interval` > 0 it re-arms
+/// periodically. Returns 0. Disarming (it_value == 0) stops the worker.
+fn guest_timer_settime(timerid: u64, flags: u64, new_value: u64, old_value: u64) -> i64 {
+    let id = timerid;
+    if id == 0 {
+        return (-libc::EINVAL) as i64;
+    }
+    // Copy the old value out before re-arming.
+    if old_value != 0 {
+        unsafe { std::ptr::write_bytes(old_value as *mut u8, 0, 16) };
+    }
+    if new_value == 0 {
+        // NULL new_value: query only.
+        return 0;
+    }
+    let (value_ns, interval_ns) = unsafe { read_itimerspec(new_value) };
+    let table = GUEST_TIMERS.lock().unwrap();
+    let slot_ptr = match table.get((id as usize).saturating_sub(1)) {
+        Some(Some(t)) => t as *const GuestTimer as *mut GuestTimer,
+        _ => return (-libc::EINVAL) as i64, // unknown timer_t
+    };
+    // SAFETY: we hold the GUEST_TIMERS mutex, so no other thread mutates this
+    // timer while we do. Stop any prior worker (its Arc clone keeps it valid),
+    // then install a FRESH stop flag for the new worker so the prior
+    // cancellation doesn't immediately stop the one we're about to arm.
+    let slot = unsafe { &mut *slot_ptr };
+    slot.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let owner = slot.owner_host_tid;
+    let signo = slot.signo;
+    let fresh = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    slot.stop = std::sync::Arc::clone(&fresh);
+    let stop = fresh;
+    drop(table);
+    let _ = flags;
+    if value_ns <= 0 {
+        return 0; // disarmed (value == 0); the prior worker saw stop=true
+    }
+    // Spawn a worker that posts `signo` to `owner` on each interval. It owns an
+    // Arc clone of the stop flag, so it stays valid even after timer_delete.
+    std::thread::spawn(move || {
+        let mut delay = value_ns;
+        loop {
+            // Sleep `delay` ns.
+            if delay > 0 {
+                let secs = (delay / 1_000_000_000) as u64;
+                let nsecs = (delay % 1_000_000_000) as u64;
+                std::thread::sleep(std::time::Duration::new(secs, nsecs as u32));
+            }
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            // Post the expiry signal into the owner's blocked-aware pending model.
+            crate::jit::post_signal_to_thread(signo, owner as i64);
+            if interval_ns <= 0 {
+                break; // one-shot
+            }
+            delay = interval_ns;
+        }
+    });
+    0
+}
+
+/// `timer_delete(109)`: timer_t. Stops the worker and frees the slot.
+fn guest_timer_delete(timerid: u64) -> i64 {
+    let id = timerid;
+    let table = GUEST_TIMERS.lock().unwrap();
+    if let Some(Some(t)) = table.get((id as usize).saturating_sub(1)) {
+        t.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    drop(table);
+    // Mark the slot freed (the worker's Arc still holds the flag until it exits).
+    let mut table = GUEST_TIMERS.lock().unwrap();
+    if let Some(slot) = table.get_mut((id as usize).saturating_sub(1)) {
+        *slot = None;
+    }
+    0
 }
 
 /// Spawn a guest child thread on a real host thread (clone(220)/clone3(435)'s

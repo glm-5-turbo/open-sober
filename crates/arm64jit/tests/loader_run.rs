@@ -1608,3 +1608,108 @@ int entry(void){
     eprintln!("\x1b[32mPASS\x1b[0m sig-procmask: blocked SIGUSR1 went pending and was delivered on unblock");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// Real POSIX interval-timer -> guest-signal dispatch: a guest installs a
+/// SIGALRM handler, creates a timer (timer_create), arms it for a few ms
+/// (timer_settime), then spins (yielding each pass) until the handler runs.
+/// A host worker thread sleeps the interval and POSTS SIGALRM into the guest's
+/// blocked-aware pending model; the dispatcher loop drains it and runs the
+/// handler. Before this slice timers forwarded to host POSIX timers whose
+/// expiry signal was delivered to the HOST process, never the guest handler.
+#[test]
+fn loader_run_timer_signal_delivers_sigalm_to_handler() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_timer_signal: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("sig-timer");
+
+    let src = r#"
+struct ksa {
+    unsigned long handler;   // 0
+    unsigned long flags;     // 8
+    unsigned long restorer;  // 16
+    unsigned char mask[8];   // 24
+};
+volatile long g_hit = 0;
+volatile long g_sig = 0;
+volatile long g_ticks = 0;
+volatile long g_tid = 0;
+void on_alrm(int sig){ g_hit = 1; g_sig = sig; g_ticks++; }
+static long my_rt_sigaction(long sig, long act, long oact) {
+    register long x8 asm("x8") = 134;
+    register long x0 asm("x0") = sig;
+    register long x1 asm("x1") = act;
+    register long x2 asm("x2") = oact;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_timer_create(long sevp, long tid) {
+    register long x8 asm("x8") = 107;
+    register long x0 asm("x0") = 1;   // CLOCK_MONOTONIC
+    register long x1 asm("x1") = sevp;
+    register long x2 asm("x2") = tid;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_timer_settime(long tid, long newv) {
+    register long x8 asm("x8") = 110;
+    register long x0 asm("x0") = tid;
+    register long x1 asm("x1") = 0;   // flags=0
+    register long x2 asm("x2") = newv;
+    register long x3 asm("x3") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
+static long my_nanosleep(long req) {
+    register long x8 asm("x8") = 101;
+    register long x0 asm("x0") = req;
+    register long x1 asm("x1") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    return x0;
+}
+int entry(void){
+    struct ksa sa = {0};
+    sa.handler = (unsigned long)on_alrm;
+    long r = my_rt_sigaction(14, (long)&sa, 0);   // SIGALRM -> handler
+    if (r != 0) return 1000;
+
+    r = my_timer_create(0, (long)&g_tid);          // default sigevent -> SIGALRM
+    if (r != 0 || g_tid == 0) return 2000;
+
+    // itimerspec { it_value = { .1s, 0 }, it_interval = { .1s, 0 } } (periodic).
+    unsigned long long its[2];
+    its[0] = 0;              // it_value.tv_sec
+    its[1] = 100000000;      // it_value.tv_nsec = 100ms
+    its[2] = 0;              // it_interval.tv_sec
+    its[3] = 100000000;      // it_interval.tv_nsec = 100ms
+    r = my_timer_settime(g_tid, (long)its);
+    if (r != 0) return 3000;
+
+    // Spin up to ~2s, yielding so the dispatcher drains pending signals; the
+    // timer worker posts SIGALRM to us which the handler turns into ticks.
+    struct { long sec; long nsec; } ts;
+    ts.sec = 0; ts.nsec = 1000000;   // 1ms yield
+    long guard = 0;
+    while (g_ticks < 2 && guard < 20000) { guard++; my_nanosleep((long)&ts); }
+    if (g_ticks < 2) return 4000;     // handler never ticked -> timer not dispatched
+    if (g_sig != 14) return 5000;     // wrong signal
+    return 42;
+}
+"#;
+    let elf = compile(&wd, "sig-timer", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "sig-timer: entry() -> {v}, expected 42 (timer signal never reached the guest handler?)"
+        ),
+        Err(e) => panic!("sig-timer: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m sig-timer: periodic timer delivered SIGALRM to the guest handler");
+    let _ = std::fs::remove_dir_all(&wd);
+}
