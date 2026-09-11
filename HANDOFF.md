@@ -5189,3 +5189,39 @@ initial-exec (TPREL64), TLSDESC (1031), and general-dynamic
 ledger is now closed. `cargo build --workspace` clean; `cargo test --workspace`
 **320/0**. Next per RECOMMENDATION: more JNI fake-object backing, libbadcpu
 ISA, services/auth. HARD GATE unchanged (no GPU/APK here).
+
+---
+
+## Session (cycle 34, Sep 11, 2026) — RESOLVED the last documented open arm64jit bug (323/0)
+
+Closed the long-open cycle-33 residual (fuzz seed 9000_58, `gen_fp_edge`):
+full-program JIT 2474795 vs both oracles 2039651 (+435144 = exactly a[5]*1e6).
+This was the only remaining documented arm64jit correctness gap on this box.
+
+**Root cause — a decode collision, NOT the hypothesized host-register clobber.**
+gcc -O3 schedules a scalar `fcsel Dd,Dn,Dm,<cond>` into the d-reg min/max chain
+whose rm/cond fields give it a top-16 (`0x1e65`) that ALSO matches the
+fcvt-to-int decode gate (`fcvtau`/`fcvtas`, mode 2). e.g. `fcsel d26,d28,d5,mi`
+= `0x1e654f9a` decoded as `Inst::FcvtToInt` — which writes integer X{rd}, NOT
+vector D{rd} — so the min-accumulator (d26) never updated and kept its stale
+`a[i]*1e6` double; the final total carried that element. This explains the two
+confusing facts: it only reproduced from the full program (register-reuse gave
+the exact badly-encoded fcsel), and JIT_BUDGET=1/JIT_STEP did NOT mask it
+(per-instruction decode, not a within-block scratch collision).
+
+**Fix (decode.rs, one discriminator):** the FcvtToInt gate now requires
+`bits[11:10]==00` in addition to the existing bit12-clear guard. Every real
+fcvt-to-int clears bits[11:10] (verified fcvtau 0x1e650062 = 00); fcsel needs
+0b11 (cond lives in bits[15:12]). With the guard, `0x1e654f9a` falls through
+to `Inst::FcsSel` and d26 updates correctly. Regression-guarded:
+- decode unit: fcsel 0x1e654f9a/0x1e65ef9a -> FcsSel, fcvtau 0x1e650062 ->
+  still FcvtToInt (added to fp_2d_op_decode_collisions_with_int_add_bsl_and_fcvt).
+- e2e canary `diff_fp_edge_fcsel_swallowed_as_fcvt` (full program, jit==oracle
+  ==2039651). Sensitivity-proven: reverting only the `0x0c00` guard re-fails
+  the canary with the EXACT original jit 2474795 vs oracle 2039651.
+- `fuzz_repros/README.md` updated: fp_edge_9000_58/21 now RESOLVED.
+
+`cargo build --workspace` clean; `cargo test --workspace` **323/0** (was 322).
+HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none
+on this VPS). Next per RECOMMENDATION order: JNI fake-object backing, libbadcpu
+ISA, services/auth.

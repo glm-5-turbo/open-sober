@@ -3123,7 +3123,15 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             // silently loaded 0 into the destination. Verified: fcvtzu w0,d1 =
             // 0x1e790020, fcvtas w0,d1 = 0x1e640020, fcvtau w2,d3 = 0x1e650062,
             // all bit12 CLR; fmov d23,#12.0 = 0x1e651017, bit12 SET.
-            if (insn & 0x1000) == 0 {
+            // ALSO require bits[11:10]==00: fcsel (0x1e20_0c00 residue, cond in
+            // bits[15:12], rm in bits[16:20]) shares a top-16 with fcvtau
+            // (d-ops 0x1e64/0x1e65) when its rm/cond bits happen to land there,
+            // and fcsel MUST NOT be swallowed as an fcvt-to-int (it writes the
+            // vector slot d{rd}, fcvt writes integer x{rd}; e.g. fcsel
+            // d26,d28,d5,mi = 0x1e654f9a has top-16 0x1e65 -> decodes as
+            // fcvtau, silently corrupting the min-accumulator). Every real
+            // fcvt-to-int keeps bits[11:10]==00; fcsel needs 0b11.
+            if (insn & 0x1000) == 0 && (insn & 0x0c00) == 0 {
             let fam = insn & 0xffff_0000;
             let mode = match fam {
                 0x9e28_0000 | 0x9e29_0000 | 0x9e68_0000 | 0x9e69_0000
@@ -5799,6 +5807,27 @@ mod logical_imm_regressions {
         match decode(0x1e790020) {
             Inst::FcvtToInt { unsigned: true, .. } => {} // fcvtzu w0,d1
             other => panic!("fcvtzu w0,d1 -> {other:?}"),
+        }
+        // Session (cycle 33, fp_edge_9000_58): a scalar `fcsel Dd,Dn,Dm,<cond>`
+        // whose rm/cond fields happen to give it a top-16 that the fcvt-to-int
+        // gate also matches (0x1e64/0x1e65 = fcvtau/fcvtas) was being swallowed
+        // as an FcvtToInt, which writes integer x{rd} instead of vector d{rd} —
+        // so the min-accumulator register never updated and the final answer
+        // carried a stale a[i]*1e6 double. The fcvt gate now also requires
+        // bits[11:10]==00 (every real fcvt-to-int clears them; fcsel needs
+        // 0b11). Real gcc: `fcsel d26,d28,d5,mi` = 0x1e654f9a (cond=mi=4).
+        match decode(0x1e654f9a) {
+            Inst::FcsSel { rd: 26, rn: 28, rm: 5, cond: 4, sz: true } => {}
+            other => panic!("fcsel d26,d28,d5,mi -> {other:?}"),
+        }
+        match decode(0x1e65ef9a) {
+            Inst::FcsSel { rd: 26, rn: 28, rm: 5, cond: 14, sz: true } => {} // al
+            other => panic!("fcsel d26,d28,d5,al -> {other:?}"),
+        }
+        // fcvtau (real fcvt-to-int, bits[11:10]==00) must STILL decode as fcvt:
+        match decode(0x1e650062) {
+            Inst::FcvtToInt { mode: 2, unsigned: true, .. } => {} // fcvtau w2,d3
+            other => panic!("fcvtau w2,d3 -> {other:?}"),
         }
     }
 

@@ -1,24 +1,30 @@
 # Fuzz repro artifacts
 
-## fp_edge_9000_58.c / fp_edge_9000_21.c — OPEN residual bug
-Found by `gen_fp_edge` (FP-edge differential generator, added this session).
-Both oracles (native x86 gcc AND qemu-aarch64) agree: result 2039651.
-JIT returns 2474795 (diff = +435144 = exactly a[5]*1e6).
+## fp_edge_9000_58.c / fp_edge_9000_21.c — RESOLVED (fcsel swallowed as fcvt)
+Found by `gen_fp_edge` (FP-edge differential generator). Both oracles
+(native x86 gcc AND qemu-aarch64) agree: result 2039651. JIT returned
+2474795 (diff = +435144 = exactly a[5]*1e6).
 
-Diagnosis chain (all isolated and CLEAN individually):
-- scalar fcvtzs (+/-inf, NaN): JIT==native x86 (INT64_MIN for inf/NaN); qemu
-  differs (ARM: +inf->INT64_MAX, NaN->0) but that is NOT this bug (native oracle
-  agrees with JIT, so the fuzzer can't see it; a genuine ARM-vs-x86 FP->int
-  saturation difference in FcvtTzReg/FcvVec which ARM semantics require fixing).
-- mn/mx (fcsel select, NaN operand): INT64_MIN in JIT, matches native.
-- back = (long long)((double)ivals): correct 2039600 when isolated.
-- The full program is the ONLY trigger: gcc jointly schedules the SIMD
-  `fcvtzs v.2d` (in-place, 8 int lanes -> addp sum) INTERLEAVED with the scalar
-  fcsel d-reg min/max and the cmgt+bsl clamps, sharing dN/vN vector slots.
-  Under that exact allocation the JIT's host register file clobbers one value,
-  producing the +435144 drift. Only reproducible from this exact .c (removing
-  ANY of lo/hi, mn/mx, back, or ivals&0xff makes it pass), i.e. a block-compiler
-  register-scheduling bug. Need a single-instruction host-emission diff (JIT_STEP
-  is block-granular) to nail which translate arm's scratch collides.
+ROOT CAUSE (NOT a register-clobber as first hypothesized): a **decode
+collision**. gcc -O3 schedules a scalar `fcsel Dd,Dn,Dm,<cond>` into the
+d-reg min/max chain whose rm/cond fields give it a top-16 (`0x1e65`) that
+also matches the fcvt-to-int decode gate (`fcvtau`/`fcvtas`). e.g.
+`fcsel d26,d28,d5,mi` = `0x1e654f9a` decoded as an `FcvtToInt`, which
+writes integer X{rd} instead of vector D{rd}. So the min-accumulator
+register (d26) was never updated and kept its stale `a[i]*1e6` double;
+the final total carried that element (+435144).
+
+FIX (decode.rs): the FcvtToInt gate now also requires `bits[11:10]==00`.
+Every real fcvt-to-int clears bits[11:10] (!!verified: fcvtau 0x1e650062
+has them 00); fcsel requires 0b11 (its cond lives in bits[15:12]). With
+the guard, `0x1e654f9a` falls through to Inst::FcsSel and d26 updates
+correctly. Sensitivity-proven: reverting only the `0x0c00` guard re-fails
+the canary with the exact original jit 2474795 vs oracle 2039651.
+
+Landed:
+- decode regression in fp_2d_op_decode_collisions_with_int_add_bsl_and_fcvt
+  (fcsel 0x1e654f9a/0x1e65ef9a -> FcsSel; fcvtau 0x1e650062 still fcvt).
+- e2e canary diff_fp_edge_fcsel_swallowed_as_fcvt (fcsel_vs_fcvt).
 Run: cargo build -p arm64jit --example elfjit; elfjit <(compile this at -O3
 -aarch64 -static -nostdlib -Wl,-e,entry) <entry> ; diff vs native+gcc / qemu.
+Now jit == oracle == 2039651.
