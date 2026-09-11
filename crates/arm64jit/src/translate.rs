@@ -273,15 +273,31 @@ pub fn translate(
 ) -> Result<(), String> {
     match inst {
         Inst::MoveWide {
-            rd, imm16, hw, opc, ..
+            rd, imm16, hw, opc, sf,
         } => {
             let val = (imm16 as u64) << ((hw as u64) * 16);
-            // opc: 0=movz,1=movk,2=movn. movz/movk write imm (movk merges later,
-            // treated as movz for the first pass).
-            if opc == 2 {
-                mov_guest_imm(buf, rd as u32, !val);
-            } else {
-                mov_guest_imm(buf, rd as u32, val);
+            match opc {
+                2 => mov_guest_imm(buf, rd as u32, !val), // movn
+                1 => {
+                    // movk: read-modify-write — OR `imm16<<shift` into bits
+                    // [shift, shift+16), preserving all other bits. Multi-part
+                    // 64-bit constant build is `movz xD,#lo ; movk xD,#hi,lsl#16
+                    // (or lsl#32/48)`; treating movk as a full replace corrupted
+                    // the constant (e.g. 0x28bb1 built as movz 0x8bb1 then movk
+                    // 0x2 lsl#16 came out 0x20000, breaking comparisons).
+                    let shift = (hw as u32) * 16;
+                    let mut clear = !(0xffffu64 << shift);
+                    if !sf {
+                        clear &= 0xffff_ffff; // W-dest zero-extends to 64 bits
+                    }
+                    ldg(buf, RAX, rd as u32);
+                    buf.mov_ri64(RCX, clear);
+                    buf.and_rr64(RAX, RCX);
+                    buf.mov_ri64(RCX, (imm16 as u64) << shift);
+                    buf.or_rr64(RAX, RCX);
+                    stg(buf, rd as u32, RAX);
+                }
+                _ => mov_guest_imm(buf, rd as u32, val), // movz
             }
             Ok(())
         }
@@ -494,11 +510,17 @@ pub fn translate(
                             ldg(buf, RAX, rn as u32);
                             ldg(buf, RCX, rm as u32);
                             buf.imul_rr64(RAX, RCX); // RAX = Rn*rm (low 64)
-                            ldg(buf, RDI, ra as u32);
-                            if signed {
-                                buf.sub_rr64(RAX, RDI); // Rn*rm - ra
-                            } else {
-                                buf.add_rr64(RAX, RDI); // Rn*rm + ra
+                            if ra != 31 {
+                                // ra is a real register: += / -= it. For `mul`,
+                                // ra==31 means XZR (accumulate 0), NOT SP — ldg
+                                // would read the stack pointer and corrupt the
+                                // product with it.
+                                ldg(buf, RDI, ra as u32);
+                                if signed {
+                                    buf.sub_rr64(RAX, RDI); // Rn*rm - ra
+                                } else {
+                                    buf.add_rr64(RAX, RDI); // Rn*rm + ra
+                                }
                             }
                         }
                         if !sf {
@@ -685,12 +707,38 @@ pub fn translate(
             imm,
             size,
             ld,
+            sext,
         } => {
             // address = rn + imm*size (scaled byte offset)
             ldg(buf, RDX, rn as u32); // pointer operand into RDX
             let off = (imm as i32).checked_mul(size as i32).unwrap_or(0);
             if off != 0 {
                 buf.lea64(RDX, RDX, off);
+            }
+            if ld && sext {
+                // Sign-extending load (ldrsw/ldrsh/ldrsb): load `size` bytes and
+                // sign-extend into the full 64-bit X dest (bit23+bit22==0 form).
+                match size {
+                    4 => {
+                        buf.mov_load32(RAX, RDX, 0);
+                        buf.movsxd_r64_r32(RAX, RAX);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    2 => {
+                        buf.movzx_word_mem(RAX, RDX, 0);
+                        buf.shl_ri8(RAX, 48);
+                        buf.sar_ri8(RAX, 48); // 16->64 sign-extend
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    1 => {
+                        buf.movzx_byte_mem(RAX, RDX, 0);
+                        buf.shl_ri8(RAX, 56);
+                        buf.sar_ri8(RAX, 56); // 8->64 sign-extend
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    s => return Err(format!("LdStrImm sign-extend size {} not implemented", s)),
+                }
+                return Ok(());
             }
             match (size, ld) {
                 (8, true) => {

@@ -102,6 +102,10 @@ pub enum Inst {
         imm: u32, // scaled byte offset = value * size
         size: u8, // 1=byte,2=half,4=word,8=dword
         ld: bool, // load=true, store=false
+        // Sign-extending load (ldrsw/ldrsh/ldrsb): bit23=1 + bit22=0, which the
+        // naive `ld=bit22` read as a store. When set, this is a LOAD that
+        // sign-extends the loaded size into the 64-bit dest X-register.
+        sext: bool,
     },
     // ---- load/store (register offset) ----
     LdStrReg {
@@ -845,14 +849,16 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 
-    // ---- add/subtract (shifted register) ----
-    // top byte: 0x0b/0x2b(add) 0x4b/0x6b(sub) x32-sfx; 0x8b/0xab 0xcb/0xeb x64
-    //   (the 1x/3x/5x/7x... bit29 = S flag: 0x2b=ADDS32,0xab=ADDS64,0x6b=SUBS32,0xeb=SUBS64)
+    // ---- add/subtract (shifted register) ----  REAL tops only.
+    // 0x0b/0x2b(add W, ±S) 0x4b/0x6b(sub W) 0x8b/0xab(add X) 0xcb/0xeb(sub X).
+    // NOTE: 0x1b/0x9b are MADD/MSUB/MUL (0x9b007c20 = `mul x0,x1,x0`) and 0x3b/
+    // 0xbb are multiply-family too — they must NOT be caught here or every
+    // multiply decodes as a spurious `add ...,lsl #N` (verified: madd came out
+    // AddSubReg lsl#31). They fall through to the MulDiv gate below.
     if matches!(
         top,
-        0x0b | 0x1b | 0x2b | 0x3b | 0x4b | 0x6b | 0x8b | 0x9b | 0xab | 0xbb | 0xcb | 0xeb
+        0x0b | 0x2b | 0x4b | 0x6b | 0x8b | 0xab | 0xcb | 0xeb
     ) {
-        // 0x1b/0x3b/0x9b/0xbb are the S-set with shift_amount N? keep set broad; refine below.
         let n = b(insn, 21, 21);
         let sub = b(insn, 30, 30) == 1;
         let s = b(insn, 29, 29) == 1;
@@ -1070,6 +1076,11 @@ pub fn decode(insn: u32) -> Inst {
             _ => 8,
         };
         let ld = (insn >> 22) & 1 == 1;
+        // Sign-extending load (ldrsw/ldrsh/ldrsb) differs from a store by bit23;
+        // the load/store classifier is `ld=bit22`, but ldrsw has bit22=0 yet IS a
+        // load. Detect the sign-extend form and treat it as a load into X-reg.
+        let sext = !ld && (insn & 0x80_0000) != 0;
+        let ld = ld || sext;
         let imm = (insn >> 10) & 0xfff;
         let rn = b(insn, 5, 9) as u8;
         let rt = b(insn, 0, 4) as u8;
@@ -1079,6 +1090,7 @@ pub fn decode(insn: u32) -> Inst {
             imm,
             size,
             ld,
+            sext,
         };
     }
 
@@ -2949,12 +2961,14 @@ mod tests {
                 imm,
                 size,
                 ld,
+                sext,
             } => {
                 assert_eq!(rt, 0);
                 assert_eq!(rn, 0);
                 assert_eq!(imm, 2);
                 assert_eq!(size, 8);
                 assert!(ld);
+                assert!(!sext);
             }
             other => panic!("expected LdStrImm, got {:?}", other),
         }
@@ -2969,14 +2983,52 @@ mod tests {
                 imm,
                 size,
                 ld,
+                sext,
             } => {
                 assert_eq!(rt, 1);
                 assert_eq!(rn, 0);
                 assert_eq!(imm, 3);
                 assert_eq!(size, 8);
                 assert!(!ld);
+                assert!(!sext);
             }
             other => panic!("expected LdStrImm, got {:?}", other),
+        }
+    }
+    #[test]
+    fn ldrsw_sign_extend_load_ground_truth() {
+        // Regression: `ldrsw x0,[sp,#20]` is a SIGN-EXTEND LOAD, not a store. It
+        // encodes bit22=0 (like STR) but bit23=1; mis-decoding it as a store
+        // corrupted memory in int/factorial loops. Encodings from
+        // aarch64-linux-gnu-as (rn=x1, rt=x0):
+        //   ldrsw x0,[x1,#20]=0xb9801420 ; ldrsh x0,[x1,#20]=0x79802820
+        //   ldrsb x0,[x1,#20]=0x39805020 ; str w0,[x1,#20]=0xb9001420
+        match decode(0xb9801420) {
+            Inst::LdStrImm {
+                rt, rn, imm, size, ld, sext,
+            } => {
+                assert_eq!((rt, rn, imm, size, ld, sext), (0, 1, 5, 4, true, true));
+            }
+            other => panic!("ldrsw -> sext LdStrImm, got {other:?}"),
+        }
+        match decode(0x79802820) {
+            Inst::LdStrImm { size, ld, sext, .. } => {
+                assert_eq!((size, ld, sext), (2, true, true));
+            }
+            other => panic!("ldrsh -> sext LdStrImm, got {other:?}"),
+        }
+        match decode(0x39805020) {
+            Inst::LdStrImm { size, ld, sext, .. } => {
+                assert_eq!((size, ld, sext), (1, true, true));
+            }
+            other => panic!("ldrsb -> sext LdStrImm, got {other:?}"),
+        }
+        // A genuine STR is NOT a sign-extend load.
+        match decode(0xb9001420) {
+            Inst::LdStrImm { ld, sext, .. } => {
+                assert!(!ld && !sext);
+            }
+            other => panic!("str w -> plain store, got {other:?}"),
         }
     }
     #[test]
