@@ -429,6 +429,10 @@ pub enum Inst {
     SimdFmovImm { rd: u8, esize: u8, value_bits: u64, q: bool },
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T ----
     FcvVec { rd: u8, rn: u8, signed: bool, esize: u8, q: bool },
+    // ---- SIMD integer unary: neg/abs Vd.T, Vn.T (two-reg misc, opcode 0xb) ----
+    // op 0=neg (Vd = -Vn, signed per-lane), 1=abs (Vd = |Vn| signed). esize in
+    // {1,2,4,8} bytes (B/H/S/D), q selects 8B/16B, 4H/8H, 2S/4S, 1D/2D.
+    SimdArithUnary { rd: u8, rn: u8, esize: u8, q: bool, op: u8 },
     // ---- SIMD float widen/narrow: fcvtl/Vd.2D (f32->f64) & fcvtn/Vd.2S
     // (f64->f32), 2 lanes. fcvtl reads Vn low (upper=false) or high half
     // (upper=true); fcvtn writes Vd low (upper=false) or high half
@@ -1169,7 +1173,13 @@ pub fn decode(insn: u32) -> Inst {
             return Inst::SimdPairAddD { rd, rn, unsigned };
         }
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T (FPI(FPc))----
-    if matches!(insn & 0xffe0_fc00, 0x0ea0_b800 | 0x2ea0_b800 | 0x4ea0_b800 | 0x4ee0_b800 | 0x6ea0_b800 | 0x6ee0_b800) {
+    // bit16 MUST be SET: the mask 0xffe0_fc00 clears bits[20:16], and the
+    // integer two-reg-misc NEG/ABS (opcode 0xb at bits[16:12], bit16 CLEAR)
+    // share the residue here. Requiring bit16=1 keeps fcvtzs/fcvtzu (all six
+    // sizes have bit16 set, objdump-verified) while excluding neg/abs.
+    if matches!(insn & 0xffe0_fc00, 0x0ea0_b800 | 0x2ea0_b800 | 0x4ea0_b800 | 0x4ee0_b800 | 0x6ea0_b800 | 0x6ee0_b800)
+        && (insn & 0x0001_0000) != 0
+    {
         // esize discriminator is bit22: .2d (imm-64) has it set, .4s/.2s clear —
         // e.g. fcvtzs v0.2d=0x4ee1b820 vs fcvtzs v0.4s=0x4ea1b820 differ by
         // 0x400000 (bit22). (bit20 does NOT distinguish: both 0x4ee1b820 and
@@ -1181,6 +1191,30 @@ pub fn decode(insn: u32) -> Inst {
         let signed = (insn >> 29) & 1 == 0;
         let q = (insn >> 30) & 1 == 1;
         return Inst::FcvVec { rd, rn, signed, esize: e, q };
+    }
+    // ---- SIMD integer unary neg/abs: NEG Vd.T,Vn.T = -Vn, ABS = |Vn| ----
+    // Two-register-misc, opcode bits[16:12]==0xb (b safely separates from the
+    // fcvtzs/fcvtzu family above — bit16 CLEAR here vs the fcvtzs bit16 SET —
+    // and from cmeq/cmgt/cmlt#0 [0x8/0x9/0xa] and sqabs/sqneg [0x7]). neg=U
+    // (bit29 set → 0x2e/0x6e), abs=bit29 clear (0x0e/0x4e). size=(insn>>22)&3
+    // maps S-arrangement {0→B(1),1→S(4),2→H(2),3→D(8)}. Q=bit30.
+    if matches!((insn >> 24) & 0x3f, 0x0e | 0x2e | 0x4e | 0x6e)
+        && ((insn >> 12) & 0x1f) == 0xb
+    {
+        let sz = (insn >> 22) & 3;
+        let esize = match sz {
+            0 => 1, // .b
+            1 => 2, // .h
+            2 => 4, // .s
+            _ => 8, // .d
+        };
+        return Inst::SimdArithUnary {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            esize,
+            q: (insn >> 30) & 1 == 1,
+            op: if (insn >> 29) & 1 == 1 { 0 } else { 1 }, // neg : abs
+        };
     }
     // ---- SIMD float widen/narrow: fcvtl Vd.2D,Vn.2S (f32->f64) & fcvtn
     // Vd.2S,Vn.2D (f64->f32). Asm+objdump verified: fcvtl 0x0e617820 /
@@ -4866,6 +4900,63 @@ mod tests {
                 assert_eq!((rd, signed), (0, false)); // fcvtzu -> unsigned
             }
             other => panic!("fcvtzu d0,d7 -> FcvVec unsigned, got {other:?}"),
+        }
+    }
+    #[test]
+    fn vector_neg_abs_decode_not_fcvt_family() {
+        // Regression: integer vector NEG/ABS (two-reg misc, opcode 0xb, bit16
+        // CLEAR) must NOT be swallowed by the vector float->int FcvVec gate,
+        // whose mask 0xffe0_fc00 zeroes bit16 and so matched `neg v29.2s` too —
+        // decoding NEG as fcvtzu silently zeroed/corrupted lanes.
+        //   neg v29.2s, v31.2s = 0x2ea0bbfd (the runtime repro)
+        match decode(0x2ea0bbfd) {
+            Inst::SimdArithUnary { rd, rn, esize, q, op } => {
+                assert_eq!((rd, rn, esize, q, op), (29, 31, 4, false, 0));
+            }
+            other => panic!("neg v29.2s,v31.2s -> SimdArithUnary{{op:0}}, got {other:?}"),
+        }
+        // abs v2.2s, v1.2s
+        match decode(0x0ea0b822) {
+            Inst::SimdArithUnary { rd, rn, esize, q, op } => {
+                assert_eq!((rd, rn, esize, q, op), (2, 1, 4, false, 1));
+            }
+            other => panic!("abs v2.2s,v1.2s -> SimdArithUnary{{op:1}}, got {other:?}"),
+        }
+        // neg v0.2d, v1.2d (D width, Q=1)
+        match decode(0x6ee0b820) {
+            Inst::SimdArithUnary { rd, rn, esize, q, op } => {
+                assert_eq!((rd, rn, esize, q, op), (0, 1, 8, true, 0));
+            }
+            other => panic!("neg v0.2d,v1.2d -> SimdArithUnary esize8, got {other:?}"),
+        }
+        // neg v0.4h, v1.4h (H width, Q=0)
+        match decode(0x2e60b820) {
+            Inst::SimdArithUnary { rd, rn, esize, q, op } => {
+                assert_eq!((rd, rn, esize, q, op), (0, 1, 2, false, 0));
+            }
+            other => panic!("neg v0.4h,v1.4h -> SimdArithUnary esize2, got {other:?}"),
+        }
+        // neg v0.4s, v1.4s (S width, Q=1) — the exec-test width
+        match decode(0x6ea0b820) {
+            Inst::SimdArithUnary { rd, rn, esize, q, op } => {
+                assert_eq!((rd, rn, esize, q, op), (0, 1, 4, true, 0));
+            }
+            other => panic!("neg v0.4s,v1.4s -> SimdArithUnary esize4, got {other:?}"),
+        }
+        // fcvtzs/fcvtzu still decode to FcvVec (bit16 set, now required).
+        match decode(0x4ee1b820) {
+            // fcvtzs v0.2d, v1.2d
+            Inst::FcvVec { rd, esize, q, .. } => {
+                assert_eq!((rd, esize, q), (0, 8, true));
+            }
+            other => panic!("fcvtzs v0.2d -> FcvVec, got {other:?}"),
+        }
+        match decode(0x2ea1b820) {
+            // fcvtzu v0.2s, v1.2s
+            Inst::FcvVec { rd, esize, q, signed, .. } => {
+                assert_eq!((rd, esize, q, signed), (0, 4, false, false));
+            }
+            other => panic!("fcvtzu v0.2s -> FcvVec, got {other:?}"),
         }
     }
     #[test]

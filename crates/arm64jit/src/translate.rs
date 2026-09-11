@@ -4594,6 +4594,57 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+        Inst::SimdArithUnary { rd, rn, esize, q, op } => {
+            // neg/abs Vd.T, Vn.T: per-lane signed negate or absolute value.
+            // neg: 0 - lane (two's complement wraps on overflow, matching ARM).
+            // abs: |signed lane| via the identity (x ^ (x ar>> w-1)) - (x ar>> w-1)
+            // after sign-extending the lane; safe read-modify-write when rd==rn.
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let m = esize as i32;
+            for l in 0..lanes {
+                match esize {
+                    8 => buf.mov_load64(RAX, RBX, src + l * m),
+                    4 => {
+                        buf.mov_load32(RAX, RBX, src + l * m);
+                        if op == 1 {
+                            buf.movsxd_r64_r32(RAX, RAX); // sign-extend for |signed|
+                        }
+                    }
+                    2 => {
+                        if op == 1 {
+                            buf.movsx_word_mem(RAX, RBX, src + l * m);
+                        } else {
+                            buf.movzx_word_mem(RAX, RBX, src + l * m);
+                        }
+                    }
+                    _ => {
+                        if op == 1 {
+                            buf.movsx_byte_mem(RAX, RBX, src + l * m);
+                        } else {
+                            buf.movzx_byte_mem(RAX, RBX, src + l * m);
+                        }
+                    }
+                }
+                if op == 0 {
+                    buf.neg_r64(RAX);
+                } else {
+                    let w = esize * 8;
+                    buf.mov_rr64(RCX, RAX);
+                    buf.sar_ri8(RCX, (w - 1) as u8);
+                    buf.xor_rr64(RAX, RCX);
+                    buf.sub_rr64(RAX, RCX);
+                }
+                match esize {
+                    8 => buf.mov_store64(RBX, dst + l * m, RAX),
+                    4 => buf.mov_store32(RBX, dst + l * m, RAX),
+                    2 => buf.mov_store16(RBX, dst + l * m, RAX),
+                    _ => buf.mov_store8(RBX, dst + l * m, RAX),
+                }
+            }
+            Ok(())
+        }
         Inst::FcvVec { rd, rn, signed, esize, q } => {
             // fcvtzu/fcvtzs Vd.T, Vn.T: convert each FP lane (esize bytes) to an
             // int, truncating toward zero; negative clamp for the unsigned form.

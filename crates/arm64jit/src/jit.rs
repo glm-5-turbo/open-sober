@@ -968,10 +968,20 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         // reachable call graph into one multi-MB blast that took seconds to
         // translate and then SIGSEGV'd. CONFIG_JUMP_GUEST_BUDGET tunable.
         // `JIT_BUDGET` env overrides for instruction-granular tracing.
-        let block_budget: usize = std::env::var("JIT_BUDGET")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8192);
+        // `JIT_STEP=1` forces single-instruction blocks and dumps the full
+        // guest register file after each one — a per-instruction trace for
+        // diffing a miscompiled straight-line block against a reference
+        // (qemu -d cpu, or a hand/simulated oracle). Debug-only; no effect on
+        // the normal path.
+        let step_trace = std::env::var_os("JIT_STEP").is_some();
+        let block_budget: usize = if step_trace {
+            1
+        } else {
+            std::env::var("JIT_BUDGET")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8192)
+        };
         let block = compile_image_bounded(image, base, pc, state, block_budget)?;
         #[cfg(debug_assertions)]
         if std::env::var_os("JIT_DUMP").is_some() {
@@ -990,6 +1000,17 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         }
         stamp_cntvct(state);
         unsafe { run(&block, state) };
+        if step_trace {
+            let s = unsafe { &*state };
+            let mut line = format!("STEP pc={:#x}", s.pc);
+            for (i, x) in s.x.iter().enumerate() {
+                line.push_str(&format!(" x{i}={x:#x}"));
+            }
+            for (i, v) in s.v.iter().enumerate() {
+                line.push_str(&format!(" v{i}={v:#x}"));
+            }
+            println!("{line}");
+        }
         if std::env::var_os("JIT_TRACE").is_some() {
             println!(
                 "  block@0x{pc:x} -> pc=0x{:x} x0=0x{:x} x1=0x{:x} x30=0x{:x}",
@@ -3185,6 +3206,100 @@ mod tests {
         let r = exec_bytes(&mut st, &code, 0).expect("exec");
         assert_eq!(buf[0], 3, "fcvtzs d0,d0 stores the int 3, not the float 3.5");
         assert_eq!(r, 3, "x0 = converted integer");
+    }
+
+    #[test]
+    fn vector_neg_abs_unary_lane_magnitudes() {
+        // Integer vector NEG/ABS across widths. Regression: `neg v29.2s,
+        // v31.2s` (0x2ea0bbfd) was mis-decoded as a vector float->int (FcvVec)
+        // because the FcvVec gate masks off bit16, silently zeroing/corrupting
+        // lanes. Verify signed magnitude per lane for .4s, .8h, .16b, .2d.
+        // Encodings assembly-verified:
+        //   neg v0.4s,v1.4s=0x6ea0b820  abs v2.4s,v1.4s=0x4ea0b822
+        //   neg v4.8h,v5.8h=0x6e60b8a4  abs v6.8h,v5.8h=0x4e60b8a6
+        //   neg v8.16b,v9.16b=0x6e20b928 abav10=0x4e20b92a
+        //   neg v12.2d,v13.2d=0x6ee0b9ac abav14=0x4ee0b9ae ; ret
+        let insn: &[u32] = &[
+            0x6ea0b820, 0x4ea0b822, // v0=-v1, v2=|v1| (4s)
+            0x6e60b8a4, 0x4e60b8a6, // v4=-v5, v6=|v5| (8h)
+            0x6e20b928, 0x4e20b92a, // v8=-v9, v10=|v9| (16b)
+            0x6ee0b9ac, 0x4ee0b9ae, // v12=-v13, v14=|v13| (2d)
+            0xd65f03c0, // ret
+        ];
+        let mut code = Vec::new();
+        for w in insn {
+            code.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut st = CpuState::new();
+        // v1 .4s = [-57798278, -1, 1000000, -2000000000]
+        let s4: [i32; 4] = [-57798278, -1, 1000000, -2000000000];
+        st.v[2] = (s4[0] as u32 as u64) | ((s4[1] as u32 as u64) << 32);
+        st.v[3] = (s4[2] as u32 as u64) | ((s4[3] as u32 as u64) << 32);
+        // v5 .8h = [0x8000,-1,0x0002,0xffff,0x0001,0x7fff,0x8001,0x0003]
+        let h8: [u32; 8] = [0x8000, 0xffff, 0x0002, 0xffff, 0x0001, 0x7fff, 0x8001, 0x0003];
+        for (i, h) in h8.iter().enumerate() {
+            let reg = 2 * 5 + i / 4;
+            let shift = (i % 4) * 16;
+            st.v[reg] |= (*h as u64) << shift;
+        }
+        // v9 .16b = [0xff,0x00,0x01,0x80,0x02,0xff,0x7f,0x81, ...]
+        let b16: [u32; 16] = [
+            0xff, 0x00, 0x01, 0x80, 0x02, 0xff, 0x7f, 0x81, 0xfe, 0x01, 0x00, 0x7f, 0x0a, 0xf0, 0x03, 0x80,
+        ];
+        for (i, b) in b16.iter().enumerate() {
+            let reg = 2 * 9 + i / 8;
+            let shift = (i % 8) * 8;
+            st.v[reg] |= (*b as u64) << shift;
+        }
+        // v13 .2d = [-5, 9223372036854775807]
+        st.v[26] = (-5i64 as u64);
+        st.v[27] = i64::MAX as u64;
+
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0, "entry returns x0");
+
+        // neg v0.4s (negate each s-lane): [-57798278, -1, 1000000, -2000000000]
+        //   -> [57798278, 1, -1000000, 2000000000]
+        let g0 = |i: usize| st.v[i / 2] >> ((i % 2) * 32) & 0xffffffff;
+        assert_eq!(g0(0) as i32, 57798278, ".4s neg lane0");
+        assert_eq!(g0(1) as i32, 1, ".4s neg lane1");
+        assert_eq!(g0(2) as i32, -1000000, ".4s neg lane2");
+        assert_eq!(g0(3) as i32, 2000000000, ".4s neg lane3");
+        // abs v2.4s
+        let g2 = |i: usize| st.v[4 + i / 2] >> ((i % 2) * 32) & 0xffffffff;
+        assert_eq!(g2(0) as i32, 57798278, ".4s abs lane0");
+        assert_eq!(g2(1) as i32, 1, ".4s abs lane1");
+        assert_eq!(g2(2) as i32, 1000000, ".4s abs lane2");
+        assert_eq!(g2(3) as i32, 2000000000, ".4s abs lane3");
+        // neg v4.8h: neg of [0x8000,-1,2,-1,1,0x7fff,-32767,3] -> [0x8000,1,-2,1,-1,-32767,32767,-3]
+        let gh = |reg: usize, i: usize| (st.v[reg] >> ((i % 4) * 16)) as i16 as i32;
+        let n4 = |i: usize| gh(2 * 4 + i / 4, i);
+        assert_eq!(n4(0), -32768, ".8h neg lane0 (wrap)");
+        assert_eq!(n4(1), 1, ".8h neg lane1");
+        assert_eq!(n4(2), -2, ".8h neg lane2");
+        assert_eq!(n4(3), 1, ".8h neg lane3");
+        assert_eq!(n4(7), -3, ".8h neg lane7");
+        // abs v6.8h
+        let a6 = |i: usize| gh(2 * 6 + i / 4, i);
+        assert_eq!(a6(0), -32768, ".8h abs lane0 (|−32768| wraps to 0x8000)");
+        assert_eq!(a6(1), 1, ".8h abs lane1");
+        assert_eq!(a6(7), 3, ".8h abs lane7");
+        // neg v8.16b
+        let n8 = |i: usize| (st.v[16 + i / 8] >> ((i % 8) * 8)) as u8 as i32;
+        assert_eq!(n8(0), 1, ".16b neg b0 (0xff -> 1)");
+        assert_eq!(n8(3), 128, ".16b neg b3 (0x80 -> 128 wrap)");
+        assert_eq!(n8(7), 127, ".16b neg b7 (0x81 -> 127)");
+        // abs v10.16b (abs of the SIGNED byte)
+        let a10 = |i: usize| (st.v[20 + i / 8] >> ((i % 8) * 8)) as u8 as i32;
+        assert_eq!(a10(0), 1, ".16b abs b0 (0xff=-1 -> 1)");
+        assert_eq!(a10(3), 128, ".16b abs b3 (0x80=-128 -> 128)");
+        assert_eq!(a10(7), 127, ".16b abs b7 (0x81=-127 -> 127)");
+        // neg v12.2d
+        assert_eq!(st.v[24], 5, ".2d neg lane0 (-5 -> 5)");
+        assert_eq!(st.v[25] as i64, i64::MIN + 1, ".2d neg lane1 (INT64_MAX -> -INT64_MAX)");
+        // abs v14.2d
+        assert_eq!(st.v[28], 5, ".2d abs lane0");
+        assert_eq!(st.v[29] as i64, i64::MAX, ".2d abs lane1");
     }
 
     #[test]

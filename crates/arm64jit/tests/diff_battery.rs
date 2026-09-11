@@ -1896,3 +1896,32 @@ long long entry(void){
 "#,
     );
 }
+
+// Integer vector NEG/ABS (two-reg-misc opcode 0xb). Root-cause: `neg v29.2s,
+// v31.2s` (0x2ea0bbfd) collided with the vector float->int FcvVec gate (mask
+// 0xffe0_fc00 zeroes bit16), so NEG decoded as fcvtzu and silently zeroed /
+// corrupted each lane. This canary reduces across both -x and |x| (gcc -O3
+// emits vector `neg`/`abs`); the fused two-loop gen_signed_div in fuzz_jit.py
+// is the same family.
+#[test]
+fn diff_vector_neg_abs_unary() {
+    assert_diff(
+        "vector_neg_abs_unary",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv = 42424217ull;
+    unsigned long long x = seedv;
+    int a[16];
+    for(int i=0;i<16;i++){ x=x*1103515245ull+12345ull; a[i]=(int)((x>>31)-(x>>1)); }
+    long long s=0;
+    for(int i=0;i<16;i++){
+        int n = -a[i];
+        int m = (a[i]<0) ? -a[i] : a[i];
+        s += (long long)(n - m);
+    }
+    return s;
+}
+"#,
+    );
+}
