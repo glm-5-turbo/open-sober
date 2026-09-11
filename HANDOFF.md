@@ -2893,3 +2893,76 @@ paths (+ MRS via `stg`), and the msr-tpidr write kept as-is.
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof remains blocked (no libroblox.so/APK, no GPU) —
    HARD GATE on a capable host (`elfjit ... 0x1f0db20 --jni` run log).
+
+---
+
+# Session — glibc-CRT ISA sweep (dc/ic, MTE writeback, GCS/SME-TLS) + svc correctness (Sep 12 2026)
+
+Continuing the cross-gcc / hand-assembled-battery approach with no APK/GSI/GPU.
+**Three focused commits; workspace 132/0, arm64jit 97, tree clean.**
+
+## 4db2b3c — data/instruction cache maintenance (dc/ic) no-ops
+glibc's `__libc_mtag_tag_region` ends in a `dc` op. In the single-threaded
+direct-mapped JIT these coherence ops (dc/gva/civac/ivac, ic ivau; top 0xd5,
+CRn=7) are no-ops — EXCEPT `dc zva` which zeros the advertised 16-byte block.
+Fixed two bugs in the leftover session-draft: Rt decoded from bits[9:5]
+(instead of bits[4:0]; caused `dc zva x0` to write via x1 → segv), and the
+test used 0xd50b7400 (=a `sys` instr) as `dc zva` — the real `dc zva x0` is
+0xd50b7420 (CRm=4 && op2=1). modmain moved 0x40c174 -> 0x438b1c.
+
+## d55cb04 — MTE tag-store writeback + mrs gcspr_el0/tpidr2_el0
+- The MteTag gate forced bit10==0, so post/pre-index st2g/stg writeback forms
+  (`[x2],#64` / `[x2,#-64]!`) were Unsupported. Their Xn-advance (Xn +=
+  signed imm<<4) is a real side effect glibc memset/stg loops depend on; the
+  tag-store itself stays a memory no-op. Decode now carries rn/wb/wb_off
+  (imm9 sign-extended, scaled <<4). Load bit stays bit22 (ldg byte1=0x60;
+  stg/st2g 0x20/0xa0), so the discriminator is unaffected. objdump-verified.
+- `mrs gcspr_el0` (armv9 GCS ptr, 0xd53b2522) + `tpidr2_el0` (SME 2nd TLS,
+  0xd53bd0ae) read 0 (features never enabled) — glibc CRT reads them sizing
+  GCS call frames / probing SME. sysreg ids 6/7.
+- modmain advanced to 0x442cf8, then stops on glibc's SME-IFUNC feature-probe
+  (`str za w15,[x16]` = 0xe1206200). **Documented as BEYOND Roblox's
+  Android/bionic boot ISA** — the real libroblox.so boot path is already fully
+  decoded / exit 0 per prior sessions. Root cause of that glibc-only tail:
+  elfjit sets up NO guest auxv, so glibc reads garbage AT_HWCAP and
+  IFUNC-resolves into SME. Chasing the SME ZA-tile ISA is a synthetic-harness
+  tangent, not a Roblox boot blocker.
+
+## e20687d — svc syscall-number bugs + extended table + inline host-call fixes
+Hand-assembled aarch64 svc programs (write / exit / multiple sequential svc)
+through elfjit exposed real bugs on the syscall path:
+1. **getuid was mapped to 199 (that's socketpair); real AArch64 getuid=174.**
+   **mremap was mapped to 220 (that's clone); real = 216 (3264_mremap).**
+   Neither was ever exercised (the unit test only checks write/mmap/getpid).
+   Fixed; added uid/euid/gid/egid/tid/ppid @ 174-178/173. +regression
+   `guest_svc_identity_numbers_match_aarch64_abi`.
+2. Extended the table with common aarch64 boot syscalls: getcwd 17, chdir 49,
+   getdents64 61, lseek 62, faccessat 48 (w/ AT_FDCWD), readlinkat 78, pipe2 59,
+   set_tid_address 96, sched_yield 124, prctl 167.
+3. **Inline host-call correctness (two real bugs):**
+   - JIT block body runs at host RSP≡8 (mod 16) — correct for guest-to-guest
+     BL (call_rel32) — but SysV needs RSP≡0 at a host CALL site. So
+     `call guest_svc` / `call guest_sha1stem` fired misaligned; any callee with
+     aligned stack work (format! in JIT_TRACE_SVC, SSE locals) SIGSEGV'd. Now
+     sub rsp,8 before / add rsp,8 after each inline host call.
+   - guest_svc(st)'s state arg was passed implicitly via RDI (held the entry
+     state on the FIRST call by luck; a prior host call clobbers RDI), so the
+     SECOND svc in a block passed garbage (+ misaligned deref of 0x1). Now
+     `mov rdi, rbx` explicitly.
+   Proof: svc_elf writes then exits 0; exit_only returns 7; `we` (2 writes +
+   exit_group 3) returns 3 with both writes visible; trip (3 sequential
+   writes) prints W1/W2/W3. Previously ANY 2nd svc segfaulted — a real
+   blocker Roblox (many syscalls) would hit.
+
+### Status
+- `cargo build --workspace` clean; `cargo test --workspace` 132/0 (arm64jit 97).
+- Battery clean (no unexpected walls); modmain still stops honestly at the
+  documented SME `str za` (0x442cf8), beyond the Roblox boot ISA.
+- Commits 4db2b3c, d55cb04, e20687d on local `dev`.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+2. Optional (glibc-coverage only, not Roblox): give elfjit a guest auxv so
+   glibc IFUNCs resolve to scalar (non-SME) paths.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
+   the HARD GATE, blocked until a capable host + the real binary/APK.
