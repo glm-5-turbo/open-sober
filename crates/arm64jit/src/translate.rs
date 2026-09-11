@@ -132,6 +132,35 @@ fn zext_w(buf: &mut CodeBuf, r: u8) {
 
 /// Byte offset of `CpuState.nzcv` (after pc@256: nzcv u32 at 264).
 const NZCV_OFF: i32 = 8 * 32 + 8; // 264
+
+/// Snapshot a source vector register to the permscratch area when it aliases
+/// `rd`, so a SIMD permute does not clobber a source it is still reading.
+/// `slotA` (0x800) and `slotB` (0x810) are the two 16-byte scratch slots.
+/// Returns the byte offset to READ the (possibly snapshotted) source from.
+/// When the source does not alias rd it is read in place (no copy needed).
+fn permute_source(
+    buf: &mut CodeBuf,
+    rd: u8,
+    src: u8,
+    scratch_hi: bool,
+) -> i32 {
+    let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
+    let orig = slot(src as i32);
+    if src == rd {
+        // rd aliases the source. Copy the full 16B to scratch, then read from
+        // there. Note rd==31 is a legit VECTOR dest (v31), NOT XZR — only an
+        // actual register-alias (src == rd) needs the snapshot.
+        let scratch = crate::jit::PERMSCRATCH_OFF + if scratch_hi { 16 } else { 0 };
+        // copy both u64 halves: [orig..orig+8) -> [scratch..scratch+8)
+        buf.mov_load64(RAX, RBX, orig);
+        buf.mov_store64(RBX, scratch, RAX);
+        buf.mov_load64(RAX, RBX, orig + 8);
+        buf.mov_store64(RBX, scratch + 8, RAX);
+        scratch
+    } else {
+        orig
+    }
+}
 /// Byte offset of `CpuState.pad`.
 #[allow(dead_code)]
 const PAD_OFF: i32 = 8 * 32 + 12; // 268
@@ -1374,6 +1403,28 @@ pub fn translate(
                     ldg(buf, RAX, rn as u32);
             let r = (rot & (if sf { 63u32 } else { 31u32 })) as u8;
             buf.ror_ri8(RAX, r);
+            if !sf {
+                buf.zero_ext_r32(RAX);
+            }
+            stg(buf, rd as u32, RAX);
+            Ok(())
+        }
+        Inst::Extr { rd, rn, rm, lsb, sf } => {
+            // EXTR: Xd = (Xn >> lsb) | (Xm << (bits - lsb)). rm==rn degenerates
+            // to Ror (handled separately); this is the general 2-operand form
+            // (e.g. gcc's `(x >> 51) | (x << 13)` -> `extr x0, x0, x1, #51`).
+            let bits = if sf { 64u32 } else { 32u32 };
+            let lsb = lsb & (bits - 1);
+            let hi_part = (bits - lsb) & (bits - 1); // Xm << (bits-lsb)
+            ldg(buf, RAX, rn as u32); // Xn
+            if lsb != 0 {
+                buf.shr_ri8(RAX, lsb as u8); // lower part: Xn >> lsb
+            }
+            ldg(buf, R10, rm as u32); // Xm
+            if hi_part != 0 {
+                buf.shl_ri8(R10, hi_part as u8); // Xm << (bits-lsb)
+            }
+            buf.or_rr64(RAX, R10);
             if !sf {
                 buf.zero_ext_r32(RAX);
             }
@@ -3002,51 +3053,59 @@ pub fn translate(
                                                                                                                                                                                                                                                                                                                                                                             Ok(())
                                                                                                                                                                                                                                                                                                                                                                         }
                                                                                                         Inst::SimdUz1 { rd, rn, rm, esize, q } => {
-                                                                                                            // uzp1 Vd.T, Vn.T, Vm.T: even-indexed elements of Vn then Vm.
-                                                                                                            // Vd[i]=Vn[2i] for i in 0..n/2; Vd[n/2+i]=Vm[2i]. n = 8 or 16 bytes.
-                                                                                                            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            let n: i32 = if q { 16 } else { 8 };
-            let es = esize as i32;
-            for i in 0..(n / (2 * es)) {
-                let ei = 2 * i * es;
-                // Vd[i] = Vn[2i]
-                match esize {
-                    8 => { buf.mov_load64(RAX, RBX, slot(rn) + ei); buf.mov_store64(RBX, slot(rd) + i * es, RAX); }
-                    4 => { buf.mov_load32(RAX, RBX, slot(rn) + ei); buf.mov_store32(RBX, slot(rd) + i * es, RAX); }
-                    2 => { buf.mov_load32(RAX, RBX, slot(rn) + ei); buf.mov_store16(RBX, slot(rd) + i * es, RAX); }
-                    _ => { buf.mov_load32(RAX, RBX, slot(rn) + ei); buf.mov_store8(RBX, slot(rd) + i * es, RAX); }
-                }
-                // Vd[n/2 + i] = Vm[2i]
-                match esize {
-                                    8 => { buf.mov_load64(RAX, RBX, slot(rm) + ei); buf.mov_store64(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
-                                    4 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store32(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
-                                    2 => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store16(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
-                                    _ => { buf.mov_load32(RAX, RBX, slot(rm) + ei); buf.mov_store8(RBX, slot(rd) + (n / (2*es) + i) * es, RAX); },
-                }
-            }
-            Ok(())
-}
+                                                                                                                    // uzp1 Vd.T, Vn.T, Vm.T: even-indexed elements of Vn then Vm.
+                                                                                                                    // Vd[i]=Vn[2i] for i in 0..n/2; Vd[n/2+i]=Vm[2i]. n = 8 or 16 bytes.
+                                                                                                                    // When rd aliases a source (gcc emits rd==rn ubiquitously), the
+                                                                                                                    // writes must not corrupt bytes the loop still reads from that
+                                                                                                                    // source — snapshot to scratch first.
+                                                                                                                    let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
+                                                                                                                    let rn_src = permute_source(buf, rd, rn, false); // read-from offset
+                                                                                                                    let rm_src = permute_source(buf, rd, rm, true);
+                                                                                                                    let n: i32 = if q { 16 } else { 8 };
+                                                                                                                    let es = esize as i32;
+                                                                                                                    for i in 0..(n / (2 * es)) {
+                                                                                                                        let ei = 2 * i * es;
+                                                                                                                        // Vd[i] = Vn[2i]
+                                                                                                                        match esize {
+                                                                                                                            8 => { buf.mov_load64(RAX, RBX, rn_src + ei); buf.mov_store64(RBX, slot(rd as i32) + i * es, RAX); }
+                                                                                                                            4 => { buf.mov_load32(RAX, RBX, rn_src + ei); buf.mov_store32(RBX, slot(rd as i32) + i * es, RAX); }
+                                                                                                                            2 => { buf.mov_load32(RAX, RBX, rn_src + ei); buf.mov_store16(RBX, slot(rd as i32) + i * es, RAX); }
+                                                                                                                            _ => { buf.mov_load32(RAX, RBX, rn_src + ei); buf.mov_store8(RBX, slot(rd as i32) + i * es, RAX); }
+                                                                                                                        }
+                                                                                                                        // Vd[n/2 + i] = Vm[2i]
+                                                                                                                        match esize {
+                                                                                                                                            8 => { buf.mov_load64(RAX, RBX, rm_src + ei); buf.mov_store64(RBX, slot(rd as i32) + (n / (2*es) + i) * es, RAX); },
+                                                                                                                                            4 => { buf.mov_load32(RAX, RBX, rm_src + ei); buf.mov_store32(RBX, slot(rd as i32) + (n / (2*es) + i) * es, RAX); },
+                                                                                                                                            2 => { buf.mov_load32(RAX, RBX, rm_src + ei); buf.mov_store16(RBX, slot(rd as i32) + (n / (2*es) + i) * es, RAX); },
+                                                                                                                                            _ => { buf.mov_load32(RAX, RBX, rm_src + ei); buf.mov_store8(RBX, slot(rd as i32) + (n / (2*es) + i) * es, RAX); },
+                                                                                                                        }
+                                                                                                                    }
+                                                                                                                    Ok(())
+                                                                                                        }
 Inst::SimdUz2 { rd, rn, rm, esize, q } => {
             // uzp2 Vd.T, Vn.T, Vm.T: ODD-indexed elements of Vn then Vm.
             // Vd[i]=Vn[2i+1] for i in 0..n/2; Vd[n/2+i]=Vm[2i+1]. n = 8 or 16 bytes.
             // (gcc magic-division reducer gathers product-HIGH words with this.)
-            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            // rd aliasing a source (gcc emits rd==rn) must not clobber reads.
+            let rn_src = permute_source(buf, rd, rn, false);
+            let rm_src = permute_source(buf, rd, rm, true);
+            let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
             let n: i32 = if q { 16 } else { 8 };
             let es = esize as i32;
             for i in 0..(n / (2 * es)) {
                 let oi = (2 * i + 1) * es;
                 match esize {
-                    8 => { buf.mov_load64(RAX, RBX, slot(rn) + oi); buf.mov_store64(RBX, slot(rd) + i * es, RAX); }
-                    4 => { buf.mov_load32(RAX, RBX, slot(rn) + oi); buf.mov_store32(RBX, slot(rd) + i * es, RAX); }
-                    2 => { buf.mov_load32(RAX, RBX, slot(rn) + oi); buf.mov_store16(RBX, slot(rd) + i * es, RAX); }
-                    _ => { buf.mov_load32(RAX, RBX, slot(rn) + oi); buf.mov_store8(RBX, slot(rd) + i * es, RAX); }
+                    8 => { buf.mov_load64(RAX, RBX, rn_src + oi); buf.mov_store64(RBX, slot(rd as i32) + i * es, RAX); }
+                    4 => { buf.mov_load32(RAX, RBX, rn_src + oi); buf.mov_store32(RBX, slot(rd as i32) + i * es, RAX); }
+                    2 => { buf.mov_load32(RAX, RBX, rn_src + oi); buf.mov_store16(RBX, slot(rd as i32) + i * es, RAX); }
+                    _ => { buf.mov_load32(RAX, RBX, rn_src + oi); buf.mov_store8(RBX, slot(rd as i32) + i * es, RAX); }
                 }
                 let n2 = n / (2 * es);
                 match esize {
-                                    8 => { buf.mov_load64(RAX, RBX, slot(rm) + oi); buf.mov_store64(RBX, slot(rd) + (n2 + i) * es, RAX); },
-                                    4 => { buf.mov_load32(RAX, RBX, slot(rm) + oi); buf.mov_store32(RBX, slot(rd) + (n2 + i) * es, RAX); },
-                                    2 => { buf.mov_load32(RAX, RBX, slot(rm) + oi); buf.mov_store16(RBX, slot(rd) + (n2 + i) * es, RAX); },
-                                    _ => { buf.mov_load32(RAX, RBX, slot(rm) + oi); buf.mov_store8(RBX, slot(rd) + (n2 + i) * es, RAX); },
+                                    8 => { buf.mov_load64(RAX, RBX, rm_src + oi); buf.mov_store64(RBX, slot(rd as i32) + (n2 + i) * es, RAX); },
+                                    4 => { buf.mov_load32(RAX, RBX, rm_src + oi); buf.mov_store32(RBX, slot(rd as i32) + (n2 + i) * es, RAX); },
+                                    2 => { buf.mov_load32(RAX, RBX, rm_src + oi); buf.mov_store16(RBX, slot(rd as i32) + (n2 + i) * es, RAX); },
+                                    _ => { buf.mov_load32(RAX, RBX, rm_src + oi); buf.mov_store8(RBX, slot(rd as i32) + (n2 + i) * es, RAX); },
                 }
             }
             Ok(())
@@ -3056,7 +3115,10 @@ Inst::SimdZip1 { rd, rn, rm, esize, q } => {
             // Vd[2k+1]=Vm[k] for k in 0..(n/2), n = 8 (q=0) / 16 (q=1) bytes,
             // element size = es (1,2,4,8). Source element k at Vn[+]k*es and
             // Vm[k*es]; dest at Vd[2k*es] / Vd[(2k+1)*es].
-            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            // rd aliasing a source must not clobber reads mid-permute.
+            let rn_src = permute_source(buf, rd, rn, false);
+            let rm_src = permute_source(buf, rd, rm, true);
+            let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
             let n: i32 = if q { 16 } else { 8 };
             let es = esize as i32;
             for k in 0..(n / (2 * es)) {
@@ -3065,28 +3127,28 @@ Inst::SimdZip1 { rd, rn, rm, esize, q } => {
                 let d1 = (2 * k + 1) * es; // dest element 2k+1
                 match esize {
                     8 => {
-                        buf.mov_load64(RAX, RBX, slot(rn) + so);
-                        buf.mov_store64(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load64(RAX, RBX, slot(rm) + so);
-                        buf.mov_store64(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load64(RAX, RBX, rn_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load64(RAX, RBX, rm_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d1, RAX);
                     }
                     4 => {
-                        buf.mov_load32(RAX, RBX, slot(rn) + so);
-                        buf.mov_store32(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load32(RAX, RBX, slot(rm) + so);
-                        buf.mov_store32(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d1, RAX);
                     }
                     2 => {
-                        buf.mov_load32(RAX, RBX, slot(rn) + so);
-                        buf.mov_store16(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load32(RAX, RBX, slot(rm) + so);
-                        buf.mov_store16(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d1, RAX);
                     }
                     _ => {
-                        buf.mov_load32(RAX, RBX, slot(rn) + so);
-                        buf.mov_store8(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load32(RAX, RBX, slot(rm) + so);
-                        buf.mov_store8(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d1, RAX);
                     }
                 }
             }
@@ -3096,7 +3158,10 @@ Inst::SimdZip2 { rd, rn, rm, esize, q } => {
             // zip2 Vd.T, Vn.T, Vm.T: interleave the UPPER halves.
             // Vd[2k]=Vn[n/2+k] and Vd[(2k+1)]=Vm[n/2+k] for k in 0..(n/2),
             // n = 8 (q=0) / 16 (q=1) bytes, element size = es.
-            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            // rd aliasing a source must not clobber reads mid-permute.
+            let rn_src = permute_source(buf, rd, rn, false);
+            let rm_src = permute_source(buf, rd, rm, true);
+            let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
             let n: i32 = if q { 16 } else { 8 };
             let es = esize as i32;
             for k in 0..(n / (2 * es)) {
@@ -3105,28 +3170,28 @@ Inst::SimdZip2 { rd, rn, rm, esize, q } => {
                 let d1 = (2 * k + 1) * es;
                 match esize {
                     8 => {
-                        buf.mov_load64(RAX, RBX, slot(rn) + so);
-                        buf.mov_store64(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load64(RAX, RBX, slot(rm) + so);
-                        buf.mov_store64(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load64(RAX, RBX, rn_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load64(RAX, RBX, rm_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d1, RAX);
                     }
                     4 => {
-                        buf.mov_load32(RAX, RBX, slot(rn) + so);
-                        buf.mov_store32(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load32(RAX, RBX, slot(rm) + so);
-                        buf.mov_store32(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d1, RAX);
                     }
                     2 => {
-                        buf.mov_load32(RAX, RBX, slot(rn) + so);
-                        buf.mov_store16(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load32(RAX, RBX, slot(rm) + so);
-                        buf.mov_store16(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d1, RAX);
                     }
                     _ => {
-                        buf.mov_load32(RAX, RBX, slot(rn) + so);
-                        buf.mov_store8(RBX, slot(rd) + d0, RAX);
-                        buf.mov_load32(RAX, RBX, slot(rm) + so);
-                        buf.mov_store8(RBX, slot(rd) + d1, RAX);
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d1, RAX);
                     }
                 }
             }

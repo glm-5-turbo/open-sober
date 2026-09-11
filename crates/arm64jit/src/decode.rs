@@ -557,7 +557,11 @@ pub enum Inst {
         // ---- NEON: mov Vd.D[1], Vn.D[0] (dup low 64 into the high 64 lane) ----
                            InsD1D0 { rd: u8, rn: u8 }, // v16B: slot_hi(8B) = low-64-of-Vn
                            // ---- EXTR / ROR rotate: rm==rn in the EXTR base ----
-                           Ror { rd: u8, rn: u8, rot: u32, sf: bool }, // ror rd,rn,#rot
+                                                     Ror { rd: u8, rn: u8, rot: u32, sf: bool }, // ror rd,rn,#rot
+                                                     // ---- EXTR (general): Xd = (Xn >> lsb) | (Xm << (bits-lsb)),
+                                                     // the rotate/extract gcc emits for `(x>>a)|(x<<(b-a))` when
+                                                     // rn != rm. (The Ror alias above is the rm==rn special case.) ----
+                                                     Extr { rd: u8, rn: u8, rm: u8, lsb: u32, sf: bool },
                            // ---- supervisor call (svc #imm) -> host syscall routing ----
                            Svc { imm: u16 },
                            // ---- breakpoint (brk #imm) -> guest trap; JIT halts gracefully
@@ -2658,15 +2662,19 @@ pub fn decode(insn: u32) -> Inst {
     }
 
     // ---- EXTR / ROR rotate: class (insn&0x1fe00000) in {0x13800000,0x13c00000}
-//      (the EXTR base; UBFM is 0x130/0x136 — disjoint). rm==rn => rotation.
-    if matches!(insn & 0x1fe0_0000, 0x1380_0000 | 0x13c0_0000)
-        && ((insn >> 16) & 0x1f) == ((insn >> 5) & 0x1f)
-    {
+//      (the EXTR base; UBFM is 0x130/0x136 — disjoint). rm==rn => rotation;
+//      rm!=rn (e.g. `extr x0,x0,x1,#51`, gcc's `(x>>51)|(x<<13)`) is the general
+//      extract and must NOT fall through to the UBFM/SBFM gate below.
+    if matches!(insn & 0x1fe0_0000, 0x1380_0000 | 0x13c0_0000) {
         let sf = (insn >> 31) & 1 == 1;
-        let rot = b(insn, 10, 15); // rotation amount (6-bit, 0..63)
+        let lsb = b(insn, 10, 15); // extract amount (6-bit, 0..63)
         let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
-        return Inst::Ror { rd, rn, rot, sf };
+        if rm == rn {
+            return Inst::Ror { rd, rn, rot: lsb, sf };
+        }
+        return Inst::Extr { rd, rn, rm, lsb, sf };
     }
 
     // ---- bitfield (UBFM/SBFM): lsr/lsl (UBFM) and asr (SBFM) aliases ----
@@ -3455,8 +3463,17 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                                                                                                                                                                                                                                                                                                                                             let esize = (1 << f.trailing_zeros()) as u8; // 8(d)/4(s)/2(h)/1(b)
                                                                                                                                                                                                                                                                                                                                                                                                                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
-                                                                                                                                                                                                                                                                                                                                                                                        let dst_idx = ((insn >> 20) & 1) as u8;
-                                                                                                                                                                                                                                                                                                                                                                                        let src_idx = ((insn >> 14) & 1) as u8;
+                                                                                                                                                                                                                                                                                                                                                                                        // INS Vd.T[dst], Vn.T[src] packs BOTH lane indices into the word:
+                                                                                                                                                                                                                                                                                                                                                                                        //   imm5 low `log2(esize)` bits + 1 encode escale via trailing zeros;
+                                                                                                                                                                                                                                                                                                                                                                                        //   dst index = imm5 >> (log2(esize)+1);
+                                                                                                                                                                                                                                                                                                                                                                                        //   src index = a contiguous field at bits[14:15-l]), l=log2(esize),
+                                                                                                                                                                                                                                                                                                                                                                                        //   width 4-l: (insn >> (11+l)) & ((1 << (4-l))-1).
+                                                                                                                                                                                                                                                                                                                                                                                        // (Verified against the aarch64 assembler across all 4x4 S, 8x8 H,
+                                                                                                                                                                                                                                                                                                                                                                                        // 16x16 B and 2x2 D lane pairs — the old single-bit bit20/bit14 read
+                                                                                                                                                                                                                                                                                                                                                                                        // only worked for lane 0/1 S and silently corrupted every other case.)
+                                                                                                                                                                                                                                                                                                                                                                                        let l = esize.ilog2();
+                                                                                                                                                                                                                                                                                                                                                                                        let dst_idx = (f >> (l + 1)) as u8;
+                                                                                                                                                                                                                                                                                                                                                                                        let src_idx = ((insn >> (11 + l)) & ((1u32 << (4 - l)) - 1)) as u8;
                                                                                                                                                                                                                                                                                                                                                                                         return Inst::SimdInsD { rd, rn, dst_idx, src_idx, esize };
                                                                                                                                                                                                                                                                                                                                                                                                                                                                     }
                                                                                                                                                                                                                                                                                                                                                                                                                                                                 }

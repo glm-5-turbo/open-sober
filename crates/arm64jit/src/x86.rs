@@ -939,43 +939,43 @@ impl CodeBuf {
         self.b(modrm(3, op, rd & 7));
     }
 
-    /// shl r64, imm8  (encoding 48 C1 /4 ib)
+    /// shl r64, imm8  (encoding 48/49 C1 /4 ib). rd>=8 needs REX.B (0x49).
     pub fn shl_ri8(&mut self, rd: u8, imm: u8) {
-        self.b(0x48);
+        self.b(if rd >= 8 { 0x49 } else { 0x48 });
         self.b(0xC1);
         self.b(modrm(3, 4, rd & 7));
         self.b(imm);
     }
-    /// shr r64, imm8  (encoding 48 C1 /5 ib)
-       pub fn shr_ri8(&mut self, rd: u8, imm: u8) {
-           self.b(0x48);
-           self.b(0xC1);
-           self.b(modrm(3, 5, rd & 7));
-           self.b(imm);
-       }
-       /// sar r64, imm8  (encoding 48 C1 /7 ib) — arithmetic (sign) shift right
-       pub fn sar_ri8(&mut self, rd: u8, imm: u8) {
-           self.b(0x48);
-           self.b(0xC1);
-           self.b(modrm(3, 7, rd & 7));
-           self.b(imm);
-       }
-       /// sar r32, imm8  (C1 /7 ib, no REX.W) — 32-bit arithmetic shift, sign
-        /// taken from bit31. Used for `asr Wd` where the guest operand is a
-        /// zero-extended 32-bit value: a 64-bit `sar` would read bit63 (=0) as the
-        /// sign and turn `asr w,#1` of 0x80000000 into 0x40000000, not 0xc0000000.
-        pub fn sar32_ri8(&mut self, rd: u8, imm: u8) {
-            if rd & 8 != 0 {
-                self.b(0x41);
-            }
-            self.b(0xC1);
-            self.b(modrm(3, 7, rd & 7));
-            self.b(imm);
+    /// shr r64, imm8  (encoding 48/49 C1 /5 ib)
+    pub fn shr_ri8(&mut self, rd: u8, imm: u8) {
+        self.b(if rd >= 8 { 0x49 } else { 0x48 });
+        self.b(0xC1);
+        self.b(modrm(3, 5, rd & 7));
+        self.b(imm);
+    }
+    /// sar r64, imm8  (encoding 48/49 C1 /7 ib) — arithmetic (sign) shift right
+    pub fn sar_ri8(&mut self, rd: u8, imm: u8) {
+        self.b(if rd >= 8 { 0x49 } else { 0x48 });
+        self.b(0xC1);
+        self.b(modrm(3, 7, rd & 7));
+        self.b(imm);
+    }
+    /// sar r32, imm8  (C1 /7 ib, no REX.W) — 32-bit arithmetic shift, sign
+    /// taken from bit31. Used for `asr Wd` where the guest operand is a
+    /// zero-extended 32-bit value: a 64-bit `sar` would read bit63 (=0) as the
+    /// sign and turn `asr w,#1` of 0x80000000 into 0x40000000, not 0xc0000000.
+    pub fn sar32_ri8(&mut self, rd: u8, imm: u8) {
+        if rd & 8 != 0 {
+            self.b(0x41);
         }
+        self.b(0xC1);
+        self.b(modrm(3, 7, rd & 7));
+        self.b(imm);
+    }
 
-    /// ror r64, imm8  (48 C1 /1 ib) — rotate right
+    /// ror r64, imm8  (48/49 C1 /1 ib) — rotate right
     pub fn ror_ri8(&mut self, rd: u8, imm: u8) {
-        self.b(0x48);
+        self.b(if rd >= 8 { 0x49 } else { 0x48 });
         self.b(0xC1);
         self.b(modrm(3, 1, rd & 7));
         self.b(imm);

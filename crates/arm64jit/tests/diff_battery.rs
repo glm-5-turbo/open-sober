@@ -876,6 +876,65 @@ unsigned long long entry(void){
 }
 
 #[test]
+fn diff_rotate_extract_and_byte_accum() {
+    // Two more silent-miscompile classes:
+    //  (a) `(x >> (64-n)) | (x << n)` compiles to the GENERAL EXTR
+    //      (`extr x0,x0,x1,#imm`, rm != rn) which used to fall through to a
+    //      UBFM/SBFM misdecode (bit-rotate produced garbage).
+    //  (b) gcc -O3 vectorizes `unsigned char` accumulate loops into
+    //      `uzp1 v.8h`/`add v.16b` with SELF-aliasing sources (rd==rn), which
+    //      the permute translate corrupted by writing rd while still reading
+    //      the aliased source's high half.
+    assert_diff(
+        "rot_extract",
+        "-O2",
+        r#"
+unsigned long long entry(void){
+    volatile unsigned long long x = 0x123456789abcdef0ULL;
+    volatile int n = 13;
+    return (x >> (64 - n)) | (x << n);
+}
+"#,
+    );
+    assert_diff(
+        "rot_extract_chain",
+        "-O3",
+        r#"
+unsigned long long entry(void){
+    volatile unsigned long long x = 0x13579bdf2468aceaULL;
+    volatile int n = 29;
+    unsigned long long acc = 0;
+    acc += (x >> (64 - n)) | (x << n);
+    acc += (x >> n) | (x << (64 - n));
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "uchar_accum",
+        "-O3",
+        r#"
+unsigned long long entry(void){
+    unsigned char t = 0;
+    for (int i=0;i<300;i++) t = (unsigned char)(t + i);
+    return t;
+}
+"#,
+    );
+    assert_diff(
+        "uchar_accum_hybrid",
+        "-O3",
+        r#"
+unsigned long long entry(void){
+    unsigned char t = 0, s = 0;
+    for (int i=0;i<320;i++){ t = (unsigned char)(t + i*7); s = (unsigned char)(s + i); }
+    return (unsigned long long)(t*1000 + s);
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_double_vector_arith() {
     // The .2d double-lane vector family (fmla v.2d / fmul v.2d / fcvtzs v.2d),
     // the double sibling of the .4s group above.

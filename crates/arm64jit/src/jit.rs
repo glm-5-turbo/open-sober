@@ -39,6 +39,13 @@ pub struct CpuState {
     /// (CNTFRQ_EL0 = 100 MHz). Reads by the guest see time advance between
     /// blocks so cnt-delta arithmetic is monotonic and self-consistent.
     pub cntvct: u64,
+    /// Scratch: two 16-byte temp vector slots used to snapshot rn/rm before a
+    /// SIMD permute (uzp1/uzp2/zip1/zip2) when rd aliases a source. Reading
+    /// through memory that the permute is simultaneously writing into would
+    /// otherwise corrupt late-iteration reads (gcc's `uzp1 v31.8h, v31.8h,
+    /// v26.8h` writes rd==rn while still reading rn's high half). Kept after
+    /// `cntvct` so VECTOR_BASE (272) is unchanged.
+    pub permscratch: [u64; 4], // 32 bytes = 2 × 16-byte vectors
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
@@ -55,6 +62,8 @@ pub const PC_OFF: i32 = 8 * 32; // 256
 pub const TPIDR_OFF: i32 = VECTOR_BASE + 64 * 8; // 784
 /// Byte offset of `CpuState.cntvct` — right after `tpidr` (784..792).
 pub const CNTVCT_OFF: i32 = TPIDR_OFF + 8; // 792
+/// Byte offset of `CpuState.permscratch` — right after `cntvct` (792..800).
+pub const PERMSCRATCH_OFF: i32 = CNTVCT_OFF + 8; // 800
 
 impl CpuState {
     pub fn new() -> Self {
@@ -66,6 +75,7 @@ impl CpuState {
             v: [0; 64],
             tpidr: 0,
             cntvct: 0,
+            permscratch: [0; 4],
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {
@@ -1766,6 +1776,86 @@ mod tests {
         let mut st = CpuState::new();
         let r = exec_bytes(&mut st, &code, 0).expect("exec");
         assert_eq!(r, 0x0000_0000_ffff_fffd, "movn w0,#2 zero-extends to x0");
+    }
+
+    #[test]
+    fn extr_general_two_operand_rotate() {
+        // Regression: `ror` via `(x >> 51) | (x << 13)` compiles to the GENERAL
+        // EXTR `extr x0, x0, x1, #51` (rm != rn), which the Ror gate (rm==rn
+        // only) skipped, letting it fall through to the UBFM/SBFM misdecode.
+        // External result = (x0 >> 51) | (x1 << 13) = 0x8acf13579bde0246 for
+        // x0=0x123456789abcdef0, x1=0x123456789abcdef0.
+        // extr x0, x0, x1, #51 = 0x93c1cc00 (assembler-verified).
+        let code = [
+            0x00u8, 0xcc, 0xc1, 0x93, // extr x0, x0, x1, #51
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[0] = 0x123456789abcdef0;
+        st.x[1] = 0x123456789abcdef0;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0x8acf13579bde0246, "general EXTR rotates");
+        // ror alias still works: extr x0, x0, x0, #13 = ror x0,#13 (0x93c03400)
+        let code2 = [
+            0x00u8, 0x34, 0xc0, 0x93, // ror x0, #13
+            0xc0, 0x03, 0x5f, 0xd6,
+        ];
+        let mut st2 = CpuState::new();
+        st2.x[0] = 0x123456789abcdef0;
+        let r2 = exec_bytes(&mut st2, &code2, 0).expect("exec");
+        assert_eq!(r2, 0xf78091a2b3c4d5e6, "EXTR rm==rn == ror");
+    }
+
+    #[test]
+    fn uzp1_rd_aliases_rn_does_not_corrupt_source() {
+        // Regression: `uzp1 v12.8h, v12.8h, v26.8h` (rd==rn, gcc's ubiquitous
+        // rotate/unpack idiom) wrote the SECOND-half (Vm) elements into rd bytes
+        // 8..15, then a later first-half iteration read source bytes 8..15 from
+        // the SAME slot — now corrupted. Snapshot source to scratch first.
+        // v12.8h = {0x1111,0x2222,0x3333,0x4444, 0x5555,0x6666,0x7777,0x8888}
+        // v26.8h = {0xaabb,0xccdd,0xeeff,0x0011, 0x2233,0x4455,0x6677,0x8899}
+        // uzp1 v12.8h, v12.8h, v26.8h: result = even hw of v12 then even of v26:
+        //   {0x1111,0x3333,0x5555,0x7777, 0xaabb,0xeeff,0x2233,0x6677}
+        let mut st = CpuState::new();
+        st.set_v(12, 0x4444333322221111, 0x8888777766665555); // v12 .8h
+        st.set_v(26, 0x0011eeffccddaabb, 0x8899667755442233); // v26 .8h
+        let word = 0x4e41198cu32; // uzp1 v12.8h, v12.8h, v26.8h (assembler-verified)
+        let code = [
+            word.to_le_bytes()[0], word.to_le_bytes()[1],
+            word.to_le_bytes()[2], word.to_le_bytes()[3],
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec");
+        // Even halfwords: v12 lane0 holds hw0=0x1111 (LE) ... check d12 low = hw0,hw2,hw4,hw6
+        // v12 d0 after: hw0=0x1111, hw2=0x3333, hw4=0x5555, hw6=0x7777 (LE u64)
+        let low = 0x7777_5555_3333_1111u64;
+        assert_eq!(st.v[12 * 2], low, "uzp1 rd==rn first half (even v12)");
+    }
+
+    #[test]
+    fn simd_insd_sets_correct_lane_with_multi_byte_indices() {
+        // Regression: the INS (vector, element) decode read dst_idx=bit20 and
+        // src_idx=bit14 — two single bits. That only coincided with the true
+        // lane once (S lane0->1); every S lane other than 0, and every H/B lane,
+        // silently copied into the wrong element. The fv4 float canary
+        // (`mov v3.s[1], v28.s[0]`, `mov v31.s[1], v4.s[0]`, built by gcc -O3)
+        // depended on an S insert into lane 1 and returned 153 instead of 175.
+        // Correct packing (verified against the aarch64 assembler for all 4x4 S,
+        // 8x8 H, 16x16 B, 2x2 D lane pairs):
+        //   l = log2(esize); dst = imm5 >> (l+1); src = (insn>>(11+l)) & ((1<<(4-l))-1).
+        // mov v3.s[2], v5.s[1]: v3 lane 2 <- v5 lane 1 (=3.5f). 0x6e1424a3.
+        let mut st = CpuState::new();
+        st.set_v(5, 0x40600000_3f800000, 0); // v5.4s = {1.0, 3.5, 0, 0}
+        let code = [
+            0xa3, 0x24, 0x14, 0x6e, // mov v3.s[2], v5.s[1]
+            // read v3 lane 2 back into x0 via `mov s0, v3.s[2]; fmov w0, s0`
+            0x60, 0x04, 0x14, 0x5e, // mov s0, v3.s[2]
+            0x00, 0x00, 0x26, 0x1e, // fmov w0, s0
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0x4060_0000, "v3.s[2] = 3.5f copied from v5.s[1]");
+        assert_eq!(st.v[3 * 2 + 1] & 0xffff_ffff, 0x4060_0000, "v3 lane2 = 3.5f");
     }
 
     #[test]
