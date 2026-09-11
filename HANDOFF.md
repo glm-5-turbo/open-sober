@@ -5773,3 +5773,41 @@ Thread-model remaining: per-thread TLS **init-image copies** for clone children
 beyond the TP pointer handoff (needs a real multilib guest to validate).
 HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none on
 this VPS).
+
+## Cycle 44 (Sep 11, 2026) — SIMD rev16 (granule 2) fixed; rev/permute fuzz generator (368/0)
+
+### The bug (silent-miscompile class, found by the differential fuzzer)
+A new fuzz generator `gen_byte_reverse_perm` (added to `fuzz_jit.py`) targets
+the SIMD byte-reverse/permutation family the int-heavy generators never
+produce: `vrev16/32/64q_u8`, `vuzp`, `vtrn`, and a u32 `vrev64q_u32`. First run
+exposed a real gap: **SIMD `rev16` decoded via the rev64/rev32 gates (which
+only handle byte1 0x08) and mis-decoded to a wrong-value instruction instead of
+trapping** — the byte-reverse/permute silent-miscompile class. Real encodings
+`rev16 v0.16b=0x4e201800` / `.8b=0x0e201800` fell through. Oracle/JIT
+mismatches were byte-identical to the rev16 FAIL numbers (a compiler also
+emitted `rev16` inside the trn/rbit functions, so all three reported the same
+root cause).
+
+### Fix (commit 8e00bdc)
+- **decode.rs**: `rev16` is two-reg-misc REV16 (byte1 0x18, **bit21 SET**) —
+  disjoint from the uzp1/trn1 3-same permute (`uzp1 v0.16b=0x4e011800` has bit21
+  CLEAR). New gate `(insn & 0x3f20_f800) == 0x0e20_1800` pins the prefix lanes,
+  bit21, and byte1 0x18; returns `SimdRev { granule: 2 }`.
+- **x86.rs**: `mov_load16` (movzx 0F B7, zero-extend a 16-bit word) and
+  `rol16_ri8` (66 C1 /0 ib, 16-bit rotate-left) helpers.
+- **translate.rs**: `SimdRev` granule 2 arm — per-16-bit-halfword byte-swap via
+  `mov_load16 → rol16_ri8(8) → mov_store16`.
+- **decoder regression test** `rev16_decodes_as_granule2_not_uzp` (rev16 .16b/.8b
+  → granule 2 + q; uzp1 stays a permute, not rev16; rev32 stays granule 4).
+
+### Verification
+Isolated the family through the full oracle pipeline: rev16 60/60 (was 22/60
+before the fix), rev32/rev64/uzp unchanged. 4 fresh seeds (30 cases each) of the
+full mixed fuzzer: 0 fail. `cargo test --workspace` **368/0** (was 367/0 — the
+new decode regression).
+
+Remaining JIT ISA surface is substantially complete (155 Inst arms incl. SHA,
+crypto, structure ld/st, perms, SAT narrow, SME no-ops); the one annotation'd
+gap is fp16 (`fcvtl` `.4h`/`fcvtn` `.4h`), deferred — a real project, not a
+one-liner. Thread-model remaining: per-thread TLS init-image copies for clone
+children (needs a real multilib guest). HARD GATE unchanged.
