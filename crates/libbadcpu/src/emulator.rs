@@ -66,11 +66,15 @@ unsafe fn emulate_vex(inst: &DecodedInstruction, ctx: *mut libc::ucontext_t) -> 
     let is_64bit = (inst.rex & 0x08) != 0 && !inst.has_66;
 
     if inst.opcode[0] == 0x0F && inst.opcode[1] == 0x38 {
-        let src1 = get_reg(ctx, inst.reg);
         let src2 = get_rm_value(inst, ctx);
 
         let result: u64 = match op3 {
-            0xF2 => src1 & !src2,
+            // ANDN dest, src1, src2: dest = NOT(src2) AND src1, where src1 is
+            // the VEX vvvv field (the NDS/non-destructive source), NOT modrm.reg.
+            0xF2 => {
+                let src1 = get_reg(ctx, inst.vex_vvvv);
+                src1 & !src2
+            }
             0xF3 => src2.wrapping_neg() & src2,
             0xF1 => src2 ^ (src2.wrapping_sub(1)),
             0xF4 => src2 & (src2.wrapping_sub(1)),
@@ -190,35 +194,44 @@ unsafe fn emulate_count_trailing_zeros(inst: &DecodedInstruction, ctx: *mut libc
 }
 
 // === Register access helpers ===
-// On x86-64 Linux, gregs is [i64; 23]. We work with u64 values and cast.
+// On x86-64 Linux, ucontext_t.uc_mcontext.gregs is greg_t[23] (NGREG), laid
+// out by glibc in a NON-trivial order (see <sys/ucontext.h> / libc's
+// REG_* constants): R8..R15 occupy slots 0..7, then RDI,RSI,RBP,RBX,RDX,
+// RAX,RCX,RSP (8..15), then RIP=16, EFL=17. Only RIP (16) and EFL (17)
+// match the hardware register number; all GPR slots differ. The emulator
+// must map an x86 register NUMBER (ModR/M.reg base 0..15, REX.R/B-extended)
+// to the correct gregs slot, NOT use the register number as the index.
 
-// Register index mapping matching Linux kernel's ucontext layout
-const REG_RAX: usize = 0;
-const REG_RBX: usize = 3;
-const REG_RCX: usize = 1;
-const REG_RDX: usize = 2;
-const REG_RSI: usize = 6;
-const REG_RDI: usize = 7;
-const REG_RBP: usize = 5;
-const REG_RSP: usize = 4;
-const REG_R8: usize = 8;
-const REG_R9: usize = 9;
-const REG_R10: usize = 10;
-const REG_R11: usize = 11;
-const REG_R12: usize = 12;
-const REG_R13: usize = 13;
-const REG_R14: usize = 14;
-const REG_R15: usize = 15;
+// gregs slot for each x86-64 register number (REX-extended, 0..15).
+// Built from glibc's REG_* enum (R8=0...R15=7, RDI=8, RSI=9, RBP=10,
+// RBX=11, RDX=12, RAX=13, RCX=14, RSP=15).
+const GREGS_IDX: [usize; 16] = [
+    13, // reg 0  = RAX
+    14, // reg 1  = RCX
+    12, // reg 2  = RDX
+    11, // reg 3  = RBX
+    15, // reg 4  = RSP
+    10, // reg 5  = RBP
+    9,  // reg 6  = RSI
+    8,  // reg 7  = RDI
+    0,  // reg 8  = R8
+    1,  // reg 9  = R9
+    2,  // reg 10 = R10
+    3,  // reg 11 = R11
+    4,  // reg 12 = R12
+    5,  // reg 13 = R13
+    6,  // reg 14 = R14
+    7,  // reg 15 = R15
+];
+
 const REG_RIP: usize = 16;
 const REG_EFL: usize = 17;
 
 fn reg_index(reg: u8) -> usize {
-    match reg {
-        0 => REG_RAX, 1 => REG_RCX, 2 => REG_RDX, 3 => REG_RBX,
-        4 => REG_RSP, 5 => REG_RBP, 6 => REG_RSI, 7 => REG_RDI,
-        8 => REG_R8, 9 => REG_R9, 10 => REG_R10, 11 => REG_R11,
-        12 => REG_R12, 13 => REG_R13, 14 => REG_R14, 15 => REG_R15,
-        _ => 0,
+    if (reg as usize) < GREGS_IDX.len() {
+        GREGS_IDX[reg as usize]
+    } else {
+        GREGS_IDX[0]
     }
 }
 
@@ -315,5 +328,157 @@ unsafe fn update_flags_common(ctx: *mut libc::ucontext_t, result: u64, is_64bit:
         let idx = REG_EFL;
         let gregs = &mut (*ctx).uc_mcontext.gregs;
         gregs[idx] |= 0x80;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decoder::decode_instruction;
+
+    /// A hand-built ucontext: only the gregs slots we touch are set; the rest
+    /// zero. Returns (ctx_ptr, code_backing) so the code bytes stay alive.
+    /// gregs slots use the REAL glibc x86-64 layout (RAX=13, RCX=14, RIP=16).
+    fn make_ctx(code: &[u8]) -> (libc::ucontext_t, Vec<u8>) {
+        let mut ctx: libc::ucontext_t = unsafe { std::mem::zeroed() };
+        let mut backing = code.to_vec();
+        backing.resize(32, 0xcc); // pad so decode has readable bytes
+        ctx.uc_mcontext.gregs[REG_RIP] = backing.as_ptr() as i64;
+        (ctx, backing)
+    }
+
+    /// POPCNT r64,r64 = F3 48 0F B8 /r. Emulation must write the DEST reg
+    /// (ModR/M.reg) and read the SOURCE (ModR/M.rm) at their true gregs slots.
+    #[test]
+    fn popcnt_writes_dest_at_correct_gregs_slot() {
+        // popcnt rax, rcx  (REX.W=48, mod=11 reg=000 rm=001)
+        let code = [0xF3u8, 0x48, 0x0F, 0xB8, 0xC1];
+        let mut ctx;
+        let backing;
+        unsafe {
+            let (c, b) = make_ctx(&code);
+            ctx = c;
+            backing = b;
+            // source rcx = 0b1011 (3 set bits); dest rax = junk that must be overwritten.
+            ctx.uc_mcontext.gregs[14] = 0b1011; // RCX
+            ctx.uc_mcontext.gregs[13] = 0xDEAD; // RAX
+            let features = crate::cpuid::CpuFeatures::default();
+            let inst = decode_instruction(backing.as_ptr());
+            let res = emulate(&inst, &features, &mut ctx);
+            assert_eq!(res, EmulationResult::Success, "popcnt should emulate");
+            // Destination is rax -> gregs[13], value = 3.
+            assert_eq!(ctx.uc_mcontext.gregs[13], 3, "popcnt result in RAX");
+            // RIP advanced by the instruction length.
+            assert_eq!(
+                ctx.uc_mcontext.gregs[REG_RIP],
+                backing.as_ptr() as i64 + 5,
+                "RIP advanced by 5"
+            );
+        }
+    }
+
+    /// LZCNT (F3 0F BD) on a non-zero source writes the count to the DEST reg.
+    #[test]
+    fn lzcnt_writes_dest_count_at_correct_slot() {
+        // F3 REX.W 0F BD C8 = lzcnt rcx, rax (prefix F3, then REX.W=48, reg=001=rcx, rm=000=rax)
+        let code = [0xF3u8, 0x48, 0x0F, 0xBD, 0xC8];
+        let mut ctx;
+        let backing;
+        unsafe {
+            let (c, b) = make_ctx(&code);
+            ctx = c;
+            backing = b;
+            ctx.uc_mcontext.gregs[13] = 1; // rax = 1 -> lzcnt(1)=63
+            let features = crate::cpuid::CpuFeatures::default();
+            let inst = decode_instruction(backing.as_ptr());
+            let _ = emulate(&inst, &features, &mut ctx);
+            assert_eq!(ctx.uc_mcontext.gregs[14], 63, "lzcnt result in RCX");
+        }
+    }
+
+    /// TZCNT 16-bit (66 F3 0F BC) exercises the 16-bit GPR path.
+    #[test]
+    fn tzcnt_16bit_matches_real_count() {
+        // 66 F3 0F BC C8 = tzcnt cx, ax (operand-size 66 -> 16-bit)
+        let code = [0x66u8, 0xF3, 0x0F, 0xBC, 0xC8];
+        let mut ctx;
+        let backing;
+        unsafe {
+            let (c, b) = make_ctx(&code);
+            ctx = c;
+            backing = b;
+            ctx.uc_mcontext.gregs[13] = 0x100; // ax = 0x0100 -> tzcnt=8
+            let features = crate::cpuid::CpuFeatures::default();
+            let inst = decode_instruction(backing.as_ptr());
+            // inst.reg (dest)=1 = rcx=14; inst.rm=0=rax=13. Verify decode fn table.
+            assert_eq!(inst.reg, 1);
+            assert_eq!(inst.rm, 0);
+            let _ = emulate(&inst, &features, &mut ctx);
+            assert_eq!(ctx.uc_mcontext.gregs[14], 8, "tzcnt finally in RCX");
+        }
+    }
+
+    /// ANDN r32a,r32b,r/m32 = VEX.NDS.LZ.0F38.W0 F2 /r.
+    /// The first source is the VEX vvvv field, NOT the modrm.reg (dest).
+    /// C4 E2 70 F2 C2 = ANDN eax, ecx, edx (mod=11 reg=000 eax rm=010 edx,
+    /// vvvv=1 ecx). Semantics: eax = ~edx & ecx.
+    #[test]
+    fn andn_uses_vev_vvvv_source() {
+        // ANDN eax, ecx, edx
+        let code = [0xC4u8, 0xE2, 0x70, 0xF2, 0xC2];
+        let mut ctx;
+        let backing;
+        unsafe {
+            let (c, b) = make_ctx(&code);
+            ctx = c;
+            backing = b;
+            // ecx (slot 14, vvvv=1) = 0x0F, edx (slot 12, rm=2) = 0x03.
+            // ANDN = ~0x03 & 0x0F = 0x0C, written to eax (slot 13).
+            ctx.uc_mcontext.gregs[14] = 0x0F; // ecx
+            ctx.uc_mcontext.gregs[12] = 0x03; // edx
+            ctx.uc_mcontext.gregs[13] = 0xDEAD; // eax (dest, must be overwritten)
+            let features = crate::cpuid::CpuFeatures::default();
+            let inst = decode_instruction(backing.as_ptr());
+            assert!(inst.is_vex, "should be VEX");
+            assert_eq!(inst.opcode[0], 0x0F);
+            assert_eq!(inst.opcode[1], 0x38);
+            assert_eq!(inst.opcode[2], 0xF2);
+            assert_eq!(inst.vex_vvvv, 1, "vvvv decoded = ecx");
+            assert_eq!(inst.reg, 0, "dest = eax");
+            assert_eq!(inst.rm, 2, "src2 = edx");
+            let _ = emulate(&inst, &features, &mut ctx);
+            // Dest eax = ~edx & ecx = ~0x03 & 0x0F = 0x0C.
+            assert_eq!(
+                ctx.uc_mcontext.gregs[13],
+                0x0C,
+                "ANDN eax,ecx,edx = ~edx & ecx in eax"
+            );
+        }
+    }
+
+    /// BLSI/BLSMSK/BLSR do NOT use vvvv — dest is modrm.reg and the sole
+    /// source is rm. Verify BLSR (VEX.0F38.W0 F4) clears the low bit.
+    /// C4 E2 70 F4 C2 = blsr eax, edx (mod=11 reg=000 eax rm=010 edx).
+    #[test]
+    fn blsr_is_rm_sourced_not_vvvv() {
+        // blsr eax, edx  (vvvv field present but ignored by BLSR)
+        let code = [0xC4u8, 0xE2, 0x70, 0xF4, 0xC2];
+        let mut ctx;
+        let backing;
+        unsafe {
+            let (c, b) = make_ctx(&code);
+            ctx = c;
+            backing = b;
+            // edx (slot 12, rm=2) = 0x0B (1011); vvvv=ecx must be IGNORED.
+            ctx.uc_mcontext.gregs[12] = 0x0B; // edx
+            ctx.uc_mcontext.gregs[14] = 0xFF; // ecx (vvvv, irrelevant)
+            ctx.uc_mcontext.gregs[13] = 0xDEAD; // eax (dest)
+            let features = crate::cpuid::CpuFeatures::default();
+            let inst = decode_instruction(backing.as_ptr());
+            assert_eq!(inst.vex_vvvv, 1);
+            let _ = emulate(&inst, &features, &mut ctx);
+            // BLSR = edx & (edx-1) = 0x0B & 0x0A = 0x0A.
+            assert_eq!(ctx.uc_mcontext.gregs[13], 0x0A, "blsr eax,edx = edx&(edx-1)");
+        }
     }
 }

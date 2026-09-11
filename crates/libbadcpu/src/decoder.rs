@@ -116,6 +116,8 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
             let b2 = *ip.add(pos); pos += 1;
             vex_w = (b2 >> 7) & 1;
             _vex_pp = b2 & 0x03;
+            // vvvv is the inverted field in b2 bits [6:3].
+            inst.vex_vvvv = ((!((b2 >> 3) & 0x0F)) & 0x0F) as u8;
             // Reconstruct REX: W|~R|~X|~B
             inst.rex = (vex_w << 3) | ((!vex_r & 1) << 2) | ((!((b1 >> 6) & 1) & 1) << 1) | ((!((b1 >> 5) & 1) & 1));
             inst.has_rex = true;
@@ -124,6 +126,8 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
             let b1 = *ip.add(pos); pos += 1;
             let vex_r = (b1 >> 7) & 1;
             _vex_pp = b1 & 0x03;
+            // vvvv is the inverted field in b1 bits [6:3]; map = 1 (0F).
+            inst.vex_vvvv = ((!((b1 >> 3) & 0x0F)) & 0x0F) as u8;
             vex_m = 1;
             inst.rex = (!vex_r & 1) << 2;
             inst.has_rex = true;
@@ -161,27 +165,35 @@ pub unsafe fn decode_instruction(ip: *const u8) -> DecodedInstruction {
             pos += 1;
         }
     } else if inst.is_vex {
+        // After the VEX prefix bytes, `pos` points at the actual opcode byte
+        // (the byte after C4-x-x / C5-x). Read it there, not `first_byte`
+        // (which is the C4/C5 prefix itself).
+        let op_byte = *ip.add(pos);
         match opcode_map {
             1 => {
                 inst.opcode[0] = 0x0F;
-                inst.opcode[1] = first_byte;
+                inst.opcode[1] = op_byte;
                 inst.opcode_len = 2;
+                pos += 1;
             }
             2 => {
                 inst.opcode[0] = 0x0F;
                 inst.opcode[1] = 0x38;
-                inst.opcode[2] = first_byte;
+                inst.opcode[2] = op_byte;
                 inst.opcode_len = 3;
+                pos += 1;
             }
             3 => {
                 inst.opcode[0] = 0x0F;
                 inst.opcode[1] = 0x3A;
-                inst.opcode[2] = first_byte;
+                inst.opcode[2] = op_byte;
                 inst.opcode_len = 3;
+                pos += 1;
             }
             _ => {
-                inst.opcode[0] = first_byte;
+                inst.opcode[0] = op_byte;
                 inst.opcode_len = 1;
+                pos += 1;
             }
         }
     } else {
@@ -372,6 +384,43 @@ mod tests {
         assert!(inst.has_f3);
         assert_eq!(inst.opcode[0], 0x0F);
         assert_eq!(inst.opcode[1], 0xBD);
+    }
+
+    #[test]
+    fn test_decode_vex_3byte_opcode_not_from_prefix() {
+        // ANDN eax,ecx,edx = C4 E2 70 F2 C2. The opcode byte must be read
+        // AFTER the C4 EO 70 VEX bytes (0xF2), not the C4/C5 prefix.
+        let code = [0xC4u8, 0xE2, 0x70, 0xF2, 0xC2];
+        let inst = unsafe { decode_instruction(code.as_ptr()) };
+        assert!(inst.is_vex);
+        assert_eq!(inst.opcode_len, 3);
+        assert_eq!(inst.opcode[0], 0x0F);
+        assert_eq!(inst.opcode[1], 0x38);
+        assert_eq!(inst.opcode[2], 0xF2, "ANDN VEX opcode byte");
+        // vvvv field (b2=0x70, bits[6:3] inverted) = 1.
+        assert_eq!(inst.vex_vvvv, 1);
+        // REX reconstruction: b1=0xE2 -> ~R|~X|~B all 1 => rex lower bits 0,
+        // W=0. So rex = 0.
+        assert_eq!(inst.rex, 0);
+        // operand size without W = 32.
+        assert_eq!(inst.operand_size, 32);
+        // len = VEX(3) + opcode(1) + modrm(1) = 5.
+        assert_eq!(inst.len, 5);
+    }
+
+    #[test]
+    fn test_decode_vex_2byte_vvvv() {
+        // 2-byte VEX short form: map 1 (0F). e.g. VZEROUPPER-adjacent map-1
+        // vvvv encoding. C5 D8 = map-1, vvvv=(~DX>>3)&0xF.
+        // b1=0xD8: ~R(bit7=1)->R=0; vvvv = (~((0xD8>>3)&0xF))&0xF =
+        // (~0xB)&0xF = 4.
+        let code = [0xC5u8, 0xD8, 0x77, 0xC0];
+        let inst = unsafe { decode_instruction(code.as_ptr()) };
+        assert!(inst.is_vex);
+        assert_eq!(inst.vex_vvvv, 4);
+        assert_eq!(inst.opcode_len, 2);
+        assert_eq!(inst.opcode[0], 0x0F);
+        assert_eq!(inst.opcode[1], 0x77);
     }
 
     fn inst_test_modrm(_inst: DecodedInstruction) {
