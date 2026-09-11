@@ -356,10 +356,9 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     let nr = s.x[8];
     let a = [s.x[0], s.x[1], s.x[2], s.x[3], s.x[4], s.x[5]];
     if std::env::var("JIT_TRACE_SVC").is_ok() {
-        eprintln!(
-            "guest svc {:x} ({}) a0={:#x} a1={:#x} a2={:#x} a3={:#x}",
-            nr, nr, a[0], a[1], a[2], a[3]
-        );
+        // Unbuffered fd-2 marker (eprintln buffers and is lost on _exit/segv).
+        let m = format!("guest svc {nr:x} a0={:#x}\n", a[0]);
+        unsafe { libc::write(2, m.as_ptr() as *const libc::c_void, m.len()); }
     }
     use libc::{c_long, c_void, c_char, c_int};
     // AArch64 -> host. We dispatch by AArch64 syscall number directly to the
@@ -369,8 +368,15 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     let ret: c_long = match nr {
         // --- process / exit ---
         93 | 94 => { // exit(93) / exit_group(94)
-            eprintln!("guest_svc: exit_group({}) from guest", a[0]);
-            std::process::exit(a[0] as i32);
+            if std::env::var("JIT_TRACE_SVC").is_ok() {
+                eprintln!("guest_svc: exit_group({}) from guest", a[0]);
+            }
+            // A guest exit_group is a raw kernel call: terminate immediately
+            // without Rust's stdout flush / destructor walk (a guest `exit`
+            // must NOT run host language-level cleanup, and Rust's atexit stdio
+            // flush crashed under elfjit when stdout was redirected). Guest
+            // writes went directly to fd 1, so nothing is lost by _exit.
+            unsafe { libc::_exit(a[0] as c_int) };
         }
         // --- basic I/O ---
         63 => unsafe { libc::read(a[0] as c_int, a[1] as *mut c_void, a[2] as usize) as c_long },
@@ -387,13 +393,30 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
             if a[0] == 0 { return libc::syscall(libc::SYS_brk, 0 as usize) as u64; }
             r as c_long
         },
-        220 => unsafe { libc::syscall(libc::SYS_mremap, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as c_int, a[4] as usize) as c_long },
+        216 => unsafe { libc::syscall(libc::SYS_mremap, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as c_int, a[4] as usize) as c_long }, // (220 is clone, NOT mremap)
+        // --- filesystem / directory ---
+        17 => unsafe { libc::syscall(libc::SYS_getcwd, a[0] as usize, a[1] as usize) as c_long },
+        49 => unsafe { libc::chdir(a[0] as *const c_char) as c_long },
+        61 => unsafe { libc::syscall(libc::SYS_getdents64, a[0] as c_int, a[1] as usize, a[2] as usize) as c_long },
+        62 => unsafe { libc::lseek(a[0] as c_int, a[1] as i64, a[2] as c_int) as c_long },
+        48 => unsafe { libc::faccessat(libc::AT_FDCWD, a[0] as *const c_char, a[1] as c_int, 0) as c_long },
+        78 => unsafe { libc::syscall(libc::SYS_readlinkat, libc::AT_FDCWD as usize, a[0] as usize, a[1] as usize, a[2] as usize) as c_long },
+        59 => unsafe { libc::pipe2(a[0] as *mut c_int, a[2] as c_int) as c_long },
+        96 => unsafe { libc::syscall(libc::SYS_set_tid_address, a[0] as usize) as c_long },
+        124 => unsafe { libc::sched_yield() as c_long },
         // --- time ---
         113 => unsafe { libc::clock_gettime(a[0] as libc::clockid_t, a[1] as *mut libc::timespec) as c_long },
         101 => unsafe { libc::nanosleep(a[1] as *const libc::timespec, a[2] as *mut libc::timespec) as c_long },
+        // --- process / control ---
+        167 => unsafe { libc::prctl(a[0] as c_int, a[1], a[2], a[3], a[4]) as c_long },
         // --- process / user identity ---
         172 => unsafe { libc::getpid() as c_long },
-        199 => unsafe { libc::getuid() as c_long },
+        174 => unsafe { libc::getuid() as c_long }, // (199 is socketpair, NOT getuid)
+        175 => unsafe { libc::geteuid() as c_long },
+        176 => unsafe { libc::getgid() as c_long },
+        177 => unsafe { libc::getegid() as c_long },
+        178 => unsafe { libc::gettid() as c_long },
+        173 => unsafe { libc::getppid() as c_long },
         98 => unsafe {
             // futex: only FUTEX_WAIT(0)/FUTEX_WAKE(1) forwarded to the host. Others return 0.
             let op = a[1] as i32;
@@ -2541,6 +2564,34 @@ mod tests {
         st.x[8] = 172;
         let pid = guest_svc(&mut st as *mut CpuState);
         assert_eq!(pid as u32, std::process::id());
+    }
+
+    #[test]
+    fn guest_svc_identity_numbers_match_aarch64_abi() {
+        // Regression for two latent syscall-number bugs: the table mapped
+        // getuid to 199 (that's actually socketpair) and mremap to 220 (that's
+        // clone). The real AArch64 numbers (asm-generic/unistd.h, arm64 uapi):
+        // getpid=172, getuid=174, geteuid=175, getgid=176, getegid=177,
+        // gettid=178, getppid=173, mremap=216 (3264_mremap), mmap=222.
+        let mut st = CpuState::new();
+        // getuid (AArch64 174) == host real uid (euid sandboxing aside, same)
+        st.x[8] = 174;
+        let uid = guest_svc(&mut st as *mut CpuState);
+        assert_eq!(uid as libc::uid_t, unsafe { libc::getuid() }, "getuid is 174");
+        // geteuid (175)
+        st.x[8] = 175;
+        assert_eq!(guest_svc(&mut st as *mut CpuState) as libc::uid_t,
+            unsafe { libc::geteuid() }, "geteuid is 175");
+        // gettid (178) == the host thread id (libc gettid)
+        st.x[8] = 178;
+        assert_eq!(guest_svc(&mut st as *mut CpuState) as isize,
+            unsafe { libc::syscall(libc::SYS_gettid) as isize }, "gettid is 178");
+        // The wrong numbers must NOT be getuid: 199 returns the (host) socketpair
+        // error -EINVAL here, NOT the uid — proving 199 is not getuid.
+        st.x[8] = 199;
+        let r199 = guest_svc(&mut st as *mut CpuState);
+        assert_ne!(r199 as libc::uid_t, unsafe { libc::getuid() },
+            "199 is not getuid (it is socketpair)");
     }
 
     #[test]

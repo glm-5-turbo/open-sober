@@ -1012,8 +1012,22 @@ pub fn translate(
             // Route the supervisor call to the host `guest_svc` dispatcher (this
             // is the hookpoint for real AArch64->host syscall routing).
             let addr = crate::jit::guest_svc as usize as u64;
+            // guest_svc(st) is extern "C" fn(*mut CpuState)->u64: arg0 (state)
+            // must go in RDI explicitly. RDI at block entry does hold the state
+            // pointer (we are f(state)), so the FIRST inline call worked by
+            // accident — but a prior host call clobbers RDI (caller-saved), so
+            // any later svc passed garbage. This was a real latent bug.
+            buf.mov_rr64(RDI, RBX); // arg0 = state
             buf.mov_ri64(RAX, addr);
+            // The JIT block body runs at host RSP ≡ 8 (mod 16) — the correct
+            // callee-entry alignment for guest-to-guest BL (call_rel32) — but
+            // SysV requires RSP ≡ 0 at the *call* site of a host function. An
+            // inline host callee (guest_svc, guest_sha1stem) does its own
+            // aligned stack work (prologue push, SSE locals; e.g. format! in
+            // tracing), so a misaligned call faults. Align around the call.
+            buf.sub_ri64(4, 8); // RSP(4) -= 8  ->  RSP ≡ 0 mod 16 at the call
             buf.call_r64(RAX); // guest_svc(st); returns the syscall result in RAX
+            buf.add_ri64(4, 8); // RSP += 8  ->  back to block-entry alignment
             stg(buf, 0, RAX); // system value -> guest x0 (AArch64 return reg)
             Ok(())
         }
@@ -3099,7 +3113,12 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                 buf.mov_rr64(RDI, RBX);   // arg0 = CpuState*
                                 buf.mov_ri64(RSI, packed); // arg1 = packed op
                                 buf.mov_ri64(RAX, addr);
+                                // Align RSP ≡ 0 mod 16 at the host call site
+                                // (block body runs at RSP ≡ 8; SysV host calls
+                                // need ≡ 0) — same rationale as the Svc arm.
+                                buf.sub_ri64(4, 8);
                                 buf.call_r64(RAX);
+                                buf.add_ri64(4, 8);
                                 Ok(())
                             }
                             // Vd = (Vn & Vm) | (Vd & ~Vm), over the full 16 bytes
