@@ -9,7 +9,7 @@ fn main() {
         .unwrap_or_else(|| "/home/code-agent/.cache/open-sober/libs/libroblox.so".to_string());
     let el = unsafe { libloader::elf::load_elf_image(std::path::Path::new(&path)) }
         .expect("load_elf_image");
-    let (bound, unbound) = arm64jit::plt::bind_image_plt(&el);
+    let (bound, unbound) = arm64jit::plt::bind_image_plt(&el, None);
     println!("== {path} PLT JUMP_SLOT import summary ==");
     println!("resolved-to-host: {bound}  |  unbound: {unbound}  (total {})", bound + unbound);
 }

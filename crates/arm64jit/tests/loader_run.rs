@@ -134,7 +134,7 @@ fn compile_pie(workdir: &std::path::Path, name: &str, src: &str) -> PathBuf {
 fn run_elf(path: &std::path::Path) -> Result<u64, String> {
     let el = unsafe { load_elf_image(path) }.map_err(|e| format!("load_elf_image: {e:#}"))?;
 
-    let (_nbound, _unresolved) = arm64jit::plt::bind_image_plt(&el);
+    let (_nbound, _unresolved) = arm64jit::plt::bind_image_plt(&el, None);
 
     // Full mapped span (all PT_LOADs + inter-segment gaps) as valid-pc extent,
     // relative to the exec segment base — same as elfjit.
@@ -529,4 +529,150 @@ fn loader_run_fixed_pt_fcvt_returns_99() {
          return s;\n}\n",
         99,
     );
+}
+
+/// Run a whole `DT_NEEDED` chain through the loader → cross-module binder →
+/// `jit_run` pipeline. Mirrors `run_elf` but loads the dependency closure,
+/// binds every module against the combined export scope, and feeds `jit_run` a
+/// single image slice covering the whole contiguous chain.
+fn run_chain(
+    chain: &libloader::deps::LoadedChain,
+    main_path: &std::path::Path,
+) -> Result<u64, String> {
+    let refs: Vec<&libloader::elf::LoadedElf> = chain.entries.iter().collect();
+    let scope = arm64jit::plt::build_export_scope(&refs);
+    for el in &chain.entries {
+        arm64jit::plt::bind_image_plt(el, Some(&scope));
+    }
+
+    let main = chain.main();
+    let base = chain.base();
+    let end = chain.end();
+    let len = (end - base) as usize;
+    let image = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
+
+    let mut st = CpuState::new();
+    let entry = main.info.entry; // relocated to guest space by load_elf_image_at
+
+    // Guest stack + TLS (kernel-style initial stack), same as run_elf/elfjit.
+    const STACK_SIZE: usize = 4 * 1024 * 1024;
+    let stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
+    let mut auxv = arm64jit::boot::standard_auxv(
+        main,
+        arm64jit::boot::HWCAP_FP | arm64jit::boot::HWCAP_ASIMD,
+        0,
+    );
+    let sp = arm64jit::boot::layout_initial_stack(
+        stack.as_ptr() as *mut u8,
+        STACK_SIZE,
+        Some(&[0u8; 0]),
+        &[],
+        &mut auxv,
+    );
+    st.set(31, sp);
+    let tls = Box::leak(vec![0u8; 64 * 1024].into_boxed_slice());
+    st.tpidr = libloader::elf::setup_guest_tls(
+        &main.info,
+        main_path,
+        tls.as_ptr() as *mut u8,
+        64 * 1024,
+    )
+    .map_err(|e| format!("setup_guest_tls: {e:#}"))?;
+
+    jit_run(image, base, entry, &mut st as *mut CpuState)
+}
+
+#[test]
+fn loader_run_needed_dep_cross_module_call_returns_42() {
+    // Multi-module (DT_NEEDED) end-to-end: the loader resolves the main .so's
+    // `DT_NEEDED libdep.so`, maps the dependency contiguously after it in the
+    // same guest region, and the guest's `bl dep_val@plt` (a JUMP_SLOT the host
+    // resolver can't satisfy) resolves through the cross-module export scope to
+    // the dependency's own guest address, which jit_run compiles from the
+    // shared image slice. entry() = dep_val() + 2 = 40 + 2 = 42.
+    if cross_gcc().is_none() {
+        eprintln!("skipping loader_run_needed_dep: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir("chain");
+
+    // libdep.so exports dep_val() = 40 (a plain -shared library, no entry).
+    let dep_c = wd.join("dep.c");
+    std::fs::write(&dep_c, "int dep_val(void){ return 40; }\n").unwrap();
+    let dep_so = wd.join("libdep.so");
+    let out = Command::new("aarch64-linux-gnu-gcc")
+        .args(["-shared", "-fPIC", "-nostdlib"])
+        .arg(&dep_c)
+        .arg("-o")
+        .arg(&dep_so)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cross-gcc (dep): {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc (dep) failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // libmain.so NEEDs libdep.so and calls dep_val from its entry.
+    let main_c = wd.join("main.c");
+    std::fs::write(&main_c, "extern int dep_val(void); int entry(void){ return dep_val() + 2; }\n")
+        .unwrap();
+    let main_so = wd.join("libmain.so");
+    let out = Command::new("aarch64-linux-gnu-gcc")
+        .args(["-shared", "-fPIC", "-nostdlib", "-Wl,-e,entry"])
+        .arg("-Wl,--no-as-needed")
+        .arg("-L")
+        .arg(&wd)
+        .arg("-l")
+        .arg("dep")
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_so)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cross-gcc (main): {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc (main) failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Sanity: libmain really DT_NEEDs libdep.
+    let rel = Command::new("aarch64-linux-gnu-readelf")
+        .args(["-d"])
+        .arg(&main_so)
+        .output()
+        .expect("readelf missing");
+    let dyn_txt = String::from_utf8_lossy(&rel.stdout);
+    assert!(
+        dyn_txt.contains("libdep.so"),
+        "libmain should DT_NEED libdep.so:\n{dyn_txt}"
+    );
+
+    let search = vec![wd.clone()];
+    let chain = libloader::deps::load_elf_with_deps(&main_so, &search)
+        .unwrap_or_else(|e| panic!("load_elf_with_deps: {e:#}"));
+    assert_eq!(
+        chain.entries.len(),
+        2,
+        "expected main + 1 dependency, got {}",
+        chain.entries.len()
+    );
+    // Dependency (entry 1) sits at a distinct, higher guest base than main.
+    let main_base = chain.main().base_addr as u64;
+    let dep_base = chain.entries[1].base_addr as u64;
+    assert!(
+        dep_base > main_base,
+        "dependency should map after main (dep {dep_base:#x} <= main {main_base:#x})"
+    );
+
+    match run_chain(&chain, &main_so) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "chain: entry() -> {v}, expected 42 (cross-module JUMP_SLOT not resolved?)"
+        ),
+        Err(e) => panic!("chain: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m chain: entry() -> 42 via DT_NEEDED cross-module dep call");
+    let _ = std::fs::remove_dir_all(&wd);
 }

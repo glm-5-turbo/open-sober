@@ -17,6 +17,7 @@
 
 mod sandbox;
 pub mod elf;
+pub mod deps;
 pub mod android_relocs;
 mod android;
 mod ipc;

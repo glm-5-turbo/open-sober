@@ -67,7 +67,7 @@ fn main() {
         // Fold the import resolver + host shims into the boot path: bind every PLT
         // JUMP_SLOT GOT slot to a host thunk so translated Roblox `blr`s hit real
         // host functions (libc/libm/float/bionic/graphics-stub) instead of stalling.
-        let (nbound, nunresolved) = arm64jit::plt::bind_image_plt(&el);
+        let (nbound, nunresolved) = arm64jit::plt::bind_image_plt(&el, None);
         if nbound > 0 {
             println!("PLT imports bound: {nbound} to host thunks ({} unbound)", nunresolved);
         }

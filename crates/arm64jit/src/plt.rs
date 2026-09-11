@@ -7,7 +7,179 @@
 //! image: after this, every import the guest references resolves to a real host
 //! x86-64 routine (or a benign graphics/audio/media fallback stub).
 
+use std::collections::HashMap;
+
 use libloader::elf::LoadedElf;
+
+/// Build a combined guest symbol scope across a module chain: maps every *global
+/// defined* symbol (`st_shndx != SHN_UNDEF`, `STB_GLOBAL`/`STB_WEAK` binding) of
+/// each loaded module to its guest/runtime address (== host address under
+/// `libloader`'s guest==host mapping). The main image's definitions win
+/// (first-wins insertion in load order), so a dependency later in `els` only
+/// fills a name no earlier module already defines — the ELF program-then-libs
+/// interposition rule.
+///
+/// This lets one module's `adrp;ldr x,[GOT];blr x` import dispatch into another
+/// module's *exported* function when `bind_image_plt` is given the scope for a
+/// whole `DT_NEEDED` chain: a symbol the host resolver can't satisfy resolves to
+/// the defining module's guest address, which the JIT then compiles from the
+/// shared image slice.
+#[allow(unused)]
+pub fn build_export_scope(els: &[&LoadedElf]) -> HashMap<Vec<u8>, u64> {
+    const DT_NULL: i64 = 0;
+    const PT_DYNAMIC: u8 = 2;
+    const DT_SYMTAB: i64 = 6;
+    const DT_STRTAB: i64 = 5;
+    const DT_HASH: i64 = 4;
+    const SHN_UNDEF: u16 = 0;
+    const STB_LOCAL: u8 = 0;
+
+    #[inline]
+    fn rd64(p: usize) -> u64 {
+        unsafe { std::ptr::read_unaligned(p as *const u64) }
+    }
+    #[inline]
+    fn rd32(p: usize) -> u32 {
+        unsafe { std::ptr::read_unaligned(p as *const u32) }
+    }
+    #[inline]
+    fn rd16(p: usize) -> u16 {
+        unsafe { std::ptr::read_unaligned(p as *const u16) }
+    }
+
+    let mut scope: HashMap<Vec<u8>, u64> = HashMap::new();
+    for el in els {
+        let min_guest = el
+            .segments
+            .iter()
+            .map(|s| s.guest_vaddr)
+            .min()
+            .unwrap_or(0);
+        let host = |g: u64| -> usize { el.host_addr_of(g).unwrap_or(0) as usize };
+        let ehdr = host(min_guest);
+        if ehdr == 0 {
+            continue;
+        }
+        let e_phoff = rd64(ehdr + 0x20) as usize;
+        let e_phentsize = rd16(ehdr + 0x36) as usize;
+        let e_phnum = rd16(ehdr + 0x38) as usize;
+
+        let mut dyn_link = 0u64;
+        for i in 0..e_phnum {
+            let ph = ehdr + e_phoff + i * e_phentsize;
+            if rd32(ph) == PT_DYNAMIC as u32 {
+                dyn_link = rd64(ph + 0x10);
+                break;
+            }
+        }
+        if dyn_link == 0 {
+            continue;
+        }
+        let dynp = host(el.guest_of(dyn_link));
+        if dynp == 0 {
+            continue;
+        }
+        let (mut symtab, mut strtab, mut hash) = (0u64, 0u64, 0u64);
+        let mut i = 0usize;
+        loop {
+            let tag = rd64(dynp + i * 16) as i64;
+            let val = rd64(dynp + i * 16 + 8);
+            if tag == DT_NULL as i64 {
+                break;
+            }
+            match tag {
+                DT_SYMTAB => symtab = val,
+                DT_STRTAB => strtab = val,
+                DT_HASH => hash = val,
+                _ => {}
+            }
+            i += 1;
+            if i > 4096 {
+                break;
+            }
+        }
+        if symtab == 0 || strtab == 0 {
+            continue;
+        }
+        let symtab_h = host(el.guest_of(symtab));
+        let strtab_h = host(el.guest_of(strtab));
+
+        // Upper bound of this module's guest==host mapped image (end of the
+        // highest segment). GNU-hashed libs have no DT_HASH nchain, so the
+        // scan must stop before reading past the module's actual data rather
+        // than walk into unmapped memory.
+        let lim = el
+            .segments
+            .iter()
+            .map(|s| s.guest_vaddr.saturating_add(s.memsz))
+            .max()
+            .unwrap_or(0);
+
+        // Number of symbol-table entries: from the DT_HASH nchain when present,
+        // else a bounded scan (stop at an all-zero/unnamed undefined symbol).
+        let nsyms: usize = if hash != 0 {
+            let hash_h = host(el.guest_of(hash));
+            if hash_h != 0 {
+                rd32(hash_h + 4) as usize // nchain (offset +4)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let scan_limit = if nsyms != 0 && nsyms < (1 << 20) {
+            nsyms
+        } else {
+            (1 << 20)
+        };
+
+        for n in 1..scan_limit {
+            let sym = symtab_h + n * 24;
+            // Never read outside the module's mapped image (no DT_HASH → the
+            // null-symbol sentinel can't be used; the null symbol IS index 0,
+            // which we skip = start at n=1 — bound by the image end instead).
+            if nsyms == 0 && sym + 24 > lim as usize {
+                break;
+            }
+            let st_name = rd32(sym) as usize;
+            let st_info = unsafe { *(sym as *const u8).add(4) };
+            let st_shndx = rd16(sym + 6);
+            let st_value = rd64(sym + 8);
+            if st_shndx == SHN_UNDEF || (st_info >> 4) == STB_LOCAL {
+                continue; // undefined (import) or local — not in the export scope
+            }
+            let mut name = Vec::new();
+            {
+                let mut p = strtab_h + st_name;
+                let end = lim as usize;
+                while p < end {
+                    let c = unsafe { *(p as *const u8) };
+                    if c == 0 {
+                        break;
+                    }
+                    name.push(c);
+                    p += 1;
+                    if name.len() > 256 {
+                        break;
+                    }
+                }
+            }
+            if name.is_empty() {
+                continue;
+            }
+            let va = el.guest_of(st_value);
+            if va != 0 {
+                scope.entry(name).or_insert(va); // first (earliest-loaded) wins
+            }
+        }
+    }
+    scope
+}
+
+/// Resolve `name` against a cross-module scope, if one is provided.
+fn scope_resolve(scope: Option<&HashMap<Vec<u8>, u64>>, name: &[u8]) -> Option<u64> {
+    scope.and_then(|s| s.get(name)).copied()
+}
 
 /// Walk `DT_JMPREL` and bind every `R_AARCH64_JUMP_SLOT` GOT slot to a host
 /// thunk guest address. Returns `(resolved, total_relocs)`.
@@ -16,7 +188,10 @@ use libloader::elf::LoadedElf;
 /// with an explicit `libm.so.6` fallback), 2) hand-written bionic shim
 /// (`__errno`/`__strlen_chk`/`__android_log_print`/... ), 3) float-ABI bridge
 /// (float64/float32), 4) catch-all graphics/audio/media fallback stub.
-pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
+pub fn bind_image_plt(
+    el: &LoadedElf,
+    scope: Option<&HashMap<Vec<u8>, u64>>,
+) -> (usize, usize) {
     const DT_NULL: i64 = 0;
     const PT_DYNAMIC: u8 = 2; // NOT 6 (PT_PHDR=6); 2 is the dynamic segment
     const DT_STRTAB: i64 = 5;
@@ -94,7 +269,7 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
         // GLOB_DAT relocations may still exist in the main DT_RELA, so bind
         // them before bailing (a module with only exported-data globals has
         // zero PLT calls yet depends on the main GOT for correctness).
-        let glob = bind_glob_dat(el);
+        let glob = bind_glob_dat(el, scope);
         eprintln!(
             "[plt] (no JUMP_SLOT) bound {} GLOB_DAT/ABS64, {} unresolved",
             glob.0, glob.1
@@ -134,23 +309,19 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
             }
         }
         match (
+            scope_resolve(scope, &name),
             crate::resolver::resolve(&name),
             crate::resolver::resolve_float(&name),
             crate::resolver::resolve_float32(&name),
         ) {
-            (Some(a), _, _) => {
+            (Some(a), _, _, _)
+            | (None, Some(a), _, _)
+            | (None, None, Some(a), _)
+            | (None, None, None, Some(a)) => {
                 wr64(host(el.guest_of(r_offset)), a);
                 resolved += 1;
             }
-            (None, Some(a), _) => {
-                wr64(host(el.guest_of(r_offset)), a);
-                resolved += 1;
-            }
-            (None, None, Some(a)) => {
-                wr64(host(el.guest_of(r_offset)), a);
-                resolved += 1;
-            }
-            (None, None, None) => pending.push((name, r_offset)),
+            (None, None, None, None) => pending.push((name, r_offset)),
         }
     }
 
@@ -180,7 +351,7 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
     // globals referenced from `-fPIC` module code go through the *main* GOT via
     // R_AARCH64_GLOB_DAT, and if left un-patched the guest `adrp;ldr x,[GOT]`
     // reads 0 and derefs/calls NULL. See bind_glob_dat for the exact semantics.
-    let glob = bind_glob_dat(el);
+    let glob = bind_glob_dat(el, scope);
     eprintln!(
         "[plt] bound {resolved} JUMP_SLOT + {} GLOB_DAT/ABS64 ({} unresolved), {} unresolved",
         glob.0, unresolved, glob.1
@@ -205,7 +376,10 @@ pub fn bind_image_plt(el: &LoadedElf) -> (usize, usize) {
 /// host address: for a data object use `dlsym` raw (guest==host addressable); for
 /// a function/notype use the resolver's host-call thunk so a guest call to the
 /// slot dispatches to the real host fn. Returns `(bound, unresolved)`.
-fn bind_glob_dat(el: &LoadedElf) -> (usize, usize) {
+fn bind_glob_dat(
+    el: &LoadedElf,
+    scope: Option<&HashMap<Vec<u8>, u64>>,
+) -> (usize, usize) {
     const DT_NULL: i64 = 0;
     const PT_DYNAMIC: u8 = 2;
     const DT_RELA: i64 = 7;
@@ -345,7 +519,13 @@ fn bind_glob_dat(el: &LoadedElf) -> (usize, usize) {
                     p += 1;
                 }
             }
-            if st_info & 0xf == STT_OBJECT {
+            // A cross-module import: if a loaded dependency (or the main image)
+            // defines this symbol, bind to its guest address so a guest deref /
+            // blr on the GOT slot lands in the defining module, which the JIT
+            // compiles from the shared image slice.
+            if let Some(sa) = scope_resolve(scope, &name) {
+                Some(sa.wrapping_add(r_addend as u64))
+            } else if st_info & 0xf == STT_OBJECT {
                 // Data object: dlsym gives the raw host (guest==host) addr.
                 match std::ffi::CString::new(name) {
                     Ok(c) => {
@@ -394,11 +574,15 @@ fn patch_stack_canary(el: &LoadedElf, wr64: &impl Fn(usize, u64)) {
     // because the runtime maps guest==host (contig), that value doubles as the
     // host addr.
     const CANARY_GOT_LINK: u64 = 0x631a000 + 0xa30; // = 0x631aa30
-    let host_addr = el.guest_of(CANARY_GOT_LINK) as usize;
-    if host_addr == 0 {
-        eprintln!("[plt] canary slot link {:#x} maps to 0; skipping", CANARY_GOT_LINK);
+    // Only patch if the slot actually lands inside this module's mapped image.
+    // For a small test .so linked at a low origin this link-time address maps
+    // far outside the module's PT_LOADs (guest==host), so dereferencing it
+    // would SIGSEGV; for the real libroblox.so it resolves to the real GOT slot.
+    let Some(host_addr) = el.host_addr_of(el.guest_of(CANARY_GOT_LINK)) else {
+        eprintln!("[plt] canary slot {CANARY_GOT_LINK:#x} not in this module's image; skipping");
         return;
-    }
+    };
+    let host_addr = host_addr as usize;
     let cur = unsafe { std::ptr::read_unaligned(host_addr as *const u64) };
 
     static CANARY: std::sync::atomic::AtomicU64 =
@@ -450,7 +634,7 @@ mod tests {
         }
         let el = unsafe { libloader::elf::load_elf_image(std::path::Path::new(path)) }
             .expect("load_elf_image");
-        let (bound, unbound) = bind_image_plt(&el);
+        let (bound, unbound) = bind_image_plt(&el, None);
         eprintln!("bound {bound}, unbound {unbound}");
         assert!(bound >= 500, "expected most of 537 JUMP_SLOT imports bound, got {bound}");
         assert_eq!(unbound, 0, "every import should bind via resolve/stub");

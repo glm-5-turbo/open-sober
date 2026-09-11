@@ -296,8 +296,22 @@ impl LoadedElf {
 /// SAFETY: mmap/mprotect/copy from file. The returned mapping is RWX where the
 /// ELF requests and lives until process exit (deliberate leak for a one-shot
 /// run; callers needing to unmap should track `base_addr`).
+/// Load an aarch64 ELF for the JIT path at an automatically chosen base
+/// (0x100000000 for PIE/ET_DYN). See [`load_elf_image_at`].
 #[allow(unused)]
 pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
+    load_elf_image_at(path, None)
+}
+
+/// Load an aarch64 ELF for the JIT path at a caller-chosen guest base.
+///
+/// This is the parameterized core shared by [`load_elf_image`] (auto base)
+/// and the multi-module loader (`crates/libloader/src/deps.rs`), which lays
+/// each `DT_NEEDED` dependency contiguously after the main image so a single
+/// `jit_run` image slice covers the whole chain and cross-module calls
+/// resolve into the same guest address space.
+#[allow(unused)]
+pub fn load_elf_image_at(path: &Path, jit_base: Option<usize>) -> Result<LoadedElf> {
     let info = parse_elf(path)?;
     let _file = File::open(path)?;
 
@@ -321,10 +335,15 @@ pub fn load_elf_image(path: &Path) -> Result<LoadedElf> {
     // Choose a fixed guest/JIT base that does not collide with host mappings.
     // For non-PIE use the link base (== min_vaddr, e.g. 0x400000); for PIE use
     // a fixed high region since the link origin is 0x0 (NULL page).
-    let jit_base = if info.is_pie {
-        0x1_0000_0000usize // 0x100000000
-    } else {
-        align_down_u64(min_vaddr, 0x1000) as usize
+    let jit_base = match jit_base {
+        Some(b) => b,
+        None => {
+            if info.is_pie {
+                0x1_0000_0000usize // 0x100000000
+            } else {
+                align_down_u64(min_vaddr, 0x1000) as usize
+            }
+        }
     };
     let base_page = align_down_u64(min_vaddr, 0x1000);
     let span = align_up_u64(max_end - base_page, 0x1000) as usize;

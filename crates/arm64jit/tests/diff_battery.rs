@@ -96,7 +96,7 @@ fn compile_arm(workdir: &std::path::Path, name: &str, src: &str, opt: &str) -> P
 /// `examples/elfjit.rs` and the loader_run harness).
 fn run_elf(path: &std::path::Path) -> Result<u64, String> {
     let el = unsafe { load_elf_image(path) }.map_err(|e| format!("load_elf_image: {e:#}"))?;
-    let (_n, _u) = arm64jit::plt::bind_image_plt(&el);
+    let (_n, _u) = arm64jit::plt::bind_image_plt(&el, None);
     let seg = el
         .segments
         .iter()
