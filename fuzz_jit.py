@@ -596,7 +596,28 @@ def gen_varshift():
     return (long long)(s1*131 + s2*17 + s3*3) ^ 0xf00baaull;
 }}
 """
-gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt, gen_pairwise_reduce, gen_varshift]
+def gen_scalar_varshift():
+    # SCALAR variable shift (lslv/lsrv/asrv) cannot be auto-vectorized: the
+    # running hash h is a loop-carried dependency, so gcc keeps each shift in a
+    # GPR (`lsl x11,x11,x9` / `asrv` etc. — the VarShiftVar arm), unlike array
+    # elementwise shifts which vectorize to NEON ushl/sshl. Covers the scalar
+    # count-masking (sf?0x3f:0x1f), W sign-extend before asrv, zero-ext result.
+    n=random.choice([16,24,32,48])
+    width=random.choice(["unsigned long long","long long","unsigned int","int"])
+    seed=random.choice([998877, 112233, 556677, 314159])
+    wbits = 64 if "long long" in width else 32
+    sh_mask = min(random.choice([3,7,15,31,63]), wbits-1)
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = {seed}ull;
+    unsigned long long x = seedv;
+    {width} sh[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1442695040888963407ull; sh[i]=({width})((x>>33)&{sh_mask}); }}
+    {width} h=0x12345678;
+    for(int i=0;i<{n};i++){{ h = ({width})((h << ({width})sh[i]) ^ (h >> ({width})sh[i])) ^ ({width})i; }}
+    return (long long)h;
+}}
+"""
+gens += [gen_neon_byelem, gen_neon_tbl_bitmix, gen_bfi_64, gen_tbz_branches, gen_fixed_pt_fcvt, gen_pairwise_reduce, gen_varshift, gen_scalar_varshift]
 
 # -shared self-import shape: exported module functions calling each OTHER via
 # @plt (and optionally recursing). Exercises the binder's own-export JUMP_SLOT
