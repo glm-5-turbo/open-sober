@@ -434,6 +434,16 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         216 => unsafe { libc::syscall(libc::SYS_mremap, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as c_int, a[4] as usize) as c_long }, // (220 is clone, NOT mremap)
         // --- filesystem / directory ---
         17 => unsafe { libc::syscall(libc::SYS_getcwd, a[0] as usize, a[1] as usize) as c_long },
+        34 => unsafe { libc::mkdirat(a[0] as c_int, a[1] as *const c_char, a[2] as libc::mode_t) as c_long },
+        35 => unsafe { libc::unlinkat(a[0] as c_int, a[1] as *const c_char, a[2] as c_int) as c_long },
+        36 => unsafe { libc::symlinkat(a[1] as *const c_char, a[0] as c_int, a[2] as *const c_char) as c_long },
+        37 => unsafe { // linkat(37)
+            libc::syscall(libc::SYS_linkat, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize, a[4] as usize) as c_long
+        },
+        38 => unsafe { libc::renameat(a[0] as c_int, a[1] as *const c_char, a[2] as c_int, a[3] as *const c_char) as c_long },
+        158 => unsafe { // getgroups(158): count, list
+            libc::getgroups(a[0] as c_int, a[1] as *mut libc::gid_t) as c_long
+        },
         49 => unsafe { libc::chdir(a[0] as *const c_char) as c_long },
         61 => unsafe { libc::syscall(libc::SYS_getdents64, a[0] as c_int, a[1] as usize, a[2] as usize) as c_long },
         62 => unsafe { libc::lseek(a[0] as c_int, a[1] as i64, a[2] as c_int) as c_long },
@@ -507,6 +517,12 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         // --- readv/writev ---
         65 => unsafe { libc::readv(a[0] as c_int, a[1] as *const libc::iovec, a[2] as c_int) as c_long },
         66 => unsafe { libc::writev(a[0] as c_int, a[1] as *const libc::iovec, a[2] as c_int) as c_long },
+        67 => unsafe { // pread64(67)
+            libc::syscall(libc::SYS_pread64, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as i64) as c_long
+        },
+        68 => unsafe { // pwrite64(68)
+            libc::syscall(libc::SYS_pwrite64, a[0] as usize, a[1] as usize, a[2] as usize, a[3] as i64) as c_long
+        },
         // --- system metadata (fixed char-array layout, arch-independent) ---
         160 => { // uname
             unsafe {
@@ -540,6 +556,15 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         203 => unsafe { libc::connect(a[0] as c_int, a[1] as *const libc::sockaddr, a[2] as libc::socklen_t) as c_long },
         208 => unsafe { libc::setsockopt(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as *const c_void, a[4] as libc::socklen_t) as c_long },
         209 => unsafe { libc::getsockopt(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as *mut c_void, a[4] as *mut libc::socklen_t) as c_long },
+        199 => unsafe { libc::socketpair(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as *mut c_int) as c_long },
+        206 => unsafe { libc::sendto(a[0] as c_int, a[1] as *const c_void, a[2] as usize, a[3] as c_int, a[4] as *const libc::sockaddr, a[5] as libc::socklen_t) as c_long },
+        207 => unsafe { libc::recvfrom(a[0] as c_int, a[1] as *mut c_void, a[2] as usize, a[3] as c_int, a[4] as *mut libc::sockaddr, a[5] as *mut libc::socklen_t) as c_long },
+        211 => unsafe { libc::sendmsg(a[0] as c_int, a[1] as *const libc::msghdr, a[2] as c_int) as c_long },
+        212 => unsafe { libc::recvmsg(a[0] as c_int, a[1] as *mut libc::msghdr, a[2] as c_int) as c_long },
+        213 => unsafe { libc::accept4(a[0] as c_int, a[1] as *mut libc::sockaddr, a[2] as *mut libc::socklen_t, a[3] as c_int) as c_long },
+        // --- memory advice / umask ---
+        233 => unsafe { libc::madvise(a[0] as *mut c_void, a[1] as usize, a[2] as c_int) as c_long },
+        166 => unsafe { libc::umask(a[0] as libc::mode_t) as c_long },
         // --- limits ---
         163 => unsafe { libc::getrlimit(a[0] as u32, a[1] as *mut libc::rlimit) as c_long },
         164 => unsafe { libc::setrlimit(a[0] as u32, a[1] as *const libc::rlimit) as c_long },
@@ -4134,6 +4159,82 @@ mod tests {
         assert_eq!(r as i64, 0, "fadvise64 ok");
         unsafe { libc::close(fd); }
         let _ = std::fs::remove_file(&file);
+
+        // Second batch: mkdirat(34)/unlinkat(35)/renameat(38), socketpair(199),
+        // pread64(67)/pwrite64(68), madvise(233), umask(166). All must return
+        // without -ENOSYS and with correct effect.
+        let d = std::env::temp_dir().join(format!("svc_dir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let cd = std::ffi::CString::new(d.to_str().unwrap()).unwrap();
+        st.x[8] = 34; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = cd.as_ptr() as u64; st.x[2] = 0o755;
+        assert_eq!(guest_svc(&mut st as *mut CpuState) as i64, 0, "mkdirat");
+        assert!(d.is_dir());
+
+        // write a file, then pread64/pwrite64 through it.
+        let fpath = d.join("f.bin");
+        let fp_c = std::ffi::CString::new(fpath.to_str().unwrap()).unwrap();
+        st.x[8] = 56; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = fp_c.as_ptr() as u64;
+        st.x[2] = (libc::O_CREAT | libc::O_RDWR | 0o644) as u64; st.x[3] = 0o644;
+        let fd = guest_svc(&mut st as *mut CpuState) as i32;
+        assert!(fd >= 0, "openat for pread/pwrite");
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(b"abcdefgh");
+        st.x[8] = 68; st.x[0] = fd as u64; st.x[1] = buf.as_ptr() as u64; st.x[2] = 8; st.x[3] = 0;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 8, "pwrite64 writes 8");
+        let mut rb = [0xffu8; 8];
+        st.x[8] = 67; st.x[0] = fd as u64; st.x[1] = rb.as_mut_ptr() as u64; st.x[2] = 8; st.x[3] = 0;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 8, "pread64 reads 8");
+        assert_eq!(&rb, b"abcdefgh", "pread64 content");
+        unsafe { libc::close(fd); }
+
+        // socketpair(199) AF_UNIX stream -> two fds.
+        let mut sv = [0i32; 2];
+        st.x[8] = 199; st.x[0] = libc::AF_UNIX as u64; st.x[1] = libc::SOCK_STREAM as u64;
+        st.x[2] = 0; st.x[3] = sv.as_mut_ptr() as u64;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "socketpair");
+        assert!(sv[0] >= 0 && sv[1] >= 0);
+        // sendmsg/recvmsg(211/212) roundtrip a byte over it.
+        let msg = b"Z";
+        let mut iov = libc::iovec { iov_base: msg.as_ptr() as *mut libc::c_void, iov_len: 1 };
+        let mut mh = libc::msghdr { msg_name: std::ptr::null_mut(), msg_namelen: 0,
+            msg_iov: &mut iov, msg_iovlen: 1, msg_control: std::ptr::null_mut(),
+            msg_controllen: 0, msg_flags: 0 };
+        st.x[8] = 211; st.x[0] = sv[1] as u64; st.x[1] = (&mh as *const libc::msghdr) as u64; st.x[2] = 0;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 1, "sendmsg");
+        let mut out = [0u8; 1];
+        let mut iov2 = libc::iovec { iov_base: out.as_mut_ptr() as *mut libc::c_void, iov_len: 1 };
+        let mut mh2 = libc::msghdr { msg_name: std::ptr::null_mut(), msg_namelen: 0,
+            msg_iov: &mut iov2, msg_iovlen: 1, msg_control: std::ptr::null_mut(),
+            msg_controllen: 0, msg_flags: 0 };
+        st.x[8] = 212; st.x[0] = sv[0] as u64; st.x[1] = (&mut mh2 as *mut libc::msghdr) as u64; st.x[2] = 0;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 1, "recvmsg");
+        assert_eq!(out[0], b'Z', "recvmsg content");
+        unsafe { libc::close(sv[0]); libc::close(sv[1]); }
+
+        // umask(166) roundtrips: set to a value, read back.
+        st.x[8] = 166; st.x[0] = 0o027;
+        let _m = guest_svc(&mut st as *mut CpuState) as u32;
+        st.x[8] = 166; st.x[0] = 0o027;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0o027, "umask returns previous");
+
+        // madvise(233) on an anonymous page.
+        let m = unsafe { libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ|libc::PROT_WRITE, libc::MAP_PRIVATE|libc::MAP_ANONYMOUS, -1, 0) };
+        st.x[8] = 233; st.x[0] = m as u64; st.x[1] = 4096; st.x[2] = libc::MADV_DONTNEED as u64;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "madvise DONTNEED");
+        unsafe { libc::munmap(m, 4096); }
+
+        // renameat(38) the file.
+        let d2 = d.join("f2.bin");
+        let fc2 = std::ffi::CString::new(d2.to_str().unwrap()).unwrap();
+        st.x[8] = 38; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = fp_c.as_ptr() as u64;
+        st.x[2] = libc::AT_FDCWD as u64; st.x[3] = fc2.as_ptr() as u64;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "renameat");
+        assert!(d2.is_file() && !fpath.exists());
+
+        // unlinkat(35) cleanup.
+        st.x[8] = 35; st.x[0] = libc::AT_FDCWD as u64; st.x[1] = fc2.as_ptr() as u64; st.x[2] = 0;
+        assert_eq!(guest_svc(&mut st as *mut CpuState), 0, "unlinkat");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
