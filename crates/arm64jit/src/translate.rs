@@ -215,7 +215,20 @@ fn store_nzcv(buf: &mut CodeBuf) {
         buf.and_ri64(RCX, 1);
         buf.shl_ri8(RCX, 30);
         buf.or_rr64(RDX, RCX);
-        // N = 0 (never set for a valid FP compare in these cases)
+        // N = CF && !ZF -> bit31. AArch64 FP compare sets N=1 for the ordered
+        // "less-than" (d<f) case; x86 comisd clears CF only when A>B or A==B.
+        // (Earlier this was hardcoded N=0, which made b.mi/b.lt/b.gt/b.le all
+        // wrong: b.gt evaluated N==V as 0==0 for EVERY ordered non-equal pair.)
+        //         N = (CF)        & (!ZF)
+        buf.mov_rr64(RCX, RAX);
+        buf.and_ri64(RCX, 1); // CF (bit0)
+        buf.mov_rr64(RDI, RAX);
+        buf.shr_ri8(RDI, 6);
+        buf.and_ri64(RDI, 1); // ZF (bit6)
+        buf.xor_ri64(RDI, 1); // !ZF
+        buf.and_rr64(RCX, RDI); // N (0/1)
+        buf.shl_ri8(RCX, 31);
+        buf.or_rr64(RDX, RCX);
         buf.mov_store32(RBX, NZCV_OFF, RDX);
         buf.pop(RDX);
         buf.pop(RCX);
@@ -3192,6 +3205,55 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                         buf.mov_store8(RDX, i, RAX);
                         buf.movzx_byte_mem(RAX, RBX, vslot(rd + 1) + i); // Vt1[i] -> mem[bytes+i]
                         buf.mov_store8(RDX, bytes + i, RAX);
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
+                Inst::Ld1N { rd, rn, nreg, q, post } => {
+                    // ld1 {Vt, Vt2, ..}, [Xn]: load `nreg` CONSECUTIVE (q?16:8)-byte
+                    // blocks of memory into V[rd], V[rd+1], .. (no deinterleave) —
+                    // the compiler's array-literal / memcpy idiom.
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let block = if q { 16 } else { 8 } as i32;
+                    ldg(buf, RDX, rn as u32); // RDX = base host ptr
+                    for k in 0..nreg as i32 {
+                        let slot = vslot((rd as i32 + k) as u8);
+                        if block == 16 {
+                            buf.movdqu_load(0, RDX, k * 16);
+                            buf.movdqu_store(RBX, slot, 0);
+                        } else {
+                            buf.movq_load(0, RDX, k * 8);
+                            buf.movq_store(RBX, slot, 0);
+                            buf.mov_ri64(RAX, 0);
+                            buf.mov_store64(RBX, slot + 8, RAX); // zero high u64
+                        }
+                    }
+                    if post != 0 {
+                        buf.mov_load64(RAX, RBX, slot(rn as u32));
+                        buf.add_ri64(RAX, post as u32);
+                        buf.mov_store64(RBX, slot(rn as u32), RAX);
+                    }
+                    Ok(())
+                }
+                Inst::St1N { rd, rn, nreg, q, post } => {
+                    // st1 {Vt, Vt2, ..}, [Xn]: store `nreg` consecutive (q?16:8)-byte
+                    // blocks from V[rd], V[rd+1], .. to memory (no deinterleave).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let block = if q { 16 } else { 8 } as i32;
+                    ldg(buf, RDX, rn as u32);
+                    for k in 0..nreg as i32 {
+                        let slot = vslot((rd as i32 + k) as u8);
+                        if block == 16 {
+                            buf.movdqu_load(0, RBX, slot);
+                            buf.movdqu_store(RDX, k * 16, 0);
+                        } else {
+                            buf.movq_load(0, RBX, slot);
+                            buf.movq_store(RDX, k * 8, 0);
+                        }
                     }
                     if post != 0 {
                         buf.mov_load64(RAX, RBX, slot(rn as u32));

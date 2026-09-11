@@ -2729,6 +2729,68 @@ mod tests {
     }
 
     #[test]
+    fn fsub_scalar_not_swallowed_by_widening_shll() {
+        // REGRESSION (Session 99): `fsub d0,d0,d1` = 0x1e61_3800 decodes as
+        // SIMD WidenShl (shll) because byte3-low-nibble is 0x0e and bits15:8 == 0x38
+        // (the WidenShl gate lacked a bit28==0 guard against the scalar-FP 0x1e
+        // family). Result: 59049.0 - 59048.0 returned 0.0 and dscale.elf gave 0.
+        let mut st = CpuState::new();
+        st.v[0] = 0x40ec_d520_0000_0000u64; // 59049.0  (d0 == V0 low 8B)
+        st.v[2] = 0x40ec_d500_0000_0000u64; // 59048.0  (d1 == V1 low 8B)
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x1e61_3800u32.to_le_bytes()); // fsub d0,d0,d1
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec scalar fsub");
+        assert_eq!(st.v[0], 0x3ff0_0000_0000_0000u64, "59049.0 - 59048.0 == 1.0");
+    }
+
+    #[test]
+    fn fp_compare_sets_negative_flag_and_branches() {
+        // REGRESSION (Session 99): store_nzcv_fp hardcoded N=0, but AArch64 FP
+        // compare sets N=1 for the ordered less-than case, so b.mi/b.lt/b.gt were
+        // all wrong (dclamp.elf counted everything -> 6 instead of 4). Now
+        // N = CF && !ZF. fcmp d0,d1 with d0=59048 < d1=59049:
+        //   cset w2,mi (N==1) -> 1 ; cset w3,le (Z||N!=V) -> 1 ; cset w4,gt -> 0.
+        let mut st = CpuState::new();
+        st.v[0] = 0x40ec_d500_0000_0000u64; // 59048.0  (d0 == V0 low 8B)
+        st.v[2] = 0x40ec_d520_0000_0000u64; // 59049.0  (d1 == V1 low 8B)
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x1e61_2000u32.to_le_bytes()); // fcmp d0,d1
+        code.extend_from_slice(&0x1a9f_57e2u32.to_le_bytes()); // cset w2, mi
+        code.extend_from_slice(&0x1a9f_c7e3u32.to_le_bytes()); // cset w3, le
+        code.extend_from_slice(&0x1a9f_d7e4u32.to_le_bytes()); // cset w4, gt
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec fcmp + cset");
+        assert_eq!(st.x[2], 1, "mi (N==1 for d0<d1)");
+        assert_eq!(st.x[3], 1, "le (ordered less-than or equal)");
+        assert_eq!(st.x[4], 0, "gt (d0<d1 is not greater)");
+    }
+
+    #[test]
+    fn ld1_two_register_consecutive_load_is_not_deinterleaved() {
+        // REGRESSION (Session 99): `ld1 {v0.16b-v1.16b},[x0]` (opcode bits[15:12]
+        // == 0xA) was swallowed by the ld2 gate (0x8) which DEINTERLEAVES; LD1
+        // multiple-structure loads CONSECUTIVE blocks. ddiv.elf (array-literal
+        // double array) returned 2 instead of 10. Now ld1-2reg reads 32 bytes
+        // straight into v0,v1.
+        let mut st = CpuState::new();
+        let mut buf = Vec::new();
+        for i in 0u8..32 {
+            buf.push(i); // mem = [0,1,2,...,31]
+        }
+        let bb = Box::leak(buf.into_boxed_slice());
+        st.set(0, bb.as_ptr() as u64);
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x4c40_a000u32.to_le_bytes()); // ld1 {v0.16b-v1.16b},[x0]
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec ld1-2reg");
+        assert_eq!(st.v[0], 0x0706_0504_0302_0100u64, "v0 = consecutive first 8 bytes");
+        assert_eq!(st.v[1], 0x0f0e_0d0c_0b0a_0908u64, "v0 hi = next 8 bytes");
+        assert_eq!(st.v[2], 0x1716_1514_1312_1110u64, "v1 = second block, no deinterleave");
+        assert_eq!(st.v[3], 0x1f1e_1d1c_1b1a_1918u64, "v1 hi");
+    }
+
+    #[test]
     fn fnmul_scalar_negate_mul() {
         // fnmul s10, s0, s1 = 0x1e21880a (wall): s10 = -(s0*s1).
         let f = |x: f32| x.to_bits() as u64;

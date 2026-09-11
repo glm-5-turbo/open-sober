@@ -325,6 +325,13 @@ pub enum Inst {
     Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
     // ---- SIMD st2 (structure store of two vectors) ----
     St2 { rd: u8, rn: u8, q: bool, post: i32 },
+    // ---- SIMD ld1/st1 MULTIPLE structures (consecutive, NO deinterleave) ----
+    // ld1/st1 {Vt.T, Vt2.T, ..} loads/stores `nreg` consecutive (q?16:8)-byte
+    // vectors to/from V[rd], V[rd+1], .. — the plain array-copy idiom the
+    // compiler emits for 2/3/4-element vector literals (differs from ld2/st2
+    // which DEINTERLEAVE). nreg∈{1,2,3,4}; post is the writeback amount.
+    Ld1N { rd: u8, rn: u8, nreg: u8, q: bool, post: i32 },
+    St1N { rd: u8, rn: u8, nreg: u8, q: bool, post: i32 },
     // ---- scalar udiv/sdiv Wd/Wd/Wm ----
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
@@ -1743,30 +1750,51 @@ pub fn decode(insn: u32) -> Inst {
         return Inst::Sha { mode: sha_op, rd, rn, rm };
     }
 
-    // ---- SIMD ld2: load two vectors, deinterleaved (ld2 {Vt, Vt1}, [Xn]) ----
-    // Prefix 0x0c40 (Q=0) / 0x4c40 (Q=1); st2 is 0x0c00/0x4c00. post-index when
-    // bit23=1 (the load is `[Xn], #imm`). Deinterleave: Vt[i]=m[2i], Vt1[i]=m[2i+1].
-    if (insn & 0xffc0_0000) == 0x0c40_0000 || (insn & 0xffc0_0000) == 0x4c40_0000 {
+    // ---- SIMD load/store MULTIPLE structures: ld1/ld2/st1/st2 {Vt, Vt1[, ..]}, [Xn] ----
+    // Class from bits[29:22] (mask 0xffc0_0000): LD has bit22 (L=1) and R=bit21;
+    // prefixes 0x4c40(ld,q1)/0x0c40(ld,q0)/0x4c00(st,q1)/0x0c00(st,q0).
+    // The STRUCTURE TYPE + register count is opcode bits[15:12]:
+    //   0x8 = LD2/ST2 (DEINTERLEAVE Vt[i]=m[2i], Vt1[i]=m[2i+1])
+    //   0xA = LD1/ST1 2-register, 0x7/0x0 = 1-register, 0x6 = 3-reg, 0x2 = 4-reg
+    //         -> LD1/ST1 MULTIPLE loads/stores `nreg` CONSECUTIVE (q?16:8)-byte
+    //         vectors (NO deinterleave) — the compiler's array-literal idiom.
+    // post-index writeback when bit23=1 (advance Xn by the total bytes).
+    let sc = insn & 0xffc0_0000;
+    if sc == 0x0c40_0000 || sc == 0x4c40_0000 || sc == 0x0c00_0000 || sc == 0x4c00_0000 {
         let q = (insn & 0x4000_0000) != 0;
-        return Inst::Ld2 {
-            rd: (insn & 0x1f) as u8,
-            rn: ((insn >> 5) & 0x1f) as u8,
-            q,
-            post: if (insn >> 23) & 1 == 1 { 32 } else { 0 },
-        };
-    }
-
-    // ---- SIMD st2: store two vectors (Vt, Vt2) consecutively to [Xn] ----
-    // Prefix 0x0c00 (Q=0) / 0x4c00 (Q=1) -- disjoint from ld2 (0x0c40/0x4c40, bit20).
-    if (insn & 0xffc0_0000) == 0x0c00_0000 || (insn & 0xffc0_0000) == 0x4c00_0000 {
-        let q = (insn & 0x4000_0000) != 0;
-        let bytes = if q { 16 } else { 8 } as i32;
-        return Inst::St2 {
-            rd: (insn & 0x1f) as u8,
-            rn: ((insn >> 5) & 0x1f) as u8,
-            q,
-            post: if (insn >> 23) & 1 == 1 { bytes * 2 } else { 0 },
-        };
+        let ld = (insn & 0x0040_0000) != 0; // L bit22
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let block = if q { 16 } else { 8 } as i32;
+        let wb = if (insn >> 23) & 1 == 1 { true } else { false };
+        let op = (insn >> 12) & 0xf;
+        if op == 0x8 {
+            // LD2 / ST2 — deinterleave (existing behavior).
+            let post = if wb { block * 2 } else { 0 };
+            return if ld {
+                Inst::Ld2 { rd, rn, q, post }
+            } else {
+                Inst::St2 { rd, rn, q, post }
+            };
+        } else {
+            // LD1 / ST1 multiple — register count from opcode.
+            let nreg: u8 = match op {
+                0x2 => 4,
+                0x6 => 3,
+                0x7 | 0x0 => 1,
+                0xa => 2,
+                _ => 0, // unsupported structure width
+            };
+            if nreg == 0 {
+                return Inst::Unsupported(insn);
+            }
+            let post = if wb { block * (nreg as i32) } else { 0 };
+            return if ld {
+                Inst::Ld1N { rd, rn, nreg, q, post }
+            } else {
+                Inst::St1N { rd, rn, nreg, q, post }
+            };
+        }
     }
 
     // ---- SIMD/NEON movi vector-immediate ----
@@ -1797,9 +1825,13 @@ pub fn decode(insn: u32) -> Inst {
         return Inst::FmlaEl { rd, rn, vlm, idx, el64: el32, q, sub };
     }
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
-    // byte2 (bits15:8) == 0x38; byte0 in the SHLL family {0e,1e,2e,3e,6e,7e}. Reads the
+    // byte2 (bits15:8) == 0x38; byte0 in the SHLL family {0e,2e,4e,6e}. Reads the
     // low nlanes half-width elements of Vn, sign/zero-extends each to double width.
-    if ((insn >> 24) & 0x0f) == 0x0e && ((((insn >> 8) & 0xff) & 0x7c) == 0x38) {
+    // NOTE bit28==0 is REQUIRED: the scalar-FP 0x1e byte3-low-nibble (fsub =
+    // 0x1e61_3800 has byte3 0x1e) ALSO gives (insn>>24)&0x0f == 0x0e, so without
+    // excluding it this gate swallows scalar `fsub d0,d0,d1`. Real shll bytes are
+    // 0x0e/0x2e/0x4e/0x6e (bit28=0); 0x1e/0x3e/0x5e/0x7e are the scalar-FP 0x1e..0x80 family.
+    if ((insn >> 24) & 0x0f) == 0x0e && ((insn >> 28) & 1) == 0 && ((((insn >> 8) & 0xff) & 0x7c) == 0x38) {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let b1 = (insn >> 16) & 0xff;
