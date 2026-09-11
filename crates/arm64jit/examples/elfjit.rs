@@ -31,10 +31,14 @@ unsafe fn install_segv_debug() {
             let x1 = *(rbx.wrapping_add(8) as *const u64);
             let x2 = *(rbx.wrapping_add(16) as *const u64);
             let x3 = *(rbx.wrapping_add(24) as *const u64);
+            let x4 = *(rbx.wrapping_add(32) as *const u64);
+            let x5 = *(rbx.wrapping_add(40) as *const u64);
+            let x6 = *(rbx.wrapping_add(48) as *const u64);
+            let x7 = *(rbx.wrapping_add(56) as *const u64);
             let sp = *(rbx.wrapping_add(248) as *const u64);
             let fault = (*info).si_addr() as u64;
             let s = format!(
-                "\n[SIGSEGV] fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} sp={sp:#x}\n"
+                "\n[SIGSEGV] fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} sp={sp:#x}\n"
             );
             let b = s.as_bytes();
             libc::write(2, b.as_ptr() as *const libc::c_void, b.len());

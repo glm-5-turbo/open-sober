@@ -178,3 +178,16 @@ Commit summary: new boot.rs (auxv), SmeNoop/AddVectorLen/SveCntd/MulLong decodes
   run-varying-high-garbage address (next bug: a residual 32-bit/zero-extend leak).
 - cargo test --workspace 142/0; elfjit keeps a permanent SIGSEGV diagnostic.
 ---
+### Final (same session) — LSE atomics; modmain -> __tunable_get_val block-register bug (142/0)
+- Committed 36a47f7: LSE atomics decoded + emulated; modmain booted through
+  __libc_start_main and glibc's IFUNC-atomic ldxr/stxr fallback.
+- modmain now crashes in __tunable_get_val (0x4128ec): x4 should be
+  adrp/add(0x48dc88)+ubfiz(0xC00)=0x48e888 but carries 0x7f8000000000 high
+  garbage at the `add x4,x7,x4` (rm=x4 read stale). ubfiz + the add are BOTH
+  proven-clean in isolation (incl. on a dirty x4); it's a BLOCK-COMPILER
+  register-interaction bug (intervening mov w5,w0 / adrp reusing the host reg
+  for rm=x4?). Persists across JIT_BUDGET. Next: JIT_DUMP/trace x4 through the
+  block to find where the 0x7f800000 prefix enters.
+- elfjit: permanent SIGSEGV diagnostic (guest pc + x0..x7 + sp from CpuState).
+- cargo test --workspace 142/0 (arm64jit 108). HARD GATE still unmet (no GPU/APK).
+---

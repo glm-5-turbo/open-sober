@@ -3035,3 +3035,42 @@ modmain.elf now runs __libc_start_main fully and dies deep in
 (another latent 32-bit/zero-extend leak) — the next debugging target.
 Also: elfjit now keeps a permanent SIGSEGV diagnostic handler (prints guest
 pc + regs from CpuState) — invaluable for localizing a real-code crash.
+
+
+### Continued (Sep 11 2026) — LSE atomics landed; modmain now dies in __tunable_get_val (block-register bug)
+
+Commit 36a47f7 decoded the LSE atomics (ldadd/ldclr/ldeor/ldset/swp) with
+single-threaded emulation; modmain.elf boot then advanced THROUGH
+__libc_start_main and the IFUNC atomics (the ldxr/stxr fallback, since
+have_lse=0) and now crashes inside `__tunable_get_val` (0x4128ec) on a
+block-level register corruption:
+
+- fault = 0x7fXX_0000_48e8b8 (low 0x48e8b8 constant, high 0x7fXX/0x7eXX
+  run-varying).
+- x7 = 0x48dc88 is CORRECT (adrp x3,0x48d000; add x7,x3,#0xc88 — both clean).
+- x4 = 0x7f800048e888 is CORRUPTED. It should be
+  `ubfiz x4,x0,#7,#32` (0xC00 for x0=0x18) then `add x4,x7,x4` = 0x48dc88+C00
+  = 0x48e888. Instead x4 carries 0x7f8000000000 high garbage from the *source*
+  x4 at the `add x4,x7,x4` (rm=x4 read gave 0x7f8000000C00).
+- ubfiz is NOT the bug: proven clean in isolation AND on a pre-dirtied x4
+  (0x1f000000 -> 0xC00), and the full ubfiz;add sequence is clean in isolation
+  (0x48e888 with a correct x7 build). So it is a BLOCK-COMPILER register-
+  interaction bug only in the real __tunable_get_val block (persists across
+  JIT_BUDGET 2/8/16/300000, so not a boundary artifact): likely the intervening
+  `mov w5,w0` (W write) or `adrp`/`mov` reusing a host register that also holds
+  the rm=x4 value, so `add x4,x7,x4` reads a stale/dirty x4.
+- Next: dump block@0x4128ec host code (JIT_DUMP) or add per-instruction guest
+  x4 trace to find which instruction gives x4 the 0x7f8000000000 high prefix.
+
+Also: elfjit now permanently installs a SIGSEGV diagnostic (guest pc + x0..x7 +
+sp from the CpuState via ucontext RBX) — the tool that pinned all of today's
+crashes; recorded because it is reusable.
+
+`cargo test --workspace` 142/0 (arm64jit 108).
+
+### HARD GATE (unchanged)
+Roblox actually running (load -> JNI init -> main loop -> frame on a GPU host)
+is NOT met and cannot be on this GPU-less VPS without the real libroblox.so/APK.
+The elfjit path is a growing no-QEMU CPU translator that currently boots a full
+statically-linked glibc program deep into its CRT/startup. The HARD GATE remains
+`elfjit <libroblox.so> 0x1f0db20 --jni` on a capable host.
