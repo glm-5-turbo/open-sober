@@ -4427,10 +4427,16 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                         buf.mov_load64(RAX, RBX, base + o);
                                         buf.bswap_r64(RAX);
                                         buf.mov_store64(RBX, dbase + o, RAX);
-                                    } else {
+                                    } else if granule == 4 {
                                         buf.mov_load32(RAX, RBX, base + o);
                                         buf.bswap_r32(RAX);
                                         buf.mov_store32(RBX, dbase + o, RAX);
+                                    } else {
+                                        // granule == 2 (rev16): byte-swap each
+                                        // 16-bit halfword = rotate-left-by-8.
+                                        buf.mov_load16(RAX, RBX, base + o);
+                                        buf.rol16_ri8(RAX, 8);
+                                        buf.mov_store16(RBX, dbase + o, RAX);
                                     }
                                 }
                                 Ok(())

@@ -143,6 +143,17 @@ impl CodeBuf {
         self.b(0x8B);
         self.emit_mem(rd, base, disp);
     }
+    /// movzx r32, [mem]  (0F B7 /r): zero-extend a 16-bit word into the full
+    /// 32-bit register. Used by rev16 so the 16-bit rotate/store operate on a
+    /// cleanly zero-extended value.
+    pub fn mov_load16(&mut self, rd: u8, base: u8, disp: i32) {
+        if rd >= 8 || base >= 8 {
+            self.b(rex(false, rd, 0, base));
+        }
+        self.b(0x0F);
+        self.b(0xB7);
+        self.emit_mem(rd, base, disp);
+    }
     /// mov [mem] <- r64
     pub fn mov_store64(&mut self, base: u8, disp: i32, src: u8) {
         if base >= 8 || src >= 8 {
@@ -991,6 +1002,19 @@ impl CodeBuf {
         }
         self.b(0xC1);
         self.b(modrm(3, 1, rd & 7));
+        self.b(imm);
+    }
+    /// ROL r16, imm8 : 66 C1 /0 ib (16-bit rotate LEFT by imm). The 0x66 prefix
+    /// makes this operate on the low 16 bits only, so a pre-existing high half
+    /// of the register is untouched. Used for rev16, which needs a 16-bit
+    /// byte-swap = rotate-left-by-8 within each halfword.
+    pub fn rol16_ri8(&mut self, rd: u8, imm: u8) {
+        self.b(0x66); // 16-bit operand-size prefix
+        if rd & 8 != 0 {
+            self.b(0x41); // REX.B for high register
+        }
+        self.b(0xC1);
+        self.b(modrm(3, 0, rd & 7));
         self.b(imm);
     }
     /// bswap r32  (0F C8+rd): reverse byte order of the low 32 bits.

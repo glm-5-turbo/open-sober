@@ -2201,6 +2201,19 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 8, q: (insn >> 30) & 1 == 1 };
     }
+    // ---- SIMD rev16 (granule 2): rev16 Vd.16B/.8B, Vn ---- byte-swap within
+    // each 16-bit halfword. Real encodings 0x0e201800 (.8b) / 0x4e201800
+    // (.16b). This is the two-reg-misc REV16 (byte1 0x18, bit21 set), which is
+    // DISJOINT from the uzp1/trn1 3-same op (uzp1 v0.16b=0x4e011800 has bit21
+    // CLEAR — the permute gate keeps prefix 0x0e00_1800 with bit21=0). Mask
+    // 0x3f20_f800 pins (a) the two-reg-misc prefix lanes (0x3f00_0000), (b)
+    // bit21 SET (0x0020_0000, the rev16-vs-uzp discriminator), and (c) byte1
+    // 0x18 (0x0000_f800). rev64 above already consumed byte1==0x08.
+    if (insn & 0x3f20_f800) == 0x0e20_1800 {
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::SimdRev { rd, rn, granule: 2, q: (insn >> 30) & 1 == 1 };
+    }
     if (insn & 0x3f00_0c00) == 0x2e00_0800 && (insn & 0x3c00) == 0x0800 && (insn & 0x0020_0000) != 0 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
@@ -5774,6 +5787,35 @@ mod logical_imm_regressions {
                 assert!(q);
             }
             other => panic!("uzp2 v0.4s,v25.4s,v0.4s -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rev16_decodes_as_granule2_not_uzp() {
+        // Regression: SIMD rev16 (16-bit halfword byte-swap, granule 2) used
+        // to fall through the rev64/rev32 gates (only byte1 0x08 was handled)
+        // and mis-decode to a wrong-value instruction instead of trapping —
+        // the byte-reverse/permute fuzzer's silent-miscompile class. Real
+        // encodings from GCC: rev16 v0.16b = 0x4e201800, .8b = 0x0e201800.
+        for (word, q) in [(0x4e201800u32, true), (0x0e201800, false)] {
+            match decode(word) {
+                Inst::SimdRev { granule, q: gotq, .. } => {
+                    assert_eq!(granule, 2, "rev16 must be granule 2 for {word:#x}");
+                    assert_eq!(gotq, q, "rev16 q flag for {word:#x}");
+                }
+                other => panic!("rev16 {word:#x} -> {other:?} (expected SimdRev granule 2)"),
+            }
+        }
+        // uzp1 v0.16b,v0.16b,v1.16b = 0x4e011800: bit21 clear must NOT capture
+        // as rev16 (it is a 3-same permute, granule-agnostic).
+        assert!(matches!(
+            decode(0x4e011800),
+            Inst::SimdUz1 { .. } | Inst::SimdUz2 { .. }
+        ), "uzp1 (0x4e011800) must not become rev16");
+        // rev32 v0.16b must stay granule 4 (not relabeled).
+        match decode(0x6e200800) {
+            Inst::SimdRev { granule, q: true, .. } => assert_eq!(granule, 4),
+            other => panic!("rev32 v0.16b -> {other:?}"),
         }
     }
 
