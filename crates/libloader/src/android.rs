@@ -331,10 +331,17 @@ fn ensure_dir_android(path: &Path, mode: u32) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Unique root per call so parallel tests never clobber each other's tree.
+    // (pid alone is shared by all tests in one process — two tests racing on
+    // remove_dir_all at start/end caused chmod-ENOENT on a sibling's dirs.)
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn setup_test_root() -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
-            .join(&format!("sober_android_test_{}", std::process::id()));
+            .join(format!("sober_android_test_{}_{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
