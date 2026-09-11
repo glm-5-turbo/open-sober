@@ -5811,3 +5811,40 @@ crypto, structure ld/st, perms, SAT narrow, SME no-ops); the one annotation'd
 gap is fp16 (`fcvtl` `.4h`/`fcvtn` `.4h`), deferred — a real project, not a
 one-liner. Thread-model remaining: per-thread TLS init-image copies for clone
 children (needs a real multilib guest). HARD GATE unchanged.
+
+## Cycle 44b (Sep 11, 2026) — integer LONG multiply by element fixed; widen-mul fuzz generator (369/0)
+
+### The bug (silent-miscompile, fuzzer-caught)
+A second new generator `gen_widen_mul_acc` (vmlal_lane_s16/32, vmull_lane, and
+the `_high_` 2 variants — widening multiply-accumulate with an indexed
+broadcast element) failed **40/40** against the qemu oracle. Root cause: the
+integer **LONG-by-element** multiply family
+(`smull/umull/smlal/umlal/smlsl/umlsl Vd.T, Vn.T, Vm.Tsb[idx]`) was entirely
+undecoded. GCC emits it for vector*const-scalar scaling. The words mis-decoded
+as `FmlaEl` (the `.2d` forms, which share bit23 SET) or `VecMovi` (the `.4s`
+forms) — both silent wrong values, no trap.
+
+### Fix (commit 39150c4)
+- New `Inst::SimdMullEl`. Decode gate: prefix `b[28:24]=01111`,
+  size `b[23:22]` (1 → `.4s` res 4 bytes, 2 → `.2d` res 8), indexed operand
+  reg `Vm = b[19:16]` (4 bits, v0-v15), index = `L(b21):H(b20)` for 16-bit
+  src / `L(b21)` alone for 32-bit src, op `b[15:12]` in
+  `{2=mlal acc, 6=mlsl acc-sub, 0xa=mull}`.
+- **bit13 (0x2000) SET** is the clean discriminator vs FP fmla-el (op 1/5 →
+  bit13 clear) and non-widening int mla-el (op 0 → bit13 clear). The gate
+  must precede the FP fmla-el gate (which otherwise steals the `.2d` forms).
+- Translated per-lane like `SimdMull` but the `m` operand is loaded ONCE from
+  the single indexed element (`slot(rm) + index*esize`) instead of lane `i`;
+  `sub` arm for mlsl/umlsl; `uphalf=8` for the q=1 (_2/upper) high-lane forms.
+- Decoder regression `widening_mul_by_element_decodes_not_fptsel_or_movi`
+  (25 ground-truth encodings incl. the failing real-binary words) + guards
+  that FP fmla-el, int MLA-el, and `movi v0.2d,#0` stay unmangled.
+
+### Verification
+widen-mul isolation 40/40 (was 0/40 — every case formerly failed). Full mixed
+fuzz sweeps across 3 fresh seeds: 0 fail. `cargo test --workspace` **369/0**
+(arm64jit lib 207 unit tests, +1 with the new regression).
+
+The two cycle-44 fixes (rev16 `8e00bdc`, LONG-by-element `39150c4`) were both
+differential-fuzzer finds — new targeted generators is the highest-yield
+bug-hunt on this APK-less box. HARD GATE unchanged.
