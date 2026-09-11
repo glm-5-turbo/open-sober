@@ -6014,3 +6014,40 @@ Repro run-log artifact: `/home/hermes-worker/runs/real-boot-runlog.txt`.
 `cargo test --workspace` **384/0** green (`cargo build --workspace` clean; the
 decode.rs/plt.rs edits surface only the pre-existing rustfmt-churn warnings —
 rustfmt isn't installed on this box). Local `dev` commits only (no push).
+
+---
+
+## Session (Sep 11, continued) — REAL Roblox engine code now runs: MemoryPool + guest-threading fixed (387/0)
+
+The real `libroblox.so` 2.738.1397 boot (arm64jit + libloader, headless) crossed
+three walls this session and now executes **real engine code** before the next
+fault: JNI_OnLoad completed, TSAN/TLS-key once-init, a guest worker thread
+spawned, and `[roblox:JNIMain] TelemetryProtocol::setProcessTimeOverride` logged.
+Run log: `/home/hermes-worker/runs/real-boot-runlog.txt`.
+
+Three boot fixes (dev commits `9bf61e3`, `a3a8372`):
+
+1. **`body_contains_indirect()`** — a guest fn containing a `blr`/`br` (C++
+   vtable dispatch, computed GetEnv) is now *diverted*, not inlined. An inlined
+   `blr` `ret`s into the caller block instead of jit_run, silently skipping the
+   hostcall (GetEnv's *penv never written) and skipping the callee's x19-x28
+   restoring epilogue. This was the REAL cause of the long-standing "null
+   vtable" SIGSEGV: the vm was a corrupted register from a skipped inline GetEnv,
+   NOT a missing JNI stub (the vtable-backed-fake-objects theory is unnecessary.
+2. **`bionic_pthread_once()`** — real glibc pthread_once calls the guest
+   init_routine natively (SIGILL on `paciasp`). Interpose: run the guest
+   once-routine via jit_run (`run_guest_callback()`). Unblocked the TSAN /
+   TLS-key one-time init.
+3. **`route_mempool_big_alloc_to_host()`** — the TLS-block allocator's big
+   allocator (unseeded MemoryPool arena → NULL → guest abort) is patched
+   (adrp/br + thunk in a mapped segment gap) to route to host `calloc`. Then
+   `bionic_pthread_create/join` + `spawn_pthread()` — glibc pthread_create
+   called the guest worker start routine natively (SIGILL); now spawns a fresh
+   host thread running it through jit_run with its own guest stack+TLS.
+
+Current wall (engine data access): JNIMain/TelemetryProtocol SIMD-copies a
+struct to guest addr 0x109285fb0 (unmapped, ~33MB past image end). The pointer
+isn't a 0x55... heap result — likely a guest svc mmap returning a low address or
+a computed arena base. Next: trace who produced 0x109285fb0 and make it real.
+
+`cargo test --workspace` **387/0** green. Local dev commits only (no push).
