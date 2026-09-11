@@ -69,6 +69,48 @@ const SET_BYTE_ARRAY_REGION: usize = 208;
 const SET_INT_ARRAY_REGION: usize = 211;
 const REGISTER_NATIVES: usize = 215;
 const GET_JAVA_VM: usize = 219;
+// More official JNINativeInterface offsets (object-model / monitor / exception /
+// ref / static-field / call-method / direct-buffer surface), verified against
+// Android NDK jni.h. These previously fell to the `voidp` default returning 0;
+// wiring them to typed stubs (and real fake-object backing) makes guest JNI
+// paths that check `if (!ref / !clazz / !buf) fail` pass instead of aborting.
+const IS_ASSIGNABLE_FROM: usize = 11;
+const EXCEPTION_OCCURRED: usize = 15;
+const EXCEPTION_DESCRIBE: usize = 16;
+const EXCEPTION_CLEAR: usize = 17;
+const PUSH_LOCAL_FRAME: usize = 19;
+const POP_LOCAL_FRAME: usize = 20;
+const IS_SAME_OBJECT: usize = 24;
+const NEW_LOCAL_REF: usize = 25;
+const ENSURE_LOCAL_CAPACITY: usize = 26;
+const ALLOC_OBJECT: usize = 27;
+const NEW_OBJECT: usize = 28;
+const GET_OBJECT_CLASS: usize = 31;
+const IS_INSTANCE_OF: usize = 32;
+const CALL_OBJECT_METHOD: usize = 34;
+const CALL_BOOLEAN_METHOD: usize = 37;
+const CALL_INT_METHOD: usize = 49;
+const CALL_VOID_METHOD: usize = 61;
+const CALL_STATIC_OBJECT_METHOD: usize = 114;
+const CALL_STATIC_BOOLEAN_METHOD: usize = 117;
+const CALL_STATIC_INT_METHOD: usize = 129;
+const CALL_STATIC_VOID_METHOD: usize = 141;
+const GET_STATIC_FIELD_ID: usize = 144;
+const GET_STATIC_OBJECT_FIELD: usize = 145;
+const GET_STATIC_INT_FIELD: usize = 150;
+const SET_STATIC_OBJECT_FIELD: usize = 154;
+const SET_STATIC_INT_FIELD: usize = 159;
+const RELEASE_STRING_UTF_CHARS: usize = 170;
+const UNREGISTER_NATIVES: usize = 216;
+const MONITOR_ENTER: usize = 217;
+const MONITOR_EXIT: usize = 218;
+const GET_STRING_UTF_REGION: usize = 221;
+const NEW_WEAK_GLOBAL_REF: usize = 226;
+const DELETE_WEAK_GLOBAL_REF: usize = 227;
+const EXCEPTION_CHECK: usize = 228;
+const NEW_DIRECT_BYTE_BUFFER: usize = 229;
+const GET_DIRECT_BUFFER_ADDRESS: usize = 230;
+const GET_DIRECT_BUFFER_CAPACITY: usize = 231;
 // Official JNIVMInterface word offsets.
 const VM_GET_ENV: usize = 7;
 
@@ -458,6 +500,118 @@ extern "C" fn jni_new_global_ref(
     o // pass-through like the QEMU shim
 }
 
+/// NewLocalRef: identity (the fake-object model has no distinct local-ref pool,
+/// so a returned ref is just the object's handle — like NewGlobalRef). Non-zero
+/// for a valid object: guest `if (!local) return` doesn't spuriously abort.
+extern "C" fn jni_new_local_ref(
+    _e: u64, o: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    o
+}
+
+/// IsSameObject(a, b): 1 iff the two handles are identical. Fake-object handles
+/// are invariant tokens, so identity comparison is the correct semantic.
+extern "C" fn jni_is_same_object(
+    _e: u64, a: u64, b: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    (a == b) as u64
+}
+
+/// GetObjectClass(obj): return a stable non-zero jclass handle so guest code that
+/// does `jclass c = GetObjectClass(o); if (!c) fail;` passes. Never return `o`
+/// itself (that would alias the object). Interning a fixed class name yields a
+/// readable, stable handle that won't collide with real object addresses.
+extern "C" fn jni_get_object_class(
+    _e: u64, obj: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if obj == 0 {
+        0
+    } else {
+        str_handle(b"java/lang/Object")
+    }
+}
+
+/// IsInstanceOf(obj, cls): permissive true (1). Under fake-object backing any
+/// object satisfies any tested class, so instanceof guards take the success
+/// branch instead of a NULL/abort path.
+extern "C" fn jni_is_instance_of(
+    _e: u64, _obj: u64, _cls: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    1
+}
+
+/// GetStringUTFRegion(env, str, start, len, buf): copy `len` UTF-8 bytes of the
+/// string starting at byte `start` into `buf` (bounds-safe). `str` is the
+/// readable buffer NewStringUTF returned.
+extern "C" fn jni_get_string_utf_region(
+    _e: u64, jstr: u64, start: u64, len: u64, buf: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if buf == 0 {
+        return 0;
+    }
+    let s = read_cstr(jstr).unwrap_or_default();
+    let start = start as usize;
+    if start > s.len() {
+        return 0;
+    }
+    let n = (len as usize).min(s.len() - start);
+    unsafe {
+        std::ptr::copy_nonoverlapping(s.as_ptr().add(start), buf as *mut u8, n);
+    }
+    0
+}
+
+/// Guest-visible registry of direct NIO byte buffers: NewDirectByteBuffer's
+/// returned jobject handle -> (native address, capacity). Roblox passes
+/// textures/audio/asset buffers around as `java.nio.ByteBuffer` native memory,
+/// so GetDirectBufferAddress/Capacity must answer with the real backing.
+fn direct_buffer_registry() -> &'static Mutex<HashMap<u64, (u64, u64)>> {
+    static REG: OnceLock<Mutex<HashMap<u64, (u64, u64)>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// NewDirectByteBuffer(env, address, capacity) -> jobject: create a fresh,
+/// unique opaque handle that records (address, capacity). Returns the handle
+/// (non-zero) so `ByteBuffer.allocateDirect`-style checks don't abort; the
+/// address/capacity are recovered by GetDirectBufferAddress/Capacity.
+extern "C" fn jni_new_direct_byte_buffer(
+    _e: u64, address: u64, capacity: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if address == 0 {
+        return 0;
+    }
+    let token = unsafe { alloc_zeroed(Layout::new::<u8>()) } as u64; // fresh unique handle
+    direct_buffer_registry().lock().unwrap().insert(token, (address, capacity));
+    token
+}
+
+extern "C" fn jni_get_direct_buffer_address(
+    _e: u64, buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    direct_buffer_registry().lock().unwrap().get(&buf).map(|&(a, _)| a).unwrap_or(0)
+}
+
+extern "C" fn jni_get_direct_buffer_capacity(
+    _e: u64, buf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    direct_buffer_registry().lock().unwrap().get(&buf).map(|&(_, c)| c).unwrap_or(0)
+}
+
+/// IsAssignableFrom: permissive true (1) — fake-object classes always assignable.
+extern "C" fn jni_self_true(
+    _e: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    1
+}
+
+/// PopLocalFrame(env, result): returns its `result` argument (JNI semantics — the
+/// popped frame's saved result object, or NULL).
+extern "C" fn jni_pop_local_frame(
+    _e: u64, result: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    result
+}
+
 extern "C" fn jni_get_java_vm(
     _e: u64, vm_out: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
@@ -530,6 +684,49 @@ pub fn build_jni() -> (u64, u64) {
         functions[SET_INT_ARRAY_REGION] = reg(jni_set_int_array_region);
         functions[REGISTER_NATIVES] = reg(jni_register_natives);
         functions[GET_JAVA_VM] = reg(jni_get_java_vm);
+        // Fake-object backing + the rest of the JNI surface at official offsets.
+        // Exception / local-frame / capacity / monitor / void / zero-returning
+        // call+field slots use the shared NULL-returning stubs; object-model,
+        // ref, direct-buffer and string-copy slots get real fake-object backing.
+        functions[IS_ASSIGNABLE_FROM] = reg(jni_self_true); // permissive
+        functions[EXCEPTION_OCCURRED] = reg(jni_voidp_0); // no pending exception
+        functions[EXCEPTION_DESCRIBE] = ok;
+        functions[EXCEPTION_CLEAR] = ok;
+        functions[PUSH_LOCAL_FRAME] = ok; // JNI_OK
+        functions[POP_LOCAL_FRAME] = reg(jni_pop_local_frame);
+        functions[IS_SAME_OBJECT] = reg(jni_is_same_object);
+        functions[NEW_LOCAL_REF] = reg(jni_new_local_ref);
+        functions[ENSURE_LOCAL_CAPACITY] = ok; // JNI_OK
+        functions[ALLOC_OBJECT] = reg(jni_voidp_0); // no java.lang.Object to alloc
+        functions[NEW_OBJECT] = reg(jni_voidp_0);
+        functions[GET_OBJECT_CLASS] = reg(jni_get_object_class);
+        functions[IS_INSTANCE_OF] = reg(jni_is_instance_of);
+        // Call[Object/Boolean/Int/Void]Method + the static forms: return the
+        // typed zero. Real Java re-entry isn't wired, so 0 is the honest result.
+        functions[CALL_OBJECT_METHOD] = reg(jni_voidp_0);
+        functions[CALL_BOOLEAN_METHOD] = reg(jni_voidp_0);
+        functions[CALL_INT_METHOD] = reg(jni_voidp_0);
+        functions[CALL_VOID_METHOD] = ok;
+        functions[CALL_STATIC_OBJECT_METHOD] = reg(jni_voidp_0);
+        functions[CALL_STATIC_BOOLEAN_METHOD] = reg(jni_voidp_0);
+        functions[CALL_STATIC_INT_METHOD] = reg(jni_voidp_0);
+        functions[CALL_STATIC_VOID_METHOD] = ok;
+        functions[GET_STATIC_FIELD_ID] = reg(jni_get_method_id);
+        functions[GET_STATIC_OBJECT_FIELD] = reg(jni_voidp_0);
+        functions[GET_STATIC_INT_FIELD] = field0;
+        functions[SET_STATIC_OBJECT_FIELD] = ok;
+        functions[SET_STATIC_INT_FIELD] = ok;
+        functions[RELEASE_STRING_UTF_CHARS] = ok; // void no-op
+        functions[UNREGISTER_NATIVES] = ok; // JNI_OK
+        functions[MONITOR_ENTER] = ok; // JNI_OK
+        functions[MONITOR_EXIT] = ok; // JNI_OK
+        functions[GET_STRING_UTF_REGION] = reg(jni_get_string_utf_region);
+        functions[NEW_WEAK_GLOBAL_REF] = reg(jni_new_global_ref); // identity
+        functions[DELETE_WEAK_GLOBAL_REF] = ok;
+        functions[EXCEPTION_CHECK] = reg(jni_voidp_0); // no pending exception
+        functions[NEW_DIRECT_BYTE_BUFFER] = reg(jni_new_direct_byte_buffer);
+        functions[GET_DIRECT_BUFFER_ADDRESS] = reg(jni_get_direct_buffer_address);
+        functions[GET_DIRECT_BUFFER_CAPACITY] = reg(jni_get_direct_buffer_capacity);
 
         let env_fn_tbl = u64array(&functions);
         let mut vm_functions = vec![voidp; VM_SLOTS];
@@ -903,5 +1100,138 @@ mod tests {
         // Writing through the pointer is visible via the registry-backed length.
         unsafe { *(arr as *mut u8) = 0xAB };
         assert_eq!(jni_get_array_length(0, arr, 0, 0, 0, 0, 0, 0), 4);
+    }
+
+    /// The added fake-object / monitor / exception / ref / static-field /
+    /// direct-buffer slot offsets must match the authoritative Android NDK.
+    #[test]
+    fn jni_fake_object_surface_offsets_match_android_ndk() {
+        assert_eq!(IS_ASSIGNABLE_FROM, 11, "IsAssignableFrom (NDK)");
+        assert_eq!(EXCEPTION_OCCURRED, 15, "ExceptionOccurred");
+        assert_eq!(EXCEPTION_CLEAR, 17, "ExceptionClear");
+        assert_eq!(NEW_LOCAL_REF, 25, "NewLocalRef");
+        assert_eq!(IS_SAME_OBJECT, 24, "IsSameObject");
+        assert_eq!(GET_OBJECT_CLASS, 31, "GetObjectClass");
+        assert_eq!(IS_INSTANCE_OF, 32, "IsInstanceOf");
+        assert_eq!(CALL_OBJECT_METHOD, 34, "CallObjectMethod");
+        assert_eq!(CALL_INT_METHOD, 49, "CallIntMethod");
+        assert_eq!(CALL_VOID_METHOD, 61, "CallVoidMethod");
+        assert_eq!(CALL_STATIC_OBJECT_METHOD, 114, "CallStaticObjectMethod");
+        assert_eq!(CALL_STATIC_INT_METHOD, 129, "CallStaticIntMethod");
+        assert_eq!(CALL_STATIC_VOID_METHOD, 141, "CallStaticVoidMethod");
+        assert_eq!(GET_STATIC_FIELD_ID, 144, "GetStaticFieldID");
+        assert_eq!(GET_STATIC_OBJECT_FIELD, 145, "GetStaticObjectField");
+        assert_eq!(RELEASE_STRING_UTF_CHARS, 170, "ReleaseStringUTFChars");
+        assert_eq!(MONITOR_ENTER, 217, "MonitorEnter");
+        assert_eq!(MONITOR_EXIT, 218, "MonitorExit");
+        assert_eq!(GET_STRING_UTF_REGION, 221, "GetStringUTFRegion");
+        assert_eq!(EXCEPTION_CHECK, 228, "ExceptionCheck");
+        assert_eq!(NEW_DIRECT_BYTE_BUFFER, 229, "NewDirectByteBuffer");
+        assert_eq!(GET_DIRECT_BUFFER_ADDRESS, 230, "GetDirectBufferAddress");
+        assert_eq!(GET_DIRECT_BUFFER_CAPACITY, 231, "GetDirectBufferCapacity");
+    }
+
+    /// The boot-relevant fake-object surface must be non-null host thunks at the
+    /// official offsets (a mis-slot or NULL dispatches to 0 -> guest abort).
+    #[test]
+    fn jni_fake_object_slots_are_nonnull_at_official_offsets() {
+        let (env, _vm) = build_jni();
+        unsafe {
+            let functions = *(env as *const u64);
+            let get = |i: usize| -> u64 { *(functions as *const u64).add(i) };
+            for (i, name) in [
+                (NEW_LOCAL_REF, "NewLocalRef"),
+                (IS_SAME_OBJECT, "IsSameObject"),
+                (GET_OBJECT_CLASS, "GetObjectClass"),
+                (IS_INSTANCE_OF, "IsInstanceOf"),
+                (MONITOR_ENTER, "MonitorEnter"),
+                (MONITOR_EXIT, "MonitorExit"),
+                (EXCEPTION_OCCURRED, "ExceptionOccurred"),
+                (EXCEPTION_CLEAR, "ExceptionClear"),
+                (EXCEPTION_CHECK, "ExceptionCheck"),
+                (GET_STRING_UTF_REGION, "GetStringUTFRegion"),
+                (NEW_DIRECT_BYTE_BUFFER, "NewDirectByteBuffer"),
+                (GET_DIRECT_BUFFER_ADDRESS, "GetDirectBufferAddress"),
+                (GET_DIRECT_BUFFER_CAPACITY, "GetDirectBufferCapacity"),
+                // Call-method family (typed-zero / void) must not be the voidp=NULL.
+                (CALL_OBJECT_METHOD, "CallObjectMethod"),
+                (CALL_INT_METHOD, "CallIntMethod"),
+                (CALL_VOID_METHOD, "CallVoidMethod"),
+                (CALL_STATIC_VOID_METHOD, "CallStaticVoidMethod"),
+            ] {
+                let sl = get(i);
+                assert!(sl != 0, "slot {i} ({name}) non-null");
+                host_call_at(sl).expect(name);
+            }
+        }
+    }
+
+    /// Fake-object backing semantics: NewLocalRef/NewGlobalRef are identity,
+    /// IsSameObject is identity-compare, GetObjectClass returns a stable non-zero
+    /// class handle, IsInstanceOf/IsAssignableFrom are permissive true, and the
+    /// exception/monitor slots report no pending state.
+    #[test]
+    fn jni_fake_object_backing_semantics() {
+        use super::{
+            jni_get_object_class, jni_is_instance_of, jni_is_same_object,
+            jni_new_local_ref, jni_self_true,
+        };
+        let obj: u64 = 0x1000_abcd;
+        // NewLocalRef passthrough.
+        assert_eq!(jni_new_local_ref(0, obj, 0, 0, 0, 0, 0, 0), obj);
+        // IsSameObject identity.
+        assert_eq!(jni_is_same_object(0, obj, obj, 0, 0, 0, 0, 0), 1);
+        assert_eq!(jni_is_same_object(0, obj, 0xdead, 0, 0, 0, 0, 0), 0);
+        // GetObjectClass: non-zero, stable, distinct from the object; 0 for NULL.
+        let c = jni_get_object_class(0, obj, 0, 0, 0, 0, 0, 0);
+        assert_ne!(c, 0, "GetObjectClass returns a handle");
+        assert_ne!(c, obj, "class handle does not alias the object");
+        assert_eq!(jni_get_object_class(0, c, 0, 0, 0, 0, 0, 0), c, "stable");
+        assert_eq!(jni_get_object_class(0, 0, 0, 0, 0, 0, 0, 0), 0, "NULL obj -> NULL class");
+        // Permissive instanceof / assignable-from.
+        assert_eq!(jni_is_instance_of(0, obj, c, 0, 0, 0, 0, 0), 1);
+        assert_eq!(jni_self_true(0, 0, 0, 0, 0, 0, 0, 0), 1);
+    }
+
+    /// Direct NIO ByteBuffer round-trip: NewDirectByteBuffer records the backing,
+    /// GetDirectBufferAddress/Capacity recover it, and an unknown handle yields 0.
+    #[test]
+    fn jni_direct_byte_buffer_round_trip() {
+        use super::{
+            jni_get_direct_buffer_address, jni_get_direct_buffer_capacity,
+            jni_new_direct_byte_buffer,
+        };
+        let backing: u64 = 0x6000_3000;
+        let cap = 1024u64;
+        let h = jni_new_direct_byte_buffer(0, backing, cap, 0, 0, 0, 0, 0);
+        assert_ne!(h, 0, "NewDirectByteBuffer returns a handle");
+        assert_ne!(h, backing, "handle is distinct from the backing address");
+        assert_eq!(jni_get_direct_buffer_address(0, h, 0, 0, 0, 0, 0, 0), backing);
+        assert_eq!(jni_get_direct_buffer_capacity(0, h, 0, 0, 0, 0, 0, 0), cap);
+        // Unknown handle -> 0 (not-a-direct-buffer).
+        assert_eq!(jni_get_direct_buffer_address(0, 0x999, 0, 0, 0, 0, 0, 0), 0);
+        // Two NewDirectByteBuffer calls yield distinct handles.
+        let h2 = jni_new_direct_byte_buffer(0, backing, cap, 0, 0, 0, 0, 0);
+        assert_ne!(h, h2, "fresh unique handle per allocation");
+        assert_eq!(jni_get_direct_buffer_address(0, h2, 0, 0, 0, 0, 0, 0), backing);
+    }
+
+    /// GetStringUTFRegion copies `len` UTF-8 bytes at byte `start` into `buf`,
+    /// bounds-safe (out-of-range start leaves buf untouched, no fault).
+    #[test]
+    fn jni_get_string_utf_region_copies() {
+        use super::jni_get_string_utf_region;
+        let s = b"ro.blox engine";
+        let src = unsafe { alloc_zeroed(Layout::array::<u8>(s.len() + 1).unwrap()) };
+        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), src, s.len()) };
+        let mut buf = [0u8; 5];
+        // Copy "blox" (bytes 3..7).
+        jni_get_string_utf_region(0, src as u64, 3, 4, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(&buf[..4], b"blox", "region copy");
+        assert_eq!(buf[4], 0, "only len bytes copied");
+        // Out-of-range start -> no copy, no crash.
+        let mut untouched = [0u8; 3];
+        jni_get_string_utf_region(0, src as u64, 99, 3, untouched.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(untouched, [0u8; 3]);
     }
 }
