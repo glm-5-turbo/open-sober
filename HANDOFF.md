@@ -4755,3 +4755,42 @@ Known gap for next sessions: R_AARCH64_TLS_* (TPREL/DTPREL) are not handled at
 all by the loader/JIT. Real TLS needs a host-side per-thread guest TLS area
 (tp/x28 slot), an architected feature — needs the real binary to validate.
 cargo test --workspace 294/0, build clean.
+
+## Session (Sep 11, 2026) — long-open fused two-loop signed-div miscompile RESOLVED: integer vector NEG/ABS (302/0)
+
+Root-caused the last reproducibly-open JIT bug — the fused two-loop signed
+magic-division miscompile (`fuzz_jit.py` gen_signed_div; n=4, div /7 repro:
+oracle 406144671 vs jit 78184144 — the entire neg-loop contribution was lost).
+It was a DECODE COLLISION, not a register-clobber:
+
+- `neg v29.2s, v31.2s` (0x2ea0bbfd) is an integer two-register-misc op
+  (opcode bits[16:12]==0xb, bit16 CLEAR). The vector float->int FcvVec gate
+  used mask 0xffe0_fc00, which ZEROES bits[20:16], so NEG fell into the residue
+  `0x2ea0_b800` (== fcvtzu v0.2s) and executed as a float->int convert — with
+  v31.s0=0xfc8e117a (a small denormal float) that silently produced 0, then fed
+  every downstream zip1/saddw/sxtl2 lane wrong.
+
+Fixed (commit 47b1007):
+1. FcvVec gate now requires bit16 SET (all six fcvtzs/fcvtzu sizes have it;
+   neg/abs have it clear) — NEG/ABS no longer decode as fcvtzu. This also means
+   NEG/ABS stop silently corrupting anywhere a -O3 build emits them.
+2. New `Inst::SimdArithUnary` decode for NEG/ABS (opcode 0xb, neg=bit29,
+   esize from bits[23:22] {0:B,1:H,2:S,3:D}), placed before FcvVec.
+3. Translate: per-lane signed negate (neg_r64, two's-complement wrap) and
+   abs via `(x^(x ar>> w-1)) - (x ar>> w-1)` after sign-extending each lane;
+   per-lane read-modify-write is rd==rn safe.
+4. Added `JIT_STEP` debug trace (single-instruction blocks + full x/v dump
+   after each) — the per-instruction register oracle that made this tractable;
+   debug-only, no effect on normal path.
+
+Verification: repro jit=406144671==oracle (exact); decode + exec regressions
+across .4s/.8h/.16b/.2d (negative, wrap, and abs-magnitude lane cases); new
+diff_battery canary `diff_vector_neg_abs_unary`; ~420 fresh fuzz cases across
+12 seeds (incl. 50/99/7/9001 repro seeds) all green, 0 fails; full
+`cargo test --workspace` **302/0**, build clean.
+
+No known-open arm64jit correctness items remain on this box (same as the
+cycle-27 close). Next high-value per RECOMMENDATION order: libloader ELF/loader
+gaps, libbadcpu ISA coverage, JNI function-table surface, then services/auth.
+HARD GATE unchanged: real Roblox boot + reproducible run log on a GPU + real
+APK/binary host (none on this VPS).

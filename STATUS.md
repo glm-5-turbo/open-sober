@@ -888,7 +888,18 @@ Also committed: guest_svc boot-path syscall expansion (22 AArch64 numbers) + 2 n
 generators. Confirmation sweep 300/304 green across 19 fresh seeds (the 4 fails are all
 the two-loop bug below, no regressions). Workspace 299/0, build clean, tree clean.
 
-OPEN, documented: a real bug still reproducibly failing — **two fused accumulation
+## RESOLVED (2026-09-11, commit 47b1007) — the open fused two-loop signed-div bug
+Root cause was a DECODE COLLISION, not a register-clobber: integer vector
+NEG/ABS (two-reg misc, opcode bits[16:12]==0xb, bit16 CLEAR) collided with the
+vector float->int FcvVec gate (mask 0xffe0_fc00 zeroes bits[20:16], so
+`neg v29.2s,v31.2s`=0x2ea0bbfd matched the fcvtzu v0.2s residue and executed as
+a float->int convert, silently producing 0). Fixed by requiring bit16 SET on
+the FcvVec gate, adding a real SimdArithUnary NEG/ABS decode+translate, and a
+JIT_STEP per-instruction register trace. Repro jit=406144671==oracle; ~420 fuzz
+cases / 12 seeds green; decode+exec regressions + diff_vector_neg_abs_unary
+canary; workspace 302/0. No known-open arm64jit correctness items remain.
+
+OPEN, documented (CYCLE 27, superseded): a real bug still reproducibly failing —
 loops (e.g. gen_signed_div's `s += a[i]/D; s += a[i]%D` pos loop THEN the negative-
 divisor loop) in ONE function** miscompile at ANY size (n=4 reproduces:
 pos + neg /7, oracle 406144671 vs jit 78184144; pos alone PASSES, neg alone PASSES,
@@ -902,3 +913,8 @@ block under software-pipelining. Needs a JIT per-instruction register tracer
 mid-block are illegal because guest x31==host RSP). Repro kept at fuzz_jit.py
 gen_signed_div (FUZZFAIL_50_8, 9001_1, 9003_16). HARD GATE unchanged (no
 GPU/APK/libroblox.so on this box).
+cycle: 25
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T11:09:44Z
+---
