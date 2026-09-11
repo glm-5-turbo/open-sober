@@ -637,11 +637,11 @@ extern "C" fn jni_get_java_vm(
 // JVM `GetEnv`/`AttachCurrentThread`: `jint GetEnv(JavaVM*, void** penv, jint)`
 // writes the current thread's JNIEnv into `*penv` and returns JNI_OK (0).
 extern "C" fn jni_vm_getenv(
-    _vm: u64, penv: u64, _version: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+    vm: u64, penv: u64, _version: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
-    let (env, _vm) = build_jni();
+    let (env, vm2) = build_jni();
     if std::env::var_os("JIT_TRACE").is_some() {
-        eprintln!("[jni] VM_GetEnv(penv={penv:#x}) writes env={env:#x}");
+        eprintln!("[jni] VM_GetEnv(vm={vm:#x} penv={penv:#x}) writes env={env:#x} [env]={:#x} vm2={vm2:#x}", unsafe { *(env as *const u64) });
     }
     if penv != 0 {
         unsafe { *(penv as *mut u64) = env };
