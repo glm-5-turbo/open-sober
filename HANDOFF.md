@@ -3318,3 +3318,23 @@ constant placement, not a JIT bug.
 Next: keep pressing the cross-gcc FP/SIMD surface (division edges, fma chains,
 single-precision float, struct-by-value + FP, loop-with-FP-condition) to find
 more silent miscompiles; then libloader gaps. HARD GATE unchanged.
+
+## Session (Sep 11, 2026) — FMOV-immediate [16,30] decode bug fixed (commit bc5ab89)
+A second cross-gcc battery (single-precision array div, double loop, mixed
+int/float casts, double-struct-by-value, float matmul, double reciprocal —
+native ground truth fdivf20 dloop7 mixed4407 dstruct169 dneg0 fmat69 drec124)
+hit: fdivf `float a[]={6,12,18,24}; sum a[i]/3` returned 6 instead of 20.
+Root cause was NOT the float div (isolated divss/addss/fcvtzs.e,.s all correct)
+but **decode_fmov_imm's exponent wrap**: the 3-bit field E maps E0..3->e+1..+4,
+E4..7->e-3..0, but the code wrapped `ex>=4`, so E=3 (exponent +4 => constants
+16.0..30.0) decoded as -4 (0.0625..0.117). Every FMOV-imm in [16,30] — sample
+rates, half-texel, 24.0 corner constants — came out ~256x too small (silent).
+Fix: threshold `ex>=5` (E=4 gives (E+1)=5 -> -3). Verified against the
+assembler's encodings for 0.125..30.0 (immf.s). fdivf 6->20; dloop/mixed/
+dstruct/dneg/fmat/drec all match native. +4 decode_fmov_imm asserts (16,30,2,
+0.75). arm64jit 123/123, workspace 172/0, prior battery unchanged.
+Lesson: single- and double-FP immediate decoding share decode_fmov_imm — a
+boundary exponent bug corrupts both (the fdivf array used f32, dscale earlier
+used 3.0; the [16,30] band is where it bites).
+Next: keep pressing FP/SIMD (fma/compiler-contracted `fmla`, more div/compare
+edges, single-precision struct args) then libloader gaps. HARD GATE unchanged.

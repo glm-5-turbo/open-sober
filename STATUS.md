@@ -371,3 +371,14 @@ each result diffed against a native x86-64 compile. Three real bugs found+fixed
 Gate: cargo build clean; cargo test --workspace 172/0. HARD GATE unchanged:
 real Roblox boot + run log on a GPU/APK host (elfjit <libroblox.so> 0x1f0db20
 --jni). HEAD a0465a0 on local dev.
+---
+## Cycle addendum — FMOV-immediate [16,30] decode bug (workspace 172/0, commit bc5ab89)
+Second cross-gcc FP battery (single-precision array div, double-struct-byvalue,
+float matmul, int/float casts, FP loop condition) → one more silent bug:
+`decode_fmov_imm` exponent wrap at `>=4` wrongly mapped E=3 (true exp +4 =
+constants 16.0..30.0) to -4 (0.0625), so every FMOV-imm in [16,30] was ~256x too
+small. fdivf float array {6,12,18,24}/3 gave 6 instead of 20 (isolated
+divss/addss/fcvtzs verified OK; the constants were wrong). Fixed threshold
+`>=5` (verified vs assembler 0.125..30.0). +4 asserts (16,30,2,0.75). fdivf
+6→20; rest of battery matches native. arm64jit 123/123, workspace 172/0.
+Gate: build clean, tests 172/0, HEAD bc5ab89 local dev. HARD GATE unchanged.
