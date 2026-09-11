@@ -5129,3 +5129,38 @@ fixture still 21; fib/shared and plain-static recursion still correct. Fuzzer
 re-run 3 fresh seeds 0 fail. +loader_run_recursive_import_bearing_callee_returns_
 correct regression. `cargo test --workspace` 317/0, build clean. HARD GATE
 unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
+
+## Session 32d (Sep 11, 2026, hermes-worker) — cross-module TLS GOT binding: TPREL64 + TLSDESC (319/0)
+
+Closed the last documented loader TLS gap (`R_AARCH64_TLS_*` across `DT_NEEDED`
+deps, which the memory tracked as open). The multi-module loader seeded TLS only
+for the main image, and TLS GOT relocations were unbound, so a `__thread` in a
+dependency (libssl/libcrypto/...) read garbage/0. One focused commit:
+
+- **`deps::setup_chain_tls` / `layout_chain_tls`** (`libloader`): lay EVERY
+  module's `PT_TLS` block into one per-thread region at TP-relative offsets
+  (aarch64 `TLS_TCB_AT_TP`: TCB at TP, first block at TP+16, later blocks
+  alignment-padded) and copy each module's init image there. Returns `(TP,
+  per-module offsets)`. Generalises `elf::setup_guest_tls` (main-only).
+- **`plt::bind_chain_tls(els, offsets)`** (`arm64jit`): bind the chain's TLS GOT
+  relocations to concrete TP-relative offsets:
+  - `R_AARCH64_TLS_TPREL64` (1030, initial-exec): GOT slot = module block offset
+    + symbol `st_value` + addend — the guest's `mrs tpidr_el0; ldr [GOT]; add
+    tp,x0` then lands on the variable.
+  - `R_AARCH64_TLSDESC` (1031, GCC 13+ default even for `-ftls-model=global-
+    dynamic`): a 16-byte descriptor `{resolver_host_call, tprel}`; the resolver
+    host fn returns `descriptor[1]` after the guest `blr`s to it.
+  - **Pitfall found in debug:** GCC emits TLSDESC relocs into `.rela.plt`
+    (DT_JMPREL), NOT `.rela.dyn` (DT_RELA) where initial-exec TPREL64 lives, so
+    the binder must walk BOTH dynamic reloc tables (first cut bound 0 slots).
+
+Verified end-to-end, no QEMU, with cross-gcc `-shared` dep chains exercising
+BOTH models: dep-local `__thread` accessed through TLSDESC (`entry()==1007`) and
+through initial-exec (`entry()==53`) via the full loader → cross-module binder →
+chain-TLS → `jit_run` pipeline. Two permanent gates
+`loader_run_chain_dep_tls_{initial_exec,tlsdesc}` seal them.
+
+`cargo build --workspace` clean; `cargo test --workspace` **319/0** (was 317;
++2 loader_run). HARD GATE unchanged (no GPU/APK here). Next per RECOMMENDATION:
+true global-dynamic `__tls_get_addr` (DTPMOD/DTPREL) for older dep builds, more
+JNI fake-object backing, libbadcpu ISA.
