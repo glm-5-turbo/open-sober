@@ -630,20 +630,26 @@ pub fn translate(
             }
             // Inject stored C into CF (last op = popfq); RAX/RCX are preserved.
             load_nzcv_to_eflags(buf);
+            // The stored C (nzcv bit29) is in the b.cond "borrow" convention:
+            // store_nzcv for `adds` stores !carry-out, for `subs` stores borrow.
+            // ADC/SBC consume the TRUE ARM carry, and in BOTH cases
+            // TRUE_C = !stored_C, so
+            //   adc adds TRUE_C = !C_s      -> cmc then native adc, and
+            //   sbc subtracts 1-TRUE_C = C_s -> native sbb directly.
             if sub {
-                // sbc: Rd = rn - rm - (1 - C). With CF currently = C, first
-                // complement CF so the subtraction consumes 1-C.
-                buf.cmc(); // CF = 1 - C
-                buf.sbb_rr64(RAX, RCX);
+                buf.sbb_rr64(RAX, RCX); // RAX = rn - rm - C_s = rn - rm - (1-TRUE_C)
                 if s {
-                    // ARM sbc sets C = NOT(borrow); sbb left CF=borrow, so
-                    // invert before store_nzcv reads it as the carry flag.
-                    buf.cmc();
+                    // ARM sbcs sets C = not-borrow; report it in borrow-convention
+                    // (= the x86 CF left by sbb), matching `subs`.
                     store_nzcv(buf);
                 }
             } else {
-                buf.adc_rr64(RAX, RCX); // RAX = rn + rm + C
+                buf.cmc(); // CF = TRUE_C = !C_s
+                buf.adc_rr64(RAX, RCX); // RAX = rn + rm + TRUE_C
                 if s {
+                    // adcs is an add: store C_s = !carry-out (like `adds`) so a
+                    // later b.cond reads the right borrow-convention C.
+                    buf.cmc();
                     store_nzcv(buf);
                 }
             }
@@ -1410,19 +1416,29 @@ pub fn translate(
             Ok(())
         }
         Inst::Extr { rd, rn, rm, lsb, sf } => {
-            // EXTR: Xd = (Xn >> lsb) | (Xm << (bits - lsb)). rm==rn degenerates
-            // to Ror (handled separately); this is the general 2-operand form
-            // (e.g. gcc's `(x >> 51) | (x << 13)` -> `extr x0, x0, x1, #51`).
+            // EXTR: Xd = (Xn << (bits - lsb)) | (Xm >> lsb)  — ARM concatenates
+            // Xn as the HIGH word and Xm as the LOW word of a 2*bits value and
+            // shifts right by lsb. (The Ror alias rm==rn is handled separately.)
+            // NOTE: the earlier implementation had the operand order INVERTED
+            // ((Xn >> lsb) | (Xm << (bits-lsb))); the rotate case rn==rm is
+            // symmetric so it hid the bug, but gcc's real 128-bit shifts
+            // (e.g. `extr x1, x2, x1, #32` for a cross-word shift) got the two
+            // operands swapped and returned garbage.
             let bits = if sf { 64u32 } else { 32u32 };
             let lsb = lsb & (bits - 1);
-            let hi_part = (bits - lsb) & (bits - 1); // Xm << (bits-lsb)
-            ldg(buf, RAX, rn as u32); // Xn
+            let hi_part = (bits - lsb) & (bits - 1); // Xn << (bits-lsb)
+            // low part: Xm >> lsb
+            ldg(buf, RAX, rm as u32);
             if lsb != 0 {
-                buf.shr_ri8(RAX, lsb as u8); // lower part: Xn >> lsb
+                buf.shr_ri8(RAX, lsb as u8);
             }
-            ldg(buf, R10, rm as u32); // Xm
-            if hi_part != 0 {
-                buf.shl_ri8(R10, hi_part as u8); // Xm << (bits-lsb)
+            // high part: Xn << (bits-lsb). lsb==0 would shift by `bits` (=0 in a
+            // 64-bit reg), so force it to 0 explicitly (the high word plays no role).
+            ldg(buf, R10, rn as u32);
+            if lsb == 0 {
+                buf.mov_ri64(R10, 0);
+            } else if hi_part != 0 {
+                buf.shl_ri8(R10, hi_part as u8);
             }
             buf.or_rr64(RAX, R10);
             if !sf {

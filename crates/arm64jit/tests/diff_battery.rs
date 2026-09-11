@@ -1421,6 +1421,128 @@ long long entry(void){
 }
 
 #[test]
+fn diff_math128_and_carry() {
+    // __int128 multiply/square (umulh/smulh high-half + madd chain) and
+    // multiword add-with-carry (adc/adcs) — bignum / large-integer math that
+    // appears in crypto / session signing / price arithmetic. A wrong high-half
+    // product or a dropped carry silently corrupts the upper 64 bits.
+    assert_diff(
+        "math128",
+        "-O2",
+        r#"
+typedef __int128 i128;
+static i128 sq(i128 x){ return x*x; }
+static i128 mul(i128 a,i128 b){ return a*b; }
+static i128 madd(i128 a,i128 b,i128 c){ return a*b + c; }
+unsigned long long entry(void){
+    volatile unsigned long long lo=0x123456789abcdef0ULL, one=1ULL;
+    i128 a = ((i128)lo << 64) | 0x0fedcba987654321ULL;
+    i128 b = sq(a) >> 64;                 // high 64 of a*a
+    i128 c = mul(a, 0xdeadbeefULL) >> 20;
+    i128 d = madd(a, 0x100000001ULL, 7);
+    unsigned long long acc = (unsigned long long)b;
+    acc ^= (unsigned long long)(c >> 32);
+    acc ^= (unsigned long long)(d >> 63);
+    unsigned long long h=0, t=0;
+    // multiword add: h:t + carry chain
+    { unsigned long long x0=0xffffffffffffffffULL, x1=1ULL;
+      unsigned long long s0 = x0 + x1; int carry = s0 < x0;
+      unsigned long long s1 = x0 + carry;  // adc
+      h = s1; t = s0; }
+    acc ^= h*3 + t;
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "math128_const",
+        "-O3",
+        r#"
+typedef __int128 i128;
+i128 entry128(void){ return ((i128)0x1122334455667788ULL * 0x99aabbccddeeffULL); }
+unsigned long long entry(void){
+    i128 v = entry128();
+    return (unsigned long long)v ^ (unsigned long long)(v >> 64);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_switch_fnptr_hash() {
+    // Robin-Hood switch lowering (jump table via adrp+ldr+br) + indirect
+    // function-pointer dispatch (blr through a table) + an FNV-style hash chain
+    // (XOR/mul/rotate) — control-flow + hashing the game core uses constantly.
+    assert_diff(
+        "switch_jump",
+        "-O2",
+        r#"
+static int hot(int x){
+    switch(x){
+        case 0: return 11;
+        case 1: return 101;
+        case 3: return 1001;
+        case 5: return 10001;
+        case 9: return 100001;
+        case 13:return 1000001;
+        case 42:return 10000001;
+        default: return 7;
+    }
+}
+static int hot3(int x){
+    switch(x){
+        case 100: return 1;
+        case 200: return 2;
+        case 300: return 4;
+        case 400: return 8;
+        case 500: return 16;
+        case 600: return 32;
+        case 700: return 64;
+        default: return 0;
+    }
+}
+unsigned long long entry(void){
+    unsigned long long acc = 0;
+    int a[10] = {0,1,3,5,9,13,42,7,2,4};
+    for(int i=0;i<10;i++) acc += hot(a[i]);
+    acc ^= hot3(600);
+    acc ^= hot3(999);
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "fnptr_callback",
+        "-O3",
+        r#"
+typedef unsigned long long (*fnt)(unsigned long long);
+static unsigned long long add2(unsigned long long x){ return x+2; }
+static unsigned long long mul3(unsigned long long x){ return x*3; }
+static unsigned long long xorf(unsigned long long x){ return x ^ 0xdeadbeefULL; }
+static fnt tbl[4] = {add2, mul3, xorf, add2};
+unsigned long long entry(void){
+    unsigned long long acc = 1;
+    for(int i=0;i<8;i++) acc = tbl[acc & 3](acc);
+    return acc;
+}
+"#,
+    );
+    assert_diff(
+        "fnv_hash",
+        "-O2",
+        r#"
+unsigned long long entry(void){
+    const unsigned char msg[32] = "open-sober robux proto hash";
+    unsigned long long h = 0xcbf29ce484222325ULL;
+    for(int i=0;i<32 && msg[i];i++){ h ^= msg[i]; h = h*0x100000001b3ULL; }
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33;
+    return h;
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_halfword_minmax_negatives() {
     // Signed SHORT/CHAR arrays with negatives fed into min/max/sum reductions —
     // exercises the 16/8-bit sign-extended load pipeline (movsx REX.W fix) and
