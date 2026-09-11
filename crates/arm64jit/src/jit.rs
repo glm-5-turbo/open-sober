@@ -336,12 +336,29 @@ static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static CURRENT_TP: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    // Depth of nested jit_run dispatch loops on this thread (outer boot loop +
+    // any run_guest_callback/spawn_pthread re-entries). >0 means the thread is
+    // executing guest blocks / the host-call bridge. Counter (not bool) because
+    // a nested jit_run (pthread_once callback) would otherwise clear the flag
+    // while the outer dispatcher is still running.
+    static IN_JIT_RUN: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+/// Whether the calling host thread is currently inside a `jit_run` dispatch
+/// loop (true only between jit_run's set-on-entry and clear-on-exit).
+pub fn in_jit_run() -> bool {
+    IN_JIT_RUN.with(|c| c.get() > 0)
 }
 
 /// Host-visible current guest thread-pointer (0 if the caller isn't a guest
 /// thread). Used by the general-dynamic TLS resolver.
 pub fn current_guest_tp() -> u64 {
     CURRENT_TP.with(|c| c.get())
+}
+
+/// Host gettid of the calling thread (for JIT_TRACE block attribution).
+pub fn current_tid() -> u64 {
+    unsafe { libc::syscall(libc::SYS_gettid) as u64 }
 }
 
 /// Main-thread guest TLS template captured at `jit_run` setup: the raw
@@ -1125,6 +1142,30 @@ pub fn active_guest_threads() -> usize {
     GUEST_THREADS.lock().unwrap().len()
 }
 
+/// For a given host tid, return the CpuState pointer this guest thread is
+/// actually running from (the one `register_guest_thread` stored for it), or
+/// 0 if that host tid is not a live guest-thread. A fault handler compares the
+/// ucontext's RBX against this to confirm the faulting thread was executing a
+/// translated block vs. arbitrary host code (where RBX means nothing and any
+/// "register" read is garbage).
+pub fn guest_state_of_host(host_tid: i64) -> u64 {
+    let v = GUEST_THREADS.lock().unwrap();
+    for r in v.iter() {
+        if r.host_tid as i64 == host_tid {
+            return r.state as u64;
+        }
+    }
+    0
+}
+
+/// Enumerate current guest threads as (host_tid, guest_tid, state_ptr) for
+/// diagnostics. The fault handler prints this so exactly which thread faulted
+/// (and whether its RBX still points at its own CpuState) is unambiguous.
+pub fn dump_guest_threads() -> Vec<(i64, u64, u64)> {
+    let v = GUEST_THREADS.lock().unwrap();
+    v.iter().map(|r| (r.host_tid as i64, r.guest_tid, r.state as u64)).collect()
+}
+
 /// Is the `tgkill` target the current guest thread (`s`)? The guest's
 /// gettid() returns the REAL host tid (mirroring kernel behavior), and a clone
 /// child also has an internal guest tid; match either so pthread_kill(self)
@@ -1516,9 +1557,15 @@ pub fn exec_bytes(state: &mut CpuState, bytes: &[u8], _start_pc: u64) -> Result<
 /// an indirect/return transfer, `state.pc` holds the next address, so the
 /// dispatcher compiles & re-enters there. Halts when `pc == 0`.
 pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Result<u64, String> {
-    // Epoch for the CNTVCT_EL0 readout. The guest reads cntfrq_el0 (100 MHz)
-    // and cntvct_el0 to compute time deltas; stamp the per-block counter once so
-    // it stays monotonic and agrees with the declared frequency.
+    unsafe { (*state).pc = entry }
+    IN_JIT_RUN.with(|c| c.set(c.get() + 1));
+    let run_result = jit_run_inner(image, base, state);
+    IN_JIT_RUN.with(|c| c.set(c.get() - 1));
+    run_result
+}
+
+pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u64, String> {
+    // Epoch for the CNTVCT_EL0 readout.
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     let epoch = *EPOCH.get_or_init(Instant::now);
     let stamp_cntvct = |st: *mut CpuState| {
@@ -1526,8 +1573,6 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         let ticks = ns / 10; // /10 ns == 100 MHz ticks
         unsafe { (*st).cntvct = ticks };
     };
-    unsafe { (*state).pc = entry }
-    // Register the active image so a `clone` child host thread can re-enter
     // `jit_run` on the same program. The image is process-lifetime.
     *EXEC_CTX.lock().unwrap() = Some(ExecCtx {
         image_addr: image.as_ptr() as usize,
@@ -1735,8 +1780,9 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             println!("{line}");
         }
         if std::env::var_os("JIT_TRACE").is_some() {
+            let t = crate::jit::current_tid();
             println!(
-                "  block@0x{pc:x} -> pc=0x{:x} x0=0x{:x} x1=0x{:x} x19=0x{:x} x20=0x{:x} x30=0x{:x}",
+                "  [t={t}] block@0x{pc:x} -> pc=0x{:x} x0=0x{:x} x1=0x{:x} x19=0x{:x} x20=0x{:x} x30=0x{:x}",
                 unsafe { (*state).pc },
                 unsafe { (*state).x[0] },
                 unsafe { (*state).x[1] },

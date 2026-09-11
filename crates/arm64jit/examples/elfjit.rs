@@ -56,14 +56,79 @@ unsafe fn install_fault_debug() {
             let x30 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(240) as *const u64) } else { 0 };
             let name = if sig == libc::SIGSEGV { "SIGSEGV" } else if sig == libc::SIGILL { "SIGILL" } else { "SIGFAULT" };
             let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+            // Does the faulting host thread actually run a guest CpuState?
+            // Compare the ucontext RBX against the registered CpuState pointer
+            // for this host tid. If they match, the guest reg dump is real; if
+            // not, RBX is an arbitrary host value and the dump is garbage.
+            let reg_state = arm64jit::jit::guest_state_of_host(tid as i64);
+            let state_matches = reg_state != 0 && reg_state == rbx as u64;
+            // Guest tid of the matching registered state (0 if unregistered).
+            let reg_guest_tid = if reg_state != 0 {
+                unsafe { *(reg_state as *const u64).wrapping_add(848 / 8) } // CpuState.tid field
+            } else {
+                u64::MAX
+            };
+            // Enumerate all registered guest threads: (host_tid, guest_tid, state).
+            let thr = arm64jit::jit::dump_guest_threads()
+                .iter()
+                .map(|(h, g, s)| format!("({h}:{g},{s:#x})"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let in_jit = arm64jit::jit::in_jit_run();
             // Diagnostic: dump the LocalStorageManager static-map global on fault
             // to confirm whether our boot-time seed persisted.
             let lsm_global = unsafe { *(0x10726f8c0u64 as *const u64) };
+            // Full host x86-64 register file (SysV). The guest regs above are read
+            // through rbx==CpuState base, so if rbx itself is corrupt the guest
+            // dump is an artifact; the host frame disambiguates a real guest fault
+            // from a handler/spurious read.
+            let g = |i: usize| (*uc).uc_mcontext.gregs[i];
+            let (rax, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15, fl) = (
+                g(libc::REG_RAX as usize), g(libc::REG_RCX as usize), g(libc::REG_RDX as usize),
+                g(libc::REG_RSI as usize), g(libc::REG_RDI as usize), g(libc::REG_RBP as usize),
+                g(libc::REG_RSP as usize), g(libc::REG_R8 as usize), g(libc::REG_R9 as usize),
+                g(libc::REG_R10 as usize), g(libc::REG_R11 as usize), g(libc::REG_R12 as usize),
+                g(libc::REG_R13 as usize), g(libc::REG_R14 as usize), g(libc::REG_R15 as usize),
+                g(libc::REG_EFL as usize),
+            );
             let s = format!(
-                "\n[{name}] tid={tid} fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x} lsm_map_global=0x{lsm_global:x}\n  raw[]= {hex}\n"
+                "\n[{name}] tid={tid} fault={fault:#x} rip={rip:#x} guestpc={pc:#x} rbx_matches_gueststate={state_matches} (reg_state={reg_state:#x}, tid={reg_guest_tid})\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x} lsm_map_global=0x{lsm_global:x}\n  HOST rax={rax:#x} rbx={rbx:#x} rcx={rcx:#x} rdx={rdx:#x} rsi={rsi:#x} rdi={rdi:#x}\n  HOST rbp={rbp:#x} rsp={rsp:#x} r8={r8:#x} r9={r9:#x} r10={r10:#x} r11={r11:#x}\n  HOST r12={r12:#x} r13={r13:#x} r14={r14:#x} r15={r15:#x} eflags={fl:#x}\n  GUEST_THREADS {thr} in_jit_run={in_jit}\n  raw[]= {hex}\n"
             );
             let b = s.as_bytes();
             libc::write(2, b.as_ptr() as *const libc::c_void, b.len());
+            // Native frame-pointer backtrace (SysV: rbp chain, [rbp]=prev rbp,
+            // [rbp+8]=return addr). Classifies every ret addr as host-JIT vs
+            // guest-text vs libc so we see WHICH dispatcher path jumped to guest.
+            let mut btd = String::from("\n  BT:");
+            let mut fp: u64 = rbp as u64;
+            let classify = |ra: u64| -> String {
+                if ra >= 0x100000000 && ra < 0x120000000 {
+                    format!("GUEST({ra:#x})")
+                } else if ra >= 0x7f0000000000 && ra < 0x7f8000000000 {
+                    format!("HOST({ra:#x})")
+                } else if ra >= 0x7f0000000000 {
+                    format!("HOST({ra:#x})")
+                } else {
+                    format!("{ra:#x}")
+                }
+            };
+            for _ in 0..24 {
+                if fp & 7 != 0 || fp < 0x400000 || fp >> 56 != 0 {
+                    break;
+                }
+                let ra = unsafe { *(fp.wrapping_add(8) as *const u64) };
+                if ra == 0 {
+                    break;
+                }
+                btd.push_str(&format!(" -> {}", classify(ra)));
+                let nfp = unsafe { *(fp as *const u64) };
+                if nfp <= fp || nfp - fp > 0x4000 {
+                    break;
+                }
+                fp = nfp;
+            }
+            btd.push('\n');
+            libc::write(2, btd.as_bytes().as_ptr() as *const libc::c_void, btd.len());
         }
         std::process::abort();
     }

@@ -362,6 +362,75 @@ fn loader_run_shared_glob_dat_and_abs64_returns_37() {
     let _ = std::fs::remove_dir_all(&wd);
 }
 #[test]
+fn loader_run_unresolved_func_globdat_binds_safe_stub() {
+    // REGRESSION: Roblox imports finalize-purchase / GL-log / AMedia delete
+    // functions via GLOB_DAT slots (function pointers in a data table). When
+    // such an import is UNRESOLVABLE on this host, `bind_glob_dat` previously
+    // left the slot at its original value (0 or a stale `.dynstr` symbol-name
+    // pointer) — the guest later `blr`s through it and jumps INTO the symbol
+    // table (SIGSEGV with register file full of ASCII .dynstr strings, the
+    // real worker-thread crash signature). Fix: bind unsolvable *function*
+    // GLOB_DAT/ABS64 slots to a registered host-call stub (zero/handle-return)
+    // so an indirect call dispatches to real host code, never symbol data.
+    if cross_gcc().is_none() {
+        eprintln!("skipping loader_run_unresolved_func_globdat: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir("unresglob");
+    // `undefined_fn` is declared but its body is NOT in this module, so it is
+    // SHN_UNDEF. Because it is used through a function pointer (gfp), the
+    // compiler emits a GLOB_DAT relocation carrying the name (not a JUMP_SLOT).
+    // There is genuinely no host symbol named `undefined_fn`, so the resolver
+    // cannot satisfy it — exercising exactly the unresolved-function path.
+    let elf = compile_shared(
+        &wd,
+        "ug",
+        "extern int undefined_fn(int);\n\n\
+         int (*gfp)(int) = undefined_fn;\n\n\
+         int entry(void){ return gfp != 0; }\n",
+    );
+    let relout = Command::new("aarch64-linux-gnu-readelf")
+        .arg("-rW")
+        .arg(&elf)
+        .output()
+        .unwrap();
+    let rel = String::from_utf8_lossy(&relout.stdout);
+    assert!(
+        rel.contains("R_AARCH64_GLOB_DAT") || rel.contains("R_AARCH64_ABS64"),
+        "fixture emits a function-pointer reloc for undefined_fn: {rel}"
+    );
+
+    // Load + bind. The GLOB_DAT slot for `undefined_fn` must now hold a host
+    // thunk address (the safe function-stub fallback) — NOT 0 and NOT a small
+    // value that could be a `.dynstr` offset into symbol data.
+    let el = libloader::elf::load_elf_image(&elf).expect("load_elf_image");
+    let (_nb, _un) = arm64jit::plt::bind_image_plt(&el, None);
+    let slot_guest = {
+        // Re-parse readelf's `undefined_fn` reloc r_offset (GLOB_DAT or ABS64).
+        let off = rel
+            .lines()
+            .find(|l| l.contains("undefined_fn") && l.contains("undefined_fn + 0"))
+            .and_then(|l| l.split_whitespace().next())
+            .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap())
+            .unwrap();
+        el.guest_of(off)
+    };
+    let slot_g = el.host_addr_of(slot_guest).expect("slot mapped");
+    let v = unsafe { (slot_g as *const u64).read_unaligned() };
+    assert!(
+        v != 0 && v > 0x1_0000,
+        "unresolved-fn GLOB_DAT slot must bind a host stub thunk, got {v:#x}"
+    );
+    // The JIT thunk region is far above any `.dynstr` (which sits low in the
+    // image, <0x20000-ish base offset) — a bound thunk is a large 0x7f... addr.
+    eprintln!(
+        "\x1b[32mPASS\x1b[0m unresolved fn GLOB_DAT bound to host stub thunk {v:#x}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
 fn loader_run_self_import_binds_to_own_guest_body() {
     // REGRESSION: a `-shared` module calling one of its OWN exported functions
     // goes through `@plt`; the JUMP_SLOT symbol is defined in the module itself
@@ -379,7 +448,7 @@ fn loader_run_self_import_binds_to_own_guest_body() {
     let elf = compile_shared(
         &wd,
         "self",
-        "int internal_fn(int x){ return x * 5; }\n\\\n         int entry(void){ return internal_fn(7); }\n",
+        "int internal_fn(int x){ return x * 5; }\n\n         int entry(void){ return internal_fn(7); }\n",
     );
     // Sanity: the JUMP_SLOT names a symbol the module defines.
     let rel = Command::new("aarch64-linux-gnu-readelf")

@@ -614,7 +614,23 @@ fn bind_glob_dat(
                         st_shndx
                     );
                 }
-                0 // unresolved
+                // Leave data-object / canary-less slots as-is (0 is fine for a
+                // guest that only reads them), BUT a *function* GLOB_DAT slot
+                // that we can't resolve must not be left holding its original
+                // stale data (`.dynstr` symbol-name pointer or garbage the
+                // prior relocation wrote): the guest would `blr` through it and
+                // jump into the symbol table. Bind it to a benign host-call
+                // stub (zero-return, or handle-return for handle-like names) so
+                // an indirect call dispatches to real host code instead of a
+                // symbol string. Re-resolve to get the stub's registered slot.
+                let is_func = st_shndx == SHN_UNDEF && st_info & 0xf != STT_OBJECT;
+                if is_func {
+                    let stub = crate::shims::register_fallback(&unresolved_name);
+                    wr64(slot_guest, stub);
+                    1 // bound to a safe stub
+                } else {
+                    0 // unresolved
+                }
             }
         }
     };
