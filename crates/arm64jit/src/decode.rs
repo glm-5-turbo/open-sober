@@ -368,6 +368,13 @@ pub enum Inst {
         q: bool,
         sub: bool,
     },
+    // ---- SIMD single-precision FP two-source arithmetic: fadd/fsub/fmul/fdiv
+    // (op 0..3) and fmax/fmin/fmaxnm/fminnm (op 4..7) on Vd.2s/.4s lanes. ----
+    VecFpArith { rd: u8, rn: u8, rm: u8, op: u8, q: bool },
+    // ---- SIMD FP compare->mask: fcmeq/fcmgt/fcmge Vd.T, Vn.T, Vm.T ----
+    // result lane = all-ones if Vn op Vm, else 0. op 0=eq,1=gt,2=ge (lt/le are
+    // gt/ge with Vn/Vm swapped). esize 4 (.2s/.4s) or 8 (.2d); q = bit30.
+    VecFpCmp { rd: u8, rn: u8, rm: u8, esize: u8, op: u8, q: bool },
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
         WidenShl { rd: u8, rn: u8, dst_esize: u8, nlanes: u8, signed: bool, upper: bool },
         // ---- SIMD add/sub-long widening: saddl/uaddl/subl/usubl Vd.T, Vn.T, Vm.T ----
@@ -555,6 +562,15 @@ pub enum Inst {
     // in Vd. Gate (insn & 0xffe0_fc00)==0x6e60d800 (verified vs real decir0x6e61d842
     // and compiler 0x6e61dbff; excludes scvtf/scalar/compare forms).
     Ucvtf2d { rd: u8, rn: u8 },
+    // ---- NEON vector int->FP: scvtf/ucvtf Vd.T, Vn.T (s32/u32->f32, s64->f64) ----
+    // The reverse of FcvVec. Gate (insn&0xffe0_fc00) in
+    // {0x0e20_d800(s32,scvtf,q=0) 0x2e20_d800(ucvtf) 0x4e20_d800(scvtf,q=1)
+    //  0x6e20_d800(ucvtf,q=1) 0x4e60_d800(scvtf v.2d s64->f64)}. esize=8 iff
+    // bit22 (the .2d forms); signed = bit29 clear; q = bit30. MUST decode
+    // BEFORE the SimdMull gate, which otherwise swallows 0x4e21d800 as a
+    // widening multiply (a silent miscompile: every vector int->float produced
+    // garbage). (unsigned ucvtf v.2d 0x6e60d800 stays Ucvtf2d.)
+    VecIntToFp { rd: u8, rn: u8, esize: u8, signed: bool, q: bool },
     // ---- scalar unsigned int64->double: ucvtf Dd, Dn (int in Dn -> double) ----
         // Gate (insn & 0xffe0_fc00) == 0x7e60_d800, disjoint from the vector Ucvtf2d
         // (0x6e60_d800, bit23 differs), Fabd (0x7ee0_d400) and fmov (0x1e604000).
@@ -601,6 +617,11 @@ pub enum Inst {
     // ---- SIMD 32-bit lane multiply-accumulate/subtract: mla/mls Vd.4S/2S ----
     // mla: Vd = Vd + Vn*Vm ; mls: Vd = Vd - Vn*Vm (per 32-bit lane).
     SimdMla { rd: u8, rn: u8, rm: u8, lanes: u8, sub: bool },
+    // ---- SIMD 32-bit lane MLA/MLS by element: mla/mls Vd.4S/2S, Vn, Vm.S[idx] ----
+    // Vd[i] += Vn[i]*Vm.single-element (broadcast), per 32-bit lane. Integer
+    // (wrap mod 2^32), the by-element sibling of SimdMla. Previously misdecoded
+    // as VecMovi (a silent wrong-immediate) which corrupted vector math.
+    SimdMlaEl { rd: u8, rn: u8, rm: u8, index: u8, lanes: u8, sub: bool },
     // ---- SIMD zip even: zip1 Vd.T, Vn.T, Vm.T ----
     SimdZip1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD zip2: upper-half interleave (gcc unsigned magic-div widen) ----
@@ -1059,6 +1080,77 @@ pub fn decode(insn: u32) -> Inst {
         let signed = (insn >> 29) & 1 == 0;
         let q = (insn >> 30) & 1 == 1;
         return Inst::FcvVec { rd, rn, signed, esize: e, q };
+    }
+    // ---- SIMD int->FP (vector): scvtf/ucvtf Vd.T, Vn.T (s32/u32->f32, s64->f64) ----
+    // Reverse of FcvVec. Encodings assembled & objdump-verified:
+    //   scvtf v0.4s=0x4e21d800  ucvtf v0.4s=0x6e21d800  scvtf v0.2s=0x0e21d800
+    //   ucvtf v0.2s=0x2e21d800  scvtf v0.2d=0x4e61d800.
+    // (ucvtf v.2d 0x6e61d800 is Ucvtf2d above.) MUST be before SimdMull, which
+    // otherwise misdecodes every one of these as a widening multiply.
+    if matches!(insn & 0xffe0_fc00, 0x0e20_d800 | 0x2e20_d800 | 0x4e20_d800 | 0x6e20_d800 | 0x4e60_d800) {
+        let esize = if (insn >> 22) & 1 == 1 { 8u8 } else { 4u8 };
+        let signed = (insn >> 29) & 1 == 0;
+        let q = (insn >> 30) & 1 == 1;
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        return Inst::VecIntToFp { rd, rn, esize, signed, q };
+    }
+    // ---- SIMD single-precision FP two-source arithmetic: fadd/fsub/fmul/fdiv
+    // (op 0..3) and fmax/fmin/fmaxnm/fminnm (op 4..7) on Vd.2s/.4s lanes. ----
+    // Encodings asm+objdump verified (see /tmp/fpv.s): fadd 2s/4s =
+    // 0x0e21d400/0x4e21d400, fsub 0x0ea1d400/0x4ea1d400, fmul 0x2e21dc00/
+    // 0x6e21dc00, fdiv 0x2e21fc00/0x6e21fc00, fmax 0x4e21f400, fmin
+    // 0x4ea1f400, fmaxnm 0x4e21c400, fminnm 0x4ea1c400. MUST be before
+    // SimdMull/Simd4s/SimdAddB, which silently misdecode these as a widening
+    // multiply / integer add / byte add (vector single-FP graphics math was
+    // wrong, not an Unsupported stop, until this gate was added). The .2d
+    // double-lane forms (0x..60 d400/.. etc.) stay with Simd2dFp.
+    {
+        const VFP: &[(u32, u8)] = &[
+            (0x0e20_d400, 0), (0x4e20_d400, 0), // fadd 2s/4s
+            (0x0ea0_d400, 1), (0x4ea0_d400, 1), // fsub
+            (0x2e20_dc00, 2), (0x6e20_dc00, 2), // fmul
+            (0x2e20_fc00, 3), (0x6e20_fc00, 3), // fdiv
+            (0x0e20_f400, 4), (0x4e20_f400, 4), // fmax
+            (0x0ea0_f400, 5), (0x4ea0_f400, 5), // fmin
+            (0x0e20_c400, 6), (0x4e20_c400, 6), // fmaxnm
+            (0x0ea0_c400, 7), (0x4ea0_c400, 7), // fminnm
+        ];
+        let m = insn & 0xffe0_fc00;
+        if let Some(&(_, op)) = VFP.iter().find(|&&(r, _)| r == m) {
+            let rd = (insn & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rm = ((insn >> 16) & 0x1f) as u8;
+            let q = (insn >> 30) & 1 == 1;
+            return Inst::VecFpArith { rd, rn, rm, op, q };
+        }
+    }
+    // ---- SIMD FP compare->mask: fcmeq/fcmgt/fcmge Vd.T, Vn.T, Vm.T ----
+    // byte2 (bits15:8) == 0xe4, top byte in the {2e,4e,6e,.2d 6e..} family
+    // (encodings asm+objdump verified: fcmgt 4s=0x6ea2e420 fcmeq 4s=0x4e22e420
+    // fcmge 4s=0x6e22e420, .2d forms bit22 set). Per-lane result = all-ones if
+    // the comparison holds else 0. op: bit29=0 => eq, else bit23=1 => gt,
+    // bit23=0 => ge. MUST be before the SimdVShift gate, which otherwise
+    // misdecodes fcmgt as a variable shift (gcc float-vs-constant count loops
+    // returned garbage). NaN handling: comiss/comisd sets CF=ZF on NaN, so a
+    // NaN lane reads as "less than" — eq/ge/gt all produce 0 (matches ARM's
+    // "NaN compares false") for the ordered forms.
+    if ((insn & 0xffe0_fc00) >> 8) & 0xff == 0xe4
+        && matches!((insn >> 24) & 0x0f, 0x0e | 0x2e | 0x4e | 0x6e)
+    {
+        let esize = if (insn >> 22) & 1 == 1 { 8u8 } else { 4u8 };
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        let q = (insn >> 30) & 1 == 1;
+        let op = if (insn >> 29) & 1 == 0 {
+            0u8 // fcmeq
+        } else if (insn >> 23) & 1 == 1 {
+            1u8 // fcmgt
+        } else {
+            2u8 // fcmge
+        };
+        return Inst::VecFpCmp { rd, rn, rm, esize, op, q };
     }
     // ---- variable shift by register: lslv/lsrv/asrv/rorv Wd|Xd, Wn|Xn, Wm|Xm ----
     // Gate (insn & 0xffe0_2000) in {0x1ac0_2000, 0x9ac0_2000}; distinct from MulDiv
@@ -1941,6 +2033,66 @@ pub fn decode(insn: u32) -> Inst {
         let q = (insn & 0x4000_0000) != 0;
         let sub = (insn & 0x4000) != 0;
         return Inst::FmlaEl { rd, rn, vlm, idx, el64: el32, q, sub };
+    }
+    // ---- INTEGER 32-bit lane MLA/MLS by element: mla/mls Vd.4S/2S, Vn, Vm.S[idx] ----
+    // Encodings assembled & objdump-verified (see /tmp/mlae.s): mla 2s/4s =
+    // 0x2f820020/0x6fa20020, mls = 0x2f824020/0x6f824820. Top nibble 0x0f with
+    // bit29 SET (0x2f/0x6f) — the opposite of FP fmla-el (0x0f/0x4f, bit29
+    // CLEAR), so it is disjoint. mls = bit14, q = bit30, .s index = bit21.
+    // Byte1 top-nibble 0x8 excludes the widening smlal/umlal (0x42) forms.
+    // MUST be before VecMovi, which otherwise decodes these as a vector
+    // immediate (silent wrong-value: gcc int->float init used this and every
+    // lane of the a*scalar product was garbage).
+    if ((insn >> 24) & 0x0f) == 0x0f
+        && (insn & 0x2000_0000) != 0
+        && (insn & 0x0080_0000) != 0
+    {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        // .4s index (0..3) = (bit11 << 1) | bit21; .2s (0..1) = bit21.
+        let index = ((((insn >> 11) & 1) << 1) | ((insn >> 21) & 1)) as u8;
+        let q = (insn >> 30) & 1 == 1;
+        let sub = (insn & 0x4000) != 0;
+        let lanes = if q { 4u8 } else { 2u8 };
+        return Inst::SimdMlaEl { rd, rn, rm, index, lanes, sub };
+    }
+    // ---- SIMD permutes (zip1/zip2, uzp1/uzp2): 3-same, byte2 ----
+    // byte2 (bits15:8): zip1=0x38 zip2=0x78 uzp1=0x18 uzp2=0x58. These SHARE
+    // byte2 0x38 with the shll shift-imm family, so this gate MUST precede the
+    // WidenShl gate below, otherwise gcc's `zip1 v.4s` (float-vector init /
+    // interleave) is misdecoded as a widening shift -> silent wrong vector
+    // (fv_arith / dv_arith small-error corruption).
+    // esc: esize = 1<<bits[23:22]; q = bit30.
+    {
+        let p = insn & 0x3f20_fc00;
+        let kind = if p == 0x0e00_3800 {
+            Some(1u8) // zip1
+        } else if p == 0x0e00_7800 {
+            Some(2u8) // zip2
+        } else if p == 0x0e00_1800 {
+            Some(3u8) // uzp1
+        } else if p == 0x0e00_5800 {
+            Some(4u8) // uzp2
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            let esize = (1 << ((insn >> 22) & 0x3)) as u8;
+            let q = (insn >> 30) & 1 == 1;
+            let rd = (insn & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rm = ((insn >> 16) & 0x1f) as u8;
+            return if kind == 2 {
+                Inst::SimdZip2 { rd, rn, rm, esize, q }
+            } else if kind == 3 {
+                Inst::SimdUz1 { rd, rn, rm, esize, q }
+            } else if kind == 4 {
+                Inst::SimdUz2 { rd, rn, rm, esize, q }
+            } else {
+                Inst::SimdZip1 { rd, rn, rm, esize, q }
+            };
+        }
     }
     // ---- SIMD widening shift-left (sign/zero extend): shll/usll Vd.Td, Vn.Ts ----
     // byte2 (bits15:8) == 0x38; byte0 in the SHLL family {0e,2e,4e,6e}. Reads the

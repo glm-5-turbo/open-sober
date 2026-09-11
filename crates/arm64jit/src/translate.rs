@@ -2057,12 +2057,80 @@ pub fn translate(
                                                                                                                                                                     buf.mulss(1, 2);
                                                                                                                                                                     if sub { buf.subss(0, 1); } else { buf.addss(0, 1); }
                                                                                                                                                                     buf.movd_r32_xmm(RAX, 0);
-                                                                                                                                                                    buf.mov_store32(RBX, db + 4 * l, RAX);
-                                                                                                                                                                }
-                                                                                                                                                            }
-                                                                                                                                                            Ok(())
-                                                                                                                                                        }
-                                                                                                                                                        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed, upper } => {
+                                                                                                                                                                                                        buf.mov_store32(RBX, db + 4 * l, RAX);
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                }
+                                                                                                                                                                                                Ok(())
+                                                                                                                                                                                            }
+                                                                                                                                                                                            Inst::VecFpArith { rd, rn, rm, op, q } => {
+                                                                                                                                                                                                // Vector single-precision FP two-source arithmetic:
+                                                                                                                                                                                                // Vd[l] = f(Vn[l], Vm[l]) over .4s (q) or .2s lanes.
+                                                                                                                                                                                                // op 0=add 1=sub 2=mul 3=div 4=max 5=min 6=fmaxnm
+                                                                                                                                                                                                // 7=fminnm. (The NaN-propagation edge of maxnm/minnm
+                                                                                                                                                                                                // differs from x86 maxss/minss only when one operand
+                                                                                                                                                                                                // is NaN; a documented approximation for graphics.)
+                                                                                                                                                                                                let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                                                                                                                                                                                                let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+                                                                                                                                                                                                let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
+                                                                                                                                                                                                let lanes = if q { 4 } else { 2 };
+                                                                                                                                                                                                for l in 0..lanes {
+                                                                                                                                                                                                    buf.mov_load32(RAX, RBX, nb + 4 * l);
+                                                                                                                                                                                                    buf.movd_xmm_r32(0, RAX);
+                                                                                                                                                                                                    buf.mov_load32(RAX, RBX, mb + 4 * l);
+                                                                                                                                                                                                    buf.movd_xmm_r32(1, RAX);
+                                                                                                                                                                                                    match op {
+                                                                                                                                                                                                        0 => buf.addss(0, 1),
+                                                                                                                                                                                                        1 => buf.subss(0, 1),
+                                                                                                                                                                                                        2 => buf.mulss(0, 1),
+                                                                                                                                                                                                        3 => buf.divss(0, 1),
+                                                                                                                                                                                                        4 | 6 => buf.maxss(0, 1),
+                                                                                                                                                                                                        _ => buf.minss(0, 1), // 5 / 7
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    buf.movd_r32_xmm(RAX, 0);
+                                                                                                                                                                                                    buf.mov_store32(RBX, db + 4 * l, RAX);
+                                                                                                                                                                                                }
+                                                                                                                                                                                                Ok(())
+                                                                                                                                                                                            }
+                                                                                                                                                                                            Inst::VecFpCmp { rd, rn, rm, esize, op, q } => {
+            // fcmeq/fcmgt/fcmge Vd.T, Vn.T, Vm.T: per-lane result = all-ones
+            // if Vn op Vm, else 0 (the mask gcc ANDs/sub-adds to count lanes).
+            // Compare via comiss/comisd (CF=1 if Vn<Vm; ZF=1 if equal), then
+            // setcc AL, movzx, neg -> all-ones or 0 in the low 32/64 bits.
+            let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
+            let es = esize as i32;
+            let lanes = if q { 16 / es } else { 8 / es };
+            let cc = match op {
+                0 => 4u8,  // fcmeq  : sete (ZF)
+                1 => 7u8,  // fcmgt  : seta (CF=0 && ZF=0)
+                _ => 3u8,  // fcmge  : setae (CF=0)
+            };
+            for l in 0..lanes {
+                let off = l * es;
+                if esize == 8 {
+                    buf.movq_load(0, RBX, nb + off);
+                    buf.movq_load(1, RBX, mb + off);
+                    buf.comisd(0, 1);
+                } else {
+                    buf.mov_load32(RAX, RBX, nb + off);
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.mov_load32(RAX, RBX, mb + off);
+                    buf.movd_xmm_r32(1, RAX);
+                    buf.comiss(0, 1);
+                }
+                buf.setcc_rm8(cc, 0); // AL = 0/1
+                buf.movzx_r32_r8(RAX, RAX);
+                buf.neg_r64(RAX); // low 32/64: 0 -> 0, +1 -> all-ones
+                if esize == 8 {
+                    buf.mov_store64(RBX, db + off, RAX);
+                } else {
+                    buf.mov_store32(RBX, db + off, RAX);
+                }
+            }
+            Ok(())
+        }
+        Inst::WidenShl { rd, rn, dst_esize, nlanes, signed, upper } => {
                                 // shll/s hll2 vd.Td, vn.Ts: widen nlanes low (upper half) elements
                                 // of vn, sign/zero extend to dst_esize-byte lanes.
                                 let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
@@ -2661,6 +2729,28 @@ pub fn translate(
                                                                                                 buf.mov_store32(RBX, slot(rd) + off, RDX);
                                                                                             } else {
                                                                                                 // Vd = Vd + Vn*Vm
+                                                                                                buf.mov_load32(RDX, RBX, slot(rd) + off);
+                                                                                                buf.add_rr64(RDX, RAX);
+                                                                                                buf.mov_store32(RBX, slot(rd) + off, RDX);
+                                                                                            }
+                                                                                        }
+                                                                                        Ok(())
+                                                                                                                    }
+                                                                                    Inst::SimdMlaEl { rd, rn, rm, index, lanes, sub } => {
+                                                                                        // mla/mls Vd.4S/2S, Vn., Vm.S[idx]: Vd[i] = Vd[i] +/- Vn[i]*Vm.el
+                                                                                        // (Vm's indexed single element broadcast to every lane).
+                                                                                        let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                        let mel = slot(rm) + (index as i32) * 4;
+                                                                                        for i in 0..lanes {
+                                                                                            let off = (i as i32) * 4;
+                                                                                            buf.mov_load32(RAX, RBX, slot(rn) + off);
+                                                                                            buf.mov_load32(RCX, RBX, mel); // broadcast element
+                                                                                            buf.imul_rr64(RAX, RCX);
+                                                                                            if sub {
+                                                                                                buf.mov_load32(RDX, RBX, slot(rd) + off);
+                                                                                                buf.sub_rr64(RDX, RAX);
+                                                                                                buf.mov_store32(RBX, slot(rd) + off, RDX);
+                                                                                            } else {
                                                                                                 buf.mov_load32(RDX, RBX, slot(rd) + off);
                                                                                                 buf.add_rr64(RDX, RAX);
                                                                                                 buf.mov_store32(RBX, slot(rd) + off, RDX);
@@ -3625,22 +3715,30 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     let es = esize as i32;
                     let n = if q { 16i32 } else { 8i32 };
                     let lanes = n / es;
+                    // Broadcast the single element into xmm2 ONCE up front. Must
+                    // NOT re-read the element memory each iteration: when rd==rm
+                    // (e.g. `fmul v17.4s, v7.4s, v17.s[0]`, rd==rm==17) the first
+                    // lane's write clobbers the element before later lanes read
+                    // it, corrupting every lane after 0 (silent wrong vector).
                     let mel = f(rm) + (index as i32) * es; // address of Vm[L]
+                    if esize == 8 {
+                        buf.movq_load(2, RBX, mel);
+                    } else {
+                        buf.mov_load32(RAX, RBX, mel);
+                        buf.movd_xmm_r32(2, RAX);
+                    }
                     for l in 0..lanes {
                         // total lane byte offset: lanes may be 2S(8B),4S/2d(16B)
                         let to = l * es;
                         if esize == 8 {
                             buf.movq_load(0, RBX, f(rn) + to);
-                            buf.movq_load(1, RBX, mel);
-                            buf.mulsd(0, 1);
+                            buf.mulsd(0, 2);
                             buf.movq_store(RBX, f(rd) + to, 0);
                         } else {
                             // single-precision lanes
                             buf.mov_load32(RAX, RBX, f(rn) + to);
                             buf.movd_xmm_r32(0, RAX);
-                            buf.mov_load32(RAX, RBX, mel);
-                            buf.movd_xmm_r32(1, RAX);
-                            buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x59, 0xc1]); // mulss xmm0,xmm1
+                            buf.mulss(0, 2);
                             buf.movd_r32_xmm(RAX, 0);
                             buf.mov_store32(RBX, f(rd) + to, RAX);
                                     }
@@ -3863,6 +3961,34 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.mov_store64(RBX, dst + l * m, RAX); // 64-bit int lane
                 } else {
                     buf.mov_store32(RBX, dst + l * m, RAX); // 32-bit int lane
+                }
+            }
+            Ok(())
+        }
+                Inst::VecIntToFp { rd, rn, esize, signed, q } => {
+            // scvtf/ucvtf Vd.T, Vn.T: convert each int lane (esize bytes) to FP.
+            // The reverse of FcvVec. esize=4 -> s32/u32 -> f32 per lane;
+            // esize=8 -> (scvtf v.2d) i64 -> f64 per lane.
+            let src = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let m = esize as i32;
+            for l in 0..lanes {
+                if esize == 8 {
+                    // scvtf v.2d: 64-bit signed int lane -> double.
+                    buf.mov_load64(RAX, RBX, src + l * m);
+                    buf.cvtsi2sd(0, true, RAX);
+                    buf.movq_store(RBX, dst + l * m, 0);
+                } else {
+                    // 32-bit lane. mov_load32 zero-extends to RAX; sign-extend
+                    // if signed so cvtsi2ss is exact for negatives.
+                    buf.mov_load32(RAX, RBX, src + l * m);
+                    if signed {
+                        buf.movsxd_r64_r32(RAX, RAX);
+                    }
+                    buf.cvtsi2ss(0, true, RAX);
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, dst + l * m, RAX);
                 }
             }
             Ok(())

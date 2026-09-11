@@ -1226,6 +1226,153 @@ mod tests {
         assert_eq!(r, 0x3333, "post-index writes back x0, x5=3rd value");
     }
 
+    fn pack4(f: [f32; 4]) -> (u64, u64) {
+        let b = |x: f32| (x.to_bits() as u64);
+        (b(f[0]) | (b(f[1]) << 32), b(f[2]) | (b(f[3]) << 32))
+    }
+
+    #[test]
+    fn vector_fp_arith_ground_truth() {
+        // Vector NEON single/double FP arithmetic + int<->float convert,
+        // encodings verified against aarch64-linux-gnu-as (see /tmp/fpx.s).
+        // A Roblox 3D engine's matrix/vertex math is dense with these .4s/.2d
+        // ops; the differential battery surfaced them as silent miscompiles.
+        let ret: [u8; 4] = [0xc0, 0x03, 0x5f, 0xd6];
+        let finv = |w: u32| w.to_le_bytes();
+
+        // fmla v0.4s, v0.4s, v1.4s = 0x4e21cc00 -> v0[i] = v0[i] + v0[i]*v1[i]
+        let mut st = CpuState::new();
+        let (l0, h0) = pack4([1.0, 2.0, 3.0, 4.0]);
+        let (l1, h1) = pack4([2.0, 3.0, 4.0, 5.0]);
+        st.set_v(0, l0, h0);
+        st.set_v(1, l1, h1);
+        let mut code = finv(0x4e21cc00).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmla4s exec");
+        let (lo, hi) = st.get_v(0);
+        let e = pack4([3.0, 8.0, 15.0, 24.0]); // x*(1+y)
+        assert_eq!((lo, hi), e, "fmla v0.4s ground truth");
+
+        // fmul v0.4s, v0.4s, v1.s[0] = 0x4f819000 -> v0[i] = v0[i]*v1[0]
+        let mut st = CpuState::new();
+        let (l0, h0) = pack4([1.0, 2.0, 3.0, 4.0]);
+        let (l1, h1) = pack4([10.0, 0.0, 0.0, 0.0]);
+        st.set_v(0, l0, h0);
+        st.set_v(1, l1, h1);
+        let mut code = finv(0x4f819000).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmul4s_el exec");
+        let (lo, hi) = st.get_v(0);
+        let e = pack4([10.0, 20.0, 30.0, 40.0]);
+        assert_eq!((lo, hi), e, "fmul v0.4s, v1.s[0] ground truth");
+
+        // fmla v0.2d, v0.2d, v1.2d = 0x4e61cc00 -> two double lanes
+        let mut st = CpuState::new();
+        st.set_v(0, 1.0f64.to_bits(), 2.0f64.to_bits());
+        st.set_v(1, 3.0f64.to_bits(), 4.0f64.to_bits());
+        let mut code = finv(0x4e61cc00).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmla2d exec");
+        let (lo, hi) = st.get_v(0);
+        assert_eq!(lo, 4.0f64.to_bits(), "fmla v0.2d lane0 (1+1*3)");
+        assert_eq!(hi, 10.0f64.to_bits(), "fmla v0.2d lane1 (2+2*4)");
+
+        // scvtf v0.4s, v0.4s = 0x4e21d800 -> per-lane int->float
+        let mut st = CpuState::new();
+        st.set_v(0, 1u64 | (2 << 32), 3u64 | (4 << 32));
+        let mut code = finv(0x4e21d800).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("scvtf4s exec");
+        let (lo, hi) = st.get_v(0);
+        let e = pack4([1.0, 2.0, 3.0, 4.0]);
+        assert_eq!((lo, hi), e, "scvtf v0.4s ground truth");
+
+        // fmov v0.4s, #1.0 (SimdFmovImm, 0x4f03f600): all 4 lanes = 1.0f
+        let mut st = CpuState::new();
+        st.set_v(0, 0xdead, 0xbeef); // dirty slots, must be overwritten
+        let mut code = finv(0x4f03f600).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmov v.4s exec");
+        let (lo, hi) = st.get_v(0);
+        assert_eq!((lo, hi), pack4([1.0, 1.0, 1.0, 1.0]), "fmov v0.4s,#1.0 broadcast");
+
+        // fmov s0, w1 (FmovGp single, 0x1e270021): move w1 bits into v0.s[0]
+        let mut st = CpuState::new();
+        st.set_v(0, 0, 0);
+        st.x[1] = 1.13f32.to_bits() as u64;
+        let mut code = finv(0x1e270020).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmov s,w exec");
+        let (lo, _hi) = st.get_v(0);
+        assert_eq!(lo as u32, 1.13f32.to_bits(), "fmov s0,w1 single bits");
+
+        // scvtf with NEGATIVE int lanes (fv_i2f: a[] = i*3-7 -> -7,-4,-1,..)
+        let mut st = CpuState::new();
+        st.set_v(2, 0xfffffff9u64 | (0xfffffffcu64 << 32), 0xffffffffu64 | (0x2u64 << 32));
+        let mut code = finv(0x4e21d842).to_vec(); // rd=2,rn=2 (in-place, high reg)
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("scvtf4s neg exec");
+        let (lo, hi) = st.get_v(2);
+        let e = pack4([-7.0, -4.0, -1.0, 2.0]);
+        assert_eq!((lo, hi), e, "scvtf v0.4s negative lanes");
+
+        // fadd v0.4s, v0.4s, v1.4s = 0x4e21d400 -> per-lane add
+        let mut st = CpuState::new();
+        let (l0, h0) = pack4([1.0, 2.0, 3.0, 4.0]);
+        let (l1, h1) = pack4([0.5, 0.5, 0.5, 0.5]);
+        st.set_v(0, l0, h0);
+        st.set_v(1, l1, h1);
+        let mut code = finv(0x4e21d400).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fadd4s exec");
+        let (lo, hi) = st.get_v(0);
+        let e = pack4([1.5, 2.5, 3.5, 4.5]);
+        assert_eq!((lo, hi), e, "fadd v0.4s ground truth");
+    }
+
+    #[test]
+    fn vector_fp_by_element_highreg_and_2d() {
+        // The exact gcc-emitted by-element and high-register forms the float
+        // differential battery failed on (fv_arith / dv_arith): fmul against a
+        // broadcast scalar lane in HIGH registers, and the .2d double variant.
+        let ret: [u8; 4] = [0xc0, 0x03, 0x5f, 0xd6];
+        let finv = |w: u32| w.to_le_bytes();
+
+        // fmul v30.4s, v30.4s, v17.s[0] = 0x4f9193de (fv_arith)
+        let mut st = CpuState::new();
+        let (l0, h0) = pack4([1.0, 2.0, 3.0, 4.0]);
+        st.set_v(30, l0, h0);
+        st.set_v(17, pack4([10.0, 0.0, 0.0, 0.0]).0, 0); // s[0]=10
+        let mut code = finv(0x4f9193de).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmul v30, v17.s[0] exec");
+        let (lo, hi) = st.get_v(30);
+        assert_eq!((lo, hi), pack4([10.0, 20.0, 30.0, 40.0]), "fmul v30.4s, v17.s[0] highreg");
+
+        // fmul v6.2d, v6.2d, v1.d[0] = 0x4fc190c6 (dv_arith): double by-element
+        let mut st = CpuState::new();
+        st.set_v(6, 1.0f64.to_bits(), 2.0f64.to_bits());
+        st.set_v(1, 3.0f64.to_bits(), 0u64);
+        let mut code = finv(0x4fc190c6).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmul v6.d[0] exec");
+        let (lo, hi) = st.get_v(6);
+        assert_eq!(lo, 3.0f64.to_bits(), "fmul v6.2d, v1.d[0] lane0");
+        assert_eq!(hi, 6.0f64.to_bits(), "fmul v6.2d, v1.d[0] lane1");
+
+        // fmla v21.2d, v1.2d, v22.2d = 0x4e76cc35 (dv_arith): double vector FMLA
+        let mut st = CpuState::new();
+        st.set_v(21, 100.0f64.to_bits(), 200.0f64.to_bits());
+        st.set_v(1, 3.0f64.to_bits(), 4.0f64.to_bits());
+        st.set_v(22, 5.0f64.to_bits(), 6.0f64.to_bits());
+        let mut code = finv(0x4e76cc35).to_vec();
+        code.extend_from_slice(&ret);
+        exec_bytes(&mut st, &code, 0).expect("fmla v21.2d exec");
+        let (lo, hi) = st.get_v(21);
+        assert_eq!(lo, 115.0f64.to_bits(), "fmla v21.2d lane0 (100+3*5)");
+        assert_eq!(hi, 224.0f64.to_bits(), "fmla v21.2d lane1 (200+4*6)");
+    }
+
     #[test]
     fn lse_atomic_swp_and_ldadd_exec() {
         // ldadd w3, w6, [x0] : Rs=w6(>>16), Rn=x0(>>5), Rt=w3(&0x1f). 0xb8260003.

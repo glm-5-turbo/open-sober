@@ -429,6 +429,16 @@ impl CodeBuf {
         self.b(0x59);
         self.b(modrm(3, dst & 7, src & 7));
     }
+    /// DIVSS (SSE): `F3 0F 5E /r` — dst /= src (scalar single). reg=DST, rm=SR
+    pub fn divss(&mut self, dst: u8, src: u8) {
+        self.b(0xF3);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0x5E);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
     /// ADDSS (SSE): `F3 0F 58 /r` — dst += src (scalar single). reg=DST, rm=SR
     pub fn addss(&mut self, dst: u8, src: u8) {
         self.b(0xF3);
@@ -573,6 +583,25 @@ impl CodeBuf {
         self.b(0x0F);
         self.b(0x2F);
         self.b(modrm(3, a & 7, b & 7));
+    }
+    // SETcc r/m8: `0F 9?cc /r` — store 1 (cc true) or 0 into the 8-bit reg.
+    // cc (x86): 4=sete, 7=seta, 3=setae (0x90+cc). reg field of ModRM is /0.
+    pub fn setcc_rm8(&mut self, cc: u8, reg: u8) {
+        if reg >= 8 {
+            self.b(rex(false, 0, 0, reg));
+        }
+        self.b(0x0F);
+        self.b(0x90 + (cc & 0xf));
+        self.b(modrm(3, 0, reg & 7));
+    }
+    // MOVZX r32, r8: `0F B6 /r` — zero-extend a byte register into a 32-bit reg.
+    pub fn movzx_r32_r8(&mut self, dst: u8, src: u8) {
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0xB6);
+        self.b(modrm(3, dst & 7, src & 7));
     }
     // MAXSD xmm, xmm : F2 0F 5F /r (max; a = max(a,b) on doubles)
     pub fn maxsd(&mut self, a: u8, b: u8) {
