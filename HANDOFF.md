@@ -5812,6 +5812,17 @@ gap is fp16 (`fcvtl` `.4h`/`fcvtn` `.4h`), deferred — a real project, not a
 one-liner. Thread-model remaining: per-thread TLS init-image copies for clone
 children (needs a real multilib guest). HARD GATE unchanged.
 
+## Cycle 44g (Sep 11, 2026) — FMUL/FMLA by-element 32-bit index (376/0)
+
+Commit `def4153` (dev). A fused-FMA pair probe (gen_fp_fmla_reduce, later
+removed — qemu is nondeterministic on the fused-FMA oracle pattern) exposed
+that the 32-bit by-element index was decoded wrong: SimdFmulEl read
+bit11|bit13<<1 (always 0 for .s), FmlaEl used b21<<1|b11 (swapped). Assembler
+ground truth: .s index is 2 bits, index = (b11<<1)|b21 — s[1]=b21, s[2]=b11,
+s[3]=both. Every .4s by-element s[2]/s[3] (and fmla s[1] via the swap) used
+the wrong element. Cleared with regression tests for all 4 fmul indices +
+fmla index-1 execution. Workspace 376/0.
+
 ## Cycle 44f (Sep 11, 2026) — 3-same ADDP + MODIMM ORR/BIC RMW (375/0)
 
 Commit `84e0d71` (dev). gen_pairwise_dot (addp/vpaddq/smaxv/sminv/umaxv/
