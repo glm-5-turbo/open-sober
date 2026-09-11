@@ -1355,6 +1355,62 @@ mod tests {
     }
 
     #[test]
+    fn simd_mull_widening_multiply_correct() {
+        // smull/umull/smlal/umlal widen esrc-byte elements to res and multiply.
+        // Decode regression: the old gate read res_esize from bit22 (missed
+        // .8b->.8h res=2, mis-sized .4h as 8), unsigned from bit28 (umull treated
+        // as signed), and acc from bit15 (plain smull accumulated) — four silent
+        // miscompiles. Encodings objdump-verified.
+        // smull v0.2d, v1.2s, v2.2s = 0x0ea2c020 (signed, res 8): {7,-3}*{5,-2} => {35,6}
+        let mut st = CpuState::new();
+        st.v[2] = ((-3i32 as u32 as u64) << 32) | 7; // v1.2s
+        st.v[4] = ((-2i32 as u32 as u64) << 32) | 5; // v2.2s
+        exec_bytes(&mut st, &[0x20, 0xc0, 0xa2, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        assert_eq!(st.v[0], 35, "smull .2d lane0 = 7*5");
+        assert_eq!(st.v[1], 6, "smull .2d lane1 = -3*-2");
+        // umull v0.8h, v1.8b, v2.8b = 0x2e22c020 (unsigned, res 2):
+        // v1.8b bytes {0xFE, 0xFF, 2,3,4,5,6,7} * v2.8b {2,2,2,2,2,2,2,2}
+        // => {508, 510, 4,6,8,10,12,14}. If umull were (wrongly) signed, 0xFE as -2
+        // would give -4 (0xFFFC) not 508 (0x01FC).
+        let mut st = CpuState::new();
+        let mut a = 0xFEu64 | (0xFF << 8); // bytes 0,1
+        for i in 2..8 { a |= (i as u64) << (8 * i); } // bytes 2..7 = 2..7
+        let mut b = 2u64;
+        for i in 1..8 { b |= 2u64 << (8 * i); } // v2 all 2
+        st.v[2] = a;
+        st.v[4] = b;
+        exec_bytes(&mut st, &[0x20, 0xc0, 0x22, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        let mk2 = |l: &[u64]| -> u64 { l.iter().enumerate().fold(0u64, |acc, (i, v)| acc | (v << (16 * i))) };
+        assert_eq!(st.v[0], mk2(&[508, 510, 4, 6]), "umull .8h lanes 0..3");
+        assert_eq!(st.v[1], mk2(&[8, 10, 12, 14]), "umull .8h lanes 4..7");
+        // decode binds: smull = signed non-acc; umull = unsigned; smlal = acc res4.
+        assert!(matches!(
+            crate::decode::decode(0x0ea2c020),
+            Inst::SimdMull { res_esize: 8, unsigned: false, acc: false, q: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x0e62c020),
+            Inst::SimdMull { res_esize: 4, unsigned: false, acc: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x2e62c020),
+            Inst::SimdMull { res_esize: 4, unsigned: true, acc: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x2e22c020),
+            Inst::SimdMull { res_esize: 2, unsigned: true, acc: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x0e628020),
+            Inst::SimdMull { res_esize: 4, acc: true, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x6ea2c020),
+            Inst::SimdMull { res_esize: 8, unsigned: true, q: true, acc: false, .. }
+        ));
+    }
+
+    #[test]
     fn fcvt_vec_4s_lanes_are_32bit_and_independent() {
         // Regression: `fcvtzs v0.4s, v1.4s` treats each lane as a 32-bit float and
         // writes a 32-bit int per lane. It used movq_load (reads 8 bytes = lane +

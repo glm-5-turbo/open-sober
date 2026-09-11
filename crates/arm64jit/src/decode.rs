@@ -2271,19 +2271,29 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                         return Inst::SimdMul { rd, rn, rm, lanes };
                                                                                                                             }
                                                                                                                         // ---- SIMD widening multiply smull/umull & smlal/umlal (0x0f00_c000/8000 gate) ----
-                                                                                                                                if (insn & 0x0f00_c000) == 0x0e00_c000 || (insn & 0x0f00_c000) == 0x0e00_8000 {
-                                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
-                                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                                    let rd = (insn & 0x1f) as u8;
-                                                                                                                                    let res_esize: u8 = if (insn >> 22) & 1 == 1 { 8 } else { 4 };
-                                                                                                                                    return Inst::SimdMull {
-                                                                                                                                        rd, rn, rm,
-                                                                                                                                        res_esize,
-                                                                                                                                        unsigned: (insn >> 28) & 1 == 1,
-                                                                                                                                        q: (insn >> 30) & 1 == 1,
-                                                                                                                                        acc: (insn & 0x0000_8000) == 0x0000_8000,
-                                                                                                                                    };
-                                                                                                                                }
+                                                                                                                                                                                        // acc = which gateway matched: c000 = plain mul, 8000 = accumulate (smlal).
+                                                                                                                                                                                        // res_esize = 2 << bits[23:22] (source elem = 2^bits => result = 2x):
+                                                                                                                                                                                        //   .8b->.8h res2, .4h->.4s res4, .2s->.2d res8.
+                                                                                                                                                                                        // unsigned = bit29 (0x2e/0x6e top nibble -> 1). q = bit30 (upper half).
+                                                                                                                                                                                        // (The prior decode used bit22 for res, bit28 for unsigned and bit15 for
+                                                                                                                                                                                        // acc -- all three wrong: umull/umlal were treated as signed, umull .8h
+                                                                                                                                                                                        // got res=4, and plain smull/umull accumulated. Fixed here.)
+                                                                                                                                                                                        {
+                                                                                                                                                                                            let mullgt = insn & 0x0f00_c000;
+                                                                                                                                                                                            if mullgt == 0x0e00_c000 || mullgt == 0x0e00_8000 {
+                                                                                                                                                                                                let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                let res_esize: u8 = 2u8 << ((insn >> 22) & 3);
+                                                                                                                                                                                                return Inst::SimdMull {
+                                                                                                                                                                                                    rd, rn, rm,
+                                                                                                                                                                                                    res_esize,
+                                                                                                                                                                                                    unsigned: ((insn >> 29) & 1) == 1,
+                                                                                                                                                                                                    q: (insn >> 30) & 1 == 1,
+                                                                                                                                                                                                    acc: mullgt == 0x0e00_8000,
+                                                                                                                                                                                                };
+                                                                                                                                                                                            }
+                                                                                                                                                                                        }
                                                                                                                             // ---- SIMD unsigned compare-higher: cmhi Vd.4S/Vd.2S, Vn., Vm. ----
                                                                                                                                 // Gate &0xffe0_fc00: 0x6ea03400 (4S, Q=1, real 0x6ea13461) / 0x2ea03400 (2S).
                                                                                                                                 // Each 32-bit lane = all-ones if Vn[i] > Vm[i] (unsigned), else 0.
