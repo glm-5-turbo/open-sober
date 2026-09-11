@@ -226,7 +226,7 @@ unsafe fn emulate_count_leading_zeros(inst: &DecodedInstruction, ctx: *mut libc:
     } else if is_64bit {
         src.leading_zeros() as u64
     } else if inst.has_66 {
-        (src as u16).leading_zeros() as u64 - 16
+        (src as u16).leading_zeros() as u64
     } else {
         (src as u32).leading_zeros() as u64
     };
@@ -485,6 +485,39 @@ mod tests {
             assert_eq!(inst.rm, 0);
             let _ = emulate(&inst, &features, &mut ctx);
             assert_eq!(ctx.uc_mcontext.gregs[14], 8, "tzcnt finally in RCX");
+        }
+    }
+
+    /// LZCNT 16-bit (66 F3 0F BD) — the `(src as u16).leading_zeros()` count is
+    /// already measured against a 16-bit operand, so it must NOT be offset by
+    /// 16 (the old `- 16` returned negative/huge for every nonzero source).
+    #[test]
+    fn lzcnt_16bit_matches_real_count() {
+        // 66 F3 0F BD C8 = lzcnt cx, ax (operand-size 66 -> 16-bit)
+        let code = [0x66u8, 0xF3, 0x0F, 0xBD, 0xC8];
+        let mut ctx;
+        let backing;
+        unsafe {
+            let (c, b) = make_ctx(&code);
+            ctx = c;
+            backing = b;
+            // ax = 0x0002 -> 16-bit leading zeros = 14.
+            ctx.uc_mcontext.gregs[13] = 0x2; // rax (=ax)
+            let features = crate::cpuid::CpuFeatures::default();
+            let inst = decode_instruction(backing.as_ptr());
+            let res = emulate(&inst, &features, &mut ctx);
+            assert_eq!(res, EmulationResult::Success, "lzcnt 16-bit should emulate");
+            assert_eq!(
+                ctx.uc_mcontext.gregs[14],
+                14,
+                "lzcnt(cx, ax=2) = 14 (not a negative/huge wrap)"
+            );
+
+            // ax = 0x8000 (only the top bit set) -> 0 leading zeros.
+            ctx.uc_mcontext.gregs[13] = 0x8000;
+            let inst = decode_instruction(backing.as_ptr());
+            let _ = emulate(&inst, &features, &mut ctx);
+            assert_eq!(ctx.uc_mcontext.gregs[14], 0, "lzcnt(cx, ax=0x8000) = 0");
         }
     }
 
