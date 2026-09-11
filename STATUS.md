@@ -279,3 +279,8 @@ next: scalar S/D register-offset -> also added (FpLdStrReg, commit 921af2a,
 arm64jit 116/116, workspace 157/0); remaining scalar S unscaled/pre-post is a
 glibc-CRT tail, not a Roblox boot blocker; then libloader -> libbadcpu ->
 services/auth.
+cycle: 8
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T03:52:13Z
+---
