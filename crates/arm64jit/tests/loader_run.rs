@@ -1167,3 +1167,96 @@ int entry(void){
     eprintln!("\x1b[32mPASS\x1b[0m clone-join: parent FUTEX_WAIT joined child via CLONE_CHILD_CLEARTID wake");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// clone3 (435): the struct-based form modern glibc/bionic use preferentially.
+/// The parent passes a struct clone_args (flags/child_tid/parent_tid/stack/tls
+/// at their u64 offsets); the child runs, publishes a result, and thread-exits;
+/// the parent futex-joins on the child's clear-tid word (CLONE_CHILD_CLEARTID).
+#[test]
+fn loader_run_clone3_struct_args_spawns_guest_thread() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_clone3: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("clone3");
+
+    let src = r#"
+volatile long g_result = 0;
+volatile int g_ctlid = 0;
+
+struct clone_args {
+    unsigned long flags;       // 0
+    unsigned long pidfd;       // 8
+    unsigned long child_tid;   // 16
+    unsigned long parent_tid;  // 24
+    unsigned long exit_signal; // 32
+    unsigned long stack;       // 40
+    unsigned long stack_size;  // 48
+    unsigned long tls;         // 56
+};
+
+int entry(void){
+    static char stack[131072] __attribute__((aligned(16)));
+    int child_tid_slot = 0;
+
+    struct clone_args ca;
+    ca.flags       = 0xF00 | 0x10000 | 0x200000 | 0x1000000; // VM|FS|FILES|SIGHAND|THREAD|CLEARTID|CHILDSETTID
+    ca.pidfd       = 0;
+    ca.child_tid   = (unsigned long)&child_tid_slot;
+    ca.parent_tid  = 0;
+    ca.exit_signal = 0;
+    ca.stack       = (unsigned long)(stack + 131072 - 128);
+    ca.stack_size  = 0;
+    ca.tls         = 0;
+
+    // syscall 435: clone3(cl_args*, size)
+    register long x8 asm("x8") = 435;
+    register long x0 asm("x0") = (long)&ca;
+    register long x1 asm("x1") = sizeof(struct clone_args);
+    long tid;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+    tid = x0;
+
+    if (tid == 0) {
+        // ---- child ----
+        int p = 1;
+        for (int i = 1; i <= 10; i++) p *= i; // 10! = 3628800
+        g_result = 99 + (p == 3628800 ? 0 : 1000);
+        register long x8c asm("x8") = 93;
+        register long x0c asm("x0") = 0;
+        asm volatile("svc #0" :: "r"(x8c), "r"(x0c) : "memory");
+        return -2;
+    }
+
+    // ---- parent: futex-join on the child's clear-tid word ----
+    int expect = (int)tid;
+    register long x8f asm("x8") = 98;
+    register long x0f asm("x0") = (long)&child_tid_slot;
+    register long x1f asm("x1") = 0; // FUTEX_WAIT
+    register long x2f asm("x2") = expect;
+    register long x3f asm("x3") = 0;
+    asm volatile("svc #0" : "+r"(x0f) : "r"(x8f), "r"(x1f), "r"(x2f), "r"(x3f) : "memory");
+
+    if (x0f != 0) return 1000;                 // futex wait interrupted
+    if (g_result != 99) return 2000;           // child factorial result wrong/missing
+    if (child_tid_slot != 0) return 3000;      // clear-tid not zeroed on exit
+    return 42;
+}
+"#;
+
+    let elf = compile(&wd, "clone3", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "clone3: entry() -> {v}, expected 42 (struct-arg clone spawn/join failed?)"
+        ),
+        Err(e) => panic!("clone3: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m clone3: struct-arg clone spawned+joined a guest thread (10! via futex join)");
+    let _ = std::fs::remove_dir_all(&wd);
+}

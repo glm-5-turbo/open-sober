@@ -616,87 +616,39 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
             unsafe { libc::gettid() as c_long }
         }
         173 => unsafe { libc::getppid() as c_long },
-        // --- clone (220): spawn a guest child thread on a real host thread. ---
+        // --- clone (220) / clone3 (435): spawn a guest child thread on a real
+        // host thread. ---
         220 => {
             // AArch64 clone(flags, child_stack, parent_tid, child_tid, tls, ...).
-            // We implement the VM-sharing thread case (CLONE_VM/THREAD/SIGHAND/
-            // FS/FILES/SETTLS — what pthread_create uses): the child re-enters
-            // `jit_run` on a new host thread from the post-svc PC with a fresh
-            // stack + tls, sharing the parent's address space (guest==host, so
-            // memory is inherently shared). flags that fork a NEW process/VM
-            // (no CLONE_VM) can't be honored meaningfully -> -EINVAL.
-            let flags = a[0];
-            const CLONE_VM: u64 = 0x0000_0100;
-            // const CLONE_FS: u64 = 0x0000_0200;
-            // const CLONE_FILES: u64 = 0x0000_0400;
-            // const CLONE_SIGHAND: u64 = 0x0000_0800;
-            const CLONE_THREAD: u64 = 0x0001_0000;
-            const CLONE_SETTLS: u64 = 0x0008_0000;
-            const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
-            const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
-            const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
-            let child_stack = a[1];
-            let parent_tid = a[2] as *mut u32;
-            let tls = a[3];
-            let child_tid = a[4] as *mut u32;
-            let flags_ = flags;
-            if flags_ & CLONE_VM == 0 {
-                // A real process-fork (new VM) isn't the thread model we run.
+            spawn_guest_thread(s, a[0], a[1], a[2] as *mut u32, a[3], a[4] as *mut u32)
+        }
+        435 => {
+            // AArch64 clone3(cl_args*, size). struct clone_args (u64 fields):
+            // flags@0 pidfd@8 child_tid@16 parent_tid@24 exit_signal@32
+            // stack@40 stack_size@48 tls@56. a[0] = ptr, a[1] = size.
+            const CLONE_ARGS_FLAGS: usize = 0;
+            const CLONE_ARGS_CHILD_TID: usize = 16;
+            const CLONE_ARGS_PARENT_TID: usize = 24;
+            const CLONE_ARGS_STACK: usize = 40;
+            const CLONE_ARGS_TLS: usize = 56;
+            let size = a[1] as usize;
+            if size < CLONE_ARGS_TLS + 8 {
+                // Not enough of the struct for the fields we read.
                 (-libc::EINVAL) as c_long
             } else {
-                let tid = NEXT_TID.fetch_add(1, Ordering::SeqCst);
-                // Clone the parent register file; the child diverges below.
-                let mut child = s.clone();
-                child.tid = tid;
-                child.x[0] = 0; // clone returns 0 to the child
-                if child_stack != 0 {
-                    child.x[31] = child_stack; // new stack pointer
-                }
-                if flags_ & CLONE_SETTLS != 0 {
-                    child.tpidr = tls; // new TLS base
-                }
-                // Parent-side TID store: *parent_tid = child tid (meaningful when
-                // the child stores into the parent's memory; here identical).
-                if flags_ & CLONE_PARENT_SETTID != 0 {
-                    unsafe { parent_tid.write_volatile(tid as u32) };
-                }
-                if flags_ & CLONE_CHILD_SETTID != 0 {
-                    unsafe { child_tid.write_volatile(tid as u32) };
-                }
-                // CLONE_CHILD_CLEARTID: the child must zero `child_tid` and
-                // futex-WAKE it at thread exit (pthread_join's futex-WAIT), so
-                // carry the address in the child's state.
-                if flags_ & CLONE_CHILD_CLEARTID != 0 {
-                    child.clear_tid_addr = a[4];
-                }
-                let _ = flags_ & CLONE_THREAD; // no separate thread group tracked
-                // Re-enter jit_run on a host thread from the post-svc PC.
-                let post_svc = s.svc_next;
-                let ctx_guard = EXEC_CTX.lock().unwrap();
-                match ctx_guard.as_ref() {
-                    Some(ctx) => {
-                        // Extract Send-able pieces (the raw pointer as usize) so
-                        // the closure can reconstruct the process-lifetime image
-                        // slice inside the spawned thread.
-                        let img_addr = ctx.image_addr;
-                        let img_len = ctx.image_len;
-                        let base = ctx.base;
-                        drop(ctx_guard);
-                        std::thread::spawn(move || {
-                            // SAFETY: image bytes are process-lifetime (mmap'd by
-                            // libloader / leaked by the run harness), so the slice
-                            // reconstructed from the raw address remains valid for
-                            // the child's whole run.
-                            let image: &[u8] = unsafe {
-                                std::slice::from_raw_parts(img_addr as *const u8, img_len)
-                            };
-                            // The child runs to its thread-local exit, then pc==0
-                            // halts jit_run and the host thread ends.
-                            let _ = jit_run(image, base, post_svc, &mut child as *mut CpuState);
-                        });
-                        tid as c_long
-                    }
-                    None => (-libc::ENOSYS) as c_long, // no active exec context yet
+                let p = a[0] as *const u8;
+                // SAFETY: the guest passed a valid clone_args pointer of `size`
+                // bytes; we read the fields we're prepared to handle.
+                unsafe {
+                    let rd = |off: usize| -> u64 {
+                        std::ptr::read_unaligned(p.add(off) as *const u64)
+                    };
+                    let flags = rd(CLONE_ARGS_FLAGS);
+                    let child_tid = rd(CLONE_ARGS_CHILD_TID) as *mut u32;
+                    let parent_tid = rd(CLONE_ARGS_PARENT_TID) as *mut u32;
+                    let stack = rd(CLONE_ARGS_STACK);
+                    let tls = rd(CLONE_ARGS_TLS);
+                    spawn_guest_thread(s, flags, stack, parent_tid, tls, child_tid)
                 }
             }
         }
@@ -985,6 +937,81 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         (0i64 - e as i64) as u64
     } else {
         ret as u64
+    }
+}
+
+/// Spawn a guest child thread on a real host thread (clone(220)/clone3(435)'s
+/// shared-VM thread case). `s` is the parent CpuState (its `svc_next` holds the
+/// post-svc PC); `flags`/`child_stack`/`parent_tid`/`tls`/`child_tid` come from
+/// the syscall args. The child gets its own register file + tid + stack + TLS,
+/// and re-enters `jit_run` at the post-svc PC so it continues the guest program
+/// right after its `svc`. Returns the child's guest tid (0 would be the child;
+/// the parent never sees this path return for itself).
+fn spawn_guest_thread(
+    s: &mut CpuState,
+    flags: u64,
+    child_stack: u64,
+    parent_tid: *mut u32,
+    tls: u64,
+    child_tid: *mut u32,
+) -> i64 {
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    if flags & CLONE_VM == 0 {
+        // A real process-fork (new VM) isn't the thread model we run.
+        return (-libc::EINVAL) as i64;
+    }
+    let tid = NEXT_TID.fetch_add(1, Ordering::SeqCst);
+    // Clone the parent register file; the child diverges below.
+    let mut child = s.clone();
+    child.tid = tid;
+    child.x[0] = 0; // clone returns 0 to the child
+    if child_stack != 0 {
+        child.x[31] = child_stack; // new stack pointer
+    }
+    if flags & CLONE_SETTLS != 0 {
+        child.tpidr = tls; // new TLS base
+    }
+    // Parent-side TID store: *parent_tid = child tid.
+    if flags & CLONE_PARENT_SETTID != 0 {
+        unsafe { parent_tid.write_volatile(tid as u32) };
+    }
+    if flags & CLONE_CHILD_SETTID != 0 {
+        unsafe { child_tid.write_volatile(tid as u32) };
+    }
+    // CLONE_CHILD_CLEARTID: child zeroes `child_tid` + FUTEX_WAKEs it at thread
+    // exit (pthread_join's futex-WAIT), so carry the address in the child state.
+    if flags & CLONE_CHILD_CLEARTID != 0 {
+        child.clear_tid_addr = child_tid as u64;
+    }
+    // Re-enter jit_run on a host thread from the post-svc PC.
+    let post_svc = s.svc_next;
+    let ctx_guard = EXEC_CTX.lock().unwrap();
+    match ctx_guard.as_ref() {
+        Some(ctx) => {
+            // Extract Send-able pieces (the raw pointer as usize) so the closure
+            // can reconstruct the process-lifetime image slice in the new thread.
+            let img_addr = ctx.image_addr;
+            let img_len = ctx.image_len;
+            let base = ctx.base;
+            drop(ctx_guard);
+            std::thread::spawn(move || {
+                // SAFETY: image bytes are process-lifetime (mmap'd by libloader /
+                // leaked by the run harness), so the slice reconstructed from the
+                // raw address is valid for the child's whole run.
+                let image: &[u8] = unsafe {
+                    std::slice::from_raw_parts(img_addr as *const u8, img_len)
+                };
+                // The child runs to its thread-local exit, then pc==0 halts
+                // jit_run and the host thread ends.
+                let _ = jit_run(image, base, post_svc, &mut child as *mut CpuState);
+            });
+            tid as i64
+        }
+        None => (-libc::ENOSYS) as i64, // no active exec context yet
     }
 }
 
