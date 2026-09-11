@@ -4468,3 +4468,64 @@ the differential-assertion loop keeps flushing real wrong-pixel/audio bugs.
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
    the HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+
+---
+
+# Session (Sep 11, 2026) — SIMD compare-to-zero + sub-wide + high-rm MulDiv (workspace 280/0)
+
+Commit `1702c89` (dev). Opened at 277/0 (bif cycle). Continued the cross-gcc ISA
+sweep into signed-byte / 16-bit / int64-narrowing code; flushed one new-ISA wall
+and TWO more real silent miscompiles (total this session: 2 ISA walls + 4 bugs):
+
+## 1. SIMD integer compare-to-zero (cmeq/cmgt/cmge/cmlt/cmle Vd.T,Vn.T,#0) -- NEW
+gcc emits these for every vectorized x<0 / x==0 / sign check, e.g. the
+`if(sc[i]<0) count++` idiom which compiles to cmlt -> sxtl -> ssubw (count=n by
+subtracting the sign-extended mask). Implemented `Inst::SimdCmpZero`:
+- gate: top byte {0x0e,0x2e,0x4e,0x6e} + bit26 + bits[15:10] in {0x22 cmgt,
+  0x26 cmeq, 0x2a cmlt} AND bit16 CLEAR (bit16 set = FP frint/tbl family -- the
+  first gate draft collided with frintm 0x4e219821).
+- esize = 1<<bits[23:22] (8B/8H/4S/2D); U (bit29) toggles gt->ge and eq->le.
+- translate: per-lane signed/sign-extended load, test, setcc(eq==0x4,gt==0xf,
+  ge==0xd,lt==0xc,le==0xe), movzx, neg => all-ones-or-0 mask.
+
+## 2. sub-wide ssubw/usubw decoded as ADD -- SILENT
+The SimdAddw gate checks `(insn & 0x1800)==0x1000` (bit12 set, bit11 clear) but
+ignores bit13 (0x2000), the add/sub-wide discriminator (saddw 0x0e7613de vs
+ssubw 0x0e7633de differ by bit13). So every ssubw silently ADDED the widened
+element; the negative-count idiom's subtract became an add and the count was
+wrong. Added `sub = (insn & 0x2000) != 0` to SimdAddw; translate emits
+`sub_rr64` when set.
+
+## 3. MulDiv gate mask kept bit20 -- `mul w9,w9,w20` was Unsupported
+`(insn & 0x7ff0_0000)` keeps bit20 (part of rm, bits[20:16]), so any mul/madd/
+sdiv with rm>=16 (bit20 set) failed the gate. Correct mask 0x7fe0_0000 (clears
+the whole rm field). gcc's `mul w9,w9,w20` (32-bit mul, high rm) exposed it.
+
+## Verification
+- jit.rs `isa_regress_tests`: cmlt mask (neg bytes all-ones) + ssubw subtracts-
+  not-adds exec (both decode-atom and runtime values).
+- diff_battery `diff_byte_negcount_ssubw_cmlt`: byte sum + negative count via
+  the cmlt->ssubw idiom + 16-bit unsigned widening; jit==oracle.
+- Cross-gcc probes all exact: byte SIMD=36775, 16-bit audio =9564799, int64
+  narrowing n1=7769812456 / w=7634108456, byte+negcount=3487.
+- (learned: keep test value literals out of `<< 32` shift overflow; append
+  regression tests as a separate `#[cfg(test)] mod` at EOF instead of fragile
+  mid-file splicing.)
+- `cargo build --workspace` clean; `cargo test --workspace` 280/0 (arm64jit
+  165 lib + 44 diff + 8 loader_run).
+
+## Session total (commits 3718824, 60400f3, 1702c89)
+4 ISA walls / features (fcvtl/fcvtn float<->double, SIMD compare-to-zero) and
+FOUR real silent miscompiles found+fixed via the differential sweep:
+FpLdStImmWb scalar-store RAX-address clobber, SIMD BIF->BSL opposite select,
+ssubw-as-add, MulDiv high-rm gate mask. The cross-gcc differential battery
+(+native oracle) is the highest-leverage correctness engine available without
+an APK/GPU.
+
+## Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping (sat-ops, half-precision, more -O3
+   reduction/permute shapes, fp16).
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
+   the HARD GATE, blocked until a capable host + the real binary/APK (none here).
