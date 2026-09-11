@@ -469,3 +469,186 @@ long long entry(void){
 "#,
     );
 }
+
+// ---- NEON single-precision (float) vector SIMD ----
+// A 3D engine's vertex/matrix math is ~all .4s float-vector SIMD (fadd/fmul/
+// fmla/fmaxnm/fcvtzs/scvtf, incl. the by-element FMLA the boot trace cleared).
+// Plain -O3 gcc vectorizes elementwise float loops (no reassociation, so it
+// stays legal FP). This battery is the canary for that whole register-lane
+// family, which the older integer/double batteries did not touch.
+
+#[test]
+fn diff_float_vector_arith() {
+    // Elementwise vector fmla/fmul/fadd on .4s lanes + a final scalar sum.
+    assert_diff(
+        "fv_arith",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 1.13f; float seed = vseed;
+    float a[16];
+    for(int i=0;i<16;i++) a[i] = seed * (float)i;
+    for(int i=0;i<16;i++) a[i] = a[i]*2.0f + 1.0f;  // fmul/fmla v.4s
+    float s = 0.0f;
+    for(int i=0;i<16;i++) s += a[i];
+    return (long long)(s * 10.0f);
+}
+"#,
+    );
+    assert_diff(
+        "fv_sub_neg",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = -0.77f; float seed = vseed;
+    float a[16], b[16];
+    for(int i=0;i<16;i++){ a[i] = seed*(float)(i*3); b[i] = (float)(i&1); }
+    for(int i=0;i<16;i++) a[i] = (a[i] - b[i]) * 2.0f;   // fsub, fmul
+    float s = 0.0f;
+    for(int i=0;i<16;i++) s += a[i];
+    return (long long)(s * 100.0f);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_float_vector_conv() {
+    // Vector float->int (fcvtzs v.4s, trunc toward zero) and int->float
+    // (scvtf v.4s), across positive and negative lanes.
+    assert_diff(
+        "fv_f2i",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 3.5f; float seed = vseed;
+    float a[16]; int b[16];
+    for(int i=0;i<16;i++) a[i] = seed * (float)i;
+    for(int i=0;i<16;i++) b[i] = (int)a[i];          // fcvtzs v.4s (trunc)
+    long long s = 0; for(int i=0;i<16;i++) s += b[i];
+    return s;
+}
+"#,
+    );
+    assert_diff(
+        "fv_f2i_neg",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 1.5f; float seed = vseed;
+    float a[16]; int b[16];
+    for(int i=0;i<16;i++) a[i] = seed * (float)(-7 + i*5);  // mixed sign
+    for(int i=0;i<16;i++) b[i] = (int)a[i];
+    long long s = 0; for(int i=0;i<16;i++) s += b[i];
+    return s;
+}
+"#,
+    );
+    assert_diff(
+        "fv_i2f",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile int vk = 3; int k = vk;
+    int a[16]; float b[16];
+    for(int i=0;i<16;i++) a[i] = i*k - 7;
+    for(int i=0;i<16;i++) b[i] = (float)a[i];        // scvtf v.4s
+    long long s = 0; for(int i=0;i<16;i++) s += (long long)b[i];
+    return s;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_float_vector_fmla_byelement() {
+    // Vector-by-scalar FMLA (fmadd against a single broadcast lane) + float
+    // compare/saturating count. Roblox's boot frontier literally stopped on
+    // `fmla v29.4s, v19.4s, v26.4s`; the by-scalar (v.s[0]) form is separate.
+    assert_diff(
+        "fv_fmla_scalar",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 1.31f; float seed = vseed;
+    float a[16];
+    for(int i=0;i<16;i++) a[i] = seed + (float)i;
+    float c = 1.5f;
+    for(int i=0;i<16;i++) a[i] = a[i]*c + (float)(i%4);  // fmla v.4s by scalar
+    float s = 0.0f;
+    for(int i=0;i<16;i++) s += a[i];
+    return (long long)(s * 100.0f);
+}
+"#,
+    );
+    assert_diff(
+        "fv_cmp_count",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 0.7f; float seed = vseed;
+    float a[16]; int c = 0;
+    for(int i=0;i<16;i++) a[i] = seed * (float)i;
+    for(int i=0;i<16;i++) if (a[i] > 5.0f) c++;   // fcmgt / csel / branch
+    return c;
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_double_vector_arith() {
+    // The .2d double-lane vector family (fmla v.2d / fmul v.2d / fcvtzs v.2d),
+    // the double sibling of the .4s group above.
+    assert_diff(
+        "dv_arith",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile double vseed = 0.91; double seed = vseed;
+    double a[16];
+    for(int i=0;i<16;i++) a[i] = seed * (double)(i*i);
+    for(int i=0;i<16;i++) a[i] = a[i]*1.5 + (double)(i & 1);  // may fmla v.2d
+    double s = 0.0;
+    for(int i=0;i<16;i++) s += a[i];
+    return (long long)(s * 10.0);
+}
+"#,
+    );
+}
+
+#[test]
+fn diff_float_vector_reduced() {
+    // Narrower probes on the still-failing fv_arith shape, to localize the
+    // (small-error) miscompile to either the by-element fmul, the fmla, or the
+    // scalar reduction. n=4 keeps it to ONE vector group + one fmla.
+    assert_diff(
+        "fv4",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 1.13f; float seed = vseed;
+    float a[4];
+    for(int i=0;i<4;i++) a[i] = seed * (float)i;
+    for(int i=0;i<4;i++) a[i] = a[i]*2.0f + 1.0f;
+    float s = 0.0f;
+    for(int i=0;i<4;i++) s += a[i];
+    return (long long)(s * 10.0f);
+}
+"#,
+    );
+    assert_diff(
+        "fv4_fmul_only",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile float vseed = 1.13f; float seed = vseed;
+    float a[4];
+    for(int i=0;i<4;i++) a[i] = seed * (float)i;
+    float s = 0.0f;
+    for(int i=0;i<4;i++) s += a[i];
+    return (long long)(s * 10.0f);
+}
+"#,
+    );
+}
