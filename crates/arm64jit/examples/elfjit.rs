@@ -242,6 +242,22 @@ fn main() {
         el0.guest_of(link)
     }
     unsafe { seed_static_empty_map(link_to_guest(&el, 0x726f000 + 0x8c0)) };
+
+    // Seed the JNICallProtocol-ish refcounted-singleton pointer at guest
+    // 0x107333948 (link-time 0x7333000+0x948). The once-init atomic store
+    // (0x2b9e890) normally writes the object address 0x7333950 into that slot;
+    // under the JIT the .init_array never runs so it stays 0, and the acquire
+    // path (0x21daf00) locks `this+8` (a pthread_mutex at object+0x8) — with
+    // `this` NULL it calls pthread_mutex_lock(0x8) and faults. The object
+    // itself is zeroed bss (a valid PTHREAD_MUTEX_INITIALIZER at +8), so just
+    // wiring the pointer releases the lock into the zeroed (== initial, unlocked)
+    // mutex.
+    let singleton_slot = link_to_guest(&el, 0x7333000 + 0x948); // [ptr] slot
+    let singleton_obj = link_to_guest(&el, 0x7333000 + 0x950); // object base
+    unsafe { *((singleton_slot) as *mut u64) = singleton_obj };
+    println!(
+        "[JNICall-singleton] seeded ptr 0x{singleton_slot:x} -> object 0x{singleton_obj:x} (zeroed bss ~ PTHREAD_MUTEX_INITIALIZER at +8)"
+    );
     // Read back the seed to confirm it landed where the guest reads it.
     let g_chk = link_to_guest(&el, 0x726f000 + 0x8c0);
     let v_chk = unsafe { *(g_chk as *const u64) };
