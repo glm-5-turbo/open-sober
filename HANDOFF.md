@@ -4041,3 +4041,34 @@ qemu for ld3/ld4 q=0 & q=1 and st4 — all match. matmul now = 5248, transpose =
 3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — vector fmls operand order + dup-from-GPR vs sqadd gate (workspace 249/0)
+
+Commit `7fef13e`. Two real silent SIMD miscompiles from the differential
+battery's complex-matrix and -O2 fill probes:
+
+1. **Vector fmls inverted operands.** `fmls Vd,Vn,Vm` (= Vd - Vn*Vm) shared the
+   commutative add's mul/load ordering, so the JIT computed `Vn*Vm - Vd` — right
+   magnitude, wrong sign. 4x4 complex matmul returned 10688 vs oracle 13504;
+   `acc -= a*b` loop +20 vs oracle -100. Fixed by loading Vd into xmm0 and the
+   product into xmm1 so subss(0,1) = Vd - Vn*Vm (also .2d el64 path).
+2. **`dup Vd.T, Wn` swallowed by the SIMD saturating-add gate** (sqadd/uqadd/
+   sqsub/uqsub have byte2==0x0c too). gcc -O2 matrix/fill loops emit `dup
+   v30.4s,w1; add v30,v30,v31; scvtf; str q30,[x],#16`, so the broadcast decoded
+   as a sat-add and every array held garbage (init_O2: 18446744039484557312 vs
+   96). Verified vs assembler: bit21 is SET for all 14 sat-add forms and CLEAR
+   for all 6 dup-from-GPR widths — now required in the sat-add gate.
+
+Regression: `fmls_vector_subtract_has_correct_operand_order`,
+`dup_from_gpr_not_swallowed_by_sqadd_gate` (decode); differential canaries
+`diff_fmls_vector_subtract_accumulate`, `diff_dup_from_gpr_matrix_init`.
+cargo build clean; `cargo test --workspace` 249/0. HEAD `7fef13e`.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping ISA/correctness breadth (structure
+   load/store widths, more SIMD lane/permute/wide paths, FP reduction shapes).
+2. Move up to the runtime side: FMOD "divert guest bl-to-once through the
+   dispatcher" and JNI function-table stubs per RECOMMENDATION.md.
+3. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+4. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK (none here).
