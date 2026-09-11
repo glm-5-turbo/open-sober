@@ -3418,3 +3418,16 @@ workspace 176/0; full 5-batch battery + core C all green.
 Session net: 8 FP/SIMD correctness fixes + FMADD, all regression-locked. Next:
 keep pressing -O2 float/struct coverage, then libloader gaps. HARD GATE
 unchanged (real libroblox.so boot + GPU host).
+
+## Session (Sep 11, 2026) — sdiv/udiv signedness inversion (commit dae2e05)
+6th -O2 battery (signed/variable division, fmin/fmax, fmod, fabs): idivA
+(`s += a[i]/d[i%3]`) returned 0xaaaaaa2d, wanted -35. Root cause: the MulDiv
+decode gate used `b(insn,17,17)==1` for SDIV-vs-UDIV, but bit17=0 for BOTH
+forms — the real discriminator is bit10 (sdiv=1, udiv=0; verified by assembling
+matching-operand pairs 0x1ac50c61 vs 0x1ac50861). So every sdiv was labeled
+unsigned -> JIT emitted `xor edx,edx; div rcx` (unsigned) instead of `idiv`,
+turning negative dividends huge. gcc's magic-constant division masked it in
+earlier tests. Fixed to bit10 (matches the 2-source gate at ~2054).
++regression sdiv_is_signed_udiv_is_unsigned_same_negative_input. arm64jit
+128/128, workspace **177/0**. idiv -33, idivA -35, all 6 batches + core green.
+Cycle total: 9 FP/int miscompile fixes + FMADD, regression-locked. HEAD dae2e05.

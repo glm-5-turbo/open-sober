@@ -432,3 +432,13 @@ post-indexed 2x -> fstruct 0x391c0000 garbage (should 34), fmat2 det -108
 fstruct 34, fmat2 0, fexp 649, str 0, uint 999 = native. +regression. arm64jit
 127/127, workspace **176/0**. Cycle total: 8 FP/SIMD miscompile fixes + scalar
 FMA3, regression-locked. HEAD 8d2d57b local dev. HARD GATE unchanged.
+---
+## Cycle addendum — sdiv/udiv signedness inversion (workspace 177/0, commit dae2e05)
+6th -O2 battery surfaced a SEVERE silent one: MulDiv gate decoded sdiv/udiv via
+bit17==1, but bit17=0 for BOTH (discriminator is bit10, sdiv=1). Every sdiv was
+labeled unsigned -> emitted unsigned `div`, negatives went huge (idivA returned
+0xaaaaaa2d, wanted -35). gcc magic-constant div hid it previously. Fixed to
+bit10 + regression sdiv_is_signed_udiv_is_unsigned_same_negative_input.
+arm64jit 128/128, workspace **177/0**. Cycle net: 9 FP/int miscompile fixes +
+FMADD, all regression-locked. HEAD dae2e05. HARD GATE unchanged (real boot +
+GPU artifact).
