@@ -1532,6 +1532,16 @@ pub fn translate(
             }
             // ---- UBFM/SBFM (insert=false): shift / extract / sign-extend.
             ldg(buf, RAX, rn as u32); // load Rn
+            if !sf && !arith && !insert {
+                // W-form logical bitfield (lsr w, ubfx, lsl w, ror w, etc.): the
+                // source register is only 32 bits wide, so the UPPER 32 bits of
+                // the 64-bit slot (left by a prior X-form write such as a 64-bit
+                // madd/mul) must be discarded BEFORE any shift/rotate. Otherwise
+                // high-bit guest garbage shifts down into the low result —
+                // e.g. `ldr x1; madd x1,x1,x4,x3; lsr w5,w1,#24` pulled bits 32-55
+                // of x1 into the extracted byte (real repro: 8652 -> 0x37562e2cc).
+                buf.zero_ext_r32(RAX);
+            }
             if imms == bits - 1 {
                 // LSR (logical) or ASR (arithmetic/sign) by immr
                 let sh = (immr & (bits - 1)) as u8;

@@ -1726,3 +1726,32 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_wform_bitfield_masks_high_bits_before_shift() {
+    // Silent miscompile: a W-form (32-bit) logical bitfield op — here the
+    // `lsr w?, w1, #24` byte-extract gcc emits `for(...) b[i]=(x>>24)&0xff` —
+    // must discard the UPPER 32 bits of the 64-bit source register BEFORE the
+    // shift. The source (x1) holds a 64-bit LCG product from `madd x1,x1,x4,x3`,
+    // so a full-register `shr` pulled guest high bits 32-55 down into the
+    // extracted byte (real repro: 8652 -> 0x37562e2cc). Small array (N=8) forces
+    // gcc to the scalar madd+lsr-w chain (larger arrays vectorize to uaddw and
+    // do not trip this path). Root cause: Inst::BitField loaded Rn as u64 and
+    // shifted without `zero_ext_r32` first. Regression guard.
+    assert_diff(
+        "wform_lsrw_after_madd",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv = 123456789ull;
+    unsigned long long x = seedv;
+    unsigned char b[8];
+    for(int i=0;i<8;i++){ x = x*1103515245ull + 12345ull; b[i]=(unsigned char)((x>>24)&0xff); }
+    long long s1=0, s2=0;
+    for(int i=0;i<8;i+=1) s1 += (long long)b[i];
+    for(int i=0;i<8;i+=2) s2 += (long long)b[i];
+    return s1*7 + s2;
+}
+"#,
+    );
+}
