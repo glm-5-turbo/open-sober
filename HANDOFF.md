@@ -2717,3 +2717,52 @@ Real-binary/GPU boot remains blocked (no libroblox.so/APK, no GPU) — HARD GATE
   covers .4s (independent lanes), .2d signed, and .2d unsigned negative-clamp.
 - arm64jit now 83, workspace 117/0. Each fix was a silent data-corruption bug
   that would have produced wrong pixels/audio/coordinates in a real Roblox run.
+
+## Session (Sep 11, 2026) — SIMD lane-insert/extract fix: INS/SMOV/UMOV (commit 0f2d806)
+
+Picked up the standing "SIMD SMOV/UMOV lane->GPR and remaining FP-vs-int lane
+ops" item. Drove real aarch64 asm (INS/SMOV/UMOV across all element sizes +
+vector logical/sat) through `elfjit` and found a **silent miscompile** that
+predated this session:
+
+### The bug (would corrupt NEON-heavy graphics/audio)
+`mov v0.s[i],w1` (INS: GPR->vector-element insert, opcode bit13 CLEAR) and
+`smov`/`umov` (element extract to GPR, bit13 SET) share the decode fields of
+the vector-logical (AND/ORR/EOR/BIC) and saturating-add (SQADD/UQSUB) classes
+(residue 0x..2x0c00). The precise lane-element gate
+`(insn & 0xffe0_0c00) in {0x0e000c00, 0x4e000c00}` was placed AFTER
+SimdVLog (line ~1186) and SimdSatAdd (line ~1425), so a real INS/SMOV was
+silently mis-decoded before the lane gate was reached:
+  - `ins v0.s[0],w1` 0x4e041c20 -> AND (SimdVLog): never wrote v0, clobbered x0
+  - `smov x2,v0.s[0]` 0x4e042c02 -> SQSUB (SimdSatAdd)
+  - `smov x6,v0.h[2]` 0x4e0a2c06 -> SQSUB
+objdump-verified the encodings; `gcc` compiles `mov v.s[i],wN` as this INS form
+everywhere NEON 4-element scalar writes are edited into vectors.
+
+### The fix (decode.rs + translate.rs + jit.rs)
+1. Move the lane-element gate BEFORE the broad vector gates and key on the
+   opcode field bits[13:12] (verified across all 4 element sizes):
+   - bit13=1        => vector->GPR extract umov/smov/mov (sign = bit12 clear)
+   - bit13=0,bit12=1=> GPR->vector insert `ins/mov Vd.T[idx],Rn` (NEW `Inst::InsGp`)
+   - bit13=0,bit12=0=> dup-from-GPR (fall through to the existing SimdDupGp)
+2. Removed the now-dead late duplicate gate at the old location.
+3. SimdLaneGp translate now handles ALL element sizes (1/2/4/8), so `.h`/`.b`
+   extracts are no longer swallowed by SimdSatAdd.
+4. InsGp translate: copy esize bytes of GPR rn into Vd at index*esize.
+
+### Verified
+- `cargo test -p arm64jit` 85/85 (added `ins_gp_inserts_element_into_vector_and_extract_reads_it`
+  and `ins_gp_sign_and_zero_variants_insert_correct_lanes`); `cargo test --workspace` 119/0.
+- elfjit harness (real aarch64): lane_test.elf / smov.elf return -570
+  (=0xfffffffffffffdc6; previously returned 0). and/orr/eor/bic/sqadd/sqsub
+  still decode+execute as their real ops (logical.elf runs them all and stops
+  honestly at `uaddl` 0x4000ec = 0x2ea20020, the next unimplemented widening
+  mul — an honest Unsupported stop, not a miscompile). `dup v1.4s,w10`
+  (0x4e040d41) still decodes as SimdDupGp (the bit12==0 fall-through).
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. SIMD widening-multiply family (uaddl/saddl, and the smull/umull widening forms
+   already partly present) — surfaced by logical.elf's honest stop.
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK are available.
