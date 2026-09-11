@@ -5435,3 +5435,54 @@ per-thread CpuState + join/tid registry). This is the last large JIT capability 
 real Roblox run needs (render/audio/network worker threads) but is a genuine
 multi-session subsystem; the translator already threads per-instruction guest PC
 (needed for child continuation) and guest==host makes child memory shared.
+
+## Cycle 38 (Sep 11, 2026) — GUEST THREAD MODEL: clone(220) spawns a real host thread (353/0)
+
+Commit landed on `dev` (jit thread-model slice). This was the flagged
+next-biggest JIT capability a real Roblox run needs (render/audio/network
+worker threads) and the HANDOFF's stated "last large JIT capability". The first
+**bounded, fully-correct, tested slice** of it:
+
+- **CpuState** gains `svc_next` (post-svc guest PC) + `tid`.
+- **Svc translate arm** now (a) records `pc+4` into `state.svc_next` before the
+  `guest_svc` call, and (b) early-returns from the compiled block when a syscall
+  zeroes `state.pc` — the mechanism that lets a child thread's OWN `jit_run`
+  unwind cleanly at thread-exit (the inlined svc otherwise continues into the
+  next guest instruction).
+- **guest_svc `clone`(220)**: requires CLONE_VM (the sharing thread case that
+  pthread_create uses). Assigns a guest tid, clones the parent register file,
+  sets child SP from the `child_stack` arg + new TLS (CLONE_SETTLS), honors
+  CLONE_PARENT_SETTID/CLONE_CHILD_SETTID stores, and `std::thread::spawn`s a
+  real host thread that re-enters `jit_run` at the post-svc PC — so the child
+  continues the guest program right after its `svc`, exactly as AArch64 clone
+  semantics dictate. `EXEC_CTX` (image ptr/len/base) is registered at `jit_run`
+  entry for the child's re-entry.
+- **exit(93) is now thread-local on a spawned child** (pc=0 → Svc-arm early-ret
+  → child `jit_run` returns → host thread ends); **exit_group(94) and
+  main-thread exit still `_exit` the whole process**. `gettid`(178) stays the
+  real host tid — each clone child is a distinct host thread, so it returns a
+  distinct, correct id.
+- **New helpers**: `jcc_rel8`/`jne_rel8`/`jz_rel8` in x86.rs (short rel8 jcc —
+  needed for the in-block thread-exit `ret` guard).
+
+**Regression gate** `loader_run_clone_spawns_guest_thread`: a raw-`clone`
+fixture (cross-gcc) where the child sums 0..63 on its own guest stack, writes
+42 to a shared guest global, then thread-exits (93) without killing the parent;
+the parent's bounded spin then returns 42. Proves end-to-end that a *second
+host thread* ran guest code in the same image, shared memory (guest==host),
+distinct stack/tid, and clean thread-local exit. Verified e2e manually first
+with a SIGSEGV-logging harness (`entry()` → 42) and root-caused an initial
+fixture ABI bug (child resumes post-svc WITHOUT the caller's `sub sp,#0x20`
+prologue, so its `[sp+#8]` locals sat above the raw SP — pointed `child_stack`
+below the buffer top).
+
+`cargo build --workspace` clean; `cargo test --workspace` **353/0** (was 352).
+Differential fuzz seeds 1 (36 cases), 7 (38), 55 (38) all 0 fail — the Svc-arm
+change (now emits a pc-load/test/guard on every svc) didn't regress the JIT.
+
+**Known next** in this subsystem (documented, not half-baked in): pthread_join
+(hold child tid + futex-CLONE_CHILD_CLEARTID join), per-thread guest TLS block
+layout beyond SETTLS-pointer handoff, `clone3`(435), and tgkill/signal
+delivery to a specific child. The core spawn+shared-memory+thread-local-exit
+loop is now verified working. HARD GATE unchanged: real Roblox boot + run log
+only on a GPU/APK host (none on this VPS).
