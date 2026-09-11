@@ -26,6 +26,36 @@ cargo build clean; cargo test --workspace 270/0 (was 269). HARD GATE unchanged
 (no GPU/APK/libroblox.so on this VPS).
 ---
 
+## Cycle (Sep 11, 2026) — EXTR operand-order inversion + ADC/SBC carry polarity fixed (2 REAL silent miscompiles; workspace 272/0, commit 912eff8)
+status: session-end (committed, tests green)
+last_agent_claim: Added differential canary diff_math128_and_carry (__int128
+sq/mul/madd) + diff_switch_fnptr_hash (switch jump table / fnptr dispatch / FNV)
+-> the math128 probe FAILED (JIT 0xc24b01e838c56079 vs native 0xb50f76ac635ab31b).
+Bisected to TWO distinct real bugs in arm64jit, both now fixed & native-verified:
+
+1. **EXTR operand order INVERTED.** ARM `extr Xd,Xn,Xm,#lsb` = (Xn << (64-lsb))
+   | (Xm >> lsb): Xn is the HIGH word, Xm the LOW word. The translator did the
+   opposite. The rotate alias rn==rm is symmetric so it hid the bug (all prior
+   ror/rotate tests passed); gcc's real 128-bit cross-word shifts (e.g.
+   `extr x1, x2, x1, #32`) got operands swapped -> garbage. dp.c d>>63 went
+   0x2ea61d950eca8651 -> 0x59e26ad155555533 == native x86. A standalone
+   force_extr probe (extr#32) alone also reproduces: was 0x1111deadbeef (wrong),
+   now 0xcafe000012341234 (right).
+
+2. **ADC/SBC carry polarity.** store_nzcv stores the C flag in the b.cond
+   "borrow" convention (!carry-out for adds, borrow for subs) so the TRUE ARM
+   carry consumed by adc/sbc is !stored in BOTH cases. adc now cmc's the loaded
+   C before the native adc_carry (and cmc's back before store_nzcv in the s-case
+   so a later b.cond reads borrow-sense); sbc drops its leading cmc (sbb consumes
+   1-TrueC = stored C directly). Runtime adds+adc (adc3: 0xffffffffffffffff+5)
+   returned 0xb, now 0xc. add_carry_reference unit test updated to the
+   borrow-convention nzcv encoding.
+
+math128 now EXACTLY matches the native oracle. diff_switch_fnptr_hash (jump
+tables / blr dispatch / FNV) was already clean. cargo build clean; cargo test
+--workspace 272/0 (was 270). HARD GATE unchanged (no GPU/APK/libroblox.so).
+---
+
 ## Cycle (Sep 11, 2026) — SIMD across-lanes min/max + smax/smin & movsx fixes (workspace 268/0)
 status: session-end (committed, tests green)
 last_agent_claim: new int SIMD min/max differential canary (im_running_minmax)

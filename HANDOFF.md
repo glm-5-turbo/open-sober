@@ -4354,3 +4354,14 @@ eventfd/pipe, not a regular file which EPERMs), gettimeofday, uname=="Linux".
 Gate: `cargo build --workspace` clean; `cargo test --workspace` 270/0 (was 269).
 HARD GATE unchanged — real Roblox boot + run log on a GPU/APK host
 (`elfjit <libroblox.so> 0x1f0db20 --jni`); none of that is on this VPS.
+
+# Session (Sep 11, 2026) — two REAL silent miscompiles fixed: EXTR operand order + ADC/SBC carry polarity (workspace 272/0)
+
+New differential canaries (diff_math128_and_carry: __int128 sq/mul/madd;
+diff_switch_fnptr_hash: switch jump table / fnptr blr dispatch / FNV) surfaced
+one failing probe: math128 (JIT 0xc24b01e838c56079 vs native 0xb50f76ac635ab31b).
+Bisected to TWO distinct arm64jit bugs, both fixed + native-verified:
+1. EXTR invert — see STATUS.
+2. ADC/SBC borrow-convention carry — see STATUS.
+Files: crates/arm64jit/src/translate.rs (Extr + AddCarry), jit.rs
+(add_carry_reference), tests/diff_battery.rs (+math128 canary). Commit 912eff8.
