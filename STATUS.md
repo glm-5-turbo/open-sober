@@ -4,6 +4,20 @@ goal: run Roblox through the Open-Sober runtime (specialized runtime, graphics,
 sound) — the full "Roblox boots on the JIT/no-QEMU path" gate.
 started: 2026-09-11T01:20:42Z
 
+## Cycle (Sep 11, 2026) — randomized differential fuzz: 8 JIT correctness fixes (workspace 289/0, ~500 cases)
+status: session-end (committed, tests green)
+last_agent_claim: Persisted `fuzz_jit.py` (elfjit-vs-native-oracle differential
+fuzzer over scalar/SIMD shift/xor/byte/fp/2D/3D/bitfield/saturating/mul, ~500
+cases green seeds 1-11,99) and fixed EIGHT silent JIT miscompiles, each
+regression-guarded + sensitivity-verified: ld2/st2 esize deinterleave
+(36813d1); W-form bitfield high-32 mask (b739a6b); shrn/shrn2 shift-right-narrow
+decode (04a1483); rbit 64-bit-mask width + clz REX.W-before-F3 byte order +
+shl#imm decode (b83a1cf); UBFM extract mask sign-extension + ubfx-vs-ror
+discriminator (750457a). cargo build clean; cargo test --workspace 289/0 (was
+280). Real-boot HARD GATE unchanged — no GPU/APK/libroblox.so on this box.
+updated: 2026-09-11T09:55:00Z
+---
+
 ## Cycle (Sep 11, 2026) — guest_svc syscall surface: fstat/newfstatat (guest-layout), sockets, epoll, and 15+ more (workspace 270/0)
 status: session-end (committed, tests green)
 last_agent_claim: fstat(80)/newfstatat(79) with a hand-transcribed AArch64
