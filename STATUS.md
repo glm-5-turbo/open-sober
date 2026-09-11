@@ -450,3 +450,13 @@ ra-rn*rm. Fixed to sub RDI,RAX + mov (ra - rn*rm). Constant-folded addrs
 masked it. +regression. arm64jit 133/133, workspace **178/0**, all 7
 cross-gcc -O2 batches + core + FMA green. Cycle net: 10 miscompile fixes +
 FMADD. HEAD ccbf55c. HARD GATE unchanged (reproducible boot+GPU artifact).
+---
+## Cycle addendum — ADDV horizontal add implemented (workspace 179/0, commit 6290937)
+8th -O2 battery surfaced a missing SIMD op: gcc SIMD-vectorizes short sums to
+`addv s0,v1.4s`, which an earlier dup/move gate swallowed (identity copies ->
+0 instead of 360). Implemented Inst::Addv (sum sign-extended lanes -> bottom
+element). KEY trap: ADDV source Vn is at bits[9:5], bits20:16=fixed 17 (unusual
+SIMD layout); mask 0xfffffc00, gate at decode top. vadd 360=native.
++regression addv_horizontal_sum_across_4s_lanes. arm64jit 134/134, workspace
+**179/0**, all 8 batches + core + FMA green. Cycle net: 11 miscompile fixes +
+FMA + ADDV. HEAD 6290937. HARD GATE unchanged.

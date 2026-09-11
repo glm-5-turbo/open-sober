@@ -3441,3 +3441,17 @@ but ARM MSUB is ra-rn*rm, so n-(n/50)*50 via `msub w0,w1,w0,w2` = 25*50-1298 =
 correct). +regression msub_reuses_rm_as_rd.*. arm64jit 133/133, workspace
 **178/0**. All 7 batches + core + FMA green. Cycle total: 10 miscompile fixes +
 FMADD, all regression-locked. HEAD ccbf55c.
+
+## Session (Sep 11, 2026) — ADDV SIMD horizontal add (commit 6290937)
+8th -O2 battery (64-bit mul/div, short-array SIMD sum, dot, int matmul): vadd
+gcc fully SIMD-vectorizes a 16-short sum to `ldr q`+`addv s0,v1.4s`+`fmov w0,s0`
+- returned 0 (wanted 360). ADDV undefined; an earlier dup/move gate swallowed
+0x4eb1b820 and emitted per-lane identity copies. Implemented Inst::Addv: mask
+0xfffffc00 (clears Vn bits9:5, Sd bits4:0), residues 8b/4h/16b/8h/4s; NOTE
+source Vn at bits[9:5] (bits20:16 fixed=17) — nonstandard SIMD layout. Gate at
+top of decode (dup/move swallowed it later). Translate sums sign-extended
+lanes -> RDI -> bottom element of Vd. vadd 360=native. +regression
+addv_horizontal_sum_across_4s_lanes. arm64jit 134/134, workspace **179/0**.
+Cycle total (back half): 4 fixes (sdiv signedness, MSUB direction, s-pair
+scale, ADDV) + earlier (WidenShl, FP-N, ld1-2reg, FMOVimm, FMA3, apply_shift,
+d-pair stride) = 11 miscompile fixes + FMA + ADDV. HEAD 6290937.
