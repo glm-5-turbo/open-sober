@@ -1245,6 +1245,17 @@ pub fn compile_image_bounded(
     // still build dispatcher-return stubs for them even when the frontier drains
     // normally (otherwise their fixups index an empty stub table).
     let mut force_stubs = false;
+    // Guest-`bl` targets that we DECIDED must divert through the dispatcher
+    // (a callee whose body calls a host import — import_bearing), even when the
+    // target is the current block's own address and would otherwise be found
+    // in `host_of_guest`. The recursion case is the kicker: `bl f` where f's
+    // body also calls a host import; f is import-bearing, so its recursion must
+    // divide via a dispatcher stub (a fresh f frame) — but if we resolve the
+    // fixup to `host_of_guest[f]` we inline the recursion into the very block
+    // being compiled, and the inline-call/dispatcher-stub interaction for the
+    // inner host import regresses exactly like the once-routine bug. Force these
+    // to the stub on resolution.
+    let mut divert_set: std::collections::HashSet<u64> = std::collections::HashSet::new();
     // Memo of body_contains_host_plt_bl() per guest-bl target, so we scan a
     // given callee body at most once per compile (it may be inlined from many
     // call sites within one block).
@@ -1330,6 +1341,7 @@ pub fn compile_image_bounded(
                             // Diverted: don't inline this call; make sure the
                             // stub table is built so the fixup has a real target.
                             force_stubs = true;
+                            divert_set.insert(target);
                         }
                     } else {
                         frontier.push(target);
@@ -1408,14 +1420,16 @@ pub fn compile_image_bounded(
     // return address is left on the stack — the stub hands pc back to `jit_run`).
     let mut stub_of_target: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     if truncated || !frontier.is_empty() || force_stubs {
-        // collect the set of targets referenced by fixups but not emitted.
-        let need: Vec<u64> = fixups
-            .iter()
-            .filter(|fx| !host_of_guest.contains_key(&fx.target_pc))
-            .map(|fx| fx.target_pc)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        // collect the set of targets referenced by fixups but not emitted, PLUS
+            // any divert_set target (which must go through a stub even when the target
+            // is in host_of_guest — see the recursion note above).
+            let need: Vec<u64> = fixups
+                .iter()
+                .filter(|fx| !host_of_guest.contains_key(&fx.target_pc) || divert_set.contains(&fx.target_pc))
+                .map(|fx| fx.target_pc)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
         if !need.is_empty() {
             for target in need.iter() {
                 // record the stub address *before* emitting it so the fixup
@@ -1432,7 +1446,17 @@ pub fn compile_image_bounded(
 
     // Resolve fixups (buffer-relative).
     for fx in &fixups {
-        let target = if host_of_guest.contains_key(&fx.target_pc) {
+        let target = if divert_set.contains(&fx.target_pc) {
+            // Decided to divert (import-bearing callee / recursion): route to a
+            // dispatcher-return stub even though the target may be in
+            // host_of_guest (e.g. `bl f` recursion where f is the block's own
+            // entry). Turn a call into a jmp so it re-enters the dispatcher for
+            // a clean f frame (see the divert_set doc).
+            if fx.cc == 0xfe {
+                buf.bytes[fx.disp_off - 1] = 0xe9; // E8 -> E9 (call->jmp)
+            }
+            stub_of_target[&fx.target_pc]
+        } else if host_of_guest.contains_key(&fx.target_pc) {
             host_of_guest[&fx.target_pc]
         } else if bounded {
             // Divert to a dispatcher-return stub. Change a `call` into a `jmp`

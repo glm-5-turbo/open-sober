@@ -405,6 +405,42 @@ fn loader_run_self_import_binds_to_own_guest_body() {
 }
 
 #[test]
+fn loader_run_recursive_import_bearing_callee_returns_correct() {
+    // REGRESSION: a recursive guest `bl f` where f's body ALSO calls a host
+    // import (helper@plt). f is import-bearing, so its recursion must DIVERT via
+    // a dispatcher stub (fresh f frame) — but the fixup-resolution previously
+    // re-resolved `bl f` to `host_of_guest[f]` (f is the block's own start), so
+    // the recursion inlined into the same block and the inline-call/diverted-
+    // import interaction miscompiled (f(5)+helper chain returned 21, not 27).
+    // This is the documented "nested guest bl-inline regression to once-routine"
+    // bug, reproduced minimally.
+    if cross_gcc().is_none() {
+        eprintln!("skipping loader_run_recursive_import_bearing: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir("recimp");
+    // f(n) = n<=0 ? 7 : f(n-1) + helper(n); helper(x)=x+1; entry=f(5).
+    // Native oracle: f(0)=7, f(1)=9, f(2)=12, f(3)=16, f(4)=21, f(5)=27.
+    let elf = compile_shared(
+        &wd,
+        "rec",
+        "int helper(int x){ return x+1; }\n\\\n         int f(int n){ return n<=0 ? 7 : f(n-1) + helper(n); }\n\\\n         int entry(void){ return f(5); }\n",
+    );
+    match run_elf(&elf) {
+        Ok(v) => {
+            assert_eq!(
+                v, 27,
+                "recursive-import-bearing: entry() -> {v}, expected 27 (recursive bl f not diverted?)"
+            );
+            eprintln!("\x1b[32mPASS\x1b[0m recursive-import-bearing: entry() -> {v} (recursive f diverts cleanly)");
+        }
+        Err(e) => panic!("recursive-import-bearing: jit_run failed: {e}"),
+    }
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
 fn loader_run_asymmetric_logic_imm_mask_returns_correct() {
     // End-to-end gate for the LogicImm DecodeBitMasks rotate-RIGHT fix.
     // `volatile` prevents gcc constant-folding, so it emits a real
