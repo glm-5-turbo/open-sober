@@ -5226,6 +5226,44 @@ HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none
 on this VPS). Next per RECOMMENDATION order: JNI fake-object backing, libbadcpu
 ISA, services/auth.
 
+## Session (cycle 36, Sep 11, 2026) — GLES float/mixed + >8-arg bridge to real Mesa; JIT compressed-texture decode via shared texture_codec (343/0)
+Closed the cycle-35b graphics hole (float-ABI and >8-arg GLES stuck on the
+NULL/0 stub: no way to clear the framebuffer or upload a texture) and the
+compressed-texture JIT gap. Commits c951bb7, 370b544.
+
+1. **`HostGlesCall` bridge (c951bb7).** The integer `HostCall` (8 x-reg args) and
+   the uniform-float bridges can't express GLES functions that mix integer args
+   (x0..x7) with float args (low 32 bits of s0..s7) or take >8 args (the 9th+ on
+   the guest stack). Added `jit::HostGlesCall = extern "C" fn(*mut CpuState)->u64`
+   + `register_gles_call` (new thunk region after the f32 slots); the dispatcher
+   hands each registered wrapper the full guest CpuState. `resolver::resolve_gles_mixed`
+   installs one wrapper per function that reads the exact x/s/sp lanes its
+   AArch64 signature uses and calls real Mesa (libGLESv2.so.2, RTLD_LOCAL).
+   Wired into the PLT binder (plt.rs 7-tuple) so these imports bind to real Mesa.
+   Covered: glClearColor/BlendColor/ClearDepthf/DepthRangef/LineWidth/PolygonOffset/
+   SampleCoverage/TexParameterf, glUniform{1,2,3,4}f, glVertexAttrib{1,2,3,4}f,
+   glTexImage2D/TexSubImage2D/TexImage3D (stack pixels). Filled the integer-ABI
+   whitelist with missed pointer-arg GLES: glUniform1fv..4fv, glUniformMatrix{2,3,4}fv,
+   glTexParameterfv, glGetTexParameterfv, glGetFloatv, glGetTexLevelParameteriv.
+
+2. **JIT compressed-texture decode (370b544).** The wrapper's Android-format
+   decompression was bypassed by the JIT path (glCompressedTexImage2D bound to raw
+   Mesa -> undecodable ETC2/ASTC on desktop). Extracted `crates/texture-codec`
+   (ETC1/ETC2/EAC/ASTC/ATC -> RGBA8 + handle_compressed_tex_image_2d/sub_image_2d;
+   6 tests moved from the wrapper) shared by BOTH the glesv2-wrapper cdylib and the
+   JIT. glCompressedTexImage2D moved to the mixed bridge (removed from the int
+   whitelist) and glCompressedTexSubImage2D now decode to RGBA8 and upload via real
+   glTexImage2D/SubImage2D; non-Android formats fall through to Mesa.
+
+**Headless gates (permanent, real Mesa llvmpipe + surfaceless EGL, no GPU):** the
+end-to-end test drives context creation (eglGetDisplay/Initialize/ChooseConfig/
+CreateContext/MakeCurrent) entirely through guest blr and the int bridge,
+glClearColor(0.5,0.25,0.75,1.0) round-trips via glGetFloatv (float bridge), a 1x1
+glTexImage2D uploads through the stack bridge, and a 4x4 ETC2 upload leaves
+glGetTexLevelParameteriv(GL_TEXTURE_INTERNAL_FORMAT)==GL_RGBA8 (proves the JIT
+decompressed it, not raw-Mesa). cargo build --workspace clean; cargo test
+--workspace 343/0. HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host.
+
 ## Session (cycle 35, Sep 11, 2026) — GRAPHICS TRANSLATION LAYER: egl-wrapper + glesv2-wrapper cdylibs, input-wrapper, real-EGL JIT wiring (336/0)
 Per the worker operating rules, took the graphics translation layer
 (GRAPHICS_RECOMMENDATION.md) as the highest-leverage unblocked item — built AND
