@@ -8,6 +8,7 @@ members = [
     "crates/arm64jit",
     "crates/egl-wrapper",
     "crates/glesv2-wrapper",
+    "crates/input-wrapper",
 ]
 
 [workspace.package]

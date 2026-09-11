@@ -1,0 +1,12 @@
+[package]
+name = "input-wrapper"
+description = "Android input emulation layer: maps desktop mouse/keyboard (via raw X11) to Android touch/key events injected into the guest (GRAPHICS_RECOMMENDATION §6). Headlessly testable under Xvfb."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+x11rb = "0.14"
+
+[dev-dependencies]
+libc = "0.2"
