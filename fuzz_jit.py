@@ -882,6 +882,46 @@ gens += [gen_widen_mul_acc]
 
 
 
+def gen_pairwise_dot():
+    # addp (pairwise add within a vector), and smaxv/sminv/umaxv/uminv
+    # horizontal reductions. Both families are decoded but never fuzzed;
+    # small u16/s16 values keep sums/extends exact.
+    n = random.choice([4, 8, 16])
+    which = random.choice(["addp", "smaxv", "sminv", "umaxv", "uminv", "addp2"])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 314159ull;
+    unsigned long long x = seedv;
+    uint16_t a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*6364136223846793005ull+1ull; a[i]=(uint16_t)((x>>40)&0xff); }}
+    long long acc=0;
+    if ("{which}"=="addp") {{
+        uint16x8_t va = vld1q_u16(a);
+        uint16x4_t lo = vpadd_u16(vget_low_u16(va), vget_high_u16(va));
+        uint16_t o[4]; vst1_u16(o, lo);
+        for(int k=0;k<4;k++) acc += (long long)o[k]*(1+(k%5));
+    }} else if ("{which}"=="addp2") {{
+        uint16x8_t va = vld1q_u16(a);
+        uint16x8_t s = vaddq_u16(va, va);
+        uint16x8_t p = vpaddq_u16(s, s); // wide addp
+        uint16_t o[8]; vst1q_u16(o, p);
+        for(int k=0;k<8;k++) acc += (long long)o[k]*(1+(k%3));
+    }} else if ("{which}"=="smaxv") {{
+        int16x8_t vs = vreinterpretq_s16_u16(vld1q_u16(a));
+        acc = (long long)vmaxvq_s16(vs)*37;
+    }} else if ("{which}"=="sminv") {{
+        int16x8_t vs = vreinterpretq_s16_u16(vld1q_u16(a));
+        acc = (long long)vminvq_s16(vs)*37;
+    }} else if ("{which}"=="umaxv") {{
+        int16x8_t vs = vreinterpretq_s16_u16(vld1q_u16(a));
+        acc = (long long)vmaxvq_u16(vreinterpretq_u16_s16(vs))*37;
+    }} else {{
+        int16x8_t vs = vreinterpretq_s16_u16(vld1q_u16(a));
+        acc = (long long)vminvq_u16(vreinterpretq_u16_s16(vs))*37;
+    }}
+    return acc & 0x3fffffff;
+}}
+"""
 def gen_high_narrow():
     # SIMD high-half narrowing addhn/subhn/raddhn/rsubhn (u16->u32 widen then
     # keep top half) and pairwise-adjacent-long accumulate (vpaddl/vpadal).
@@ -927,7 +967,7 @@ long long entry(void){{
 }}
 """
 
-gens += [gen_high_narrow]
+gens += [gen_high_narrow, gen_pairwise_dot]
 
 def gen_sat_narrow():
     # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on

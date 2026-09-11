@@ -4889,6 +4889,48 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+        Inst::SimdAddp { rd, rn, rm, esize, q } => {
+            // ADDP Vd.T, Vn.T, Vm.T: pairwise-adjacent addition, no widening.
+            // First half of the output lanes = sums of adjacent (2i, 2i+1) lane
+            // pairs of Vn; second half = pair sums of Vm. Output lanes total
+            // n/esize where n = 8 (q=0) or 16 (q=1) bytes. Each src element read
+            // EXACTLY esize bytes (zero-extended) then added, so a lane's high
+            // bytes never pollute the neighbour; store exactly esize bytes.
+            // SELF-ALIAS (gcc emits addp v31,v31,v31 in reductions): the second
+            // half of the dest overlaps the source bytes the first half just wrote,
+            // so snapshot any source that aliases rd to scratch (permute_source).
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let rn_src = permute_source(buf, rd, rn, false);
+            let rm_src = permute_source(buf, rd, rm, true);
+            let n: i32 = if q { 16 } else { 8 };
+            let es = esize as i32;
+            let out_lanes = n / es;
+            let half = out_lanes / 2;
+            for i in 0..out_lanes {
+                let (base, pair) = if i < half {
+                    (rn_src, i * 2)
+                } else {
+                    (rm_src, (i - half) * 2)
+                };
+                // load pair at (2i, 2i+1), zero-extend each to 64-bit, add
+                let mut load = |tgt: u8, off: i32| match esize {
+                    8 => buf.mov_load64(tgt, RBX, base + off * es),
+                    4 => buf.mov_load32(tgt, RBX, base + off * es),
+                    2 => buf.movzx_word_mem(tgt, RBX, base + off * es),
+                    _ => buf.movzx_byte_mem(tgt, RBX, base + off * es),
+                };
+                load(RAX, pair);
+                load(RCX, pair + 1);
+                buf.add_rr64(RAX, RCX);
+                match esize {
+                    8 => buf.mov_store64(RBX, slot(rd) + i * es, RAX),
+                    4 => buf.mov_store32(RBX, slot(rd) + i * es, RAX),
+                    2 => buf.mov_store16(RBX, slot(rd) + i * es, RAX),
+                    _ => buf.mov_store8(RBX, slot(rd) + i * es, RAX),
+                }
+            }
+            Ok(())
+        }
         Inst::FcvVec { rd, rn, signed, esize, q } => {
             // fcvtzu/fcvtzs Vd.T, Vn.T: convert each FP lane (esize bytes) to an
             // int, truncating toward zero; negative clamp for the unsigned form.
@@ -5646,15 +5688,33 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
-        Inst::VecMovi { vd, lo, hi } => {
+        Inst::VecMovi { vd, lo, hi, kind } => {
             // Write a full 128-bit vector immediate into the guest v-slot
             // (CpuState.v, 16 bytes at VECTOR_BASE + 16*vd). The two u64 halves
-            // are hoisted as immediates.
+            // are hoisted as immediates. kind: 0 = write (movi/mvni),
+            // 1 = AND-in-place (bic, Vd &= lo/hi), 2 = OR-in-place (orr).
+            // Use a scratch reg for the (possibly >32-bit) mask.
             let vslot = crate::jit::VECTOR_BASE + (vd as i32) * 16;
-            buf.mov_ri64(RAX, lo);
-            buf.mov_store64(RBX, vslot, RAX);
-            buf.mov_ri64(RAX, hi);
-            buf.mov_store64(RBX, vslot + 8, RAX);
+            match kind {
+                1 | 2 => {
+                    for (off, mask) in [(vslot, lo), (vslot + 8, hi)] {
+                        buf.mov_load64(RAX, RBX, off);
+                        buf.mov_ri64(RCX, mask);
+                        if kind == 1 {
+                            buf.and_rr64(RAX, RCX);
+                        } else {
+                            buf.or_rr64(RAX, RCX);
+                        }
+                        buf.mov_store64(RBX, off, RAX);
+                    }
+                }
+                _ => {
+                    buf.mov_ri64(RAX, lo);
+                    buf.mov_store64(RBX, vslot, RAX);
+                    buf.mov_ri64(RAX, hi);
+                    buf.mov_store64(RBX, vslot + 8, RAX);
+                }
+            }
             Ok(())
         }
         Inst::Hint => {

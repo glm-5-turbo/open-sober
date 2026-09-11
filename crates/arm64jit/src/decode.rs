@@ -287,10 +287,14 @@ pub enum Inst {
     // ---- SIMD/NEON vector move-immediate (movi Vd.<T>, #imm) ----
     // `lo`/`hi` are the low/high 64-bit halves of the 128-bit result, already
     // expanded to the element size (each byte/word/dword lane set to #imm).
+    // `kind`: 0 = write (movi/mvni), 1 = AND-in-place (bic, Vd &= ~imm),
+    // 2 = OR-in-place (orr, Vd |= imm). Odd cmode (bit0=1) selects ORR/BIC;
+    // even cmode selects MOVI/MVNI.
     VecMovi {
         vd: u8,
         lo: u64,
         hi: u64,
+        kind: u8,
     },
     // ---- SIMD load-and-replicate: ld1r {Vt.T}, [Xn] ----
     Ld1 { rd: u8, rn: u8, esize: u8, q: bool }, // lanes = (q?16:8)/esize
@@ -439,6 +443,10 @@ pub enum Inst {
     // op 0=neg (Vd = -Vn, signed per-lane), 1=abs (Vd = |Vn| signed). esize in
     // {1,2,4,8} bytes (B/H/S/D), q selects 8B/16B, 4H/8H, 2S/4S, 1D/2D.
     SimdArithUnary { rd: u8, rn: u8, esize: u8, q: bool, op: u8 },
+    // ---- SIMD 3-same pairwise-ADD across each source: ADDP Vd.T, Vn.T, Vm.T ----
+    // (byte2&0xf8 == 0xb8, bit10 set). First half of lanes = pair sums of Vn,
+    // second half = pair sums of Vm; esize=1<<size, q picks 8B/16B.
+    SimdAddp { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD float widen/narrow: fcvtl/Vd.2D (f32->f64) & fcvtn/Vd.2S
     // (f64->f32), 2 lanes. fcvtl reads Vn low (upper=false) or high half
     // (upper=true); fcvtn writes Vd low (upper=false) or high half
@@ -1217,6 +1225,7 @@ pub fn decode(insn: u32) -> Inst {
     // maps S-arrangement {0→B(1),1→S(4),2→H(2),3→D(8)}. Q=bit30.
     if matches!((insn >> 24) & 0x3f, 0x0e | 0x2e | 0x4e | 0x6e)
         && ((insn >> 12) & 0x1f) == 0xb
+        && (insn & 0x400) == 0 // bit10=0: two-reg neg/abs; 3-same ADDP sets bit10
     {
         let sz = (insn >> 22) & 3;
         let esize = match sz {
@@ -1231,6 +1240,23 @@ pub fn decode(insn: u32) -> Inst {
             esize,
             q: (insn >> 30) & 1 == 1,
             op: if (insn >> 29) & 1 == 1 { 0 } else { 1 }, // neg : abs
+        };
+    }
+    // ---- SIMD 3-same pairwise-add across halves: ADDP Vd.T, Vn.T, Vm.T ----
+    // byte2&0xf8 == 0xb8 AND bit10 set (neg/abs two-reg has bit10 clear).
+    // size=bits[23:22]; q=bit30. First half lanes = Vn pair sums, second = Vm.
+    if matches!((insn >> 24) & 0x3f, 0x0e | 0x2e | 0x4e | 0x6e)
+        && ((insn >> 8) & 0xff & 0xf8) == 0xb8
+        && (insn & 0x400) != 0
+    {
+        let size = (insn >> 22) & 3;
+        let esize = 1u8 << size; // 1,2,4,8 bytes
+        return Inst::SimdAddp {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            esize,
+            q: (insn >> 30) & 1 == 1,
         };
     }
     // ---- SIMD float widen/narrow: fcvtl Vd.2D,Vn.2S (f32->f64) & fcvtn
@@ -2736,6 +2762,13 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     vd: rd(insn),
                     lo,
                     hi,
+                    // cmode LSB: 0 = MOVI/MVNI (write), 1 = ORR/BIC (RMW).
+                    // op: 0 -> movi/orr, 1 -> mvni/bic.
+                    kind: if (cmode & 1) == 1 {
+                        if op == 1 { 1 } else { 2 } // bic (AND ~imm) | orr (OR imm)
+                    } else {
+                        0 // write
+                    },
                 };
             }
 
@@ -5205,7 +5238,7 @@ mod tests {
         ] {
             let inst = decode(w);
             match inst {
-                Inst::VecMovi { vd, lo, hi } => {
+                Inst::VecMovi { vd, lo, hi, .. } => {
                     assert_eq!(lo, want_lo, "{label}: low64");
                     assert_eq!(hi, want_hi, "{label}: hi64");
                 }
@@ -5233,7 +5266,7 @@ mod tests {
             (0x6f07_e600u32, 0xffff_ffff_0000_0000u64, "movi v0.2d,#0xffffffff00000000"),
         ] {
             match decode(w) {
-                Inst::VecMovi { vd, lo, hi } => {
+                Inst::VecMovi { vd, lo, hi, .. } => {
                     assert_eq!(vd, 0, "{label}: vd");
                     assert_eq!(lo, want, "{label}: lo");
                     assert_eq!(hi, want, "{label}: hi");

@@ -5187,6 +5187,78 @@ mod tests {
     }
 
     #[test]
+    fn simd_addp_pairwise_sum() {
+        // addp v0.8h, v1.8h, v2.8h (0x4e62bc20): first 4 lanes = v1 pair sums
+        // (v1.h[i*2]+v1.h[i*2+1]), next 4 = v2 pair sums.
+        // v1 = [1,2,3,4,5,6,7,8] => [3,7,11,15]; v2 = [10,20,30,40,50,60,70,80] => [30,70,110,150]
+        let mut st = CpuState::new();
+        // v1 slots = v[2],v[3]; v2 = v[4],v[5]; v0 dst = v[0],v[1]
+        st.v[2] = 0x0004_0003_0002_0001u64; // v1 low [1,2,3,4]
+        st.v[3] = 0x0008_0007_0006_0005u64; // v1 high [5,6,7,8]
+        st.v[4] = 0x0028_001e_0014_000a; // v2 low [10,20,30,40]
+        st.v[5] = 0x0050_0046_003c_0032; // v2 high [50,60,70,80]
+        let mut c = Vec::new();
+        c.extend_from_slice(&0x4e62_bc20u32.to_le_bytes()); // addp v0.8h,v1.8h,v2.8h
+        c.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &c, 0).expect("exec addp .8h");
+        // v0.8h lanes: [3,7,11,15, 30,70,110,150] across two u64 slots v0(low8B),v1(high8B)
+        let mut lanes = Vec::new();
+        for slot in 0..2 {
+            let w = st.v[slot];
+            for k in 0..4 { lanes.push((w >> (16*k)) & 0xffff); }
+        }
+        assert_eq!(lanes, vec![3u64,7,11,15,30,70,110,150], "addp .8h lanes");
+    }
+
+    #[test]
+    fn simd_bic_vvec_immediate_keep_low_byte() {
+        // bic v31.4h, #0xff, lsl#8 (0x2f07b7ff, v31) = Vd AND NOT(0xff00) per lane
+        // = AND with 0x00FF. Existing v31 lanes [0xAABB,0xCCDD,0xEEFF,0x1122]
+        // -> [0xBB,0xDD,0xFF,0x22]. This must READ-MODIFY-WRITE (AND), not overwrite.
+        let mut st = CpuState::new();
+        st.v[62] = 0x1122_eeff_ccdd_aabbu64;  // v31 = slots v[62],v[63] (31*2)
+        st.v[63] = 0;
+        let mut c = Vec::new();
+        c.extend_from_slice(&0x2f07_b7ffu32.to_le_bytes()); // bic v31.4h,#0xff,lsl#8
+        c.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        exec_bytes(&mut st, &c, 0).expect("exec bic v.4h");
+        let lo = st.v[62];
+        let lanes = vec![lo & 0xffff, (lo>>16)&0xffff, (lo>>32)&0xffff, lo>>48];
+        assert_eq!(lanes, vec![0x00bb, 0x00dd, 0x00ff, 0x0022], "bic v.4h keep-low-byte");
+    }
+
+    #[test]
+    fn modimm_orr_bic_rmw_not_write() {
+        // Session (cycle 44f): modified-immediate with odd cmode encodes ORR/BIC
+        // (read-modify-write), not MOVI/MVNI. The decoder wrote lo/hi flatly, so
+        // `bic v.4h,#0xff,lsl#8` REPLACED lanes with 0x00ff instead of ANDing.
+        // kind: 0=write,1=AND (bic),2=OR (orr).
+        let mut st = CpuState::new();
+        st.v[62] = 0x1122_eeff_ccdd_aabbu64; // v31 lane [0xAABB,0xCCDD,0xEEFF,0x1122]
+        st.v[63] = 0;
+        // bic v31.4h,#0xff,lsl#8 = 0x2f07b7ff: Vd &= ~(0xff<<8=0xff00) = &0x00ff
+        let mut c = Vec::new();
+        c.extend_from_slice(&0x2f07_b7ffu32.to_le_bytes());
+        c.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        exec_bytes(&mut st, &c, 0).expect("bic");
+        let lo = st.v[62];
+        let lanes = vec![lo & 0xffff, (lo>>16)&0xffff, (lo>>32)&0xffff, lo>>48];
+        assert_eq!(lanes, vec![0x00bb, 0x00dd, 0x00ff, 0x0022], "bic v.4h rmw");
+
+        // orr v31.4h,#0x1234 (cmode 0x9, op0 = 0x0f00_9640? use lsl#8 form): 0x0f07b7ff
+        // is also orr v.4h,#0xff,lsl#8 -> Vd |= 0xff00 (0x0f top = op0/orr).
+        let mut st2 = CpuState::new();
+        st2.v[62] = 0x0000_0000_0000_0000u64; // zero lanes
+        let mut c2 = Vec::new();
+        c2.extend_from_slice(&0x0f07_b7ffu32.to_le_bytes()); // orr v31.4h,#0xff,lsl#8
+        c2.extend_from_slice(&0xd65f_03c0u32.to_le_bytes());
+        exec_bytes(&mut st2, &c2, 0).expect("orr");
+        let lo2 = st2.v[62];
+        let lanes2 = vec![lo2 & 0xffff, (lo2>>16)&0xffff, (lo2>>32)&0xffff, lo2>>48];
+        assert_eq!(lanes2, vec![0xff00, 0xff00, 0xff00, 0xff00], "orr v.4h");
+    }
+
+    #[test]
     fn smin_signed_lane_min() {
         // smin v0.2s, v0.2s, v1.2s (wall 0x0ea16c00): v0[i] = min_signed(v0[i], v1[i]).
         let mut st = CpuState::new();
