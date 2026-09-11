@@ -1840,6 +1840,123 @@ mod tests {
     }
 
     #[test]
+    fn and_then_sxtl_sxtl2_upper_half() {
+        // Regression for vectorized `m[k] = k & 0xf` init loops (gcc -O2):
+        //   and v28.16b,v28.16b,v29.16b ; sxtl v27.2d,v28.2s ; sxtl2 v28.2d,v28.4s
+        // with v28 = {16,17,18,19} (4 s-lanes) and v29 = 0x0000000f per lane:
+        // v27.2d = {16&15, 17&15} = {0,1}; v28.2d = {18&15, 19&15} = {2,3}.
+        // Encodings objdump-verified (maskf probe). Catches any upper-half or
+        // mask-lane slip in the sxtl/sxtl2/pand pipeline.
+        let mut st = CpuState::new();
+        let s = |x: u64| x & 0xffff_ffff;
+        // vector reg n lives at st.v[2n] (lo u64) and st.v[2n+1] (hi u64).
+        st.v[56] = (s(17) << 32) | s(16); // v28 lo: s-lanes 0,1
+        st.v[57] = (s(19) << 32) | s(18); // v28 hi: s-lanes 2,3
+        st.v[58] = (0x0fu64 << 32) | 0x0f; // v29 lo: 0xf per s-lane
+        st.v[59] = (0x0fu64 << 32) | 0x0f; // v29 hi
+        exec_bytes(
+            &mut st,
+            &[
+                0x9c, 0x1f, 0x3d, 0x4e, // and v28.16b, v28.16b, v29.16b
+                0x9b, 0xa7, 0x20, 0x0f, // sxtl v27.2d, v28.2s
+                0x9c, 0xa7, 0x20, 0x4f, // sxtl2 v28.2d, v28.4s
+            ],
+            0,
+        )
+        .expect("exec");
+        assert_eq!(st.v[54], 0, "sxtl lane0 = 16&15");
+        assert_eq!(st.v[55], 1, "sxtl lane1 = 17&15");
+        assert_eq!(st.v[56], 2, "sxtl2 lane0 = 18&15");
+        assert_eq!(st.v[57], 3, "sxtl2 lane1 = 19&15");
+    }
+
+    #[test]
+    fn simd_stp_q_preindex_store_and_writeback() {
+        // REBUILD maskf's real instruction stream END-TO-END (no seeded
+        // v-registers): movi v30.4s,#4 / movi v29.4s,#0xf, ldr q31=[init],
+        // then 6× the loop body (mov snapshot; add v31+=4; and &0xf; sxtl;
+        // sxtl2; stp q27,q28,[x0],#32). Verifies the movi/ldrq/acum/store all
+        // agree — maskf's `m[k]=k&0xf` must yield 0..23&0xf in memory.
+        let mut st = CpuState::new();
+        // One shared x0 base per the real loop: init constant at [x0,#400]
+        // ({0,1,2,3} i32), then the loop stores the widening result at [x0],
+        // advancing x0 by 32/iter (6 iters = 192 bytes, never reaches +400).
+        let buf = Box::leak(vec![0xABu8; 512].into_boxed_slice());
+        let mk = |x: u32| x.to_le_bytes();
+        for (i, v) in [0u32, 1, 2, 3].iter().enumerate() {
+            buf[400 + 4 * i..400 + 4 * i + 4].copy_from_slice(&mk(*v));
+        }
+        st.x[0] = buf.as_ptr() as u64;
+        let mut seq: Vec<u8> = Vec::new();
+        // set constants + initial v31 from [x0,#400]
+        seq.extend_from_slice(&[0x9e, 0x04, 0x00, 0x4f]); // movi v30.4s, #4
+        seq.extend_from_slice(&[0xfd, 0x05, 0x00, 0x4f]); // movi v29.4s, #0xf
+        seq.extend_from_slice(&[0x1f, 0x64, 0xc0, 0x3d]); // ldr q31, [x0, #400]
+        let body = [
+            0xfc, 0x1f, 0xbf, 0x4e, // mov v28.16b, v31.16b
+            0xff, 0x87, 0xbe, 0x4e, // add v31.4s, v31.4s, v30.4s
+            0x9c, 0x1f, 0x3d, 0x4e, // and v28.16b, v28.16b, v29.16b
+            0x9b, 0xa7, 0x20, 0x0f, // sxtl v27.2d, v28.2s
+            0x9c, 0xa7, 0x20, 0x4f, // sxtl2 v28.2d, v28.4s
+            0x1b, 0x70, 0x81, 0xac, // stp q27, q28, [x0], #32
+        ];
+        for _ in 0..6 {
+            seq.extend_from_slice(&body);
+        }
+        exec_bytes(&mut st, &seq[0..12], 0).expect("exec setup"); // movi v30, movi v29, ldr q31
+        let s = |x: u64| x & 0xffff_ffff;
+        assert_eq!(st.v[60], (s(4) << 32) | 4, "v30 = {{4,4}} (movi v30.4s,#4)");
+        assert_eq!(st.v[58], (0x0fu64 << 32) | 0x0f, "v29 = {{0xf,0xf}} (movi v29.4s,#0xf)");
+        assert_eq!(st.v[62], (s(1) << 32) | 0, "v31 lo lanes {{0,1}} (ldr q31 init)");
+        assert_eq!(st.v[63], (s(3) << 32) | 2, "v31 hi lanes {{2,3}} (ldr q31 init)");
+        exec_bytes(&mut st, &seq[12..], 0).expect("exec loop");
+        let rd = |off: usize| unsafe { *(buf.as_ptr().add(off) as *const u64) };
+        for k in 0..24usize {
+            let exp = (k as u64) & 0xf;
+            assert_eq!(rd(k * 8), exp, "m[{k}] = k & 0xf");
+        }
+        assert_eq!(st.x[0], buf.as_ptr() as u64 + 6 * 32, "x0 writeback 6x32");
+    }
+
+    #[test]
+    fn and_sxtl_accumulation_two_iterations() {
+        // The full maskf loop body x2 (mov snapshot; add v31+=4; and &0xf;
+        // sxtl + sxtl2), verifying the ACCUMULATOR survives across iterations:
+        //   mov v28.16b,v31.16b; add v31.4s,v31.4s,v30.4s; and v28,v28,v29;
+        //   sxtl v27.2d,v28.2s; sxtl2 v28.2d,v28.4s   (x2)
+        // Start v30=4, v29=0xf, v31={0,1,2,3}. After 2 iterations v31 must be
+        // {8,9,10,11}, v27={4,5} (sxtl of v28={4,5,6,7}), v28={6,7} (sxtl2).
+        // The single-shot and+sxtl+sxtl2 test passes but the looped version
+        // regressed (jit m[17]=0 instead of 1), so MOV/ADD accumulation is key.
+        let mut st = CpuState::new();
+        let s = |x: u64| x & 0xffff_ffff;
+        st.v[60] = (s(4) << 32) | 4; // v30 lo: +4 per lane   (reg 30)
+        st.v[61] = (s(4) << 32) | 4; // v30 hi
+        st.v[58] = (0x0fu64 << 32) | 0x0f; // v29 lo: mask 0xf
+        st.v[59] = (0x0fu64 << 32) | 0x0f; // v29 hi
+        st.v[62] = (s(1) << 32) | 0;  // v31 lo: {0,1}
+        st.v[63] = (s(3) << 32) | 2;  // v31 hi: {2,3}
+        // 5-instruction loop body (LE little-endian encodings, objdump-verified).
+        let body = [
+            0xfc, 0x1f, 0xbf, 0x4e, // mov v28.16b, v31.16b
+            0xff, 0x87, 0xbe, 0x4e, // add v31.4s, v31.4s, v30.4s
+            0x9c, 0x1f, 0x3d, 0x4e, // and v28.16b, v28.16b, v29.16b
+            0x9b, 0xa7, 0x20, 0x0f, // sxtl v27.2d, v28.2s
+            0x9c, 0xa7, 0x20, 0x4f, // sxtl2 v28.2d, v28.4s
+        ];
+        let mut seq = Vec::new();
+        seq.extend_from_slice(&body);
+        seq.extend_from_slice(&body);
+        exec_bytes(&mut st, &seq, 0).expect("exec");
+        assert_eq!(st.v[62], (s(9) << 32) | 8, "v31 lo after 2 iters {{8,9}}");
+        assert_eq!(st.v[63], (s(11) << 32) | 10, "v31 hi after 2 iters {{10,11}}");
+        assert_eq!(st.v[54], 4, "v27 lane0 = 4");
+        assert_eq!(st.v[55], 5, "v27 lane1 = 5");
+        assert_eq!(st.v[56], 6, "v28 lane0 = 6 (sxtl2 of {{4,5,6,7}})");
+        assert_eq!(st.v[57], 7, "v28 lane1 = 7");
+    }
+
+    #[test]
     fn simd_mull_widening_multiply_correct() {
         // smull/umull/smlal/umlal widen esrc-byte elements to res and multiply.
         // Decode regression: the old gate read res_esize from bit22 (missed

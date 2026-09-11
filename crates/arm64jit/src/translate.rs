@@ -3150,14 +3150,17 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
-                Inst::SimdXtl { rd, rn, sign, esrc } => {
+                Inst::SimdXtl { rd, rn, sign, esrc, upper } => {
                     // uxtl/sxtl Vd.<long>, Vn.<short>: widen each esrc-byte lane
                     // to a (esrc*2)-byte lane (zero/sign extend). Lanes = 8/esrc,
                     // the dest occupies the full 16-byte vector (Q=1 long form).
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    // upper (sxtl2/uxtl2): the narrow src lanes live in the
+                    // UPPER 64 bits of Vn (byte 8..15), like saddw2.
+                    let n_half: i32 = if upper { 8 } else { 0 };
                     let lanes = 8usize >> esrc.trailing_zeros() as usize;
                     for i in 0..lanes {
-                        let src = vslot(rn) + (i as i32) * (esrc as i32);
+                        let src = vslot(rn) + n_half + (i as i32) * (esrc as i32);
                         let dst = vslot(rd) + (i as i32) * (esrc as i32) * 2;
                         match (esrc, sign) {
                             (1, false) => buf.movzx_byte_mem(RAX, RBX, src),
@@ -4173,6 +4176,11 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             let off = (imm as i32).wrapping_mul(16);
             if off != 0 {
                 buf.lea64(RAX, RAX, off);
+            }
+            if std::env::var_os("JIT_TRACE").is_some() && ld {
+                // print addr + current 16 bytes at translate time (target addr
+                // is RAX-modifiable only at runtime, so approximate via x0 slot).
+                eprintln!("VECLD[DBG] ld vt={vt} rn={rn} imm={imm} off={off}");
             }
             let vslot = crate::jit::VECTOR_BASE + (vt as i32) * 16;
             if ld {

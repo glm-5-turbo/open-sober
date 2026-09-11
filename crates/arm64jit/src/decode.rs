@@ -301,7 +301,11 @@ pub enum Inst {
     // ---- SIMD single-vector store: st1 {Vt.T}, [Xn], #imm ----
     St1V { rd: u8, rn: u8, bytes: i32 },
     // ---- SIMD widen/long load: uxtl/sxtl Vd.TL, Vn.T (sign/zero extend) ----
-    SimdXtl { rd: u8, rn: u8, sign: bool, esrc: u8 },
+    // `upper` (Q=1 / sxtl2·uxtl2): the narrow source is the UPPER 64 bits of
+    // Vn (bytes 8..15), not the lower — gcc vectorizes an int->i64 widening
+    // init loop with sxtl (low) then sxtl2 (upper) to cover all lanes. Without
+    // it, sxtl2 re-read the low half and the vector contents shifted.
+    SimdXtl { rd: u8, rn: u8, sign: bool, esrc: u8, upper: bool },
     // ---- SIMD add/sub-wide: uaddw/saddw Vd.T, Vn.T, Vm.T/2 ----
     // `upper` (Q=1 / saddw2·uaddw2): the narrow source is the UPPER half of
     // Vm (bytes 8..15), not the lower half — gcc vectorizes string/math loops
@@ -1591,6 +1595,7 @@ pub fn decode(insn: u32) -> Inst {
             rn: b(insn, 5, 9) as u8,
             sign: xt == 0x0f00_0400,
             esrc,
+            upper: (insn >> 30) & 1 == 1, // Q=1 => sxtl2/uxtl2 (upper half)
         };
     }
 

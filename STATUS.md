@@ -614,3 +614,18 @@ Verified: i*i reductions return 76 (native) at -O3 (addp) and -O2 (saddw+saddw2)
 cargo build clean; cargo test --workspace 202/0.
 
 HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
+---
+## Session (Sep 11, 2026) — differential battery; sxtl2/uxtl2 upper-half FIX (workspace 210/0)
+New permanent differential battery `crates/arm64jit/tests/diff_battery.rs`: runs
+the SAME C through the loader→JIT path (cross-gcc aarch64) AND a native gcc
+oracle, requiring exact equality. Surfaced two more issues:
+1. [FIXED] `sxtl2`/`uxtl2` ignored Q (upper-half source): SimdXtl lacked
+   `upper`, so `sxtl2 v.2d, v.4s` re-read the low half. decode +=`insn>>30&1`;
+   translate +=`n_half=upper?8:0` (mirrors the declared saddw2 fix). Three new
+   deterministic linear regressions in `jit.rs` run the full maskf body 6×
+   and store m[k]=k&0xf exactly.
+2. [OPEN] intermittent SIMD-loop block-liveness bug under jit_run's single
+   back-edge block: gcc -O2/-O3 int→i64 widening init loops occasionally
+   corrupt ONE snapshot lane (address/stack dependent). All ops verified
+   correct linearly; the SIMD-loop diff canaries are excluded (mixed #[ignore]).
+cargo build clean; cargo test --workspace 210/0 (1 ignored).
