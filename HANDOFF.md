@@ -4923,8 +4923,14 @@ by the ext fix. Minimal repro `/tmp/combw/s13b.c` (`unsigned short a[24]`,
 `for(i+=2) s ^= (long long)a[i]+a[i+1]`): **native 2314 vs jit 59648**. The
 path uses `uxtl/uxtl2` + `uaddl/uaddl2` (element-wise widen-add, upper-half
 reads) + `eor` chain + the (now-correct) `ext` horizontal combine. Suspect the
-`uaddl2`/`uxtl2` upper-half read or an eor-chain lane-composition bug, not the
-(now-correct) ext. Reproducible via `fuzz_jit.py` `gen_pairwise_reduce`
+in-place `uxtl2` upper-half read or an eor-chain lane-composition bug, NOT the
+(now-correct) ext and NOT `uaddl2` — a hand-assembled
+`uaddl2 v1.4s,v0.8h,v2.8h` isolated test is byte-correct in the JIT (== qemu,
+upper-half values [5..8]+[50..80]=[55,66,77,88]). The passing sum loop (s13a)
+uses `uaddw`+`uxtl`, the failing xor loop (s13b) uses `uaddl`+`uxtl2` with the
+in-place `uxtl2 Vd.2d, Vd.4s` (rd==rn) upper-half reads — the cycle-27 in-place
+widening-alias class re-checked for the `.4s→.2d` upper form. Reproducible via
+`fuzz_jit.py` `gen_pairwise_reduce`
 (int/short/u32/u16 variants all trip it). Next debug pass: isolate `uaddl2`
 (upper) with a hand-controlled fixture vs qemu, then the eor-chain.
 
