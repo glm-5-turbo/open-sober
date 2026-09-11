@@ -197,6 +197,9 @@ fn parse_register_natives(cls: u64, methods: u64, n: u64) {
         let fn_ptr = unsafe { *e.add(2) };
         let Some(name) = read_cstr(name_p) else { continue };
         let sig = read_cstr(sig_p).unwrap_or_default();
+        if std::env::var_os("JNI_TRACE_REGISTRY").is_some() {
+            eprintln!("[jni] RegisterNatives {}::{} {} -> {:#x}", String::from_utf8_lossy(&class_bytes), String::from_utf8_lossy(&name), String::from_utf8_lossy(&sig), fn_ptr);
+        }
         reg.push(NativeMethod { class: class_bytes.clone(), name, signature: sig, fn_ptr });
     }
 }
@@ -781,6 +784,23 @@ fn object2(functions: u64) -> u64 {
 pub fn env_addr() -> u64 {
     let (e, _v) = build_jni();
     e
+}
+
+/// Allocate a fake-but-valid (non-null, dereferenceable, zeroed) `jobject` the
+/// guest can pass around / store without faulting — the JIT's analogue of the
+/// JVM handing an Activity `jobject` to a native method. Word0 stays 0 (no
+/// v-table), which is honest for the current fake-object model. For boot glue
+/// that must pass *some* activity-like handle as x1 to a Java_* entry.
+pub fn new_fake_object() -> u64 {
+    let p = unsafe { alloc_zeroed(Layout::new::<[u64; 8]>()) } as u64;
+    p
+}
+
+/// Allocate a guest-addressable, null-terminated jstring handle for the given
+/// UTF-8 bytes; returns the handle (str_handle semantics, same bytes -> same
+/// handle). For boot glue passing a params jstring to a Java_* entry.
+pub fn new_string_utf_handle(bytes: &[u8]) -> u64 {
+    str_handle(bytes)
 }
 
 /// Dispatch a registered native method back into the guest through `jit_run`.

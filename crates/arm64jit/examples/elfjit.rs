@@ -345,7 +345,7 @@ fn main() {
     // guest is a real binary we don't yet bootstrap (no TLS/stack), this lets
     // small aarch64 test functions run through the dispatcher.
     for (i, arg) in std::env::args().skip(3).take(3).enumerate() {
-        if arg == "--jni" || arg == "buf" {
+        if arg == "--jni" || arg == "buf" || arg == "--startapp" {
             let v = if arg == "buf" {
                 let b = Box::leak(vec![0x7fu8; 256].into_boxed_slice());
                 if i == 0 {
@@ -355,7 +355,7 @@ fn main() {
                 }
                 b.as_ptr() as u64
             } else {
-                0 // --jni isn't an x-register value; handled separately below
+                0 // --jni / --startapp aren't x-register values; handled separately
             };
             if arg == "buf" && i == 0 {
                 continue;
@@ -447,4 +447,53 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // --startapp <link-addr>: after JNI_OnLoad completes, drive the next real
+    // boot stage — the Java side's `nativeAppBridgeV2StartAppWithParams` (the
+    // entry that creates the engine main loop + EGL/GLES context). We chain it
+    // as a fresh guest entry after the registration phase, giving it the same
+    // JNIEnv in x0 plus fake but VALID (non-null, dereferenceable) jobject /
+    // jstring handles, exactly as the real JVM would. Captures how far the real
+    // binary gets into StartApp (main-loop / graphics init) before the next wall.
+    if let Some(hex) = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .position(|a| a == "--startapp")
+            .and_then(|i| args.get(i + 1).cloned())
+    } {
+        // Reuse the singleton env/vm; build a fake-but-valid jobject (a 5-word
+        // object header) and a jstring handle containing the StartApp params JSON.
+        let (env_ptr, _vm) = arm64jit::jni::build_jni();
+        let activity = arm64jit::jni::new_fake_object(); // non-null jobject
+        let params = arm64jit::jni::new_string_utf_handle(b"{\"key\":\"\"}");
+        let link = u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+            .unwrap_or_else(|_| panic!("bad --startapp hex"));
+        let start_app = el.guest_of(link);
+        eprintln!("[elfjit] driving StartApp @ guest {start_app:#x} after JNI_OnLoad (env={env_ptr:#x} jobject={activity:#x} params={params:#x})");
+        let mut s2 = arm64jit::jit::CpuState::new();
+        s2.tpidr = arm64jit::jit::current_guest_tp();
+        // Continue on the boot-phase guest stack (real SP), not a fresh 0 —
+        // StartApp's prologue `sub sp,#0xf0` would otherwise wrap to 0xffff..10
+        // and the frame-write faults. The Java side enters natives on whatever
+        // thread is current; elfjit reuses the main guest thread's SP.
+        s2.x[31] = st.x[31]; // guest SP
+        s2.x[0] = env_ptr;
+        s2.x[1] = activity;
+        s2.x[2] = params;
+        match arm64jit::jit::jit_run(image, base, start_app, &mut s2 as *mut CpuState) {
+            Err(e) => eprintln!("[elfjit] StartApp stopped: {e}"),
+            Ok(r) => eprintln!("[elfjit] StartApp returned Ok({r:#x})"),
+        }
+        // Let any game-start workers run before exiting (or rather: keep the
+        // process alive long enough for a real main loop to iterate/block).
+        for _ in 0..4000 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if std::env::var_os("ELFJIT_EXIT_WHEN_IDLE").is_some()
+                && arm64jit::jit::active_guest_threads() <= baseline
+            {
+                eprintln!("[elfjit] guest idle; exiting");
+                break;
+            }
+        }
+    }
 }
