@@ -104,3 +104,65 @@ regressions.
   the zero via guest x1 -> segfault. zva discriminator = CRm==4 && op2==1,
   objdump-verified across gva/civac/ivac/ivau. Regression in jit.rs.
 - arm64jit 95, workspace 129/0.
+
+# Session — guest auxv bootstrap + SME/SVE/MulLong decodes + zero-extend fix (Sep 11 2026)
+
+Goal (no APK/GSI/GPU on this box): prove the JIT can boot a full statically
+linked glibc aarch64 binary (`modmain.elf`: `main(){return 300%16;}`), which
+exercises the whole CRT + loader + syscall gate. Real, verified progress:
+
+## boot.rs — guest auxv on the initial stack (loader correctness)
+The kernel's aarch64 process-start ABI puts `[argc][argv][envp][auxv AT_NULL]`
+on the stack with sp at argc; glibc's static `_start` walks it for envp/auxv.
+The JIT previously left garbage there, so glibc read bogus AT_HWCAP2 and
+`_dl_hwcap2` landed with HWCAP2_SME (bit 23) set, driving `__libc_arm_za_disable`
+into its ZA-store loop (an unsupported `str za` wall). New `arm64jit::boot`:
+`standard_auxv(&LoadedElf, hwcap, hwcap2)` (AT_PHDR/PHENT/PHNUM/PAGESZ/ENTRY/
+BASE/HWCAP/HWCAP2/CLKTCK/RANDOM) + `layout_initial_stack()` (builds the image,
+fills AT_RANDOM from a bounded xorshift). Wired into both `elfjit` and
+`sober-core::jit`. `_dl_hwcap=0 _dl_hwcap2=0 __aarch64_have_sme=0` verified.
+
+## SME/SVE feature-off decodes (compile the CFG past __libc_arm_za_disable)
+Even with SME off, glibc's ZA block is *linearly* reachable in the compiled CFG
+(the block compiler follows fall-through past the data-dependent SME gate), so
+its instructions had to DECODE:
+- `Inst::SmeNoop` — `str za[Wt,k],[Xn,#k,mul vl]` (0xe1206200..f) + smstart/smstop
+  za (0xd5034000). No-ops: SME is never enabled in this guest.
+- `Inst::AddVectorLen` — SVE addvl/addsvl (gate 0xffe0_f000==0x0420_5000; Rn=
+  bits[20:16], imm6=sext[10:5]); translate `Xd = Xn + imm6*16` (model VL=16B).
+- `Inst::SveCntd` — SVE cntd (0x04e0_e000) -> rd=2 (VL_d/64 at VL=16B).
+- `mrs xN, midr_el1` (sysreg 8) -> 0 (unknown core, generic glibc paths).
+
+## Inst::MulLong — smull/umull/smaddl/umaddl/smsubl/umsubl
+32x32->64 multiply-long family, found in glibc's `_dl_fixup` (dynamic IFUNC
+resolution). Gate top 0x9b & bits[22:21]==01 (disjoint from MulHigh bit22 and
+64-bit madd bit21). bit23=signed, bit15=sub. Verified vs real assembler.
+
+## 🔧 Latent x86-emitter bug: `and_ri64(_, 0xffffffff)` was a NO-OP
+`and r64, imm32` sign-extends the imm, so `and rax, 0xffffffff` = `and rax,
+0xFFFFFFFFFFFFFFFF` = no-op — 10 sites meant to zero-extend a W (32-bit) value
+instead silently leaked uninitialized high bits (the glibc startup x3/x0
+corruption). Added `CodeBuf::zero_ext_r32` (`mov r32,r32`, clears upper 32)
+and replaced all 10 uses. Proven by new umull/smull/umsubl/addvl exec tests.
+
+## Verification
+- `cargo build --workspace` clean; `cargo test --workspace` **137/0**
+  (arm64jit 103, +5: multiply_long_family_ground_truth, addvl_cntd_sme_midr_
+  ground_truth, mullong_umull_exec, mullong_smull_and_msubl_exec,
+  addvl_scales_by_16_bytes).
+- `modmain.elf` boot now advances past __libc_arm_za_disable + _dl_fixup + midr
+  (previously stopped at `str za`), then hits a further glibc-startup crash
+  (x-register high-bit corruption on the auxv scan / __libc_start_main prologue;
+  the zero-extend fix is in but not sufficient). qemu still returns 12; JIT does
+  not yet boot it to completion.
+
+### Next (ordered)
+1. Finish the glibc-startup corruption (localize the leftover W-reg high-bit
+   leak / bad-computation feeding the __libc_start_main auxv scan).
+2. Then modmain.elf -> exit 12 proves full-statical-glibc boot through the JIT.
+3. libloader ELF/loader gaps -> libbadcpu gaps -> services/auth.
+4. HARD GATE remains: real libroblox.so/APK + GPU host run (`elfjit <lib> 0x1f0db20 --jni`).
+
+Commit summary: new boot.rs (auxv), SmeNoop/AddVectorLen/SveCntd/MulLong decodes
++ translate, sysreg 8 (midr), zero_ext_r32 fix, auxv wired into elfjit + sober-core.
+---

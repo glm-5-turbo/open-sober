@@ -123,15 +123,29 @@ fn main() {
         }
     }
 
-    // --- Bootstrap a guest runtime the binary can actually use -------------
+    // Bootstrap a guest runtime the binary can actually use -------------
     // (1) Guest stack: allocate a real writable region (guest==host addressing,
     //     so its host pointer is a valid guest pointer) and point SP at the top.
     // (2) TLS base: point CpuState.tpidr at a writable region so `mrs tpidr_el0`
     //     returns a non-zero, writable base (FS/GS-style thread pointer).
     const STACK_SIZE: usize = 4 * 1024 * 1024;
     let stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
-    let sp = stack.as_ptr() as u64 + STACK_SIZE as u64; // top (stack grows down)
-    st.set(31, sp); // x31 = SP
+    // Lay out a real kernel-style initial stack (argc/argv/envp/auxv) so glibc
+    // IFUNCs resolve to scalar paths instead of reading garbage auxv into SMP
+    // (which drove the JIT into an unsupported `str za` wall). No SME/SVE bits.
+    let mut auxv = arm64jit::boot::standard_auxv(
+        &el,
+        arm64jit::boot::HWCAP_FP | arm64jit::boot::HWCAP_ASIMD,
+        0,
+    );
+    let sp = arm64jit::boot::layout_initial_stack(
+        stack.as_ptr() as *mut u8,
+        STACK_SIZE,
+        Some(&[0u8; 0]), // argv[0] (empty) — keeps argc==1 like a real shell exec
+        &[],
+        &mut auxv,
+    );
+    st.set(31, sp); // x31 = SP (points at argc on the initial stack)
     const TLS_SIZE: usize = 1024 * 64;
     let tls = Box::leak(vec![0u8; TLS_SIZE].into_boxed_slice());
     st.tpidr = tls.as_ptr() as u64;

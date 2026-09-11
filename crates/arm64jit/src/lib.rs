@@ -8,3 +8,4 @@ pub mod resolver;
 pub mod shims;
 pub mod plt;
 pub mod jni;
+pub mod boot;

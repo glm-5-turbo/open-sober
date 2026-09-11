@@ -801,6 +801,28 @@ impl CodeBuf {
     pub fn and_ri64(&mut self, rd: u8, imm: u32) {
         self.ari_imm(4, rd, imm);
     }
+    /// Zero-extend `rd`'s low 32 bits into the full 64-bit register — the
+    /// canonical x86 idiom `mov rD, rD` (32-bit, NO REX.W) which clears the
+    /// upper 32 bits.
+    ///
+    /// DO NOT use `and r64, 0xffffffff` for this: REX.W-and-imm32 sign-extends
+    /// the immediate, so `and rax, 0xffffffff` is a NO-OP, not a mask. That
+    /// wrong idiom silently leaked uninitialized high bits into every W-register
+    /// write (a latent bug found via glibc-CRT register corruption).
+    pub fn zero_ext_r32(&mut self, rd: u8) {
+        let rex = 0x40
+            | if rd >= 8 {
+                // REX.R (reg) + REX.B (rm) for high registers.
+                0x04 | 0x01
+            } else {
+                0
+            };
+        if rex != 0x40 {
+            self.b(rex);
+        }
+        self.b(0x89);
+        self.b(modrm(3, rd & 7, rd & 7)); // mov r32, r32 (reg=rm=rd)
+    }
     /// or r64, imm32
     pub fn or_ri64(&mut self, rd: u8, imm: u32) {
         self.ari_imm(1, rd, imm);

@@ -1187,6 +1187,69 @@ mod tests {
     }
 
     #[test]
+    fn mullong_umull_exec() {
+        // umull x1, w3, w7 = 0x9ba77c61 : x1 = (u64)w3 * (u64)w7 (unsigned 32x32).
+        // mov x0,x1 (orr) = 0xaa0103e0 ; ret = 0xd65f03c0.
+        let code = [
+            0x61u8, 0x7c, 0xa7, 0x9b, // umull x1, w3, w7
+            0xe0, 0x03, 0x01, 0xaa, // mov x0, x1
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        // Large 32-bit operands: exercise the zero-extension (unsigned) path.
+        let mut st = CpuState::new();
+        st.x[3] = 0x0000_0001_0000_0005; // w3 low32 = 5
+        st.x[7] = 7;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 35, "umull 5*7 should be 35 (w3 high bits ignored)");
+        // Unsigned with high bit set: w3 = 0xFFFFFFFF (as u32), w7 = 2.
+        let mut st = CpuState::new();
+        st.x[3] = 0xFFFFFFFF;
+        st.x[7] = 2;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, (0xFFFFFFFFu64) * 2, "umull unsigned 0xFFFFFFFF * 2");
+    }
+
+    #[test]
+    fn mullong_smull_and_msubl_exec() {
+        // smull x4, w5, w6 = 0x9b267ca4 (signed): x4 = (i64)sext(w5)*(i64)sext(w6).
+        let code1 = [
+            0xa4u8, 0x7c, 0x26, 0x9b, // smull x4, w5, w6
+            0xe0, 0x03, 0x04, 0xaa, // mov x0, x4
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[5] = 0xFFFF_FFFD; // w5 = -3 (sign-extended)
+        st.x[6] = 4;
+        let r = exec_bytes(&mut st, &code1, 0).expect("exec");
+        assert_eq!(r as i64, -12, "smull (-3)*4 = -12");
+        // umsubl x10, w11, w12, x13 = 0x9bacb56a : x10 = x13 - w11*w12.
+        let code2 = [
+            0x6au8, 0xb5, 0xac, 0x9b, // umsubl x10, w11, w12, x13
+            0xe0, 0x03, 0x0a, 0xaa, // mov x0, x10
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[11] = 2;
+        st.x[12] = 3;
+        st.x[13] = 100;
+        let r = exec_bytes(&mut st, &code2, 0).expect("exec");
+        assert_eq!(r, 100 - 6, "umsubl 100 - 2*3");
+    }
+
+    #[test]
+    fn addvl_scales_by_16_bytes() {
+        // addvl x0, x0, #16 = 0x04205200 : x0 += 16*16 = 256 (model VL=16B).
+        let code = [
+            0x00u8, 0x52, 0x20, 0x04, // addvl x0,x0,#16
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[0] = 1000;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 1256, "addvl x0,x0,#16 => x0 += 16*16");
+    }
+
+    #[test]
     fn real_arm64_objdump_sequence() {
         let code = [0x60u8, 0x00, 0x80, 0xd2];
         let mut st = CpuState::new();

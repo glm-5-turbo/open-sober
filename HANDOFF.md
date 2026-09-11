@@ -2966,3 +2966,42 @@ through elfjit exposed real bugs on the syscall path:
    glibc IFUNCs resolve to scalar (non-SME) paths.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
    the HARD GATE, blocked until a capable host + the real binary/APK.
+
+
+---
+
+## Session (Sep 11 2026) — guest auxv bootstrap; SME/SVE/MulLong decodes; zero-extend fix (137/0)
+
+Goal: prove the JIT boots a full statically-linked glibc aarch64 binary.
+modmain.elf (`main(){return 300%16;}`, qemu returns 12) tests the whole CRT.
+
+1. **`arm64jit::boot` — guest auxv on the initial stack.** The kernel ABI puts
+   [argc][argv][envp][auxv AT_NULL] on the stack (sp at argc); glibc static
+   `_start` walks it for envp/auxv. The JIT left garbage, so `_dl_hwcap2` picked
+   HWCAP2_SME from garbage and fell into `__libc_arm_za_disable`'s `str za` loop.
+   New `standard_auxv(&LoadedElf, hwcap, hwcap2)` + `layout_initial_stack()`
+   (fills AT_RANDOM via bounded xorshift). Wired into elfjit AND sober-core::jit.
+   Verified `_dl_hwcap2=0, have_sme=0`.
+2. **SME/SVE feature-off decodes.** Even with SME off, glibc's ZA block is
+   *linearly* reachable in the compiled CFG (compiler follows fall-through past
+   the data-dependent SME gate), so it had to DECODE: `Inst::SmeNoop`
+   (`str za[Wt,k],[Xn,#k,mul vl]` 0xe1206200..f + smstart/smstop), `Inst::
+   AddVectorLen` (addvl/addsvl, `Xd = Xn + imm6*16`, model VL=16B), `Inst::
+   SveCntd` (cntd -> 2), `mrs xN, midr_el1` (sysreg 8 -> 0).
+3. **`Inst::MulLong`** — smull/umull/smaddl/umaddl/smsubl/umsubl, found in
+   glibc `_dl_fixup` (IFUNC resolution). Gate top 0x9b & bits[22:21]==01.
+4. **LATENT x86-emitter bug fixed:** `and_ri64(_, 0xffffffff)` was a NO-OP
+   (`and r64,imm32` sign-extends the imm -> AND-all-ones). All 10 zero-extend
+   sites silently leaked W-reg high bits (the glibc x3/x0 corruption). Added
+   `CodeBuf::zero_ext_r32` (`mov r32,r32`) and replaced all 10 uses. Proven by
+   umull/smull/umsubl/addvl exec tests.
+
+Verification: `cargo build --workspace` clean; `cargo test --workspace` 137/0
+(arm64jit 103). modmain.elf boot now advances past `str za` -> _dl_fixup umull
+-> midr_el1, then STILL stops early on a glibc-startup x-reg corruption (auxv
+scan / __libc_start_main prologue) — the zero-extend fix is in but a leftover
+cause remains. qemu returns 12; JIT boot to completion NOT yet achieved.
+
+Next: (1) finish the glibc-startup corruption; (2) modmain->12 proves full
+static-glibc boot; (3) libloader gaps -> libbadcpu gaps -> services/auth;
+(4) HARD GATE = real libroblox.so + GPU host (`elfjit <lib> 0x1f0db20 --jni`).

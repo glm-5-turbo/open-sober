@@ -546,7 +546,7 @@ pub fn translate(
                             _ => return Err(format!("LogicImm op {} not implemented", op)),
                         }
                         if !sf {
-                            buf.and_ri64(RAX, 0xffff_ffff);
+                            buf.zero_ext_r32(RAX);
                         }
                         if rd != 31 {
                             stg(buf, rd as u32, RAX);
@@ -657,13 +657,47 @@ pub fn translate(
                             }
                         }
                         if !sf {
-                            buf.and_ri64(RAX, 0xffff_ffff);
+                            buf.zero_ext_r32(RAX);
                         }
                         if rd != 31 {
                             stg(buf, rd as u32, RAX);
                         }
                         Ok(())
                     }
+        Inst::MulLong { rd, rn, rm, ra, signed, sub } => {
+            // smull/umull/smaddl/umaddl/smsubl/umsubl: 32-bit Rn*Rm -> 64-bit
+            // product, optionally accumulated. Sign/zero-extend both operands
+            // to 64 first, then imul: the low 64 of the signed product is
+            // bit-identical to the unsigned one, and a 32x32 product always
+            // fits in 64 bits (correct full result either way).
+            ldg(buf, RAX, rn as u32);
+            if signed {
+                buf.movsxd_r64_r32(RAX, RAX);
+            } else {
+                buf.zero_ext_r32(RAX);
+            }
+            ldg(buf, RCX, rm as u32);
+            if signed {
+                buf.movsxd_r64_r32(RCX, RCX);
+            } else {
+                buf.zero_ext_r32(RCX);
+            }
+            buf.imul_rr64(RAX, RCX); // RAX = Rn * Rm (long)
+            if ra != 31 {
+                ldg(buf, RDI, ra as u32);
+                if sub {
+                    // msubl/umsubl: RAX = Ra - Rn*Rm
+                    buf.neg_r64(RAX);
+                    buf.add_rr64(RAX, RDI);
+                } else {
+                    buf.add_rr64(RAX, RDI); // maddl/umaddl: RAX = Rn*Rm + Ra
+                }
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
         Inst::ClzCls { rd, rn, sf, cls } => {
             // clz/cls Wd|Xd, Rn. CLZ via LZCNT (F3 0F BD /r), which returns the
             // count of leading zeros directly and matches AArch64's clz(x=0)=|bits|.
@@ -676,7 +710,7 @@ pub fn translate(
             }
             ldg(buf, RAX, rn as u32);
             if !sf {
-                buf.and_ri64(RAX, 0xffff_ffff);
+                buf.zero_ext_r32(RAX);
             }
             if sf {
                 buf.bytes.extend_from_slice(&[0x48, 0xf3, 0x0f, 0xbd, 0xc0]); // lzcnt rax, rax
@@ -751,7 +785,7 @@ pub fn translate(
                 }
             }
             if !sf {
-                buf.and_ri64(RAX, 0xffff_ffff);
+                buf.zero_ext_r32(RAX);
             }
             stg(buf, rd as u32, RAX);
             Ok(())
@@ -1003,7 +1037,7 @@ pub fn translate(
             let r = (rot & (if sf { 63u32 } else { 31u32 })) as u8;
             buf.ror_ri8(RAX, r);
             if !sf {
-                buf.and_ri64(RAX, 0xffff_ffff);
+                buf.zero_ext_r32(RAX);
             }
             stg(buf, rd as u32, RAX);
             Ok(())
@@ -1127,7 +1161,7 @@ pub fn translate(
                 }
             }
             if !sf {
-                buf.and_ri64(RAX, 0xffff_ffff);
+                buf.zero_ext_r32(RAX);
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
@@ -1186,12 +1220,15 @@ pub fn translate(
                 }
                 return Ok(());
             }
-            if sysreg == 6 || sysreg == 7 {
-                // GCS / SME-TLS registers the JIT neither enables nor models:
-                // sysreg 6 = gcspr_el0 (armv9 GCS pointer; 0 when GCS disabled),
-                // sysreg 7 = tpidr2_el0 (SME second TLS pointer; 0 without SME).
+            if sysreg == 6 || sysreg == 7 || sysreg == 8 {
+                // GCS / SME-TLS / MIDR registers the JIT neither enables nor
+                // models: sysreg 6 = gcspr_el0 (armv9 GCS pointer; 0 when GCS
+                // disabled), sysreg 7 = tpidr2_el0 (SME second TLS pointer; 0
+                // without SME), sysreg 8 = midr_el1 (implementer/part; 0 =
+                // unknown core so glibc picks generic non-SME/SVE paths).
                 // Both read 0 on a fresh EL0 context that never enables the
                 // feature — matching what a real core reports at boot.
+                // (All three read 0; writes are no-ops.)
                 if read && rt != 31 {
                     buf.mov_ri64(RAX, 0);
                     stg(buf, rt as u32, RAX);
@@ -2213,7 +2250,7 @@ pub fn translate(
                                 ldg(buf, RAX, rn as u32); // Xn low 64
                             } else {
                                 ldg(buf, RAX, rn as u32);
-                                buf.and_ri64(RAX, 0xffff_ffff); // zero-extend Wn
+                                buf.zero_ext_r32(RAX); // zero-extend Wn
                                 let m = ((1u64 << (8 * esize)) - 1) as u32;
                                 buf.and_ri64(RAX, m);
                             }
@@ -3165,7 +3202,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 _ => buf.ror_cl64(RAX), // rorv
             }
             if !sf {
-                buf.and_ri64(RAX, 0xffff_ffff);
+                buf.zero_ext_r32(RAX);
             }
             if rd != 31 {
                 stg(buf, rd as u32, RAX);
@@ -3740,6 +3777,32 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
         Inst::WaitBarrier => {
             // dmb/dsb/isb — memory/cache ordering barrier; the JIT is
             // single-threaded so ordering and cache flush are irrelevant.
+            Ok(())
+        }
+        Inst::SmeNoop => {
+            // str za / smstart za / smstop za — no-ops in this SME-off guest
+            // (the ZA tile is never live and streaming mode is never entered;
+            // glibc compiles them on its __libc_arm_za_disable path).
+            Ok(())
+        }
+        Inst::AddVectorLen { rd, rn, imm_bytes } => {
+            // addvl/addsvl: Rd = Rn + imm*VL. VL=16 bytes in this no-SVE model.
+            // Fetch Rn, add the scaled byte count, store Rd.
+            ldg_src(buf, rn as u32);
+            if imm_bytes != 0 {
+                buf.add_ri64(RAX, imm_bytes as u32);
+            }
+            if rd != 31 {
+                stg(buf, rd as u32, RAX);
+            }
+            Ok(())
+        }
+        Inst::SveCntd { rd } => {
+            // cntd Xd = VL_d/64 = 2 at VL=16 bytes.
+            if rd != 31 {
+                buf.mov_ri64(RAX, 2);
+                stg(buf, rd as u32, RAX);
+            }
             Ok(())
         }
         Inst::Br { rn } => {

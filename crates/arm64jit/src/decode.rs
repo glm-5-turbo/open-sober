@@ -561,6 +561,19 @@ pub enum Inst {
             ra: u8, // MADD/MSUB accumulate reg; 0 for DIV
             sf: bool,
         },
+        // ---- integer multiply-long: smull/umull/smaddl/umaddl/smsubl/umsubl ----
+        // 32-bit Rn*Rm -> 64-bit product; Ra==31 => plain mul, else Ra+product
+        // (maddl) or Ra-product (msubl). Gate top 0x9b & bits[22:21]==01
+        // (disjoint from MulHigh bit22 and 64-bit madd bit21). bit23=signed(0),
+        // bit15=sub (msubl/umsubl accumulate subtract).
+        MulLong {
+            rd: u8,
+            rn: u8,
+            rm: u8,
+            ra: u8,     // 31 == no accumulate
+            signed: bool,
+            sub: bool,  // msubl/umsubl: Rd = Ra - Rn*Rm
+        },
     // ---- count leading zeros / sign bits: clz Wd,Xd,Rn ; cls Wd,Xd,Rn ----
     ClzCls {
         rd: u8,
@@ -580,6 +593,26 @@ pub enum Inst {
     Hint,
     // ---- memory/DMB/DSB/ISB barrier (no-op in the single-threaded JIT) ----
     WaitBarrier,
+    // ---- SME feature-off misc on glibc's `__libc_arm_za_disable` path ----
+    // `str za[Wt, k], [Xn, #k, mul vl]` (0xe1206200 family) and
+    // `smstart za`/`smstop za` (0xd50345/46/47xx, mask 0xd5034000). The guest
+    // advertises NO SME (auxv HWCAP2 SME bit clear), so streaming mode is
+    // never entered and the ZA tile is never live — these are no-ops. They
+    // must still DECODE (glibc's block compiler follows the fall-through past
+    // the data-dependent SME gate into them, so `Unsupported` would halt the
+    // whole block even though they never execute).
+    SmeNoop,
+    // ---- SVE add-vector-length: addvl/addsvl Xd, Xn, #imm ----
+    // gate (insn&0xffe0_f000)==0x0420_5000; imm6=sext(insn[10:5]) (bytes scaled
+    // by the vector length). glibc's __libc_arm_za_disable loop advances its
+    // ZA-dump pointer with `addsvl x16,x16,#16`. The guest models no SVE, so
+    // VL=16 bytes (the architectural minimum) — safe because the loop is dead
+    // at runtime (SME disabled), but the block still needs a translation.
+    AddVectorLen { rd: u8, rn: u8, imm_bytes: i32 },
+    // ---- SVE count vector elements: cntd Xd (0x04e0_e000 gate) ----
+    // Rd = VL_d / 64 = 2 at VL=16 bytes. Appears in __libc_arm_za_disable's
+    // never-taken ZA-invalid error path.
+    SveCntd { rd: u8 },
     // ---- return (ret x30) ----
     Ret,
     // ---- indirect branch (br Xn) and register call (blr Xn) ----
@@ -733,6 +766,40 @@ fn rn(insn: u32) -> u8 {
 }
 
 pub fn decode(insn: u32) -> Inst {
+    // ---- SME/SVE feature-off misc (glibc `__libc_arm_za_disable` path) ----
+    // These precise masks come before the system-register (0xd5) gates so the
+    // smstart/smstop system-link ops are not swallowed, and before any broad
+    // top-byte match would claim the 0x04 (SVE) / 0xe1 (SME) space.
+    // smstart/smstop za (0xd5034xxx): SME mode switch — no-op (SME off guest).
+    if (insn & 0xffff_f000) == 0xd503_4000 {
+        return Inst::SmeNoop;
+    }
+    // SVE addvl/addsvl Xd, Xn, #imm: gate (insn&0xffe0_f000)==0x0420_5000
+    // (bits[23:21]==010, bits[15:12]==0b0101 — excludes CNT* and addpl).
+    if (insn & 0xffe0_f000) == 0x0420_5000 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 16) & 0x1f) as u8;
+        let imm6 = ((insn >> 5) & 0x3f) as i32;
+        // sign-extend 6-bit imm, then scale by the model vector length (16 B).
+        let imm6 = if imm6 & 0x20 != 0 { imm6 - 0x40 } else { imm6 };
+        return Inst::AddVectorLen {
+            rd,
+            rn,
+            imm_bytes: imm6 * 16,
+        };
+    }
+    // SVE cntd Xd (0x04e0_e000): count 64-bit elements of a vector. VL=16B ->
+    // 2. (cntb/cntw and the .d-only feature predicates return others; only
+    // cntd appears on glibc's SME probe path, so the rest stay Unsupported.)
+    if (insn & 0xffe0_f000) == 0x04e0_e000 {
+        let rd = (insn & 0x1f) as u8;
+        return Inst::SveCntd { rd };
+    }
+    // SME str za[Wt, k], [Xn, #k, mul vl]: zero the ZA tile to memory. ZA is
+    // never live (SME off in this guest) so it's a no-op. 0xe1206200..0xf.
+    if (insn & 0xffff_fff0) == 0xe120_6200 {
+        return Inst::SmeNoop;
+    }
     // ---- SIMD vector immediate: fmov Vd.T, #imm ----
     // Disjoint gate (15 asm-verified): Q/esz prefix in {0x0f,2f,4f,6f}00_0000
     // and fixed low bits 15-10 == 0xF400. imm8 = [5..9]|[16..18]<<5. MUST precede
@@ -974,6 +1041,32 @@ pub fn decode(insn: u32) -> Inst {
     // separates it from the madd/msub/udiv/sdiv MulDiv family (bit22=0).
     // signed = bit23 clear (umulh=0x9bC7.. has bit23=1, smulh=0x9b47.. has 0).
     // Verified vs objdump: umulh x2,x3,x6 = 0x9bc67c62, smulh = 0x9b467c62.
+    // MUST come after the multiply-long check below (both are top 0x9b; the
+    // long-multiply has bits[22:21]==01, MulHigh has bit22 set ==10).
+    //
+    // ---- integer multiply-long: smull/umull/smaddl/umaddl/smsubl/umsubl ----
+    // 32x32 -> 64 product, optional accumulate (maddl/msubl). Gate top byte
+    // 0x9b AND bits[22:21]==0b01 (the long-multiply marker). Disjoint from
+    // MulHigh (bit22 set -> 0b10) and from 64-bit madd/msub (bit21 clear ->
+    // 0b00, which the MulDiv 0x1b000000 gate handles). bit23 = unsigned (1)
+    // vs signed (0); bit15 = sub (msubl/umsubl subtract the product).
+    // Verified vs objdump: umull=0x9ba77c61, smull=0x9b267ca4,
+    // umaddl=0x9ba41462, smaddl=0x9b2824e6, umsubl=0x9bacb56a,
+    // smsubl=0x9b30c5ee.
+    if (insn >> 24) & 0xff == 0x9b && (insn >> 21) & 0x3 == 0b01 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let ra = ((insn >> 10) & 0x1f) as u8;
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        return Inst::MulLong {
+            rd,
+            rn,
+            rm,
+            ra,
+            signed: (insn & 0x0080_0000) == 0, // bit23: 1=unsigned, 0=signed
+            sub: (insn & 0x0000_8000) != 0,     // bit15: 1=msubl/umsubl
+        };
+    }
     if (insn >> 24) & 0xff == 0x9b && (insn & 0x0040_0000) != 0 {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
@@ -2756,7 +2849,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
         // GNU aarch64 toolchains emit this MRS sizing a GCS call frame; without
         // it a full glibc-linked program stops. Verified against objdump of the
         // real modmain.elf word 0xd53b2522.
-        if op1 == 3 && crn == 2 && crm == 5 && op2 == 1 && read {
+        if op1 == 3 && crn == 2 && crm == 5 && op2 == 1 {
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 6, rt, read }; // gcspr_el0 -> 0
         }
@@ -2765,9 +2858,17 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
         // tpidr_el0 we model (op2=2). Without SME the register is architecturally
         // 0 on a fresh EL0 context, so read 0. Glibc CRT reads it probing SME
         // support. Verified against the real modmain.elf word 0xd53bd0ae.
-        if op1 == 3 && crn == 13 && crm == 0 && op2 == 5 && read {
+        if op1 == 3 && crn == 13 && crm == 0 && op2 == 5 {
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 7, rt, read }; // tpidr2_el0 -> 0
+        }
+        // mrs xN, midr_el1 = 0xd5380000|rt: op1=0, CRn=0, CRm=0, op2=0. The
+        // Main ID Register (implementer/part). glibc's __libc_cpu_features
+        // reads it to name a known core for memcpy/IFUNC tuning. Return 0
+        // ("unknown" implementer) so glibc picks generic non-SME/SVE paths.
+        if (insn & 0xffff_f01f) == 0xd538_0000 && read {
+            let rt = (insn & 0x1f) as u8;
+            return Inst::SysReg { sysreg: 8, rt, read }; // midr_el1 -> 0
         }
     }
 
@@ -2865,6 +2966,89 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiply_long_family_ground_truth() {
+        // Verified vs aarch64-linux-gnu-gcc $g: the smull/umull/maddl/msubl
+        // 32x32->64 family (real encodings assembled and objdump-read).
+        let cases = [
+            (0x9ba77c61u32, false, false, 3u8, 7u8, 1u8, 31u8), // umull  x1,w3,w7
+            (0x9b267ca4u32, false, true, 5u8, 6u8, 4u8, 31u8),  // smull  x4,w5,w6
+            (0x9ba41462u32, false, false, 3u8, 4u8, 2u8, 5u8),  // umaddl x2,w3,w4,x5
+            (0x9b2824e6u32, false, true, 7u8, 8u8, 6u8, 9u8),   // smaddl x6,w7,w8,x9
+            (0x9bacb56au32, true, false, 11u8, 12u8, 10u8, 13u8), // umsubl x10,w11,w12,x13
+            (0x9b30c5eeu32, true, true, 15u8, 16u8, 14u8, 17u8),  // smsubl x14,w15,w16,x17
+        ];
+        for (w, sub, signed, rn, rm, rd, ra) in cases {
+            match decode(w) {
+                Inst::MulLong {
+                    rd: d,
+                    rn: n,
+                    rm: m,
+                    ra: a,
+                    signed: s,
+                    sub: subb,
+                } => {
+                    assert_eq!((d, n, m, a, s, subb), (rd, rn, rm, ra, signed, sub), "{w:#x}");
+                }
+                other => panic!("expected MulLong for {w:#x}, got {other:?}"),
+            }
+        }
+        // umulh/smulh must NOT decode as MulLong (they're MulHigh, bit22 set).
+        assert!(matches!(decode(0x9bc57c83), Inst::MulHigh { .. }));
+        assert!(matches!(decode(0x9b487ce6), Inst::MulHigh { .. }));
+    }
+
+    #[test]
+    fn addvl_cntd_sme_midr_ground_truth() {
+        // addvl/addsvl (SVE vector-length add: Xd = Xn + imm6*VL, VL=16B).
+        for (w, rd, rn, bytes) in [
+            (0x04205020u32, 0u8, 0u8, 1i32 * 16),   // addvl x0,x0,#1
+            (0x04205040u32, 0u8, 0u8, 2i32 * 16),   // addvl x0,x0,#2
+            (0x04205200u32, 0u8, 0u8, 16i32 * 16),  // addvl x0,x0,#16
+            (0x042050a9u32, 9u8, 0u8, 5i32 * 16),   // addvl x9,x0,#5
+            (0x04225041u32, 1u8, 2u8, 2i32 * 16),   // addvl x1,x2,#2
+            (0x042857a0u32, 0u8, 8u8, -3i32 * 16),  // addvl x0,x8,#-3
+            (0x04305a10u32, 16u8, 16u8, 16i32 * 16), // addsvl x16,x16,#16
+        ] {
+            match decode(w) {
+                Inst::AddVectorLen {
+                    rd: d,
+                    rn: n,
+                    imm_bytes: b,
+                } => assert_eq!((d, n, b), (rd, rn, bytes), "{w:#x}"),
+                other => panic!("expected AddVectorLen for {w:#x}, got {other:?}"),
+            }
+        }
+        // cntd (count 64-bit elements): rd=6 for x6, value comes from translate.
+        match decode(0x04e0e3e6) {
+            Inst::SveCntd { rd } => assert_eq!(rd, 6),
+            other => panic!("expected SveCntd, got {other:?}"),
+        }
+        // SME str za[w15,k],[x16,#k,mul vl] — no-op class, 0xe1206200..0xf.
+        for w in 0xe1206200u32..=0xe120620f {
+            match decode(w) {
+                Inst::SmeNoop => {}
+                other => panic!("expected SmeNoop for {w:#x}, got {other:?}"),
+            }
+        }
+        // smstart/smstop (plain + za variants) — SmeNoop.
+        for w in [0xd503467f, 0xd503477f, 0xd503447f, 0xd503457f] {
+            match decode(w) {
+                Inst::SmeNoop => {}
+                other => panic!("expected SmeNoop for smstart/smstop {w:#x}, got {other:?}"),
+            }
+        }
+        // mrs x0, midr_el1 = 0xd5380000 — SysReg sysreg 8 (reads 0).
+        match decode(0xd5380000) {
+            Inst::SysReg { sysreg: s, rt, read } => {
+                assert_eq!(s, 8);
+                assert_eq!(rt, 0);
+                assert!(read);
+            }
+            other => panic!("expected SysReg midr_el1, got {other:?}"),
+        }
+    }
 
     #[test]
     fn bl_opens_space_for_more() {
