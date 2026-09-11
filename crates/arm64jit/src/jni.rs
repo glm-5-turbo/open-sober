@@ -456,7 +456,11 @@ jni_stub!(jni_field_0, 0);
 extern "C" fn jni_find_class(
     _e: u64, name: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
-    cstr_handle(name) // jclass = readable, stable handle
+    let h = cstr_handle(name); // jclass = readable, stable handle
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[jni] FindClass({name:#x}) -> {h:#x}");
+    }
+    h
 }
 
 extern "C" fn jni_get_method_id(
@@ -470,7 +474,11 @@ extern "C" fn jni_get_method_id(
 extern "C" fn jni_new_string_utf(
     _e: u64, utf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
-    cstr_handle(utf) // jstring = readable UTF-8 buffer
+    let h = cstr_handle(utf); // jstring = readable UTF-8 buffer
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[jni] NewStringUTF({utf:#x}) -> {h:#x}");
+    }
+    h
 }
 
 extern "C" fn jni_get_string_utf_chars(
@@ -632,6 +640,9 @@ extern "C" fn jni_vm_getenv(
     _vm: u64, penv: u64, _version: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
     let (env, _vm) = build_jni();
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[jni] VM_GetEnv(penv={penv:#x}) writes env={env:#x}");
+    }
     if penv != 0 {
         unsafe { *(penv as *mut u64) = env };
     }
