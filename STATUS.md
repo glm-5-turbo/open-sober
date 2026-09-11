@@ -918,3 +918,13 @@ status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T11:09:44Z
 ---
+cycle: 26
+status: cycle_end
+last_agent_claim: Ad-hoc verification complete — 5/5 pass, temp script cleaned up. This is explicitly ad-hoc verification, not a canonic (rc=0)
+updated: 2026-09-11T11:23:40Z
+---
+cycle: 27
+status: cycle_end
+last_agent_claim: Guest TLS bootstrapped. libloader setup_guest_tls copies the main image's PT_TLS init into a per-thread region at TP+16 (AArch64 TCB) and tpidr_el0 is seeded from it, so local-exec/initial-exec ':tprel:' addressing reads/writes real __thread data (was the documented R_AARCH64_TLS_* gap for the main-binary case). elfjit + loader_run harness wired. Verified end-to-end no-QEMU: cross-gcc __thread fixture returns 123456804 == native oracle (qemu-aarch64 itself SIGSEGVs on the nostdlib static TLS). +libloader unit test +loader_run_thread_local_storage test. Workspace 304/0, build clean. HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
+updated: 2026-09-11T12:20:00Z
+---

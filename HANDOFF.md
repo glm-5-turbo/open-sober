@@ -4794,3 +4794,49 @@ cycle-27 close). Next high-value per RECOMMENDATION order: libloader ELF/loader
 gaps, libbadcpu ISA coverage, JNI function-table surface, then services/auth.
 HARD GATE unchanged: real Roblox boot + reproducible run log on a GPU + real
 APK/binary host (none on this VPS).
+
+---
+
+## Session (Sep 11, 2026) — guest TLS bootstrapped (R_AARCH64_TLS local-exec / main-binary case)
+
+Commit `6af3cd4` (dev), workspace **304/0** (was 302), build clean.
+
+### What landed
+- `libloader::elf::setup_guest_tls(info, path, tls_region, size) -> tpidr` (+ `tls_layout`):
+  finds the main image's `PT_TLS` (p_type 7), copies its `p_filesz` init image into
+  a per-thread region at `region + AARCH64_TCB_SIZE` (16), zero-fills `.tbss` to
+  `p_memsz`, and returns the thread pointer `tpidr = region` — the AArch64 TLS ABI:
+  the module TLS data block lives 16 bytes after TP, and local-exec/initial-exec
+  `:tprel:` addressing (`mrs xN,tpidr_el0; add x0,tp,#o`) lands on block+`o-16`.
+- `elfjit` and the `loader_run` harness now seed `CpuState.tpidr` from
+  `setup_guest_tls` instead of a bare zero-filled stack. ELFs without `PT_TLS`
+  get `tpidr = region` (byte-identical to the prior behaviour) — no regression.
+- **Verified end-to-end, no QEMU**: cross-gcc `__thread` fixture (`g_slot=7`,
+  `g_big=123456789`, `g_zero` in `.tbss`, `bump()`) through `load_elf_image →
+  setup_guest_tls → jit_run` returns **123456804** — the exact native x86-64
+  oracle. (qemu-aarch64 itself SIGSEGVs on this nostdlib static TLS image because
+  it doesn't seed PT_TLS without a dynamic loader, so qemu is not a usable oracle
+  here.) Before the seeding the region was zeroed, so every `__thread` read
+  returned 0.
+
+### Scope note (honest)
+This closes the documented "R_AARCH64_TLS_* untouched" gap for the **main-binary
+local-exec/initial-exec** case — which is exactly the shape of `libroblox.so`
+loaded as the boot image (a PIE still uses local-exec for its own `__thread`).
+The **dynamic** TLS paths (`R_AARCH64_TLS_TPREL64`/`DTPREL64` GOT slots for
+TLS referenced *across* modules, general-dynamic) only engage once the loader
+loads `DT_NEEDED` dependency modules as a multi-image process — the next
+loader frontier, and it needs a real multi-lib host to validate.
+
+### Tests added
+- `libloader elf::tests::setup_guest_tls_copies_init_and_returns_tcb_tpidr` —
+  init-image copy, TCB tpidr, `.tbss` zero-fill, tprel addressing, no-TLS fallback.
+- `arm64jit loader_run::loader_run_thread_local_storage_returns_123456804` —
+  full loader→TLS→JIT pipeline gate (skipped if cross-gcc absent).
+
+### Next (per RECOMMENDATION order)
+libbadcpu/libloader JTAG: guest **threading (clone/vfork)** is the documented
+single-threaded-boot frontier (needs a real host to validate); multi-module
+`DT_NEEDED` load for cross-module TLS + GOT/PLT within deps; broaden the
+differential fuzzer into still-uncovered NEON/by-element/`tbz` classes. HARD
+GATE unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
