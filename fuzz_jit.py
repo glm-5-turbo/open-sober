@@ -782,6 +782,36 @@ def gen_scalar_fp_sign_chain():
 
 gens += [gen_scalar_fp_sign_chain]
 
+def gen_fmadd_reduce():
+    # Scalar FP fused multiply-accumulate (fmadd/fmsub d0 = a*b+c) with a
+    # binary-exact integer-based chain. GCC's `acc += a[i]*k` and
+    # `acc = acc*f + a[i]` emit fmadd; the JIT does mul+add (two roundings) vs
+    # ARM's fused one-rounding so values are NOT bit-exact — require only the
+    # int(acc) agreement after scaling so rounding mode differences collapse.
+    n=random.choice([8,16,24])
+    k=random.choice([3,5,7,11,13,31])
+    f=random.choice([0.5,2.0,-1.5,3.0])
+    mode=random.choice(["mac","poly"])
+    if mode=="mac":
+        body=(f"    for(int i=0;i<{n};i++){{ acc = acc + (double)a[i]*{k}.0; }}\n"
+              f"    for(int i=0;i<{n};i++){{ acc = acc*{f} + (double)a[i]; }}\n")
+    else:
+        body=(f"    double x = 0.5;\n"
+              f"    for(int i=0;i<{n};i++){{ x = x*{f} + (double)a[i]*{k}.0; }}\n"
+              f"    acc = x;\n")
+    return f"""long long entry(void){{
+    volatile unsigned long long seedv = 424242ull;
+    unsigned long long x = seedv;
+    int a[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1664525ull+1013904223ull; a[i]=(int)((x>>33)^(x>>13)) - 1024; }}
+    double acc = 0.0;
+    {body}    long long r = (long long)acc;
+    return r & 0x3fffffff;
+}}
+"""
+
+gens += [gen_fmadd_reduce]
+
 def main():
     fails=0; ok=0; skip=0
     for i in range(N):
