@@ -200,6 +200,15 @@ pub fn bind_image_plt(
     const DT_PLTRELSZ: i64 = 2;
     const R_AARCH64_JUMP_SLOT: u64 = 1026;
 
+    // Ensure the hand-written host-side shims (bionic errno/strlens, the
+    // __cxa_guard*/__cxa_atexit C++ static-init glue, Android asset/looper/
+    // window stubs) are registered into the resolver before symbol scanning,
+    // so an import that names one binds to the real host shim instead of
+    // falling all the way to the NULL/0 graphics catch-all. register_* are
+    // idempotent (register_named reuses an existing slot for a given name).
+    crate::shims::register_shims();
+    crate::shims::register_cxx_shims();
+
     let host = |g: u64| -> usize { el.host_addr_of(g).expect("guest not mapped") as usize };
     #[inline]
     fn rd64(p: usize) -> u64 {

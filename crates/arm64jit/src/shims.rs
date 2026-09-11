@@ -172,6 +172,71 @@ extern "C" fn java_iap_purchase(
     0
 }
 
+// ---- __cxa_guard_acquire/release/abort (Itanium C++ static-init guards) ----
+// Roblox's FMOD/engine static init uses __cxa_guard_*; the minimal `--jni` env
+// never provided these, so the guest dispatched its static-init into `pc=0x68c7
+// 518` (a `.bss` guard) and stopped. Implement the single-threaded semantics the
+// JIT needs (this is the same class as `patch_stack_canary` — guest C++ runtime
+// glue we must supply). Guard variable is the standard byte-at-*g:
+//   acquire: if *g==0  -> *g=1, return 1 (caller runs init); else return 0 (done).
+//   release: *g=2 (init complete, no waiting needed single-threaded).
+//   abort:   *g=0 (init crashed -> reset so it retries).
+extern "C" fn cxa_guard_acquire(
+    g: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if g == 0 {
+        return 0;
+    }
+    let byte = unsafe { &mut *(g as *mut u8) };
+    if *byte == 0 {
+        *byte = 1; // "initialization in progress"
+        1 // caller must run the once-body
+    } else {
+        0 // already initialized (or in progress on another thread)
+    }
+}
+
+extern "C" fn cxa_guard_release(
+    g: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if g != 0 {
+        unsafe { *(g as *mut u8) = 2 } // complete
+    }
+    0
+}
+
+extern "C" fn cxa_guard_abort(
+    g: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if g != 0 {
+        unsafe { *(g as *mut u8) = 0 } // reset
+    }
+    0 // void
+}
+
+// ---- __cxa_atexit: register a destructor call at exit. No-op (0 = success):
+// we don't model at-exit ordering, and a dropped registered call is harmless
+// for boot (the process teardown path is RTLD/loader-owned, not guest-owned).
+extern "C" fn cxa_atexit(
+    _fn: u64, _arg: u64, _dso: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+
+/// Register all guest C++ runtime shims (__cxa_guard_*, __cxa_atexit).
+pub fn register_cxx_shims() -> usize {
+    let shims: &[(&[u8], HostCall)] = &[
+        (b"__cxa_guard_acquire\0", cxa_guard_acquire),
+        (b"__cxa_guard_release\0", cxa_guard_release),
+        (b"__cxa_guard_abort\0", cxa_guard_abort),
+        (b"__cxa_atexit\0", cxa_atexit),
+    ];
+    for (name, f) in shims {
+        crate::resolver::register_named(name, *f);
+    }
+    shims.len()
+}
+
 /// Register all host-side bionic shims; returns the number registered.
 pub fn register_shims() -> usize {
     let shims: &[(&[u8], HostCall)] = &[
@@ -274,5 +339,48 @@ mod tests {
     fn strlen_chk_measures_length() {
         let c = std::ffi::CString::new("hello").unwrap();
         assert_eq!(bionic_strlen_chk(c.as_ptr() as u64, 10, 0, 0, 0, 0, 0, 0), 5);
+    }
+
+    /// Itanium __cxa_guard_* semantics: acquire->release marks a guard as
+    /// initialized so a later acquire returns 0 (already done); abort resets it.
+    #[test]
+    fn cxa_guard_acquire_release_abort_semantics() {
+        // A guard variable in writable memory.
+        let mut g = 0u8;
+        let gp = &mut g as *mut u8 as u64;
+        // First acquire: not initialized -> return 1 (run init) and mark in-progress.
+        assert_eq!(cxa_guard_acquire(gp, 0, 0, 0, 0, 0, 0, 0), 1);
+        assert_eq!(g, 1, "in-progress marker");
+        // release completes initialization.
+        cxa_guard_release(gp, 0, 0, 0, 0, 0, 0, 0);
+        assert_eq!(g, 2, "done marker");
+        // Second acquire: already initialized -> 0.
+        assert_eq!(cxa_guard_acquire(gp, 0, 0, 0, 0, 0, 0, 0), 0);
+        assert_eq!(g, 2, "acquire does not disturb a completed guard");
+        // abort resets so the next acquire runs init again.
+        cxa_guard_abort(gp, 0, 0, 0, 0, 0, 0, 0);
+        assert_eq!(g, 0);
+        assert_eq!(cxa_guard_acquire(gp, 0, 0, 0, 0, 0, 0, 0), 1);
+        // NULL guard is safely ignored (returns 0, no fault).
+        assert_eq!(cxa_guard_acquire(0, 0, 0, 0, 0, 0, 0, 0), 0);
+        assert_eq!(cxa_atexit(0, 0, 0, 0, 0, 0, 0, 0), 0);
+    }
+
+    /// The __cxa_guard_* shims must be resolvable by name through the boot
+    /// path (register_cxx_shims -> register_named -> resolver::resolve), not
+    /// just callable directly — otherwise an import naming one never binds and
+    /// falls to the NULL/0 graphics catch-all.
+    #[test]
+    fn register_cxx_shims_are_resolvable_by_name() {
+        let n = register_cxx_shims();
+        assert!(n >= 4, "guard_acquire/release/abort + atexit registered");
+        for name in ["__cxa_guard_acquire", "__cxa_guard_release", "__cxa_guard_abort", "__cxa_atexit"] {
+            let addr = crate::resolver::resolve(name.as_bytes())
+                .unwrap_or_else(|| panic!("{name:?} not resolvable by name"));
+            assert!(
+                addr >= crate::jit::HOST_THUNK_BASE,
+                "{name:?} bound to a real host thunk"
+            );
+        }
     }
 }
