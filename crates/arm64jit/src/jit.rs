@@ -1410,6 +1410,31 @@ mod tests {
     }
 
     #[test]
+    fn sdiv_is_signed_udiv_is_unsigned_same_negative_input() {
+        // REGRESSION (Session 99): every sdiv/udiv was decoded signed=bit17==1,
+        // but bit17=0 for BOTH forms (the real discriminator is bit10: sdiv=1).
+        // The MulDiv gate (first) labeled sdiv unsigned, so `sdiv` emitted the
+        // UNSIGNED `div`: a negative dividend (w3) became huge positive ->
+        // garbage quotient (idivA -O2 battery returned 0xaaaaaa2d, wanted -35).
+        // Same negative input via the signed form must truncate toward zero;
+        // via the unsigned form it must treat w3 as 0xffffffffffffffff.
+        // sdiv w1,w3,w1 = 0x1ac10c61 ; udiv w1,w3,w1 = 0x1ac10861 ; ret
+        let mut st = CpuState::new();
+        st.x[3] = 0xffff_ffff_ffff_ff9c; // w3 = -100
+        st.x[1] = 3;
+        let code = [0x61u8, 0x0c, 0xc1, 0x1a, 0xc0, 0x03, 0x5f, 0xd6]; // sdiv w1,w3,w1; ret
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec sdiv");
+        assert_eq!(st.x[1] as u32, 0xffff_ffdf, "signed -100/3 = -33 (0xffffffdf), not unsigned-mangled");
+
+        let mut st = CpuState::new();
+        st.x[3] = 0xffff_ffff_ffff_ff9c; // as W3 reinterpreted by udiv
+        st.x[1] = 3;
+        let code = [0x61u8, 0x08, 0xc1, 0x1a, 0xc0, 0x03, 0x5f, 0xd6]; // udiv w1,w3,w1; ret
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec udiv");
+        assert_eq!(st.x[1] as u32, 0xffff_ff9c / 3, "unsigned w3/3 treats w3 as huge positive");
+    }
+
+    #[test]
     fn neg_reads_rn31_as_xzr_not_sp() {
         // Regression: `neg x6,x6` = `sub x6, xzr, x6` (0xcb0603e6) is the SHIFTED-
         // register add/sub form (bit21=0), where register 31 in the rn operand is

@@ -1254,7 +1254,7 @@ pub fn decode(insn: u32) -> Inst {
         let sf = (insn >> 31) & 1 == 1;
         let div = insn & 0x7ff0_0000 == 0x1ac0_0000;
         let signed = if div {
-            b(insn, 17, 17) == 1 // SDIV vs UDIV
+            b(insn, 10, 10) == 1 // SDIV vs UDIV: bit10=1 => SDIV (assembler-verified: sdiv w1,w3,w5=0x1ac50c61 bit10=1, udiv=0x1ac50861 bit10=0)
         } else {
             b(insn, 15, 15) == 1 // MSUB vs MADD
         };
