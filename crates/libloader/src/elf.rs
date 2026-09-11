@@ -568,6 +568,27 @@ pub fn setup_guest_tls(
     Ok(tls_region as u64) // TP = block start - TCB_SIZE
 }
 
+/// Build a fresh, process-lifetime writable per-thread guest TLS region for the
+/// loaded image and return its AArch64 thread pointer (TP) value. Unlike
+/// `setup_guest_tls` (which fills a caller-supplied region), this leaks a new
+/// region so each spawned/cloned guest thread gets its OWN TLS block with the
+/// module's PT_TLS init image copied in (the shared main-thread TCB is a single
+/// block; children need independent `__thread` data).
+///
+/// Returns `(tp, tls_region, tls_size)` so the caller can also hand the raw
+/// region to a host thunk that must write through a guest TP offset. `tp`
+/// points `AARCH64_TCB_SIZE` before the module TLS block (the block starts at
+/// `region + TCB_SIZE`), matching `setup_guest_tls`'s TP convention.
+pub fn new_per_thread_tls(
+    info: &ElfInfo,
+    path: &Path,
+    tls_size: usize,
+) -> anyhow::Result<(u64, *mut u8, usize)> {
+    let region = Box::leak(vec![0u8; tls_size].into_boxed_slice());
+    let tp = setup_guest_tls(info, path, region.as_mut_ptr(), tls_size)?;
+    Ok((tp, region.as_mut_ptr(), tls_size))
+}
+
 /// Open and parse an ELF file, returning header information.
 ///
 /// Reads the ELF header and program headers to produce an `ElfInfo`.

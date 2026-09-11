@@ -338,6 +338,11 @@ fn main() {
         TLS_SIZE,
     )
     .expect("setup_guest_tls");
+    // Publish the main thread's TLS block as the template that spawned guest
+    // threads (pthread_create/clone children) clone per-thread, so their
+    // `__thread` locals and TP-indexed tables match the main thread instead of
+    // a bare zeroed buffer.
+    arm64jit::jit::publish_guest_tls_template(tls.as_ptr() as u64, TLS_SIZE);
     println!("guest sp=0x{:x} tls(tpidr)=0x{:x}", sp, st.tpidr);
 
     // JNI boot mode: hand the guest a guest-visible JavaVM* in x0 (as the Android
@@ -359,4 +364,17 @@ fn main() {
         }
         Ok(r) => println!("JIT(no-QEMU) entry() -> {} (0x{:x})", r, r),
     }
+    // Let spawned worker guest threads (pthread_create/clone children started
+    // during boot) run to completion before the process exits, so jit_run on a
+    // detached child isn't torn down mid-translation (which surfaces as a
+    // SIGSEGV reading a freed child CpuState as 'registers'). Wait for the
+    // active-guest-thread count to return to the baseline (main only).
+    let baseline = 1;
+    for _ in 0..400 {
+        if arm64jit::jit::active_guest_threads() <= baseline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
 }

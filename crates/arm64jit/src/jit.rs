@@ -344,6 +344,39 @@ pub fn current_guest_tp() -> u64 {
     CURRENT_TP.with(|c| c.get())
 }
 
+/// Main-thread guest TLS template captured at `jit_run` setup: the raw
+/// (region_ptr, region_size) of the main image's per-thread TLS block. Spawned
+/// guest threads clone this template into their OWN leaked region so `__thread`
+/// locals (errno keys, pthread key slots, function-pointer tables indexed by
+/// TP) are seeded identically to the main thread instead of reading a bare
+/// zeroed buffer (which made a worker thread's indirect call land on a
+/// symbol-name string in `.dynstr` -> SIGSEGV on a `br`).
+pub static GUEST_TLS_TEMPLATE: Mutex<Option<(u64, usize)>> = Mutex::new(None);
+
+/// Publish the main thread's TLS region (ptr, size) as the template for child
+/// threads. Called once by the run harness right after main TLS setup.
+pub fn publish_guest_tls_template(region_ptr: u64, region_size: usize) {
+    *GUEST_TLS_TEMPLATE.lock().unwrap() = Some((region_ptr, region_size));
+}
+
+/// Build a fresh per-thread guest TLS region for a spawned/cloned guest thread,
+/// seeded from the main-thread template (PT_TLS init image). Returns the new
+/// thread's TP (== its region base), or 0 if no template was published (caller
+/// falls back to a bare buffer).
+pub fn fresh_child_tls() -> u64 {
+    let Some((tmpl_ptr, tmpl_size)) = *GUEST_TLS_TEMPLATE.lock().unwrap() else {
+        return 0;
+    };
+    // Our template region is the whole per-thread TLS block INCLUDING the 16-byte
+    // AArch64 TCB prefix (region base == TP). Clone the entire block so both the
+    // TCB and the module TLS data match the main thread per-child.
+    let new = Box::leak(vec![0u8; tmpl_size].into_boxed_slice());
+    unsafe {
+        std::ptr::copy_nonoverlapping(tmpl_ptr as *const u8, new.as_mut_ptr(), tmpl_size);
+    }
+    new.as_ptr() as u64
+}
+
 /// Set the current guest thread's TP for the duration of `jit_run`.
 fn set_current_guest_tp(tp: u64) {
     CURRENT_TP.with(|c| c.set(tp));
@@ -1083,6 +1116,13 @@ pub fn register_guest_thread(state: *mut CpuState) {
         host_tid,
         state,
     });
+}
+
+/// Number of live registered guest threads (baseline 1 = the main thread).
+/// A run harness waits for this to drop back to ~1 after `jit_run` returns so
+/// spawned worker threads finish before process teardown.
+pub fn active_guest_threads() -> usize {
+    GUEST_THREADS.lock().unwrap().len()
 }
 
 /// Is the `tgkill` target the current guest thread (`s`)? The guest's
@@ -1888,8 +1928,13 @@ pub fn spawn_pthread(start_routine: u64, arg: u64) -> i64 {
         const STACK: usize = 16 * 1024 * 1024;
         let stack = Box::leak(vec![0u8; STACK].into_boxed_slice());
         child.x[31] = stack.as_ptr() as u64 + (STACK as u64) - 16;
+        // Give the child a real per-thread guest TLS block (PT_TLS init image +
+        // TCB cloned from the main thread), not a bare zeroed buffer — otherwise
+        // `__thread` locals (pthread key slots, TP-indexed fn-pointer tables)
+        // read zeros and an indirect call can land on a symbol string (SIGSEGV).
         let tls = Box::leak(vec![0u8; 64 * 1024].into_boxed_slice());
-        child.tpidr = tls.as_ptr() as u64;
+        let tp = fresh_child_tls();
+        child.tpidr = if tp != 0 { tp } else { tls.as_ptr() as u64 };
         register_guest_thread(&mut child as *mut CpuState);
         let _ = jit_run(image, base, start_routine, &mut child as *mut CpuState);
     });
