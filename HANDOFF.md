@@ -4840,3 +4840,16 @@ single-threaded-boot frontier (needs a real host to validate); multi-module
 `DT_NEEDED` load for cross-module TLS + GOT/PLT within deps; broaden the
 differential fuzzer into still-uncovered NEON/by-element/`tbz` classes. HARD
 GATE unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
+
+### Session (Sep 11, 2026 cont.) — differential fuzzer extended: NEON by-element/tbl + bitfield-insert + tbz + fcvt classes, qemu oracle; 23 generators clean
+Commit `a733fba`. Added 5 generators for previously-uncovered ISA classes (NEON
+`vmlaq_n_f32` by-element fmla + lane ins/get + `vbsl/vext/vrev64` bitmix, 64-bit
+`bfi/bfiz`, `tbz/tbnz` bit-branches, fixed-point `fcvtzs #fbits`) and a
+64-bit-exact **qemu-aarch64 oracle fallback** (write+itoa `_start` wrapper) for
+`<arm_neon.h>` programs the host x86 gcc can't compile — the old harness hard-
+skipped them. `gen_neon_byelem` uses binary-exact lanes so FMA-vs-`mul+add` ULP
+noise doesn't read as a structural diff; removed an unavailable `vrbitq_u32`
+(only `_u8` exists) for `vrev64q_u32`. Result: full 23-generator sweep is
+**70/70 green across fresh seeds, 0 skips** (was ~14% skip). No new miscompile
+found in the covered classes — a negative result, but those classes are now
+permanent gates. Workspace unchanged (304/0; Rust untouched this commit).
