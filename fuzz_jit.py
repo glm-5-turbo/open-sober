@@ -879,6 +879,60 @@ long long entry(void){{
 
 gens += [gen_widen_mul_acc]
 
+
+
+def gen_sat_narrow():
+    # Saturating narrowing via NEON intrinsics (emits sqxtn/uqxtn/sqxtun on
+    # the JIT): vqmovn_s32 (s32->s16), vqmovn_u32 (u32->u16), vqmovun_s32
+    # (s32->u16). We store each narrowed vector to memory, then sign/zero-
+    # extend each halfword back and sum. The scalar reference clamps each
+    # 32-bit input into the dst range with the SAME rules the NEON op uses
+    # (signed-dst signed clamp, unsigned-dst unsigned clamp) and sums the
+    # identical sequence. Seed values deliberately overflow s16/u16 to force
+    # real saturation, so a clamp/width/sign bug in SaturatNarrow shows as a
+    # real oracle diff.
+    n=random.choice([8,16,32])
+    which=random.choice(["s16","u16","u16un"])
+    return f"""#include <arm_neon.h>
+long long entry(void){{
+    volatile unsigned long long seedv = 4242ull;
+    unsigned long long x = seedv;
+    int32_t raw[{n}];
+    for(int i=0;i<{n};i++){{ x=x*1664525ull+1013904223ull; raw[i]=(int32_t)(((x>>40)&0x1ffff)-65536); }}
+    int16_t out16[{n}];
+    uint16_t out_u16[{n}];
+    for(int i=0;i<{n}/4;i++){{
+        int32x4_t v = vld1q_s32(&raw[i*4]);
+        if ("{which}"=="s16") {{
+            int16x4_t nv = vqmovn_s32(v);
+            vst1_s16(&out16[i*4], nv);
+        }} else if ("{which}"=="u16") {{
+            uint16x4_t nv = vqmovn_u32(vreinterpretq_u32_s32(v));
+            vst1_u16(&out_u16[i*4], nv);
+        }} else {{
+            uint16x4_t nv = vqmovun_s32(v);
+            vst1_u16(&out_u16[i*4], nv);
+        }}
+    }}
+    long long acc=0;
+    if ("{which}"=="s16") {{
+        for(int i=0;i<{n};i++) acc += (long long)out16[i] * (1 + (i%9));
+    }} else {{
+        for(int i=0;i<{n};i++) acc += (long long)out_u16[i] * (1 + (i%9));
+    }}
+    long long ref=0;
+    for(int i=0;i<{n};i++){{
+        int32_t sv = raw[i];
+        long long v;
+        if ("{which}"=="s16") {{ long long t=sv; if(t>32767)t=32767; if(t<-32768)t=-32768; v=t; }}
+        else if ("{which}"=="u16") {{ long long t=(uint32_t)sv & 0xffffffffull; if(t>65535)t=65535; v=t; }}
+        else {{ long long t=sv; if(t>65535)t=65535; if(t<0)t=0; v=t; }}
+        ref += v * (1 + (i%9));
+    }}
+    return ((acc ^ ref) & 0x3fffffff) | 1;
+}}
+"""
+
 gens += [gen_byte_reverse_perm]
 
 def main():

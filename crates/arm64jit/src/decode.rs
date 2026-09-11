@@ -2066,7 +2066,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // esize from the MSB of immh4 (esize_bytes = 1<<(fls-1) for .4S/.2D; immh4==0
     // => 8B). shift = UInt(immh4:immb) - esize_bits (the field encodes esize+shift;
     // e.g. shl .4S #25: immh=7,immb=1 -> (7<<3)|1 = 57, esize_bits=32, shift=25).
-    if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f) && (insn & 0x0000_7000) == 0x0000_5000 {
+    if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f) && (insn & 0x0000_7000) == 0x0000_5000 && (insn & 0x8000) == 0 {
         let immh4: u32 = (insn >> 19) & 0xf;
         if immh4 == 0 {
             // 8B lanes, shift = immb
@@ -2225,7 +2225,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 2, q: (insn >> 30) & 1 == 1 };
     }
-    if (insn & 0x3f00_0c00) == 0x2e00_0800 && (insn & 0x3c00) == 0x0800 && (insn & 0x0020_0000) != 0 {
+    if (insn & 0x3f00_0c00) == 0x2e00_0800 && (insn & 0x3c00) == 0x0800 && (insn & 0x0020_0000) != 0 && (insn & 0x0000_f000) == 0 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 4, q: (insn >> 30) & 1 == 1 };
@@ -2702,10 +2702,12 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
             // MSL (mask shift left) word immediates (cmode 0xc=msl#8, 0xd=msl#16):
-            // element = (imm8 << (8*idx)) | (all-ones mask in the low shift bits).
+            // element = (imm8 << (8*idx)) | (all-ones mask in the low shift bits),
+            // INVERTED for mvni (op==1) to a 32-bit word.
             (_, 0xc) | (_, 0xd) => {
                 let sh = (((cmode & 0x1) + 1) * 8) as u32; // 8 or 16
-                let lane = ((imm8 as u64) << sh) | ((1u64 << sh) - 1);
+                let mut lane = ((imm8 as u64) << sh) | ((1u64 << sh) - 1);
+                if op == 1 { lane = (!lane) & 0xffff_ffff; }
                 let low = lane | (lane << 32);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
@@ -3887,25 +3889,28 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                                                                                 let b0s = (insn >> 24) & 0xff;
                                                                                                                                                                                                                                                                                 let b2s = (insn >> 8) & 0xff;
                                                                                                                                                                                                                                                                                 if (b0s == 0x0e || b0s == 0x2e || b0s == 0x4e || b0s == 0x6e)
-                                                                                                                                                                                                                                                                                    && (b2s == 0x28 || b2s == 0x48)
-                                                                                                                                                                                                                                                                                    && !(b0s == 0x0e && b2s == 0x28)
-                                                                                                                                                                                                                                                                                {
+                                                                                                                                                                                                                                                                                                    && ((b2s & 0xf8) == 0x28 || (b2s & 0xf8) == 0x48)
+                                                                                                                                                                                                                                                                                                    && !(b0s == 0x0e && (b2s & 0xf8) == 0x28)
+                                                                                                                                                                                                                                                                                                {
                                                                                                                                                                                                                                                                                     let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                                                                                                     let rd = (insn & 0x1f) as u8;
-                                                                                                                                                                                                                                                                                    // dst_esize from byte1 bit6 (0x21->1, 0x61->2); b1 high bit=1u -> 4
-                                                                                                                                                                                                                                                                                    let b1 = ((insn >> 16) & 0xff) as u32;
-                                                                                                                                                                                                                                                                                    let dst_esize: u8 = match (b1 >> 4) & 0xf {
-                                                                                                                                                                                                                                                                                        0x2 => 1,   // 0x21: 8b <- 8h
-                                                                                                                                                                                                                                                                                        0x6 => 2,   // 0x61: 4h <- 4s
-                                                                                                                                                                                                                                                                                        _ => 1,
-                                                                                                                                                                                                                                                                                    };
+                                                                                                                                                                                                                                                                                    // dst_esize from byte1 top-nibble: 0x2 -> 8b dst(1), 0x6 -> 4h dst(2), 0xa -> 2s dst(4)
+                                                                                                                                                                                                                                                                                                        let b1 = ((insn >> 16) & 0xff) as u32;
+                                                                                                                                                                                                                                                                                                        let dst_esize: u8 = 1u8 << (((b1 >> 4) & 0xf) >> 2).min(2); // nibble 0x2->1,0x6->2,0xa->4
                                                                                                                                                                                                                                                                                     let b1q = (b0s >> 1) & 1; // byte0 bit1 == sq (sign dst) family bit
-                                                                                                                                                                                                                                                                                    return Inst::SaturatNarrow {
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           rd, rn, dst_esize,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           src_signed: (b0s & 0x40) == 0,  // 0x0e/0x4e = signed src; 0x2e/0x6e unsigned
-                                                                                                                                                                                                                                                                                        dst_signed: b1q == 0 && (b0s & 0x20) == 0,
-                                                                                                                                                                                                                                                                                        q: (insn >> 30) & 1 == 1,
-                                                                                                                                                                                                                                                                                    };
+                                                                                                                                                                                                                                                                                                        // src_signed vs dst_signed from the U bit (bit29) and byte2:
+                                                                                                                                                                                                                                                                                                        //   sqxtn  0x0e, byte2 0x48 : dst signed,  src signed
+                                                                                                                                                                                                                                                                                                        //   uqxtn  0x2e, byte2 0x48 : dst unsigned,src unsigned
+                                                                                                                                                                                                                                                                                                        //   sqxtun 0x2e, byte2 0x28 : dst unsigned,src signed
+                                                                                                                                                                                                                                                                                                        let ubit = (b0s >> 5) & 1; // bit29 set -> unsigned-dst family (0x2e/0x6e)
+                                                                                                                                                                                                                                                                                                        let dst_signed = ubit == 0;
+                                                                                                                                                                                                                                                                                                        let src_signed = if (b2s & 0xf8) == 0x28 { true } else { ubit == 0 };
+                                                                                                                                                                                                                                                                                                        return Inst::SaturatNarrow {
+                                                                                                                                                                                                                                                                                                            rd, rn, dst_esize,
+                                                                                                                                                                                                                                                                                                            src_signed,
+                                                                                                                                                                                                                                                                                                            dst_signed,
+                                                                                                                                                                                                                                                                                                            q: (insn >> 30) & 1 == 1,
+                                                                                                                                                                                                                                                                                                        };
                                                                                                                                                                                                                                                                                 }
                                                                                                                                                                                                                                                                                 // addhn/subhn/raddhn: dst = high half of src-width sum/diff, narrowed.
                                                                                                                                                                                                                                                                                 // byte2 {0x40(hn-add),0x60(hn-sub)}; prefix 0x0e/0x2e; dst_esize=1<<bits[23:22].
@@ -5927,6 +5932,54 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x2f820020), Inst::SimdMlaEl { .. }), "int MLA-el must stay");
         // pure movi must stay VecMovi, not become a widening mul.
         assert!(matches!(decode(0x6f00e400), Inst::VecMovi { .. }), "movi v0.2d,#0 must stay");
+    }
+
+    #[test]
+    fn saturating_narrow_variants_decode_correctly() {
+        // Regression (Session 44, fuzzer-caught): SIMD sqxtn/uqxtn/sqxtun had a
+        // wrong gate (byte2 exact-match instead of masked) so the unsigned-dst
+        // family was swallowed by the rev32 gate (0x2e prefix, bit23 set) as a
+        // SimdRev, and the signed flags were misderived. Also movi-msl and
+        // mvni-msl (vector immediate MSL) were captured by the shift-immediate
+        // gate (movi converged to SimdShl). Ground truth from aarch64-gcc.
+        // (word, dst_esize, src_signed, dst_signed, q)
+        let cases: &[(u32, u8, bool, bool, bool)] = &[
+            (0x0e614800, 2, true,  true,  false), // sqxtn v.4h,v.4s
+            (0x0e214800, 1, true,  true,  false), // sqxtn v.8b,v.8h
+            (0x0ea14800, 4, true,  true,  false), // sqxtn v.2s,v.2d
+            (0x2e614800, 2, false, false, false), // uqxtn v.4h,v.4s
+            (0x2e612800, 2, true,  false, false), // sqxtun v.4h,v.4s (signed src -> unsigned dst)
+            (0x2e212800, 1, true,  false, false), // sqxtun v.8b,v.8h
+            (0x4e614800, 2, true,  true,  true),  // sqxtn2 (q upper)
+            (0x6e612800, 2, true,  false, true),  // sqxtun2
+            (0x0e614bff, 2, true,  true,  false), // real: sqxtn v31.4h,v31.4s
+            (0x2e614bff, 2, false, false, false), // real: uqxtn v31.4h,v31.4s
+            (0x2e612bff, 2, true,  false, false), // real: sqxtun v31.4h,v31.4s (byte2 0x2b)
+        ];
+        for &(word, de, ss, ds, q) in cases {
+            match decode(word) {
+                Inst::SaturatNarrow { dst_esize, src_signed, dst_signed, q: gq, .. } => {
+                    assert_eq!(dst_esize, de, "{word:#x} dst_esize");
+                    assert_eq!(src_signed, ss, "{word:#x} src_signed");
+                    assert_eq!(dst_signed, ds, "{word:#x} dst_signed");
+                    assert_eq!(gq, q, "{word:#x} q");
+                }
+                other => panic!("{word:#x} -> {other:?} (expected SaturatNarrow)"),
+            }
+        }
+        // plain xtn (not saturating, b2 0x28 with 0x0e prefix) stays xtn not sqxtun.
+        // vector-immediate msl/mvni must NOT decode as shifts.
+        assert!(matches!(decode(0x4f00d43b), Inst::VecMovi { .. }), "movi msl16");
+        match decode(0x6f07c7fc) { // mvni v.4s,#0xff,msl8  -> per-lane 0xffff0000
+            Inst::VecMovi { lo, hi, .. } => {
+                assert_eq!(lo, 0xffff_0000_ffff_0000, "mvni msl8 lo");
+                assert_eq!(hi, 0xffff_0000_ffff_0000, "mvni msl8 hi");
+            }
+            other => panic!("mvni msl8 -> {other:?}"),
+        }
+        // genuine shifts stay shifts
+        assert!(matches!(decode(0x4f2157bd), Inst::SimdShl { .. }), "shl v29.4s,#1");
+        assert!(matches!(decode(0x6f580400), Inst::SimdShr { .. }), "ushr v0.2d,#40");
     }
 
     #[test]

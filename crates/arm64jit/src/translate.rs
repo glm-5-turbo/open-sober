@@ -3768,7 +3768,9 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     let src_esize = 2 * (dst_esize as i32);
                     let lanes = if q { 16 / (dst_esize as i32) } else { 8 / (dst_esize as i32) };
-                    let maxv: i64 = if dst_esize == 2 { 0xffff } else { 0xff };
+                    let maxv: i64 = if dst_signed {
+                        if dst_esize == 2 { 0x7fff } else { 0x7f }
+                    } else if dst_esize == 2 { 0xffff } else { 0xff };
                     let minv: i64 = if dst_signed {
                         if dst_esize == 2 { -0x8000 } else { -0x80 }
                     } else { 0 };
