@@ -4711,3 +4711,16 @@ Open (deeper, still characterizing): vectorized div/multiply reduction pipeline
 (`a[i]/b[i]` -> ushr.2d + and + uzp1 + scvtf + fmla fmul fdiv) gives value
 collapse (63 vs 729251) not reproducible in minimal isolated hand-asm; next
 step is tracing that specific op mix.
+
+## Session (Sep 11, 2026) — fuzz-driven FP findings wrap
+
+Fixed 9th JIT miscompile this campaign: scalar ucvtf S-form sng flag ignored
+(commit 6a3db93). fuzz_jit gens expanded (fma-chain/128-struct/float-reduce).
+All individually-isolated SIMD/FP ops now match the qemu oracle (fdiv/fmul/fmla/
+uzp1/and/ushr/scvtf/ucvtf/movi/lane-extract). Remaining open: a specific
+multi-op vectorized div/multiply-reduction pipeline (vmult.c: `acc+=a[i]/
+b[i]+c[i]` with computed operands) shows value collapse ~63 vs 729251 that does
+NOT reproduce when the same ops are isolated; needs a JIT execution tracer to
+pin the exact guest instruction. Low smoking-gun priority: all constituent ops
+validate individually. Next sessions: add a per-instruction traced run to
+diff_battery or resolve via reducing vmult.c further.
