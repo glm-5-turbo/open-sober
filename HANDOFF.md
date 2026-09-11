@@ -4414,3 +4414,57 @@ single-precision array/matrix writes in any real graphics/audio math.
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
    the HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+
+---
+
+# Session (Sep 11, 2026) — SIMD BIF misdecoded as BSL; int64->int32 narrowing (workspace 277/0)
+
+Commit `60400f3` (dev). Opened at 275/0 (fcvtl cycle). Pushed the differential
+battery further into int64->int32 truncation pipelines and found a THIRD real
+silent miscompile in the bitwise-select family:
+
+## BIF was decoded as BSL with the opposite mask semantics
+gcc -O2 int64->int32 narrowing (with large negatives needing sign handling)
+compiles through smull/saddl/saddw + cmeq + bit/bif + uzp; through the JIT it
+returned the wrong value. Root cause: the SimdSel (BSL) decode gate required
+bit22 SET but did NOT inspect bit23, so BIF (`bit22=1,bit23=1`) was silently
+decoded as BSL (`bit22=1,bit23=0`). The three select ops are:
+- BSL = (N&M)|(D&~M);  BIT (bit22=0/bit23=1) = (N&M)|(D&~M);  BIF (bit22=1/bit23=1)
+  = (N&~M)|(D&M) -- BIT/BIF are the opposite bit-inserts.
+- Fix: SimdSel gate now requires bit23 CLEAR (BSL only); BIT/BIF fall through.
+- SimdBit gate extended to the BIF residues (0x6ee01c00/0x2ee01c00 alongside
+  0x6ea01c00/0x2ea01c00) with a `bif` flag decoded from bit22; translate emits
+  (sel&Vm)|(keep&~Vm) with (sel,keep)=(Vd,Vn) for BIF and (Vn,Vd) for BIT.
+- NOTE: the bit-vs-bif opcode discriminator is bit22 (0x0040_0000), NOT bit14
+  (a first pass used bit14 and produced wrong values; the two words differ by
+  exactly 0x00400000). The SimdBit FAMILY residues also differ by bit22, so the
+  gate set {0x6ea01c00, 0x6ee01c00, ...} is correct.
+
+## Verification
+- jit.rs `bit_vs_bif_bitwise_insert_semantics`: decode maps bit->bif:false,
+  bif->bif:true, bsl->SimdSel; exec both produce the correct DISTINCT values
+  (BIT 0x11bb33dd11ff7799, BIF 0x660066446600ee for the fixed operand set).
+  Learned en route: read ARM's Vd,Vn,Vm operand order for `bit`/`bif` (Vm is the
+  MASK); the earlier "bif returned bit's value" was a test-labels error, not a
+  translate bug.
+- diff_battery `diff_int64_to_int32_narrowing_bif`: int64->int32 and the full
+  int64->int32->short round-trip drive the bif path; jit==oracle.
+- (Surgery lesson: a bad mid-file replace during test insertion dropped two
+  pre-existing host-float-bridge tests; restored them verbatim from HEAD and
+  verified with a fn-name diff that no test was lost.)
+- `cargo build --workspace` clean; `cargo test --workspace` 277/0 (arm64jit
+  163 lib + 43 diff + 8 loader_run; libbadcpu 22; libloader 23; +others).
+
+## This session's net (commits 3718824 fcvtl + store fix, 60400f3 bif)
+Two new-ISA walls (fcvtl/fcvtn) and TWO latent silent miscompiles fixed
+(FpLdStImmWb scalar store RAX-address clobber; SIMD BIF->BSL opposite select) --
+the differential-assertion loop keeps flushing real wrong-pixel/audio bugs.
+
+## Next (ordered, no APK/GSI/GPU on this box)
+1. Keep the differential battery sweeping ISA breadth (SIMD permute/wide
+   paths, sat-ops, half-precision, -O3 reduction shapes) -- the fcvtl+bif
+   cycles prove it is the highest-leverage correctness engine available here.
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
+   the HARD GATE, blocked until a capable host + the real binary/APK (none here).
