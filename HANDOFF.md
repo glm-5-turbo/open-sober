@@ -5225,3 +5225,46 @@ to `Inst::FcsSel` and d26 updates correctly. Regression-guarded:
 HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none
 on this VPS). Next per RECOMMENDATION order: JNI fake-object backing, libbadcpu
 ISA, services/auth.
+
+## Session (cycle 35, Sep 11, 2026) — GRAPHICS TRANSLATION LAYER: egl-wrapper + glesv2-wrapper cdylibs, input-wrapper, real-EGL JIT wiring (336/0)
+Per the worker operating rules, took the graphics translation layer
+(GRAPHICS_RECOMMENDATION.md) as the highest-leverage unblocked item — built AND
+headlessly verified via Mesa llvmpipe + surfaceless EGL (no GPU needed). Commits
+6a6efd5, bcf49ed, 50f8b14:
+
+1. **`crates/egl-wrapper` + `crates/glesv2-wrapper`** — cdylibs exposing the guest's
+   exact sonames (`libEGL.so`/`libGLESv2.so`). They dlopen Mesa (`libEGL.so.1`/
+   `libGLESv2.so.2`) and forward every entry via a `dl.rs` resolver (dlsym'd addrs
+   cached once; a missing Mesa symbol aborts loudly rather than calling null). All
+   44 EGL + 142 GLES signatures transcribed EXACTLY from the system headers by
+   `gen_forward.py` (kept regenerable). `glCompressedTexImage2D`/`SubImage2D` are
+   hand-written to intercept Android compressed textures — ETC1 (0x8D64), ETC2
+   RGB/RGBA1/RGBA8, EAC R/RG signed+unsigned, ASTC (0x93B0..0x93BD), ATC — and
+   decompress to RGBA with pure-Rust `texture2ddecoder` (BGRA→RGBA swizzle), then
+   upload via the real `glTexImage2D`/`glTexSubImage2D`. Non-Android formats pass
+   through to Mesa untouched.
+2. **`crates/input-wrapper`** (GRAPHICS_RECOMMENDATION §6) — Android MotionEvent/
+   KeyEvent/action-key model + surface-agnostic `PointerTracker` (mouse→ACTION_DOWN/
+   MOVE/UP multi-touch), X11 keysym→AKEYCODE map, and a raw-X11 (pure-Rust x11rb,
+   no C toolchain) window/event pump.
+3. **In-process JIT graphics wiring** — `resolver::resolve_egl` dlopens real Mesa
+   `libEGL.so.1` RTLD_GLOBAL and binds `egl*` imports as integer-ABI `HostCall`s, so
+   the guest's EGL calls now run real Mesa instead of the NULL/0 graphics catch-all.
+   Regression drives a guest `blr` to `eglGetError` through jit_run and asserts a real
+   non-zero EGL error enum. GLES is deliberately NOT routed through the integer
+   HostCall (its float-in-xmm ABI needs a dedicated float bridge).
+
+**Permanent headless gates:** `glesv2-wrapper/tests/headless_graphics.rs` dlopens
+both .so shims and exercises a real surfaceless ES3 llvmpipe context through them
+(EGL forwards, GLES renderer string, ETC2 intercepted => GL_TEXTURE_COMPRESSED=0,
+DXT1 passthrough, eglGetProcAddress forwards). `input-wrapper/tests/xvfb_input.rs`
+spawns Xvfb and opens a mapped window through the crate, validating connect + the
+pointer→touch mapping (random-display + connect-retry for stability). Plus 6 texture
+unit, 3 input unit, 2 EGL resolver tests. Installed libegl-dev/libgles-dev/libgbm-dev/
+libwayland-dev/mesa-utils first; input deps use pure-Rust x11rb.
+
+`cargo build --workspace` clean (only the cosmetic cdylib crate-name warnings);
+`cargo test --workspace` **336/0** (was 323). HARD GATE unchanged: real Roblox boot +
+run log on a GPU/APK host (none on this VPS). Next: wire the wrapper sonames into the
+guest loader's NEEDED resolution and add a GLES float-ABI host bridge, then continue
+the ordered RECOMMENDATION list (JNI fake-object backing, libbadcpu ISA, services/auth).
