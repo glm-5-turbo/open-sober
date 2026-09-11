@@ -1742,6 +1742,115 @@ pub fn run_guest_callback(fn_addr: u64, args: [u64; 8], tpidr: u64) -> Result<u6
     Ok(st.x[0])
 }
 
+/// Probe a low RWX page (below the guest image / within ±4GB of `patch_page`) to
+/// host a code-patch thunk that ADRP must be able to reach from `patch_page`.
+/// Host callback for the TLS-block allocator's big-allocation path: return
+/// `calloc(1, x1)` (x1 = byte size, zeroed) so the unseeded MemoryPool empty
+/// free-list hands the guest a real buffer instead of NULL+abort.
+extern "C" fn mempool_calloc(
+    _a0: u64, size: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    unsafe { libc::calloc(1, size as usize) as u64 }
+}
+
+/// Route the Roblox per-thread TLS-block allocator's big-allocation path to a
+/// host `calloc`, so the unseeded-MemoryPool empty-free-list returns a real
+/// zeroed buffer instead of NULL (guest `cbz + abort`).
+///
+/// `patch_site` is a guest==host code address inside Roblox's big allocator
+/// (e.g. 0x1d9801c in v2.738.1397) whose first 8 bytes are replaced with
+/// `adrp x16, thunk ; br x16`, where `thunk` is written into a mapped gap *inside
+/// the guest image* (so the JIT dispatcher accepts the pc and translates it).
+/// The thunk does `x0 = calloc(1, x1)` via a `br` to the registered
+/// `mempool_calloc` host thunk (the dispatcher's host-call bridge runs it and
+/// resumes at x30 = the allocator's caller). This mirrors Session 17b's
+/// QEMU-path malloc-route thunk and unblocks Roblox's one-time TLS-key /
+/// thread-block init, whose arena is never seeded because the real pool-init
+/// never runs under the JIT.
+pub fn route_mempool_big_alloc_to_host(patch_site: u64, image_base: u64) -> Result<u64, String> {
+    let host_thunk = register_host_call_auto(mempool_calloc);
+    // Thunk (all instructions the JIT decodes — no literal-load):
+    //   mov x0, x1            aa0103e0     @ +0
+    //   ldr x17, [x16, #16]   f9400a11     @ +4  (x16 == thunk page, set by the
+    //                                             patch's `adrp x16, page`)
+    //   br x17                d61f0220     @ +8
+    //   <host_thunk addr, 8B>               @ +16
+    let mut thunk: [u8; 24] = [0; 24];
+    thunk[0..4].copy_from_slice(&0xaa01_03e0u32.to_le_bytes()); // mov x0,x1
+    thunk[4..8].copy_from_slice(&0xf940_0a11u32.to_le_bytes()); // ldr x17,[x16,#16]
+    thunk[8..12].copy_from_slice(&0xd61f_0220u32.to_le_bytes()); // br x17
+    thunk[16..24].copy_from_slice(&host_thunk.to_le_bytes());
+
+    // Place the thunk in the first mapped inter-segment gap of the guest image
+    // (text seg ends 0x1062d8190, next rw seg starts 0x1062dc1c0 — gap 0x4030).
+    // It must be inside [image_base, image_base+image_len) for the dispatcher's
+    // bounds check to accept the pc. 0x100000000 + 0x62d9000 lands in the gap.
+    let thunk_addr = image_base + 0x62d_9000;
+    let gap_page = thunk_addr & !0xfff;
+    unsafe {
+        // Make the gap page writable so we can plant the thunk (the JIT only
+        // reads these bytes to translate them; no host X is required).
+        if libc::mprotect(gap_page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) != 0 {
+            return Err("route_mempool_big_alloc_to_host: gap page mprotect failed".into());
+        }
+        std::ptr::copy_nonoverlapping(thunk.as_ptr(), thunk_addr as *mut u8, 24);
+    }
+
+    let patch_page = patch_site & !0xfff;
+    // adrp x16, thunk_page ; br x16. ADRP: imm=(page_delta)>>12, immlo=bits[1:0],
+    // immhi=bits[20:2]. Encoding verified against the cross-assembler (1 page
+    // ahead => 0xb0000010).
+    let pages = (thunk_addr & !0xfff).wrapping_sub(patch_page) as i64 >> 12;
+    let immlo = (pages & 3) as u32;
+    let immhi = ((pages >> 2) & 0x7ffff) as u32;
+    let adrp_enc = 0x9000_0000u32 | (immlo << 29) | (immhi << 5) | 0x10; // x16
+    let br_enc = 0xd61f_0200u32; // br x16
+    let page = patch_site & !0xfff;
+    if unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE) } != 0 {
+        return Err("route_mempool_big_alloc_to_host: mprotect patch page RW failed".into());
+    }
+    let patch = unsafe { std::slice::from_raw_parts_mut(patch_site as *mut u8, 8) };
+    patch[0..4].copy_from_slice(&adrp_enc.to_le_bytes());
+    patch[4..8].copy_from_slice(&br_enc.to_le_bytes());
+    unsafe {
+        libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC);
+    }
+    Ok(thunk_addr)
+}
+
+/// Spawn a guest thread running `start_routine(arg)` through `jit_run` on a
+/// fresh host thread — the analogue of the `clone`-child spawn
+/// (`spawn_guest_thread`) for Roblox's glibc `pthread_create`, which calls the
+/// guest start routine natively (SIGILL). The child gets its own fresh guest
+/// stack (the routine `sub sp,#0x800000` carves ~8MiB) and a fresh zeroed TLS
+/// base for `mrs tpidr_el0`. Returns a non-zero guest tid (the pthread_t).
+pub fn spawn_pthread(start_routine: u64, arg: u64) -> i64 {
+    let tid = NEXT_TID.fetch_add(1, Ordering::SeqCst);
+    let (image_addr, image_len, base) = {
+        let ctx = EXEC_CTX.lock().unwrap();
+        let ctx = ctx.as_ref().expect("spawn_pthread: no active guest image");
+        (ctx.image_addr, ctx.image_len, ctx.base)
+    };
+    if start_routine < base || start_routine - base >= image_len as u64 {
+        return (-libc::EINVAL) as i64;
+    }
+    std::thread::spawn(move || {
+        // SAFETY: image bytes are process-lifetime (mmap'd by libloader/leaked).
+        let image: &[u8] = unsafe { std::slice::from_raw_parts(image_addr as *const u8, image_len) };
+        let mut child = CpuState::new();
+        child.tid = tid;
+        child.x[0] = arg; // start_routine(arg)
+        const STACK: usize = 16 * 1024 * 1024;
+        let stack = Box::leak(vec![0u8; STACK].into_boxed_slice());
+        child.x[31] = stack.as_ptr() as u64 + (STACK as u64) - 16;
+        let tls = Box::leak(vec![0u8; 64 * 1024].into_boxed_slice());
+        child.tpidr = tls.as_ptr() as u64;
+        register_guest_thread(&mut child as *mut CpuState);
+        let _ = jit_run(image, base, start_routine, &mut child as *mut CpuState);
+    });
+    tid as i64
+}
+
 /// Translate every instruction of the guest image `image` (a full program
 /// whose AArch64 bytes start at guest address `base`) into a single host
 /// function, following branches and BL calls so any reachable code is
@@ -5978,6 +6087,24 @@ mod tests {
         let mut caller = vec![0x20u8, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x00, 0x94, 0xc0, 0x03, 0x5f, 0xd6];
         caller.extend_from_slice(&[0x20, 0x00, 0x3f, 0xd6, 0xc0, 0x03, 0x5f, 0xd6]);
         assert!(body_contains_indirect(&caller, 0, 0), "transitive bl->blr flagged");
+    }
+
+    #[test]
+    fn ldr_reg_offset_loads_full_64bit_for_high_address() {
+        // Regression: `ldr x17, [x16, #16]` must load the FULL 8-byte value.
+        // Some REX/size paths truncated a 64-bit load to its low 32 bits when
+        // the source is an unsigned-imm load away (a thunk literal exposing a
+        // 0x7f0000000008-style host address became 0x8 and br'd to 0).
+        let mut buf = [0u8; 24];
+        buf[16..24].copy_from_slice(&0x7f00_0000_0008u64.to_le_bytes());
+        buf[0..4].copy_from_slice(&0xaa01_03e0u32.to_le_bytes()); // mov x0,x1
+        buf[4..8].copy_from_slice(&0xf940_0a11u32.to_le_bytes()); // ldr x17,[x16,#16]
+        buf[8..12].copy_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        let mut st = CpuState::new();
+        st.x[0] = 0x80;
+        st.x[16] = buf.as_ptr() as u64;
+        jit_run(&buf, buf.as_ptr() as u64, buf.as_ptr() as u64, &mut st as *mut CpuState).unwrap();
+        assert_eq!(st.x[17], 0x7f00_0000_0008, "full 64-bit literal loaded");
     }
 
     #[test]

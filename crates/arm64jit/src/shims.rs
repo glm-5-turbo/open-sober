@@ -261,6 +261,38 @@ extern "C" fn bionic_pthread_once(
     0
 }
 
+/// pthread_create(thread*, attr, start_routine, arg).
+///
+/// Real glibc pthread_create calls the guest start_routine natively (SIGILL).
+/// Interpose: spawn a fresh host thread running the guest start routine through
+/// `jit_run` (per-thread guest stack + TLS), and write its guest tid as the
+/// pthread_t. Returns 0 (success).
+extern "C" fn bionic_pthread_create(
+    thread: u64, _attr: u64, start_routine: u64, arg: u64,
+    _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let tid = crate::jit::spawn_pthread(start_routine, arg);
+    if tid < 0 {
+        return tid as u64; // error (EINVAL)
+    }
+    if thread != 0 {
+        unsafe { std::ptr::write_unaligned(thread as *mut u64, tid as u64) };
+    }
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[shim] pthread_create(start_routine={start_routine:#x}, arg={arg:#x}) -> tid={tid}");
+    }
+    0
+}
+
+/// pthread_join(t, retval): return 0 immediately. The guest worker threads we
+/// spawn via `spawn_pthread` run to completion independently; a join is
+/// fire-and-forget for boot (the retval pointer is left untouched).
+extern "C" fn bionic_pthread_join(
+    _t: u64, _retval: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+
 /// Register all guest C++ runtime shims (__cxa_guard_*, __cxa_atexit).
 pub fn register_cxx_shims() -> usize {
     let shims: &[(&[u8], HostCall)] = &[
@@ -269,6 +301,8 @@ pub fn register_cxx_shims() -> usize {
         (b"__cxa_guard_abort\0", cxa_guard_abort),
         (b"__cxa_atexit\0", cxa_atexit),
         (b"pthread_once\0", bionic_pthread_once),
+        (b"pthread_create\0", bionic_pthread_create),
+        (b"pthread_join\0", bionic_pthread_join),
     ];
     for (name, f) in shims {
         crate::resolver::register_named(name, *f);

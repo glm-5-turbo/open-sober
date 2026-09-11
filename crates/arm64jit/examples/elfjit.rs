@@ -26,18 +26,18 @@ unsafe fn install_fault_debug() {
             let uc = ctx as *const libc::ucontext_t;
             let rbx = (*uc).uc_mcontext.gregs[libc::REG_RBX as usize];
             let rip = (*uc).uc_mcontext.gregs[libc::REG_RIP as usize];
-            let pc = *(rbx.wrapping_add(256) as *const u64);
-            let x0 = *(rbx as *const u64);
-            let x1 = *(rbx.wrapping_add(8) as *const u64);
-            let x2 = *(rbx.wrapping_add(16) as *const u64);
-            let x3 = *(rbx.wrapping_add(24) as *const u64);
-            let x4 = *(rbx.wrapping_add(32) as *const u64);
-            let x5 = *(rbx.wrapping_add(40) as *const u64);
-            let x6 = *(rbx.wrapping_add(48) as *const u64);
-            let x7 = *(rbx.wrapping_add(56) as *const u64);
-            let x8 = *(rbx.wrapping_add(64) as *const u64);
-            let x9 = *(rbx.wrapping_add(72) as *const u64);
-            let sp = *(rbx.wrapping_add(248) as *const u64);
+            let pc = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(256) as *const u64) } else { 0 };
+            let x0 = if (rbx as usize) & 7 == 0 { *(rbx as *const u64) } else { 0 };
+            let x1 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(8) as *const u64) } else { 0 };
+            let x2 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(16) as *const u64) } else { 0 };
+            let x3 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(24) as *const u64) } else { 0 };
+            let x4 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(32) as *const u64) } else { 0 };
+            let x5 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(40) as *const u64) } else { 0 };
+            let x6 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(48) as *const u64) } else { 0 };
+            let x7 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(56) as *const u64) } else { 0 };
+            let x8 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(64) as *const u64) } else { 0 };
+            let x9 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(72) as *const u64) } else { 0 };
+            let sp = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(248) as *const u64) } else { 0 };
             let fault = (*info).si_addr() as u64;
             // Dump the raw host bytes around the faulting translated x86 so the
             // memory-op (e.g. a `mov rax,[rax+0x30]` = guest `ldr x8,[x8,#48]`)
@@ -45,18 +45,19 @@ unsafe fn install_fault_debug() {
             let mut raw = [0u8; 48];
             std::ptr::copy_nonoverlapping(rip.wrapping_sub(24) as *const u8, raw.as_mut_ptr(), 48);
             let hex = raw.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-            let x10 = *(rbx.wrapping_add(80) as *const u64);
-            let x19 = *(rbx.wrapping_add(152) as *const u64);
-            let x20 = *(rbx.wrapping_add(160) as *const u64);
-            let x21 = *(rbx.wrapping_add(168) as *const u64);
-            let x22 = *(rbx.wrapping_add(176) as *const u64);
-            let x23 = *(rbx.wrapping_add(184) as *const u64);
-            let x28 = *(rbx.wrapping_add(224) as *const u64);
-            let x29 = *(rbx.wrapping_add(232) as *const u64);
-            let x30 = *(rbx.wrapping_add(240) as *const u64);
+            let x10 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(80) as *const u64) } else { 0 };
+            let x19 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(152) as *const u64) } else { 0 };
+            let x20 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(160) as *const u64) } else { 0 };
+            let x21 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(168) as *const u64) } else { 0 };
+            let x22 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(176) as *const u64) } else { 0 };
+            let x23 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(184) as *const u64) } else { 0 };
+            let x28 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(224) as *const u64) } else { 0 };
+            let x29 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(232) as *const u64) } else { 0 };
+            let x30 = if (rbx as usize) & 7 == 0 { *(rbx.wrapping_add(240) as *const u64) } else { 0 };
             let name = if sig == libc::SIGSEGV { "SIGSEGV" } else if sig == libc::SIGILL { "SIGILL" } else { "SIGFAULT" };
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) };
             let s = format!(
-                "\n[{name}] fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x}\n  raw[]= {hex}\n"
+                "\n[{name}] tid={tid} fault={fault:#x} rip={rip:#x} guestpc={pc:#x}\n  x0={x0:#x} x1={x1:#x} x2={x2:#x} x3={x3:#x} x4={x4:#x}\n  x5={x5:#x} x6={x6:#x} x7={x7:#x} x8={x8:#x} x9={x9:#x} sp={sp:#x}\n  x10={x10:#x} x19={x19:#x} x20={x20:#x} x21={x21:#x} x22={x22:#x}\n  x23={x23:#x} x28={x28:#x} x29={x29:#x} lr(x30)={x30:#x}\n  raw[]= {hex}\n"
             );
             let b = s.as_bytes();
             libc::write(2, b.as_ptr() as *const libc::c_void, b.len());
@@ -91,6 +92,20 @@ fn main() {
         if nbound > 0 {
             println!("PLT imports bound: {nbound} to host thunks ({} unbound)", nunresolved);
         }
+
+    // Route the TLS-block allocator's big-allocation path to host calloc so the
+    // unseeded MemoryPool empty-free-list returns a real buffer instead of a
+    // NULL+abort. Site 0x1d9801c is the big allocator of Roblox v2.738.1397's
+    // per-thread TLS block (reachable from 0x1d96a40's empty free-list tail).
+    match arm64jit::jit::route_mempool_big_alloc_to_host(el.guest_of(0x1d9801c), 0x1_0000_0000) {
+        Ok(tp) => {
+            println!("[mempool] big-alloc 0x1d9801c routed to host calloc (thunk @ {tp:#x})");
+            let p = tp as *const u8;
+            let hex: Vec<String> = (0..20).map(|i| unsafe { format!("{:02x}", *p.add(i)) }).collect();
+            println!("[mempool] thunk bytes: {} (JIT-readable via guest image)", hex.join(" "));
+        }
+        Err(e) => println!("[mempool] warn: big-alloc patch skipped: {e}"),
+    }
 
     // Guest entry: the ELF's own e_entry (already relocated to guest space by
     // load_elf_image) unless a link-time address is supplied, in which case we
