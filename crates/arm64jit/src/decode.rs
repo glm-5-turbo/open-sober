@@ -474,6 +474,12 @@ pub enum Inst {
     // real ops (orr16 0x4ea41c40, mul 0x0ea09c00, InsDv1D0 0x4e18400) verified
     // not to fall under this mask.
     SimdLaneGp { rd: u8, rn: u8, esize: u8, index: u8, sign: bool, wide: bool },
+    // GPR->vector-element insert: `ins/mov Vd.T[index], Rn` (the reverse of
+    // SimdLaneGp). Same gate residue 0x..00_0c00, but bit13 is CLEAR (extract
+    // smov/umov has bit13 SET). copies esize bytes of GPR rn into Vd at byte
+    // offset index*esize. This was previously mis-decoded as SimdLaneGp
+    // (a register extract), silently corrupting a GPR and never writing Vd.
+    InsGp { rd: u8, rn: u8, esize: u8, index: u8 },
                            // ---- bitfield (UBFM/SBFM): decoded to the lsr/lsl/asr and extraction aliases ----
            BitField {
         rd: u8,
@@ -1171,6 +1177,45 @@ pub fn decode(insn: u32) -> Inst {
             sign: ((insn >> 29) & 1) == 0,
             esrc,
         };
+    }
+
+    // ---- SIMD lane ops: element extract to GPR vs GPR->element insert ----
+    // Gate (insn & 0xffe0_0c00) in {0x0e000c00 (Wd dest), 0x4e000c00 (Xd dest)}.
+    // This is placed BEFORE the broad vector-logical (AND/ORR/BIC) and
+    // saturating-add (sqadd/sqsub) gates: INS/SMOV/UMOV share those bit fields,
+    // so a loose 0x1c00/0x0c-0x2c byte gate would swallow them (objdump verified
+    // `mov v0.s[0],w1` = 0x4e041c20 wrongly decoded as AND, `smov x2` = 0x4e042c02
+    // as SQSUB, `smov x6,v0.h[2]` = 0x4e0a2c06 as SQSUB). The opcode field
+    // bits[13:12] discriminates the class (verified against objdump ground truth):
+    //   bit13=1 => vector->GPR extract (umov=11/smov=10: sign = bit12 clear)
+    //   bit13=0, bit12=1 => GPR->vector insert (ins/mov Vd.T[idx], Rn)
+    //   bit13=0, bit12=0 => dup from GPR (falls through to the SimdDupGp gate)
+    // esize from imm5 trailing-zeros: p=ctz(imm5)+1 => esize=1<<(p-1); index = imm5>>p.
+    // Verified disjoint from every legitimate logical/sat/uaddl encoding
+    // (and/orr/eor/bic/sqadd/sqsub/uaddl all give 0x..2x0c00 residue, not
+    // {0x0e000c00,0x4e000c00}) and from dup (handled below by bit12==0 fall-through).
+    {
+        let gt = insn & 0xffe0_0c00;
+        if gt == 0x0e00_0c00 || gt == 0x4e00_0c00 {
+            let imm5 = (insn >> 16) & 0x1f;
+            if imm5 != 0 {
+                let p = 1u32 + imm5.trailing_zeros();
+                let esize = (1u8 << (p - 1)) as u8; // 1,2,4,8
+                let index = (imm5 >> p) as u8;
+                let rn = ((insn >> 5) & 0x1f) as u8;
+                let rd = (insn & 0x1f) as u8;
+                if (insn & 0x2000) != 0 {
+                    // ---- vector->GPR extract (umov/smov/mov, any element size) ----
+                    let sign = (insn & 0x1000) == 0; // SMOV when bit12 clear
+                    let wide = gt == 0x4e00_0c00;
+                    return Inst::SimdLaneGp { rd, rn, esize, index, sign, wide };
+                } else if (insn & 0x1000) != 0 {
+                    // ---- GPR->vector insert (ins/mov Vd.T[idx], Rn) ----
+                    return Inst::InsGp { rd, rn, esize, index };
+                }
+                // else bit13==0 && bit12==0: dup-from-GPR; handled by SimdDupGp below.
+            }
+        }
     }
 
     // ---- SIMD vector bitwise AND/ORR/BIC (Vd.T = Vn.T op Vm.T) ----
@@ -2477,30 +2522,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                 }
                                                                                                             }
                                                                                                         }
-                                                                                                        // ---- SIMD lane extract to GPR: mov/umov/smov Wd,Xd, Vn.T[idx] ----
-                                                                                                        // Gate (insn & 0xffe0_0c00) in {0x0e000c00 (Wd dest), 0x4e000c00 (Xd dest)}.
-                                                                                                            // esize from imm5 trailing-zeros: p=ctz(imm5)+1 => esize=1<<(p-1);
-                                                                                                            // index = imm5 >> p. sign flag = bit12 clear (SMOV). Verified disjoint from
-                                                                                                            // orr16 (0x4ea41c40), mul (0x0ea09c00), cmhi, bit, InsDv1D0 (0x4e18400),
-                                                                                                            // dup, ucvtf, and the add lane form (they don't mask to the 0x0c00 residue).
-                                                                                                            {
-                                                                                                                let gt = insn & 0xffe0_0c00;
-                                                                                                                if (gt == 0x0e00_0c00 || gt == 0x4e00_0c00) {
-                                                                                                                    let imm5 = (insn >> 16) & 0x1f;
-                                                                                                                    let p = 1u32 + imm5.trailing_zeros();
-                                                                                                                    let esize = (1u8 << (p - 1)) as u8; // 1,2,4,8
-                                                                                                                    if esize == 4 || esize == 8 {
-                                                                                                                        let index = (imm5 >> p) as u8;
-                                                                                                                        let wide = gt == 0x4e00_0c00;
-                                                                                                                        // sign (SMOV) when bit12 clear (umov has it set).
-                                                                                                                        let sign = (insn & 0x1000) == 0;
-                                                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                        let rd = (insn & 0x1f) as u8;
-                                                                                                                        return Inst::SimdLaneGp { rd, rn, esize, index, sign, wide };
-                                                                                                                    }
-                                                                                                                }
-                                                                                                            }
-                                                                                                            // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
+                                                                                                                                                                                                                    // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {
                                                                                                             0x6e60_fc00 => Some(0), // fdiv
