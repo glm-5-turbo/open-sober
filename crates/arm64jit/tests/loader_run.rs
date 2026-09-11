@@ -326,3 +326,19 @@ fn loader_run_shared_glob_dat_and_abs64_returns_37() {
     }
     let _ = std::fs::remove_dir_all(&wd);
 }
+#[test]
+fn loader_run_asymmetric_logic_imm_mask_returns_correct() {
+    // End-to-end gate for the LogicImm DecodeBitMasks rotate-RIGHT fix.
+    // `volatile` prevents gcc constant-folding, so it emits a real
+    // `and x0, x0, #0xffffffff80000001` (0x92618400) on a runtime value — a
+    // rotation-ASYMMETRIC logical-immediate mask that the old left-rotate
+    // silently miscompiled. Runs the full loader->bind->jit_run pipeline.
+    // Correct mask & 1234 = 0 (1234 is even, bits31..63 clear). The OLD
+    // left-rotate decoded 0xfffffffe00000007, which keeps bit1 -> 2. So a
+    // regression returns 2 instead of 0.
+    assert_runs(
+        "asymmask",
+        "unsigned long long entry(void){ volatile unsigned long long x = 1234; return (x & 0xffffffff80000001ULL); }\n",
+        0,
+    );
+}
