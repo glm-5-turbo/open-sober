@@ -631,6 +631,8 @@ fn run_chain(
     let (tp, tls_offsets) = libloader::deps::setup_chain_tls(&chain, tls.as_ptr() as *mut u8, 64 * 1024)
         .map_err(|e| format!("setup_chain_tls: {e:#}"))?;
     arm64jit::plt::bind_chain_tls(&refs, &tls_offsets);
+    // General-dynamic `__tls_get_addr` needs TP + the chain offsets at runtime.
+    arm64jit::plt::set_chain_tls(tp, tls_offsets);
 
     let main = chain.main();
     let base = chain.base();
@@ -795,7 +797,14 @@ fn compile_dep(workdir: &std::path::Path, name: &str, src: &str, need: Option<&s
 /// `mrs tpidr_el0`:gottprel (initial-exec) and the TLSDESC descriptor calls are
 /// exercised depending on `tls_flags` (GCC 13+ defaults to TLSDESC even for
 /// `-ftls-model=global-dynamic`).
-fn run_tls_chain_test(tag: &str, dep_src: &str, main_src: &str, tls_flags: &[&str], expected: u64) {
+fn run_tls_chain_test(
+    tag: &str,
+    dep_src: &str,
+    main_src: &str,
+    tls_flags: &[&str],
+    expect_reloc: &str,
+    expected: u64,
+) {
     if cross_gcc().is_none() {
         eprintln!("skipping {tag}: aarch64-linux-gnu-gcc not available");
         return;
@@ -844,17 +853,10 @@ fn run_tls_chain_test(tag: &str, dep_src: &str, main_src: &str, tls_flags: &[&st
         .output()
         .unwrap();
     let rel = String::from_utf8_lossy(&rel.stdout);
-    if tls_flags.contains(&"-ftls-model=initial-exec") {
-        assert!(
-            rel.contains("R_AARCH64_TLS_TPREL64"),
-            "dep should have an initial-exec TPREL64 reloc:\n{rel}"
-        );
-    } else {
-        assert!(
-            rel.contains("R_AARCH64_TLSDESC"),
-            "dep should have a TLSDESC reloc:\n{rel}"
-        );
-    }
+    assert!(
+        rel.contains(expect_reloc),
+        "dep should carry a {expect_reloc} reloc:\n{rel}"
+    );
 
     let search = vec![wd.clone()];
     let chain = libloader::deps::load_elf_with_deps(&main_so, &search)
@@ -898,6 +900,7 @@ fn loader_run_chain_dep_tls_tlsdesc_returns_1007() {
         "extern int dep_getx(void); extern long long dep_gety(void);\n\
          int entry(void){ return dep_getx() + (int)dep_gety(); }\n",
         &[],
+        "R_AARCH64_TLSDESC",
         1007,
     );
 }
@@ -917,7 +920,35 @@ fn loader_run_chain_dep_tls_initial_exec_returns_53() {
         "extern int dep_getx(void); extern long long dep_gety(void);\n\
          int entry(void){ return dep_getx() * (int)dep_gety() + 3; }\n",
         &["-ftls-model=initial-exec"],
+        "R_AARCH64_TLS_TPREL64",
         53,
+    );
+}
+
+#[test]
+fn loader_run_chain_dep_tls_global_dynamic_returns_403() {
+    // Classic general-dynamic TLS via `__tls_get_addr(&tls_index)` — forced by
+    // `-mtls-dialect=trad -ftls-model=global-dynamic` because GCC 13+ defaults
+    // to TLSDESC. The dep's `dep_x`/`dep_y` access goes through
+    // `__tls_get_addr@plt` with a 16-byte GOT `tls_index` holding the module id
+    // (R_AARCH64_TLS_DTPMOD64, 1028) and the block offset
+    // (R_AARCH64_TLS_DTPREL64, 1029). bind_chain_tls writes both; the
+    // `__tls_get_addr` JUMP_SLOT binds to the host TLS resolver (via
+    // ensure_tls_get_addr) which returns TP + offsets[module] + offset using
+    // the chain state set by run_chain. entry = dep_getx() (3) + dep_gety()
+    // (400) = 403. Before this slice the JUMP_SLOT fell to the NULL catch-all
+    // and the guest called garbage.
+    run_tls_chain_test(
+        "chaintls_gd",
+        "__thread int dep_x = 3;\n\
+         __thread long long dep_y = 400;\n\
+         int dep_getx(void){ return dep_x; }\n\
+         long long dep_gety(void){ return dep_y; }\n",
+        "extern int dep_getx(void); extern long long dep_gety(void);\n\
+         int entry(void){ return dep_getx() + (int)dep_gety(); }\n",
+        &["-mtls-dialect=trad", "-ftls-model=global-dynamic"],
+        "R_AARCH64_TLS_DTPMOD64",
+        403,
     );
 }
     // Transitive DT_NEEDED closure: a NEW test header below.

@@ -8,7 +8,7 @@
 //! x86-64 routine (or a benign graphics/audio/media fallback stub).
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use libloader::elf::LoadedElf;
 
@@ -209,6 +209,9 @@ pub fn bind_image_plt(
     // idempotent (register_named reuses an existing slot for a given name).
     crate::shims::register_shims();
     crate::shims::register_cxx_shims();
+    // General-dynamic deps import `__tls_get_addr`; bind it to the host TLS
+    // resolver so the JUMP_SLOT doesn't fall to the NULL/0 catch-all.
+    ensure_tls_get_addr();
 
     let host = |g: u64| -> usize { el.host_addr_of(g).expect("guest not mapped") as usize };
     #[inline]
@@ -670,6 +673,60 @@ fn tlsdesc_resolver_addr() -> u64 {
     *RES.get_or_init(|| crate::jit::register_host_call_auto(tlsdesc_resolver))
 }
 
+/// Process-wide TLS runtime state the classic general-dynamic
+/// `__tls_get_addr(&tls_index{module, offset})` host call needs: the thread
+/// pointer TP and each chain module's TP-relative block offset. Single-threaded
+/// JIT, set once by `set_chain_tls` before `jit_run`.
+static TLS_CHAIN: Mutex<Option<(u64, Vec<u64>)>> = Mutex::new(None);
+
+/// Record the per-thread TLS base (`TP`, the value `mrs tpidr_el0` yields) and
+/// each chain module's TP-relative TLS-block offset so the `__tls_get_addr`
+/// host call can resolve `{module, offset}` → concrete guest address.
+pub fn set_chain_tls(tp: u64, offsets: Vec<u64>) {
+    *TLS_CHAIN.lock().unwrap() = Some((tp, offsets));
+}
+
+/// General-dynamic `__tls_get_addr` host resolver: `a0` = guest address of the
+/// GOT `tls_index` struct `{ u64 module_id, u64 offset }`. Returns `TP +
+/// offsets[module] + offset`, the address of the TLS variable (== what the
+/// guest then loads/stores). Only reachable when a dependency was built with
+/// `-mtls-dialect=trad -ftls-model=global-dynamic` (GCC 13+ defaults to TLSDESC,
+/// which needs no `__tls_get_addr`).
+extern "C" fn host_tls_get_addr(
+    a0: u64,
+    _a1: u64,
+    _a2: u64,
+    _a3: u64,
+    _a4: u64,
+    _a5: u64,
+    _a6: u64,
+    _a7: u64,
+) -> u64 {
+    // `tls_index` is 16 bytes of GOT: word[0] = module id, word[1] = offset
+    // within that module's TLS block (both link-time; `bind_chain_tls` wrote
+    // the module id and the DTPREL slot). Guest == host under libloader.
+    let module = unsafe { std::ptr::read_unaligned(a0 as *const u64) };
+    let offset = unsafe { std::ptr::read_unaligned((a0 + 8) as *const u64) };
+    let guard = TLS_CHAIN.lock().unwrap();
+    let (tp, offsets) = guard
+        .as_ref()
+        .expect("set_chain_tls must be called before __tls_get_addr");
+    let block = offsets.get(module as usize).copied().unwrap_or(0);
+    tp + block + offset
+}
+
+/// Register the `__tls_get_addr` host call by name exactly once so
+/// `bind_image_plt` binds a dependency's `__tls_get_addr@plt` JUMP_SLOT to it
+/// (otherwise it falls to the NULL/0 catch-all and the guest calls garbage).
+fn ensure_tls_get_addr() {
+    static REG: OnceLock<u64> = OnceLock::new();
+    REG.get_or_init(|| {
+        let addr = crate::jit::register_host_call_auto(host_tls_get_addr);
+        crate::resolver::register_named(b"__tls_get_addr", host_tls_get_addr);
+        addr
+    });
+}
+
 /// Bind AArch64 TLS GOT relocations for a whole `DT_NEEDED` module chain.
 ///
 /// Modern GCC emits one of two models for `__thread` in a `-shared -fPIC`
@@ -703,11 +760,14 @@ pub fn bind_chain_tls(els: &[&LoadedElf], offsets: &[u64]) -> usize {
     const DT_PLTRELSZ: i64 = 2;
     const R_AARCH64_TLS_TPREL64: u64 = 1030;
     const R_AARCH64_TLSDESC: u64 = 1031;
+    const R_AARCH64_TLS_DTPMOD64: u64 = 1028;
+    const R_AARCH64_TLS_DTPREL64: u64 = 1029;
 
     let resolver_addr = tlsdesc_resolver_addr();
+    ensure_tls_get_addr();
     let mut bound = 0usize;
 
-    for (el, &off) in els.iter().zip(offsets) {
+    for (mi, (el, &off)) in els.iter().zip(offsets).enumerate() {
         let host = |g: u64| -> usize { el.host_addr_of(g).expect("guest not mapped") as usize };
         #[inline]
         fn rd64(p: usize) -> u64 {
@@ -799,7 +859,11 @@ pub fn bind_chain_tls(els: &[&LoadedElf], offsets: &[u64]) -> usize {
                 let r_info = rd64(r + 8);
                 let r_addend = rd64(r + 16);
                 let stype = (r_info & 0xffff_ffff) as u64;
-                if stype != R_AARCH64_TLS_TPREL64 && stype != R_AARCH64_TLSDESC {
+                if stype != R_AARCH64_TLS_TPREL64
+                    && stype != R_AARCH64_TLSDESC
+                    && stype != R_AARCH64_TLS_DTPMOD64
+                    && stype != R_AARCH64_TLS_DTPREL64
+                {
                     continue;
                 }
                 // TP-relative offset = module block offset + symbol's offset within
@@ -812,17 +876,24 @@ pub fn bind_chain_tls(els: &[&LoadedElf], offsets: &[u64]) -> usize {
                 } else {
                     0
                 };
-                let tprel = off
-                    .wrapping_add(st_value)
-                    .wrapping_add(r_addend as u64);
+                let sym_off = st_value.wrapping_add(r_addend as u64);
+                let tprel = off.wrapping_add(sym_off);
                 let slot = host(el.guest_of(r_offset));
-                if stype == R_AARCH64_TLS_TPREL64 {
-                    wr64(slot, tprel);
-                } else {
-                    // 16-byte TLS descriptor: slot[0] = resolver fn (guest-thunk
-                    // addr), slot[1] = resolved TP-relative offset.
-                    wr64(slot, resolver_addr);
-                    wr64(slot + 8, tprel);
+                match stype {
+                    // initial-exec: GOT slot = the symbol's TP-relative offset.
+                    R_AARCH64_TLS_TPREL64 => wr64(slot, tprel),
+                    // TLSDESC: 16-byte descriptor {resolver, tprel} at the slot.
+                    R_AARCH64_TLSDESC => {
+                        wr64(slot, resolver_addr);
+                        wr64(slot + 8, tprel);
+                    }
+                    // general-dynamic `tls_index` word[0] = defining module's
+                    // chain index (used by __tls_get_addr to pick the block).
+                    R_AARCH64_TLS_DTPMOD64 => wr64(slot, mi as u64),
+                    // general-dynamic `tls_index` word[1] = offset within that
+                    // module's block (__tls_get_addr adds it to the block base).
+                    R_AARCH64_TLS_DTPREL64 => wr64(slot, sym_off),
+                    _ => unreachable!(),
                 }
                 bound += 1;
             }
