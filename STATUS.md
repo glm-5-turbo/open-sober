@@ -27,7 +27,10 @@ the guest would fault on its first cross-module import. Committed `8f3c48b`:
 Verified end-to-end with a cross-gcc `-shared` fixture (commit `040c3bf`):
 libmain.so DT_NEEDs libdep.so; entry calls dep_val() (cross-module JUMP_SLOT)
 and reads dep_global (cross-module GLOB_DAT) → returns 82 from the dep's guest
-address through the shared slice. cargo test --workspace 310/0 (was 309).
+address through the shared slice. + a transitive 2-level closure fixture
+(main→dep2→dep3, all three mapped contiguously, dep2's own JUMP_SLOT for
+dep3_val bound through the scope) → returns 44. Both are permanent loader_run
+gates. cargo test --workspace 311/0 (was 309).
 HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
 
 ## Cycle (Sep 11, 2026) — randomized differential fuzz: 8 JIT correctness fixes (workspace 289/0, ~500 cases)

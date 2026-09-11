@@ -684,3 +684,80 @@ fn loader_run_needed_dep_cross_module_call_returns_82() {
     eprintln!("\x1b[32mPASS\x1b[0m chain: entry() -> 82 via DT_NEEDED cross-module JUMP_SLOT + GLOB_DAT");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// Like `compile_shared` but for a dependency library: `-shared -fPIC
+/// -nostdlib`, no entry, with a NEEDED link to `lib<need>.so` in `workdir`.
+fn compile_dep(workdir: &std::path::Path, name: &str, src: &str, need: Option<&str>) -> PathBuf {
+    let c = workdir.join(format!("{name}.c"));
+    std::fs::write(&c, src).unwrap();
+    let so = workdir.join(format!("lib{name}.so"));
+    let mut cmd = Command::new("aarch64-linux-gnu-gcc");
+    cmd.args(["-shared", "-fPIC", "-nostdlib", "-Wl,--no-as-needed", "-Wl,-e,entry"]);
+    if let Some(n) = need {
+        cmd.arg("-L").arg(workdir).arg("-l").arg(n);
+    }
+    cmd.arg(&c).arg("-o").arg(&so);
+    let out = cmd.output().unwrap_or_else(|e| panic!("failed to run cross-gcc ({name}): {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc ({name}) failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    so
+}
+
+#[test]
+fn loader_run_deep_dep_chain_transitive_returns_44() {
+    // Transitive DT_NEEDED closure: libmain NEEDs libdep2, which NEEDs libdep3.
+    // entry() → dep2_val() → dep3_val(): the loader must recursively resolve
+    // BOTH edges, map all three modules contiguously, and bind libdep2's import
+    // of dep3_val (its OWN NEEDED, one level down) through the scope to
+    // libdep3's guest address, in addition to binding main → libdep2.
+    //   dep3_val() = 30 ; dep2_val() = dep3_val() + 12 = 42 ; entry = 42 + 2.
+    if cross_gcc().is_none() {
+        eprintln!("skipping loader_run_deep_dep_chain: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir("chain2");
+
+    compile_dep(&wd, "dep3", "int dep3_val(void){ return 30; }\n", None);
+    compile_dep(
+        &wd,
+        "dep2",
+        "extern int dep3_val(void); int dep2_val(void){ return dep3_val() + 12; }\n",
+        Some("dep3"),
+    );
+    let main_so = compile_dep(
+        &wd,
+        "main",
+        "extern int dep2_val(void); int entry(void){ return dep2_val() + 2; }\n",
+        Some("dep2"),
+    );
+
+    let search = vec![wd.clone()];
+    let chain = libloader::deps::load_elf_with_deps(&main_so, &search)
+        .unwrap_or_else(|e| panic!("load_elf_with_deps: {e:#}"));
+    assert_eq!(
+        chain.entries.len(),
+        3,
+        "expected main + 2 transitive dependencies, got {}",
+        chain.entries.len()
+    );
+    // Each module at a strictly increasing guest base (contiguous chain).
+    let bases: Vec<u64> = chain.entries.iter().map(|e| e.base_addr as u64).collect();
+    assert!(
+        bases.windows(2).all(|w| w[1] > w[0]),
+        "modules should map at increasing bases: {bases:#x?}"
+    );
+
+    match run_chain(&chain, &main_so) {
+        Ok(v) => assert_eq!(
+            v, 44,
+            "chain2: entry() -> {v}, expected 44 (transitive dep binding failed?)"
+        ),
+        Err(e) => panic!("chain2: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m chain2: entry() -> 44 via 2-level transitive DT_NEEDED closure");
+    let _ = std::fs::remove_dir_all(&wd);
+}
