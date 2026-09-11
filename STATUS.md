@@ -1052,3 +1052,24 @@ last_agent_claim: JNI fake-object backing + full JNINativeInterface surface at o
   Next per RECOMMENDATION order: libbadcpu ISA gaps, services/auth.
 updated: 2026-09-11T00:00:00Z
 ---
+---
+cycle: 37b
+status: committed (tests green)
+last_agent_claim: Boot-critical syscall gaps closed in the JIT guest_svc
+  (commit ae4de9c). sysinfo(179)/statx(291)/get_robust_list(100)/restart_syscall(128)
+  fell to -ENOSYS; now routed. sysinfo fills the guest asm-generic 64-bit struct
+  with REAL host values (game engine sizes worker-pool heaps from totalram/freeram;
+  layout byte-identical on aarch64/x86-64; NO forging per the record). statx is a
+  raw SYS_statx forward (struct asm-generic, byte-identical, guest buffer written
+  in place). get_robust_list reports a valid empty robust-futex list so glibc
+  pthread init proceeds. restart_syscall returns -EINTR. +guest_svc_sysinfo_statx_robust_restart_roundtrip
+  regression. ALSO this cycle: 3 differential-fuzz campaigns (14 fresh seeds x 100
+  = ~1500 cases) all clean, 0 failures — the JIT FP/SIMD/bitfield/long-loop coverage
+  holds on the 28-generator battery. Workspace cargo test --workspace 352/0.
+  HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
+  Candidate next ordered items (assessed, not blocked by facts on this box):
+  arm64jit guest thread model (clone 220 -> host thread with post-svc continuation;
+    the last large JIT capability, but a big multi-session subsystem). Per the
+    project's own no-half-baked discipline it was NOT landed this cycle.
+updated: 2026-09-11T00:00:00Z
+---
