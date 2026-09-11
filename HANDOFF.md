@@ -5535,3 +5535,40 @@ headlessly. Remaining thread-model next: per-thread guest TLS block layout
 (beyond SETTLS pointer handoff), tgkill/signal delivery to a specific child.
 HARD GATE unchanged: real Roblox boot + run log only on a GPU/APK host (none
 on this VPS).
+
+## Cycle 39 — SIMD variable-shift ushl/sshl + unaligned `ext` fixes (359/0)
+
+New `gen_varshift` differential fuzz generator (variable shift by register,
+both 32/64-bit lanes) exposed **two real silent miscompiles**, both fixed on
+`dev` (commit `e8b9721`):
+
+1. **ushl/sshl Vd.T,Vn.T,Vm.T.** The decode gate `(insn & 0x3f000c00) ∈
+   {0x2e,0x4e,0x6e}` masked out bit29 (the **U** bit — ushl=1, sshl=0) AND the
+   `.2d` size bits, so **sshl never decoded** (its residue is `0x0e…`) and the
+   `signed_` flag was inverted. Fixed to mask `0xffe0_fc00` with all 14
+   q/size/ushl-sshl residues; `signed_ = bit29==0`; added the `q` flag the
+   translate was ignoring. The translate previously did a plain `shl` with
+   `16/esize` lanes always (wrong for q0) and no negative-count handling.
+   Rewritten to honor q, sign-extend the count lane, and implement ARM
+   semantics: C≥0 left shift; C<0 right shift by -C (**sshl arithmetic** /
+   **ushl logical**); |C|≥element-width → 0 (ushl) or sign-fill (sshl).
+   Also fixed rel32 patching (done-jumps were patched to a stale offset recorded
+   before the right path was emitted; the 64-bit left path fell through into the
+   right path; and the JS gate had no `test_rr64`). Encodings verified against
+   `aarch64-linux-gnu` for `.2d`/`.4s`. +`simd_var_reg_shift_2d_reference` and
+   `simd_var_reg_shift_4s_reference` unit tests.
+
+2. **`ext VD.16B,Vn,Vm,#imm`** — pre-existing latent bug: the SimdExt translate
+   computed the concat offset in **bytes** but shifted by that value as if **bits**
+   (`shr/shl by 4` instead of `32`), so every unaligned immediate (≠0,≠8)
+   returned garbage. gcc's cross-lane XOR-reduce (`ext #8`+`ext #4`) mis-combined
+   the halves, which is what also derailed the sshl `.4s` compound cases. Fix:
+   `sh = (start%8)*8`. +`diff_simd_ext_unaligned_xor_reduce` canary.
+
+Both bugs are silent (no crash — wrong values). Fuzz generator now bounds shift
+counts below element width so the native-gcc oracle and ARM agree (ARM left-shift
+by ≥width = 0, x86 masks `cl` mod-width — UB region differs by ISA).
+
+**`cargo test --workspace` 359/0** (was 355). New cross-lane fuzz campaign clean
+(8 seeds × 40, all pass). `cargo build --workspace` clean. HARD GATE unchanged:
+real Roblox boot + run log only on a GPU/APK host (none on this VPS).
