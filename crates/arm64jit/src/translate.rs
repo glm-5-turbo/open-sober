@@ -1163,7 +1163,7 @@ pub fn translate(
                         buf.sar_ri8(RAX, 56); // 8->64 sign-extend
                         stg_if_writable(buf, rt as u32);
                     }
-                    s => return Err(format!("LdStrImm sign-extend size {} not implemented", s)),
+                    s => return Err(format!("LdStrImm sign-extend size {s} not implemented (pc {pc:#x})")),
                 }
                 return Ok(());
             }

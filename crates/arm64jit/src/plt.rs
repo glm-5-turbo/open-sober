@@ -423,6 +423,14 @@ fn bind_glob_dat(
     const DT_SYMTAB: i64 = 6;
     const DT_STRTAB: i64 = 5;
     const DT_RELAENT: i64 = 9;
+    // Android packed-relocation dynamic tags: `DT_ANDROID_RELA` /
+    // `DT_ANDROID_RELASZ` carry the same GLOB_DAT/ABS64 relocations as a plain
+    // `DT_RELA`, but APS2-packed, and a real libroblox.so ships ONLY the
+    // packed `.rela.dyn` (no stock DT_RELA) — so without decoding it the
+    // `__stack_chk_guard` data GOT slot (and any Android-packed global
+    // import) stays 0 and the guest null-faults in its very first prologue.
+    const DT_ANDROID_RELA: i64 = 0x6000_0011;
+    const DT_ANDROID_RELASZ: i64 = 0x6000_0012;
     const R_AARCH64_GLOB_DAT: u64 = 1025;
     const R_AARCH64_ABS64: u64 = 257;
     const SHN_UNDEF: u16 = 0;
@@ -473,6 +481,7 @@ fn bind_glob_dat(
     let dynp = host(el.guest_of(dyn_link));
     let (mut rela, mut relasz, mut relaent, mut symtab_ref, mut strtab_ref) =
         (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut android_rela, mut android_relasz) = (0u64, 0u64);
     let mut i = 0usize;
     loop {
         let tag = rd64(dynp + i * 16) as i64;
@@ -486,6 +495,8 @@ fn bind_glob_dat(
             DT_RELAENT => relaent = val,
             DT_SYMTAB => symtab_ref = val,
             DT_STRTAB => strtab_ref = val,
+            DT_ANDROID_RELA => android_rela = val,
+            DT_ANDROID_RELASZ => android_relasz = val,
             _ => {}
         }
         i += 1;
@@ -493,7 +504,8 @@ fn bind_glob_dat(
             break;
         }
     }
-    if rela == 0 || relasz == 0 || symtab_ref == 0 {
+    if (rela == 0 || relasz == 0) && (android_rela == 0 || android_relasz == 0) || symtab_ref == 0
+    {
         return (0, 0);
     }
     let entsz = if relaent != 0 { relaent as usize } else { 24 };
@@ -504,13 +516,8 @@ fn bind_glob_dat(
     let symtab_h = host(el.guest_of(symtab_ref));
     let strtab_h = host(el.guest_of(strtab_ref));
 
-    let n = (relasz as usize) / entsz;
-    let (mut bound, mut unresolved) = (0usize, 0usize);
-    for k in 0..n {
-        let r = rela_h + k * entsz;
-        let r_offset = rd64(r);
-        let r_info = rd64(r + 8);
-        let r_addend = rd64(r + 16) as i64; // Elf64_Rela.r_addend @ +16
+    let mut resolve_entry = |r_offset: u64, r_info: u64, r_addend: i64| -> usize {
+        // Returns 1 (bound) / 0 (unresolved) / -1 (not a GLOB_DAT/ABS64).
         let stype = (r_info & 0xffff_ffff) as u64;
         // R_AARCH64_GLOB_DAT (1025) and R_AARCH64_ABS64 (257) are both
         // "write the symbol's runtime address here". GLOB_DAT is the GOT-slot
@@ -520,7 +527,7 @@ fn bind_glob_dat(
         // RELATIVE), so a guest global/function-pointer reads link-time
         // garbage. Handle both.
         if stype != R_AARCH64_GLOB_DAT && stype != R_AARCH64_ABS64 {
-            continue;
+            return usize::MAX;
         }
         let sym_idx = (r_info >> 32) as usize;
         let sym = symtab_h + sym_idx * 24;
@@ -531,8 +538,7 @@ fn bind_glob_dat(
 
         let slot_guest = el.guest_of(r_offset) as usize;
         if slot_guest == 0 {
-            unresolved += 1;
-            continue;
+            return 0; // unresolved
         }
 
         let value: Option<u64> = if st_shndx != SHN_UNDEF {
@@ -563,12 +569,26 @@ fn bind_glob_dat(
                 Some(sa.wrapping_add(r_addend as u64))
             } else if st_info & 0xf == STT_OBJECT {
                 // Data object: dlsym gives the raw host (guest==host) addr.
-                match std::ffi::CString::new(name) {
-                    Ok(c) => {
-                        let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
-                        if p.is_null() { None } else { Some((p as u64).wrapping_add(r_addend as u64)) }
-                    }
-                    Err(_) => None,
+                // `__stack_chk_guard` is read via `ldr x8,[x24]` where x24 =
+                // the GOT slot holds the ADDRESS of the canary variable; glibc
+                // doesn't export it to RTLD_DEFAULT, so fall back to a stable
+                // static canary so the guest prologue's `ldr x8,[x24]` reads
+                // a live value instead of a 0 slot deref.
+                let fallback = if name == b"__stack_chk_guard" {
+                    Some(stack_canary_addr())
+                } else {
+                    None
+                };
+                match fallback.or_else(|| {
+                    std::ffi::CString::new(name)
+                        .ok()
+                        .and_then(|c| {
+                            let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
+                            (!p.is_null()).then_some(p as u64)
+                        })
+                }) {
+                    Some(a) => Some(a.wrapping_add(r_addend as u64)),
+                    None => None,
                 }
             } else {
                 // Function / notype import: host-call thunk (callable).
@@ -579,17 +599,80 @@ fn bind_glob_dat(
         match value {
             Some(v) => {
                 wr64(slot_guest, v);
-                bound += 1;
+                1 // bound
             }
             None => {
-                unresolved += 1;
                 if std::env::var_os("JIT_TRACE").is_some() {
                     eprintln!("[plt:glob_dat] unresolved {:#x}", r_offset);
+                }
+                0 // unresolved
+            }
+        }
+    };
+
+    let (mut bound, mut unresolved) = (0usize, 0usize);
+
+    // Pass 1: the stock DT_RELA table (if present).
+    if rela != 0 && relasz != 0 {
+        let n = (relasz as usize) / entsz;
+        for k in 0..n {
+            let r = rela_h + k * entsz;
+            let r_offset = rd64(r);
+            let r_info = rd64(r + 8);
+            let r_addend = rd64(r + 16) as i64; // Elf64_Rela.r_addend @ +16
+            match resolve_entry(r_offset, r_info, r_addend) {
+                usize::MAX => {}
+                1 => bound += 1,
+                _ => unresolved += 1,
+            }
+        }
+    }
+
+    // Pass 2: the Android APS2-packed `.rela.dyn` (DT_ANDROID_RELA), which a
+    // real libroblox.so ships INSTEAD of a stock DT_RELA. The loader's
+    // relative-apply (elf.rs) already decodes it for RELATIVE entries via
+    // `decode_aps2`; we re-decode here so the GLOB_DAT/ABS64 entries the
+    // loader skipped (it only applies RELATIVE) get bound — exactly what
+    // `__stack_chk_guard` needs on the boot path.
+    if android_rela != 0 && android_relasz != 0 && android_relasz <= 128 * 1024 * 1024 {
+        let srch = host(el.guest_of(android_rela));
+        let stream =
+            unsafe { std::slice::from_raw_parts(srch as *const u8, android_relasz as usize) };
+        if let Ok(rels) = libloader::android_relocs::decode_aps2(stream) {
+            for rel in &rels {
+                match resolve_entry(rel.r_offset, rel.r_info, rel.r_addend) {
+                    usize::MAX => {}
+                    1 => bound += 1,
+                    _ => unresolved += 1,
                 }
             }
         }
     }
     (bound, unresolved)
+}
+
+/// Return the guest-visible host address of a stable `__stack_chk_guard`
+/// canary: libc's real one when resolvable, else a process-static canary
+/// pattern. The returned value is the *address* whose bytes are the canary
+/// (the guest does `ldr x8,[xN]` to read the canary via the GOT slot, which
+/// holds this address).
+fn stack_canary_addr() -> u64 {
+    static CANARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let cur = CANARY.load(std::sync::atomic::Ordering::Relaxed);
+    if cur != 0 {
+        return cur;
+    }
+    let libc_guard =
+        unsafe { libc::dlsym(libc::RTLD_DEFAULT, b"__stack_chk_guard\0".as_ptr() as *const _) };
+    let addr = if !libc_guard.is_null() {
+        libc_guard as u64
+    } else {
+        let canary = 0x2f_2a_1a_0a_0e_0f_10_11u64;
+        CANARY.store(canary, std::sync::atomic::Ordering::Relaxed);
+        &CANARY as *const _ as u64
+    };
+    CANARY.store(addr, std::sync::atomic::Ordering::Relaxed);
+    addr
 }
 
 /// Write a live canary pointer into the guest `__stack_chk_guard` GOT slot.

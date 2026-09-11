@@ -1857,6 +1857,17 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // FP forms are routed below (VecLdStImm for 128-bit q, FpLdStImm for the
     // D/S/B/H scalars).
     if (insn & 0x3f00_0000) == 0x3900_0000 {
+        // PRFM (prefetch, unsigned-immediate) = `size=0b11` (byte) with
+        // `opc=0b10` (bit23 set, bit22 clear) — the "size-8 X dest load" shape
+        // that naive bit23-keyed sign-extend decode reads as `ldrx/lx size-8
+        // sign-extend`. PRFM is a pure hint (no architected data side effect
+        // beyond a cache hint a single-threaded direct-mapped JIT ignores), so
+        // treat it as a Hint/no-op. Real sign-extend loads (ldrsw/ldrsh/ldrsb)
+        // always have size 4/2/1 (never 8), so `size==8 && bit23` is uniquely
+        // PRFM. (The register-offset `ldrsb x, [..]` forms never reach here.)
+        if ((insn >> 30) & 0x3) == 0b11 && (insn & 0x80_0000) != 0 {
+            return Inst::Hint;
+        }
         let size = match (insn >> 30) & 0x3 {
             0 => 1,
             1 => 2,
@@ -6455,6 +6466,29 @@ mod logical_imm_regressions {
         ));
         // Scalable/vector scvtf (nearest) and the unscaled scalar Scvtf intact.
         assert!(matches!(decode(0x1e620000), Inst::Scvtf { .. }), "{:?}", decode(0x1e620000));
+    }
+
+    #[test]
+    fn prfm_prefetch_is_hint_not_size8_sext_load() {
+        // PRFM (prefetch, unsigned-immediate) encodes as the load/store-unsigned
+        // immediate shape with `size=0b11` (byte) and bit23 SET / bit22 clear —
+        // the exact pattern a bit23-keyed sign-extend decoder reads as an X-reg
+        // sign-extend load (and would reject with "size 8 not implemented").
+        // It's a pure hint a single-threaded direct-mapped JIT ignores, so it
+        // must decode as Hint, not LdStrImm.
+        // Ground truth (aarch64-linux-gnu-as): prfm pldl1keep,[x0]=0xf9800000,
+        //   pldl3keep,[x8]=0xf9800104 (the real libroblox.so boot word),
+        //   pldl2keep,[x1,#64]=0xf9802022, pstl1keep,[x2]=0xf9800050.
+        for w in [0xf9800000u32, 0xf9800104, 0xf9802022, 0xf9800050] {
+            assert!(matches!(decode(w), Inst::Hint), "prfm {w:#x} must be Hint, got {:?}", decode(w));
+        }
+        // Sign-extend loads remain loads (size 4/2/1) — ldrsw x0,[x0] = 0xb9800000.
+        assert!(matches!(decode(0xb9800000), Inst::LdStrImm { sext: true, size: 4, .. }));
+        // Plain 64-bit load stays LdStrImm (size 8, no sext).
+        assert!(matches!(
+            decode(0xf9400000),
+            Inst::LdStrImm { sext: false, size: 8, .. }
+        ));
     }
 }
 
