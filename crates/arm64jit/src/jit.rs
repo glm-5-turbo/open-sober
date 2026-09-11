@@ -1462,6 +1462,22 @@ mod tests {
     }
 
     #[test]
+    fn addv_horizontal_sum_across_4s_lanes() {
+        // REGRESSION (Session 99): SIMD `addv s31,v31.4s` (horizontal add, 0x4eb1b820)
+        // was swallowed by an earlier dup/move gate that emitted per-lane identity
+        // copies, so a vec-int short-array sum (vadd -O2 battery) returned 0 instead
+        // of 360. Unknown: ADDV source Vn is at bits[9:5], bits20:16 is a fixed 17;
+        // result goes to the bottom S element of Vd.
+        // addv s0,v1.4s = 0x4eb1b820 ; ret. V1 words = [1,2,3,4] -> s0 = 10.
+        let code = [0x20u8, 0xb8, 0xb1, 0x4e, 0xc0, 0x03, 0x5f, 0xd6]; // addv s0,v1.4s; ret
+        let mut st = CpuState::new();
+        st.v[2] = 0x0000_0002_0000_0001; // s1[0]=1, s1[1]=2
+        st.v[3] = 0x0000_0004_0000_0003; // s1[2]=3, s1[3]=4
+        let _ = exec_bytes(&mut st, &code, 0).expect("exec addv 4s");
+        assert_eq!(st.v[0] & 0xffff_ffff, 10, "addv s0,v1.4s sums 1+2+3+4 into s0.low");
+    }
+
+    #[test]
     fn neg_reads_rn31_as_xzr_not_sp() {
         // Regression: `neg x6,x6` = `sub x6, xzr, x6` (0xcb0603e6) is the SHIFTED-
         // register add/sub form (bit21=0), where register 31 in the rn operand is

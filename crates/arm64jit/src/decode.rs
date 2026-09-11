@@ -601,6 +601,9 @@ pub enum Inst {
     SimdAddH { rd: u8, rn: u8, rm: u8, sub: bool, q: bool },
     // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
     SimdCmEq { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
+    // ADDV Dd,Vn.T : horizontal sum of sign-extended vector elements -> bottom
+    // element of Vd. size = element width in bytes (1=B,2=H,4=S), q = 128-bit.
+    Addv { rd: u8, rn: u8, size: u8, q: bool },
     // ---- SIMD compare (nonzero) test: cmtst Vd.T, Vn.T, Vm.T ----
         SimdCmTest { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
         // ---- SIMD table lookup: tbl Vd.16B, {Vn..Vn+N}, Vm (N+1 regs, N<=3) ----
@@ -915,6 +918,32 @@ pub fn decode(insn: u32) -> Inst {
             sub: (insn >> 15) & 1 == 1,
             neg: (insn >> 21) & 1 == 1,
         };
+    }
+
+    // ---- SIMD horizontal add across lanes: ADDV Dd,Vn.T ----
+    // MUST be near the top: an earlier SIMD dup/move gate swallows 0x..b820 and
+    // emits per-lane identity copies instead of the sum. Gate clears Vn(bits9:5)
+    // and Sd(bits4:0) via mask 0xfffffc00; residues 8b=0x0e31b800, 4h=0x0e71b800,
+    // 16b=0x4e31b800, 8h=0x4e71b800, 4s=0x4eb1b800. Source Vn lives in bits[9:5]
+    // (bits20:16 is a fixed constant), unlike other SIMD. q=bit30 (128-bit => 16b/
+    // 8h/4s); bytes/lane: b23=1 -> 4, b22=1 -> 2, else 1.
+    {
+        let av = insn & 0xffff_fc00;
+        if let Some((size, q)) = match av {
+            0x0e31_b800 => Some((1u8, false)), // addv b0,v1.8b
+            0x0e71_b800 => Some((2u8, false)), // addv h0,v1.4h
+            0x4e31_b800 => Some((1u8, true)),  // addv b0,v1.16b
+            0x4e71_b800 => Some((2u8, true)),  // addv h0,v1.8h
+            0x4eb1_b800 => Some((4u8, true)),  // addv s0,v1.4s
+            _ => None,
+        } {
+            return Inst::Addv {
+                rd: (insn & 0x1f) as u8,
+                rn: ((insn >> 5) & 0x1f) as u8,
+                size,
+                q,
+            };
+        }
     }
 
     // ---- SME/SVE feature-off misc (glibc `__libc_arm_za_disable` path) ----
@@ -2964,7 +2993,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 {
                                                                                                                                                                                                                  return Inst::SimdMovEl { rd, rn, esize, index, signed, is_x };
                                                                                                                                                                                                              }
                                                                                                                                                                                                              // ---- SIMD compare equal: cmeq Vd.T, Vn.T, Vm.T ----
-                                                                                                                                                                                                        // Each element is all-ones if Vn[i]==Vm[i], else 0.
+                                                                                                                                                                                                             // Each element is all-ones if Vn[i]==Vm[i], else 0.
                                                                                                                                                                                                         // Gate &0xffe0_fc00 residues: 2d=0x6ee08c00, 4s=0x6ea08c00,
                                                                                                                                                                                                         // 2s=0x2ea08c00, 16b=0x6e208c00, 8b=0x2e208c00, 8h=0x6e608c00,
                                                                                                                                                                                                         // 4h=0x2e608c00. Disjoint from cmhi (0x3/0x34), bit (0x1c), etc.

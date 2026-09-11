@@ -2858,7 +2858,41 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             else { buf.mov_store32(RBX, slot(rd as u32), RAX); }
             Ok(())
 }
-                                                                                                                                                                                Inst::SimdCmEq { rd, rn, rm, lanes, esize } => {
+                                                                                                                                                                                Inst::Addv { rd, rn, size, q } => {
+            // ADDV Dd,Vn.T : horizontal sum of sign-extended elements.
+            let lanes: u32 = match (size, q) {
+                (1, false) => 8,
+                (1, true) => 16,
+                (2, false) => 4,
+                (2, true) => 8,
+                (4, true) => 4,
+                _ => return Err(format!("Addv unsupported size={} q={}", size, q)),
+            };
+            let vsrc = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            buf.xor_rr64(RDI, RDI); // accumulator
+            for i in 0..lanes {
+                let off = vsrc + (i as i32) * (size as i32);
+                match size {
+                    1 => buf.movsx_byte_mem(RAX, RBX, off),
+                    2 => buf.movsx_word_mem(RAX, RBX, off),
+                    4 => {
+                        buf.mov_load32(RAX, RBX, off);
+                        buf.movsxd_r64_r32(RAX, RAX);
+                    }
+                    _ => unreachable!(),
+                }
+                buf.add_rr64(RDI, RAX);
+            }
+            let vdst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            match size {
+                1 => buf.mov_store8(RBX, vdst, RDI),
+                2 => buf.mov_store16(RBX, vdst, RDI),
+                4 => buf.mov_store32(RBX, vdst, RDI),
+                _ => unreachable!(),
+            }
+            Ok(())
+        }
+        Inst::SimdCmEq { rd, rn, rm, lanes, esize } => {
             // cmeq Vd.T, Vn.T, Vm.T: each element is all-ones if Vn[i]==Vm[i]
             // else 0. Compare the esize-byte element (zero-extended via the
             // widest load that fits), then cmov all-ones vs 0, store esize bytes.
