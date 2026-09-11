@@ -583,13 +583,15 @@ fn run_chain(
 }
 
 #[test]
-fn loader_run_needed_dep_cross_module_call_returns_42() {
+fn loader_run_needed_dep_cross_module_call_returns_82() {
     // Multi-module (DT_NEEDED) end-to-end: the loader resolves the main .so's
     // `DT_NEEDED libdep.so`, maps the dependency contiguously after it in the
-    // same guest region, and the guest's `bl dep_val@plt` (a JUMP_SLOT the host
-    // resolver can't satisfy) resolves through the cross-module export scope to
-    // the dependency's own guest address, which jit_run compiles from the
-    // shared image slice. entry() = dep_val() + 2 = 40 + 2 = 42.
+    // same guest region, and the guest's import of the dependency's exported
+    // function (`bl dep_val@plt`, a JUMP_SLOT) AND exported data global
+    // (dep_global, a GLOB_DAT), neither of which the host resolver can satisfy,
+    // both resolve through the cross-module export scope to the dependency's
+    // own guest address, which jit_run compiles from the shared image slice.
+    // entry() = dep_val() + dep_global + 2 = 40 + 40 + 2 = 82.
     if cross_gcc().is_none() {
         eprintln!("skipping loader_run_needed_dep: aarch64-linux-gnu-gcc not available");
         return;
@@ -597,9 +599,10 @@ fn loader_run_needed_dep_cross_module_call_returns_42() {
     let _guard = lock_run();
     let wd = workdir("chain");
 
-    // libdep.so exports dep_val() = 40 (a plain -shared library, no entry).
+    // libdep.so exports dep_val() = 40 and a data global dep_global = 40
+    // (a plain -shared library, no entry).
     let dep_c = wd.join("dep.c");
-    std::fs::write(&dep_c, "int dep_val(void){ return 40; }\n").unwrap();
+    std::fs::write(&dep_c, "int dep_global = 40;\nint dep_val(void){ return dep_global; }\n").unwrap();
     let dep_so = wd.join("libdep.so");
     let out = Command::new("aarch64-linux-gnu-gcc")
         .args(["-shared", "-fPIC", "-nostdlib"])
@@ -614,10 +617,15 @@ fn loader_run_needed_dep_cross_module_call_returns_42() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // libmain.so NEEDs libdep.so and calls dep_val from its entry.
+    // libmain.so NEEDs libdep.so; entry calls dep_val() AND reads dep_global,
+    // so it exercises BOTH the cross-module JUMP_SLOT (function) and GLOB_DAT
+    // (data-global) scope-resolution paths: 40 + 40 + 2 = 82.
     let main_c = wd.join("main.c");
-    std::fs::write(&main_c, "extern int dep_val(void); int entry(void){ return dep_val() + 2; }\n")
-        .unwrap();
+    std::fs::write(
+        &main_c,
+        "extern int dep_global; extern int dep_val(void); int entry(void){ return dep_val() + dep_global + 2; }\n",
+    )
+    .unwrap();
     let main_so = wd.join("libmain.so");
     let out = Command::new("aarch64-linux-gnu-gcc")
         .args(["-shared", "-fPIC", "-nostdlib", "-Wl,-e,entry"])
@@ -668,11 +676,11 @@ fn loader_run_needed_dep_cross_module_call_returns_42() {
 
     match run_chain(&chain, &main_so) {
         Ok(v) => assert_eq!(
-            v, 42,
-            "chain: entry() -> {v}, expected 42 (cross-module JUMP_SLOT not resolved?)"
+            v, 82,
+            "chain: entry() -> {v}, expected 82 (cross-module JUMP_SLOT/GLOB_DAT not resolved?)"
         ),
         Err(e) => panic!("chain: jit_run failed: {e}"),
     }
-    eprintln!("\x1b[32mPASS\x1b[0m chain: entry() -> 42 via DT_NEEDED cross-module dep call");
+    eprintln!("\x1b[32mPASS\x1b[0m chain: entry() -> 82 via DT_NEEDED cross-module JUMP_SLOT + GLOB_DAT");
     let _ = std::fs::remove_dir_all(&wd);
 }
