@@ -317,6 +317,23 @@ pub fn bind_image_plt(
                 p += 1;
             }
         }
+        // Self-import: if this relocation names a symbol the module itself
+        // defines (st_shndx != SHN_UNDEF), the target is the module's own guest
+        // address — NOT a host catch-all. A shared library that calls one of its
+        // own exported functions goes through `@plt`; the dynamic symbol table
+        // entry has st_shndx set and st_value = the definition's link address.
+        // Without this, `init_value@plt` in real libroblox.so (or any -shared
+        // module) binds to the NULL/0 graphics stub and the call diverts to a
+        // host thunk instead of the real guest function. Bind it to the guest
+        // address of the module's own definition.
+        let st_shndx = rd16(sym + 6) as u32; // sym->st_shndx
+        let st_value = rd64(sym + 8);
+        if st_shndx != 0 {
+            // SHN_UNDEF == 0; any real section index means local definition.
+            wr64(host(el.guest_of(r_offset)), el.guest_of(st_value));
+            resolved += 1;
+            continue;
+        }
         match (
             scope_resolve(scope, &name),
             crate::resolver::resolve(&name),

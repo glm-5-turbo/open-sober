@@ -362,6 +362,49 @@ fn loader_run_shared_glob_dat_and_abs64_returns_37() {
     let _ = std::fs::remove_dir_all(&wd);
 }
 #[test]
+fn loader_run_self_import_binds_to_own_guest_body() {
+    // REGRESSION: a `-shared` module calling one of its OWN exported functions
+    // goes through `@plt`; the JUMP_SLOT symbol is defined in the module itself
+    // (st_shndx != SHN_UNDEF). Before the binder's self-import fix, this bound
+    // to the NULL/0 graphics catch-all (host thunk), so `entry()` dispatched to
+    // a stub that returned garbage (observed 0) instead of the real guest body.
+    // The guest reloc's st_value is the link address of the definition.
+    if cross_gcc().is_none() {
+        eprintln!("skipping loader_run_self_import: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir("selfimport");
+    // `internal_fn` default visibility => exported => callers use `bl fn@plt`.
+    let elf = compile_shared(
+        &wd,
+        "self",
+        "int internal_fn(int x){ return x * 5; }\n\\\n         int entry(void){ return internal_fn(7); }\n",
+    );
+    // Sanity: the JUMP_SLOT names a symbol the module defines.
+    let rel = Command::new("aarch64-linux-gnu-readelf")
+        .arg("-rW")
+        .arg(&elf)
+        .output()
+        .unwrap();
+    let rel = String::from_utf8_lossy(&rel.stdout);
+    assert!(rel.contains("internal_fn"), "fixture has an internal_fn JUMP_SLOT");
+    assert!(rel.contains("R_AARCH64_JUMP_SLOT"), "and it's a JUMP_SLOT reloc");
+
+    match run_elf(&elf) {
+        Ok(v) => {
+            assert_eq!(
+                v, 35,
+                "selfimport: entry() -> {v}, expected 35 (self-import bound to hose catch-all?)"
+            );
+            eprintln!("\x1b[32mPASS\x1b[0m selfimport: entry() -> {v} (own-export self-import bound to guest body)");
+        }
+        Err(e) => panic!("selfimport: jit_run failed: {e}"),
+    }
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
 fn loader_run_asymmetric_logic_imm_mask_returns_correct() {
     // End-to-end gate for the LogicImm DecodeBitMasks rotate-RIGHT fix.
     // `volatile` prevents gcc constant-folding, so it emits a real
