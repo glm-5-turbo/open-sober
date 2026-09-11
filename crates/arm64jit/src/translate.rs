@@ -411,6 +411,58 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::AddSubExt { rd, rn, rm, sub, s, sf, opt, shift } => {
+            // add/sub Xd, Xn|SP, Rm, <opt> #<shift>: Rd = Xn + (ext(Rm)<<shift).
+            // Extend Rm per `opt` (RXTB/UXTH/UXTW/SXTB/SXTH/SXTW are 32-bit-or-
+            // narrow; UXTX/SXTX keep the full 64-bit Rm). rn/rd of 31 = SP.
+            // Compute ext(Rm)<<shift in RAX, Xn(SP) in RDI, add/sub, store.
+            if rm == 31 {
+                buf.mov_ri64(RAX, 0); // W31/X31 is always XZR, never SP
+            } else {
+                ldg(buf, RAX, rm as u32);
+            }
+            match opt {
+                0 => buf.and_ri64(RAX, 0xff), // UXTB
+                1 => buf.and_ri64(RAX, 0xffff), // UXTH
+                2 => buf.zero_ext_r32(RAX),   // UXTW
+                3 => {}                       // UXTX (no-op)
+                4 => {
+                    // SXTB: sign-extend byte via shifts
+                    buf.shl_ri8(RAX, 56);
+                    buf.sar_ri8(RAX, 56);
+                }
+                5 => {
+                    // SXTH
+                    buf.shl_ri8(RAX, 48);
+                    buf.sar_ri8(RAX, 48);
+                }
+                6 => buf.movsxd_r64_r32(RAX, RAX), // SXTW
+                _ => {}                            // 7 = SXTX (no-op)
+            }
+            if shift > 0 && shift <= 3 {
+                buf.shl_ri8(RAX, shift);
+            }
+            ldg(buf, RDI, rn as u32); // rn=31 -> x[31] = SP (extended form)
+            if sub {
+                buf.sub_rr64(RDI, RAX); // RDI = Rn - ext
+                if s {
+                    store_nzcv(buf);
+                }
+                buf.mov_rr64(RAX, RDI);
+            } else {
+                buf.add_rr64(RAX, RDI); // RAX = Rn + ext
+                if s {
+                    store_nzcv(buf);
+                }
+            }
+            if !s {
+                if !sf {
+                    zext_w(buf, RAX); // 32-bit op: zero-extend the result
+                }
+                stg(buf, rd as u32, RAX); // rd=31 writes SP (extended form)
+            }
+            Ok(())
+        }
         Inst::AddCarry { rd, rn, rm, sf, s, sub } => {
             // adc/sbc/adcs/sbcs Xd, Xn, Xm: Rd = Xn +/- Xm +/- carry.
             // AArch64 adds the previous C flag (NZCV bit29). SBC subtracts the
@@ -941,6 +993,92 @@ pub fn translate(
                     buf.mov_store8(RDX, 0, RAX);
                 }
                 (s, _) => return Err(format!("LdStrImm size {} not implemented", s)),
+            }
+            Ok(())
+        }
+        Inst::LdStrImmWb {
+            rt,
+            rn,
+            imm9,
+            size,
+            ld,
+            sext,
+            writeback,
+            pre,
+        } => {
+            // pre-index [Xn,#imm9]!  -> access at Xn+imm9, then Xn += imm9
+            // post-index [Xn],#imm9   -> access at Xn,     then Xn += imm9
+            // unscaled   [Xn,#imm9]   -> access at Xn+imm9, no writeback
+            let access_off = if writeback && !pre { 0 } else { imm9 };
+            ldg(buf, RDX, rn as u32); // base
+            if ld && sext {
+                // sign-extending load (ldrsw/ldrsh/ldrsb) at [RDX+access_off]
+                match size {
+                    4 => {
+                        buf.mov_load32(RAX, RDX, access_off);
+                        buf.movsxd_r64_r32(RAX, RAX);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    2 => {
+                        buf.movzx_word_mem(RAX, RDX, access_off);
+                        buf.shl_ri8(RAX, 48);
+                        buf.sar_ri8(RAX, 48);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    1 => {
+                        buf.movzx_byte_mem(RAX, RDX, access_off);
+                        buf.shl_ri8(RAX, 56);
+                        buf.sar_ri8(RAX, 56);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    s => return Err(format!("LdStrImmWb sign-extend size {s} not implemented")),
+                }
+            } else {
+                match (size, ld) {
+                    (8, true) => {
+                        buf.mov_load64(RAX, RDX, access_off);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    (8, false) => {
+                        ldg_src(buf, rt as u32);
+                        buf.mov_store64(RDX, access_off, RAX);
+                    }
+                    (4, true) => {
+                        buf.mov_load32(RAX, RDX, access_off);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    (4, false) => {
+                        ldg_src(buf, rt as u32);
+                        buf.mov_store32(RDX, access_off, RAX);
+                    }
+                    (2, true) => {
+                        buf.movzx_word_mem(RAX, RDX, access_off);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    (2, false) => {
+                        ldg_src(buf, rt as u32);
+                        buf.mov_store16(RDX, access_off, RAX);
+                    }
+                    (1, true) => {
+                        buf.movzx_byte_mem(RAX, RDX, access_off);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    (1, false) => {
+                        ldg_src(buf, rt as u32);
+                        buf.mov_store8(RDX, access_off, RAX);
+                    }
+                    (s, _) => {
+                        return Err(format!("LdStrImmWb size {s} not implemented"))
+                    }
+                }
+            }
+            // writeback: Xn += imm9 (signed; add_ri64 sign-extends the imm32).
+            if writeback {
+                ldg(buf, RAX, rn as u32);
+                if imm9 != 0 {
+                    buf.add_ri64(RAX, imm9 as u32);
+                }
+                stg(buf, rn as u32, RAX);
             }
             Ok(())
         }

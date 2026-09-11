@@ -1177,6 +1177,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn addsubext_sxtw_and_postindex_exec() {
+        // add x3, x2, w20, sxtw #3 = 0x8b34cc43: x3 = x2 + (sext32(w20)<<3).
+        // mov x0,x3 (orr)=0xaa0303e0; ret.
+        let code = [
+            0x43u8, 0xcc, 0x34, 0x8b, // add x3,x2,w20,sxtw #3
+            0xe0, 0x03, 0x03, 0xaa, // mov x0,x3
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut st = CpuState::new();
+        st.x[2] = 0x1000;
+        st.x[20] = 0x18;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0x1000 + (0x18 << 3), "sxtw#3 add");
+        // sxtw of a negative 32-bit: w20 = -1 -> extend to -1, <<3 = -8.
+        let mut st2 = CpuState::new();
+        st2.x[2] = 0x1000;
+        st2.x[20] = 0xFFFF_FFFF; // w20 = -1
+        let r = exec_bytes(&mut st2, &code, 0).expect("exec");
+        assert_eq!(r as i64, 0x1000 - 8, "sxtw negative");
+    }
+
+    #[test]
+    fn ldrstr_postindex_writeback_exec() {
+        // ldr x3,[x0],#8 ; ldr x4,[x0],#8 ; ldr x5,[x0],#8 ; mov x0,x5 ; ret
+        // Post-index must advance x0 each time and load the successive values.
+        let code = [
+            0x03u8, 0x84, 0x40, 0xf8, // ldr x3,[x0],#8
+            0x04, 0x84, 0x40, 0xf8, // ldr x4,[x0],#8
+            0x05, 0x84, 0x40, 0xf8, // ldr x5,[x0],#8
+            0xe0, 0x03, 0x05, 0xaa, // mov x0, x5
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let buf = [0x1111u64, 0x2222, 0x3333, 0x4444];
+        let mut st = CpuState::new();
+        st.x[0] = buf.as_ptr() as u64;
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0x3333, "post-index writes back x0, x5=3rd value");
+    }
+
+    #[test]
     fn mov_add_executes_to_7() {
         // aarch64: mov x0,#3 ; add x0,x0,#4  =>  x0 = 7
         // d2800060 (mov x0,#3), 91001000 (add x0,x0,#4)

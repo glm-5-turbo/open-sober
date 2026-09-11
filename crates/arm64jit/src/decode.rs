@@ -70,6 +70,24 @@ pub enum Inst {
         // must read XZR=0) from `sub sp,sp,x1` (0xcb2163ff, bit21=1, rn=31 = SP).
         sp_operand: bool,
     },
+    // ---- add/subtract register (extended-register form, bit21=1) ----
+    // `add/sub Xd, Xn|SP, Rm, <opt> #<shift>` where Rm is a 32-bit (W) register
+    // (unless opt is UXTX/SXTX, then 64-bit) extended per `opt` (0=UXTB,1=UXTH,
+    // 2=UXTW,3=UXTX,4=SXTB,5=SXTH,6=SXTW,7=SXTX) then shifted by <shift>(0..3).
+    // rn/rd of 31 are SP. This is a DISTINCT encoding from the shifted-register
+    // form (bit21=0): decoding it through the shifted parser mis-reads the
+    // option/shift bits as a bogus `lsl #sh_amt` (e.g. sxtw#3 came out as a
+    // 51-bit shift) — a real glibc-startup x-register corruption.
+    AddSubExt {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        sub: bool,
+        s: bool,
+        sf: bool,
+        opt: u8,  // 0=UXTB 1=UXTH 2=UXTW 3=UXTX 4=SXTB 5=SXTH 6=SXTW 7=SXTX
+        shift: u8, // 0..3
+    },
     // ---- add/subtract with carry: adc/sbc/adcs/sbcs Xd, Xn, Xm ----
     AddCarry {
         rd: u8,
@@ -132,6 +150,21 @@ pub enum Inst {
         // naive `ld=bit22` read as a store. When set, this is a LOAD that
         // sign-extends the loaded size into the 64-bit dest X-register.
         sext: bool,
+    },
+    // ---- load/store (pre/post-index + unscaled) Signed imm9 ----
+    // `ldr/str Xt, [Xn, #imm9]!` (pre), `[Xn], #imm9` (post) or `[Xn, #imm9]`
+    // (unscaled). imm9 is a SIGNED byte offset (bits[20:12]); pre/post also
+    // write Xn back (Xn += imm9). Distinct from LdStrImm (which is an UNSIGNED
+    // offset scaled by size): this is the 0xf84x/0x38x signed-immediate family.
+    LdStrImmWb {
+        rt: u8,
+        rn: u8,
+        imm9: i32,      // signed byte offset
+        size: u8,       // 1=byte,2=half,4=word,8=dword
+        ld: bool,       // load=true, store=false
+        sext: bool,     // sign-extending load (ldrsw/ldrsh/ldrsb)
+        writeback: bool, // pre/post write Xn back; false = unscaled
+        pre: bool,      // pre-index (access at Xn+imm9); post accesses at Xn
     },
     // ---- load/store (register offset) ----
     LdStrReg {
@@ -981,6 +1014,24 @@ pub fn decode(insn: u32) -> Inst {
         let n = b(insn, 21, 21);
         let sub = b(insn, 30, 30) == 1;
         let s = b(insn, 29, 29) == 1;
+        // Extended-register form (bit21=1): a DIFFERENT encoding layout — Rm =
+        // bits[20:16], option = bits[15:13], shift = bits[12:10] (0..3). The
+        // shifted-register form (bit21=0) instead packs shift=bits[23:22],
+        // sh_amt=bits[15:10]. They MUST be decoded separately (feeding the
+        // extended layout through the shifted parser produced a bogus
+        // `lsl #sh_amt`, e.g. sxtw#3 -> shift 51 — real register corruption).
+        if n == 1 {
+            return Inst::AddSubExt {
+                rd: b(insn, 0, 4) as u8,
+                rn: b(insn, 5, 9) as u8,
+                rm: b(insn, 16, 20) as u8,
+                sub,
+                s,
+                sf,
+                opt: b(insn, 13, 15) as u8,
+                shift: b(insn, 10, 12) as u8,
+            };
+        }
         let shift = ShiftKind::from_u32(b(insn, 22, 23));
         let rm = b(insn, 16, 20) as u8;
         let _ = n;
@@ -996,11 +1047,10 @@ pub fn decode(insn: u32) -> Inst {
             s,
             shift,
             sh_amt,
-            // bit21=1 marks the extended-register (SP-operand) form, where rn=31
-            // and rd=31 are the stack pointer. bit21=0 (shifted register) uses XZR
-            // for 31 (qemu-verified: `neg`=0xcb0603e6 rn31=XZR vs `sub sp,sp,x1`
-            // =0xcb2163ff rn31=SP). n (bit21) is this discriminator.
-            sp_operand: b(insn, 21, 21) == 1,
+            // bit21 (==0 here, since the ==1 case returned AddSubExt above)
+            // marks the extended-register form. For the shifted form, regs 31
+            // are XZR (qemu-verified: `neg`=0xcb0603e6 reads rn31 as XZR).
+            sp_operand: false,
         };
     }
 
@@ -1826,9 +1876,16 @@ pub fn decode(insn: u32) -> Inst {
                             };
                         }
 
-    // ---- load/store (register offset) ----
-    // class: (top & 0x3b) == 0x38
-    if (insn & 0x3b00_0000) == 0x3800_0000 {
+    // ---- load/store (register offset) ---- ONLY the register-offset form.
+    // The old gate (insn & 0x3b00_0000)==0x3800_0000 was too broad: it also
+    // swallowed the pre/post-index and unscaled IMMEDIATE forms (0xf84x/0x78x/
+    // 0x384x), mis-reading their imm9+writeback bits as an `rm` register and
+    // dereferencing garbage (often 0 — the glibc auxv-scan crash). The precise
+    // register-offset test is (insn & 0x3b200c00) == 0x38200800 (option bits:
+    // real LdStrReg sxtw/lsl forms like 0xf8627803 and 0xb862d803 match; the
+    // immediate forms 0x38000c00/0x38000400/0x38000000 fall through to the
+    // LdStrImmWb decoder below).
+    if (insn & 0x3b20_0c00) == 0x3820_0800 {
         let size = match (insn >> 30) & 0x3 {
             0 => 1,
             1 => 2,
@@ -1853,6 +1910,52 @@ pub fn decode(insn: u32) -> Inst {
             ld,
             shift,
             sext,
+        };
+    }
+
+    // ---- load/store (pre/post-index + unscaled) Signed imm9 ---- 0xf84x/
+    // 0xb84x/0x784x/0x384x (the non-unsigned-offset, non-register-offset 0x38
+    // family). `ldr Xt, [Xn, #imm9]!` (pre), `[Xn], #imm9` (post), or
+    // `[Xn, #imm9]` (unscaled, no writeback). imm9 is SIGNED (bits[20:12]).
+    // The three modes are (insn & 0x3b200c00): pre=0x38000c00, post=
+    // 0x38000400, unscaled=0x38000000 (register-offset 0x38200800 already
+    // returned above). Before this decoder these forms were mis-read as
+    // register-offset LdStrReg with garbage `rm` (a real NULL-deref bug in
+    // glibc's auxv/env scan `ldr x3,[x0],#8`).
+    if matches!(insn & 0x3b20_0c00, 0x3800_0c00 | 0x3800_0400) || (insn & 0x3b20_0c00) == 0x3800_0000 {
+        let size = match (insn >> 30) & 0x3 {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        let ld = (insn >> 22) & 1 == 1;
+        // Sign-extend load (ldrsw/ldrsh/ldrsb): bit23 set (opc 10/11).
+        let sext = (insn & 0x80_0000) != 0;
+        let ld = ld || sext;
+        let imm9_raw = (insn >> 12) & 0x1ff; // signed 9-bit
+        let imm9 = if imm9_raw & 0x100 != 0 {
+            imm9_raw as i32 - 0x200
+        } else {
+            imm9_raw as i32
+        };
+        let rn = b(insn, 5, 9) as u8;
+        let rt = b(insn, 0, 4) as u8;
+        let mode = insn & 0x3b20_0c00;
+        let (writeback, pre) = match mode {
+            0x3800_0c00 => (true, true),  // pre-index [Xn,#imm9]!
+            0x3800_0400 => (true, false), // post-index [Xn],#imm9
+            _ => (false, false),          // unscaled [Xn,#imm9]
+        };
+        return Inst::LdStrImmWb {
+            rt,
+            rn,
+            imm9,
+            size,
+            ld,
+            sext,
+            writeback,
+            pre,
         };
     }
 
@@ -3048,6 +3151,59 @@ mod tests {
             }
             other => panic!("expected SysReg midr_el1, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn addsubext_and_postindex_ldr_ground_truth() {
+        // add x3, x2, w20, sxtw #3 (extended-register form) — MUST decode as
+        // AddSubExt (not the shifted AddSubReg which mis-read it as lsl#51).
+        match decode(0x8b34cc43) {
+            Inst::AddSubExt {
+                rd, rn, rm, opt, shift, sub, sf, ..
+            } => {
+                assert_eq!((rd, rn, rm), (3, 2, 20));
+                assert_eq!(opt, 6); // SXTW
+                assert_eq!(shift, 3);
+                assert!(!sub);
+                assert!(sf);
+            }
+            other => panic!("expected AddSubExt for 0x8b34cc43, got {other:?}"),
+        }
+        // sub sp, sp, x1 (extended UXTSX form) — bit21=1 but no ext -> AddSubExt
+        // opt=3(UXTX) shift=0, rn=rd=31 (SP).
+        match decode(0xcb2163ff) {
+            Inst::AddSubExt { rd, rn, rm, opt, shift, sub, .. } => {
+                assert_eq!((rd, rn), (31, 31));
+                assert_eq!(rm, 1);
+                assert_eq!(opt, 3);
+                assert_eq!(shift, 0);
+                assert!(sub);
+            }
+            other => panic!("expected AddSubExt for sub sp,sp,x1, got {other:?}"),
+        }
+        // post-index ldr x3,[x0],#8 = 0xf8408403 -> LdStrImmWb (writeback, post)
+        match decode(0xf8408403) {
+            Inst::LdStrImmWb { rt, rn, imm9, size, ld, writeback, pre, .. } => {
+                assert_eq!((rt, rn), (3, 0));
+                assert_eq!(imm9, 8);
+                assert_eq!(size, 8);
+                assert!(ld);
+                assert!(writeback);
+                assert!(!pre);
+            }
+            other => panic!("expected LdStrImmWb post for 0xf8408403, got {other:?}"),
+        }
+        // pre-index ldrh w3,[x0,#4]! = 0x78404c03 -> LdStrImmWb (writeback, pre)
+        match decode(0x78404c03) {
+            Inst::LdStrImmWb { rt, imm9, size, writeback, pre, .. } => {
+                assert_eq!((rt, imm9, size), (3, 4, 2));
+                assert!(writeback);
+                assert!(pre);
+            }
+            other => panic!("expected LdStrImmWb pre for 0x78404c03, got {other:?}"),
+        }
+        // register-offset ldr x3,[x0,x2] = 0xf8626803 MUST stay LdStrReg.
+        assert!(matches!(decode(0xf8626803), Inst::LdStrReg { .. }));
     }
 
     #[test]
