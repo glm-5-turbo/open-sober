@@ -442,3 +442,11 @@ bit10 + regression sdiv_is_signed_udiv_is_unsigned_same_negative_input.
 arm64jit 128/128, workspace **177/0**. Cycle net: 9 FP/int miscompile fixes +
 FMADD, all regression-locked. HEAD dae2e05. HARD GATE unchanged (real boot +
 GPU artifact).
+---
+## Cycle addendum — MSUB operand direction (workspace 178/0, commit ccbf55c)
+7th -O2 battery (byte/modulo, switch, SIMD reduce, shorts, bits, strcmp):
+bytelen n%50 -> -48 (wanted 48). MulDiv MSUB arm did rn*rm-ra; ARM MSUB is
+ra-rn*rm. Fixed to sub RDI,RAX + mov (ra - rn*rm). Constant-folded addrs
+masked it. +regression. arm64jit 133/133, workspace **178/0**, all 7
+cross-gcc -O2 batches + core + FMA green. Cycle net: 10 miscompile fixes +
+FMADD. HEAD ccbf55c. HARD GATE unchanged (reproducible boot+GPU artifact).

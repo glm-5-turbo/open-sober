@@ -3431,3 +3431,13 @@ earlier tests. Fixed to bit10 (matches the 2-source gate at ~2054).
 +regression sdiv_is_signed_udiv_is_unsigned_same_negative_input. arm64jit
 128/128, workspace **177/0**. idiv -33, idivA -35, all 6 batches + core green.
 Cycle total: 9 FP/int miscompile fixes + FMADD, regression-locked. HEAD dae2e05.
+
+## Session (Sep 11, 2026) — MSUB operand direction (commit ccbf55c)
+7th -O2 battery (byte-string sum+modulo, switch table, SIMD-ish reduction,
+16-bit accumulate, bitfield pack, strcmp): bytelen (n%50 after byte loop,
+n=1298) gave -48 instead of 48. Root cause: MulDiv MSUB arm computed rn*rm-ra,
+but ARM MSUB is ra-rn*rm, so n-(n/50)*50 via `msub w0,w1,w0,w2` = 25*50-1298 =
+-48. Constant-folded addrs masked it. Fixed direction (MADD arm already
+correct). +regression msub_reuses_rm_as_rd.*. arm64jit 133/133, workspace
+**178/0**. All 7 batches + core + FMA green. Cycle total: 10 miscompile fixes +
+FMADD, all regression-locked. HEAD ccbf55c.
