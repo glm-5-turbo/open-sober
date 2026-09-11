@@ -433,6 +433,16 @@ pub fn translate(
                 buf.add_ri32(RAX, imm as u32); // `adds w…` N/V/Z/C from 32-bit result
             }
             if s {
+                // ADDS/CMN (the non-subtract, flag-setting add) sets the ARM C
+                // flag to the ADD's carry-out, but x86_cc_for_cond's HS/LO/HI/LS
+                // conditions assume the stored C is the SUBTRACT-borrow
+                // convention. gcc compiles `x > 0xffffffffffff0000` as
+                // `cmn x,#0x10000; b.ls` — the add carries (ARM C=1, ls=false),
+                // so the stored C must be !carry for b.ls/b.hi to evaluate
+                // right. Complement CF before packing.
+                if !sub {
+                    buf.cmc(); // borrow-convention C = !carry-out
+                }
                 store_nzcv(buf); // N/Z/C/V -> CpuState.nzcv
             }
             // rd==31 writes SP for ADD/SUB (unlike logical ops where it's XZR and
@@ -496,7 +506,10 @@ pub fn translate(
                 buf.add_rr32(RAX, RCX); // `adds w…`: N/V/Z/C from the 32-bit result
             }
             if s {
-                store_nzcv(buf);
+                if !sub {
+                    buf.cmc(); // ADDS/CMN carries in borrow-convention (see AddSubImm)
+                }
+                store_nzcv(buf); // N/Z/C/V -> CpuState.nzcv
             }
             // rd==31: shifted-register form (bit21=0) discards the result (XZR) —
             // `neg xd,xm` does NOT touch SP. Only the extended-register form

@@ -607,6 +607,47 @@ long long entry(void){
 }
 
 #[test]
+fn diff_cmn_unsigned_large_compare() {
+    // gcc lowers `unsigned u > 0xffffffffffff0000` to `cmn x,#0x10000; b.ls`
+    // (and the sibling hs/hi/lo forms). CMN/ADDS sets the ARM C flag to the
+    // ADD's carry-out, but x86_cc_for_cond's HS/LO/HI/LS assume the stored C
+    // is the SUBTRACT-borrow convention — pre-fix the borrow-sense polarity
+    // was applied for SUBS only, so the CMN path left C as the carry and
+    // `b.ls`/`b.hi` evaluated the unsigned bound backwards (a full-mask
+    // unsigned shifted e.g. `> 0xffff...0000` to "not greater").
+    assert_diff(
+        "cmn_uconst",
+        "-O2",
+        r#"
+long long entry(void){
+    long long m = -1;
+    unsigned long long um = (unsigned long long)m; // 0xffff...ffff
+    long long acc = 0;
+    if (um > 0xffffffffffff0000ULL) acc += 1000000;   // cmn #0x10000, b.ls skip: true
+    if (um < 0xffffffffffff0001ULL) acc += 2000000;   // false
+    if (um >= 0xffffffffffff0000ULL) acc += 4000000;  // true (cmn b.lo)
+    if (um <= 0xffffffffffff0002ULL) acc += 8000000;  // false
+    return acc;                                        // 1000000 + 4000000
+}
+"#,
+    );
+    assert_diff(
+        "cmn_hi",
+        "-O3",
+        r#"
+long long entry(void){
+    unsigned long long um = 0x8000000000000001ULL;
+    long long acc = 0;
+    if (um > 0x8000000000000000ULL) acc += 10;         // true (cmn b.hi)
+    if (um < 0x8000000000000002ULL) acc += 20;         // true (cmn b.lo)
+    if (um == 0x8000000000000001ULL) acc += 40;
+    return acc;                                         // 10 + 20 + 40 = 70
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_addv_popcount_accumulate() {
     // gcc auto-vectorizes __builtin_popcountll into `cnt v.8b` + `addv b`
     // inside an accumulation loop. The ADDV-to-scalar result must CLEAR the
