@@ -284,3 +284,45 @@ status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T03:52:13Z
 ---
+
+# Session (Sep 11, 2026) — scalar FP/SIMD unscaled + pre/post-index ld/st; libbadcpu VEX.0F38 completion (workspace 164/0)
+
+Agenda: verified the handoff's flagged failing test (`libloader android
+test_setup_android_layout_idempotent`) is ALREADY FIXED (8b72828: per-call
+unique temp root + `create_dir_all` before `set_permissions`) — workspace was
+157/0 at start, not failing. Then implemented two higher-leverage pieces, both
+committed and regression-locked.
+
+## 1. arm64jit — scalar FP/SIMD (B/H/S/D) UNSCALED + PRE/POST-index ldr/st (commit 36f01ff)
+Closed the last of the `bit26=1` immediate family the status drumbeat had
+deferred ("the last of the same bit26=1 family; glibc-CRT memset tail"):
+- `FpLdStImmUnscaled` (LDUR/STUR, signed imm9) and `FpLdStImmWb` (pre/post
+  index writeback that advances Xn). Shared `fp_scalar_xfer` transfer helper.
+- Decode gate (all verified vs aarch64-linux-gnu-as ground truth): bit26=1
+  (vector), bit25=0 (immediate), bit21=0 (NOT register-offset — FpLdStrReg
+  READS bit21, found by the regression; register-offset words ALSO have
+  bit25=0), bit24=0 (not the scaled 0x3d form), bit23=0 (not 128-bit Q),
+  bits[29:27]=111; ld=bit22; addressing = bits[11:10] (00 unscaled, 01 post,
+  11 pre — pre is 0b11/0x0c00, NOT 0b10, found by the decode test).
+- +4 tests (decode ground truth incl. neighbor non-collision; stur/ldur
+  round-trip; post-index advances Xn; pre-index applies offset then writes
+  back). arm64jit 116->120. **modmain.elf (full static glibc) now boots PAST
+  its documented `stur s0` memset wall** (0x40a95c) into
+  `__libc_setup_tls`/`_dl_get_dl_main_map`, stopping at a new null-deref
+  (fault 0x0, guestpc 0x400b30 right after `bl _dl_get_dl_main_map`) — again
+  the non-Roblox glibc-CRT tangent, NOT a Roblox boot blocker.
+
+## 2. libbadcpu — complete VEX.0F38 integer family (commit 0fe7d8a)
+Added BEXTR (F7 pp=0), BZHI (F5), and the BMI2 shifts SHRX/SARX/SHLX (F7 with
+pp=F3/F2/66). Encodings verified against host gcc+objdump. Subtlety the
+pre-existing code never had to face: fix-size for the 0F38 integer ops must be
+driven by VEX.W (`vex_w`), NOT the legacy `has_66=>16-bit` rule — SHLX rax is
+pp=1 yet 64-bit. +3 tests. libbadcpu 12->15.
+
+## Gate
+- `cargo build --workspace` clean; `cargo test --workspace` **164/0** (arm64jit
+  120, libbadcpu 15, libloader 16, +1+1+11 others).
+- Commits 36f01ff (arm64jit scalars), 0fe7d8a (libbadcpu) on local `dev`,
+  tree clean.
+- HARD GATE unchanged (real Roblox boot + run log on GPU/APK host).
+---

@@ -3193,3 +3193,53 @@ is NOT met and cannot be on this GPU-less VPS without the real libroblox.so/APK.
 The elfjit path is a growing no-QEMU CPU translator that currently boots a full
 statically-linked glibc program deep into its CRT/startup. The HARD GATE remains
 `elfjit <libroblox.so> 0x1f0db20 --jni` on a capable host.
+
+---
+
+# Session (Sep 11, 2026) — scalar FP/SIMD unscaled + pre/post-index ld/st; libbadcpu VEX.0F38 completion (workspace 164/0, commits 36f01ff + 0fe7d8a)
+
+Opened by re-running the workspace: the handoff's flagged
+`test_setup_android_layout_idempotent` is ALREADY FIXED (8b72828: per-call
+unique temp root + `create_dir_all` before `set_permissions`); it passes — the
+workspace was 157/0 at start, not failing. Proceeded to two committed, tested
+pieces (no APK/GSI/GPU required):
+
+## 1. arm64jit — scalar FP/SIMD (B/H/S/D) UNSCALED (ldur/stur) + PRE/POST-index writeback ld/st
+Closed the last of the `bit26=1` immediate family (the standing "stur/ldur
+scalar s0/d0 + pre/post index" glibc-CRT-tail item).
+- `Inst::FpLdStImmUnscaled` + `Inst::FpLdStImmWb` with a shared
+  `fp_scalar_xfer` helper (transfers `size` bytes between memory and the low
+  bytes of `v[vt]`, upper lanes preserved).
+- Decode gate, each bit verified against aarch64-linux-gnu-as ground truth:
+  bit26=1 (vector file), bit25=0 (immediate offset), **bit21=0** (NOT
+  register-offset — found ONLY by the neighbor-collision test: FpLdStrReg
+  register-offset words ALSO have bit25=0, the real discriminator is bit21),
+  bit24=0 (not the scaled 0x3d form), bit23=0 (not 128-bit Q), bits[29:27]=111.
+  operand size bits[31:30], ld=bit22, imm9 sign-extended, addressing =
+  bits[11:10]: 00=unscaled, **01=post, 11=pre** (pre is `0x0c00` = 0b11, NOT
+  0b10 — caught by the decode test). unprivileged LDTR/STTR (mode 2) left
+  Unsupported.
+- +4 tests. arm64jit 116→120. **modmain.elf (full static glibc) now boots
+  PAST its documented `stur s0`/`stur d0` memset wall** into
+  `__libc_setup_tls`/`_dl_get_dl_main_map`, stopping at a residual null-deref
+  (fault 0x0, guestpc 0x400b30, right after `bl 0x413e60 _dl_get_dl_main_map`)
+  — again the HANDOFF-flagged non-Roblox glibc-CRT tail, NOT a Roblox blocker.
+
+## 2. libbadcpu — BEXTR + BZHI + SHRX/SARX/SHLX (complete the VEX.0F38 integer family)
+The SIGILL emulator already did ANDN/BLSI/BLSMSK/BLSR (VEX.0F38 F2/F3/F1/F4);
+added the rest. All encodings verified vs host gcc+objdump:
+- BEXTR = 0F38 F7 pp=0: `(src1>>start)&(2^len-1)`, start=control[7:0],
+  len=control[15:8] (control = VEX vvvv; pp=0 distinguishes it from the shifts
+  which share F7 but carry a pp prefix).
+- BZHI = 0F38 F5: `src1 & (2^ctrl-1)`; ctrl>=op-size keeps src1 + CF.
+- SHRX/SARX/SHLX = 0F38 F7 with pp=F3/F2/66 respectively.
+- **Real subtlety fixed:** fix-size for the 0F38 integer ops must come from
+  VEX.W (`vex_w`), NOT the legacy `has_66 => 16-bit` rule — SHLX rax has pp=1
+  (has_66) yet is 64-bit; the whole 0F38 branch now sizes off `vex_w`.
+- +3 tests. libbadcpu 12→15.
+
+## Gate
+- `cargo build --workspace` clean; `cargo test --workspace` **164/0** (arm64jit
+  120, libbadcpu 15, libloader 16, +1+1+11). Tree clean on local `dev`.
+- HARD GATE unchanged: `elfjit <libroblox.so> 0x1f0db20 --jni` run log on a
+  GPU + real-binary host.
