@@ -708,15 +708,30 @@ extern "C" fn host_tls_get_addr(
     _a6: u64,
     _a7: u64,
 ) -> u64 {
+    // The caller owns the current host thread == current guest thread; its
+    // TLS TP is published by `jit_run` (set_current_guest_tp). This resolves
+    // {module, offset} against the CALLING thread's OWN TLS blocks — correct
+    // for spawned clone children that each have their own TP. Fall back to the
+    // main-thread TP if the publish didn't happen (older direct call).
+    let tp = crate::jit::current_guest_tp();
+    let tp = if tp != 0 { tp } else { main_tp() };
+    tls_get_addr_from_tp(a0, tp)
+}
+
+/// Main-thread TP cached at `set_chain_tls` (falls back to it for the plain
+/// call path, which only the main thread uses).
+fn main_tp() -> u64 {
+    TLS_CHAIN.lock().unwrap().as_ref().map(|g| g.0).unwrap_or(0)
+}
+
+fn tls_get_addr_from_tp(a0: u64, tp: u64) -> u64 {
     // `tls_index` is 16 bytes of GOT: word[0] = module id, word[1] = offset
     // within that module's TLS block (both link-time; `bind_chain_tls` wrote
     // the module id and the DTPREL slot). Guest == host under libloader.
     let module = unsafe { std::ptr::read_unaligned(a0 as *const u64) };
     let offset = unsafe { std::ptr::read_unaligned((a0 + 8) as *const u64) };
     let guard = TLS_CHAIN.lock().unwrap();
-    let (tp, offsets) = guard
-        .as_ref()
-        .expect("set_chain_tls must be called before __tls_get_addr");
+    let offsets = guard.as_ref().map(|g| &g.1).cloned().unwrap_or_default();
     let block = offsets.get(module as usize).copied().unwrap_or(0);
     tp + block + offset
 }

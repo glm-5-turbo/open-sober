@@ -334,6 +334,21 @@ static EXEC_CTX: Mutex<Option<ExecCtx>> = Mutex::new(None);
 /// rely on kernel pid semantics).
 static NEXT_TID: AtomicU64 = AtomicU64::new(1);
 
+thread_local! {
+    static CURRENT_TP: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Host-visible current guest thread-pointer (0 if the caller isn't a guest
+/// thread). Used by the general-dynamic TLS resolver.
+pub fn current_guest_tp() -> u64 {
+    CURRENT_TP.with(|c| c.get())
+}
+
+/// Set the current guest thread's TP for the duration of `jit_run`.
+fn set_current_guest_tp(tp: u64) {
+    CURRENT_TP.with(|c| c.set(tp));
+}
+
 /// Register `f` as the host call for guest slot `i`. Returns the guest address
 /// the caller should resolve a JUMP_SLOT/intra-image `blr` target to so that the
 /// `jit_run` dispatcher falls through to this host call.
@@ -1332,6 +1347,8 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
     // guest thread can route a signal to it (cooperative pending_signal pickup
     // below). Each thread that runs the dispatcher registers itself.
     register_guest_thread(state);
+    // Publish this thread's guest TP for the general-dynamic TLS resolver.
+    set_current_guest_tp(unsafe { (*state).tpidr });
     let mut guard: u64 = 0;
     const MAX_STEPS: u64 = 20_000_000; // safety net against an infinite guest loop
     loop {
@@ -2079,6 +2096,34 @@ pub fn compile_image_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_guest_tp_is_thread_local_and_published() {
+        // The general-dynamic TLS resolver reads `current_guest_tp()` so it
+        // answers against the CALLING thread's own TLS area. Each guest thread
+        // (main scope or clone child) publishes its tpidr via set_current_guest_tp
+        // at jit_run entry; verify the value is published on the current thread
+        // and reset to 0 when this thread is not inside a jit_run (so a stray
+        // call can't resolve against a stale main TP).
+        assert_eq!(current_guest_tp(), 0, "not in a guest thread -> TP=0");
+        set_current_guest_tp(0x1234_5678);
+        assert_eq!(current_guest_tp(), 0x1234_5678, "published TP readable");
+        let store_ptr = Box::leak(Box::new(core::sync::atomic::AtomicU64::new(0))) as *mut core::sync::atomic::AtomicU64 as usize;
+        let jh = std::thread::spawn(move || {
+            // A spawned host thread has its OWN thread-local, untouched by the
+            // main thread's publication — the per-thread guarantee.
+            assert_eq!(current_guest_tp(), 0, "other thread starts at TP=0");
+            set_current_guest_tp(0xDEAD_BEEF);
+            let v = current_guest_tp();
+            let a = unsafe { &*(store_ptr as *const core::sync::atomic::AtomicU64) };
+            a.store(v, core::sync::atomic::Ordering::SeqCst);
+        });
+        jh.join().unwrap();
+        let a = unsafe { &*(store_ptr as *const core::sync::atomic::AtomicU64) };
+        let got = a.load(core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(got, 0xDEAD_BEEF, "per-thread TP distinct");
+        assert_eq!(current_guest_tp(), 0x1234_5678, "main thread TP unchanged");
+    }
 
     #[test]
     fn addsubext_sxtw_and_postindex_exec() {
