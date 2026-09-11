@@ -1411,6 +1411,45 @@ mod tests {
     }
 
     #[test]
+    fn simd_shift_right_immediate_ushr_sshr() {
+        // ushr/sshr Vd.T, Vn.T, #imm. Regression: plain shift-right (marker
+        // bits[14:12]==0b000) had no gate and was swallowed by the VecMovi gate
+        // (silently wrote a wrong immediate; shiftimm.elf returned 0xfffffffc
+        // instead of 3). New SimdShr gate (immh!=0 vs movi), esize from fls(immh),
+        // shift = 2*esize_bits-(immh:immb). Encodings objdump-verified.
+        // ushr v0.2s,v1.2s,#8 = 0x2f380420: {0x100,0x200} -> {1,2}
+        let mut st = CpuState::new();
+        st.v[2] = (0x200u64 << 32) | 0x100; // v1.2s
+        exec_bytes(&mut st, &[0x20, 0x04, 0x38, 0x2f, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        assert_eq!(st.v[0] & 0xffffffff, 1, "ushr .2s lane0 = 0x100>>8");
+        assert_eq!((st.v[0] >> 32) & 0xffffffff, 2, "ushr .2s lane1 = 0x200>>8");
+        // sshr v0.2s,v1.2s,#8 = 0x0f380420 (arithmetic): {-0x100(0xffffff00), 0x200} -> {-1, 2}
+        let mut st = CpuState::new();
+        st.v[2] = (0x200u64 << 32) | 0xffffff00u64; // v1.2s lane0 = -256
+        exec_bytes(&mut st, &[0x20, 0x04, 0x38, 0x0f, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        assert_eq!((st.v[0] & 0xffffffff) as u32 as i32, -1, "sshr .2s lane0 = -256>>8 (arith)");
+        assert_eq!(((st.v[0] >> 32) & 0xffffffff) as u32 as i32, 2, "sshr .2s lane1 = 0x200>>8");
+        // decode binds: ushr unsigned, sshr signed, both esize from immh.
+        assert!(matches!(
+            crate::decode::decode(0x2f380420),
+            Inst::SimdShr { esize: 4, shift: 8, unsigned: true, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x0f380420),
+            Inst::SimdShr { esize: 4, shift: 8, unsigned: false, .. }
+        ));
+        assert!(matches!(
+            crate::decode::decode(0x6f6f0420),
+            Inst::SimdShr { esize: 8, shift: 17, unsigned: true, .. }
+        ));
+        // movi must NOT be reclassified as a shift (immh==0 stays VecMovi).
+        assert!(matches!(
+            crate::decode::decode(0x0f0004a0),
+            Inst::VecMovi { .. }
+        ));
+    }
+
+    #[test]
     fn fcvt_vec_4s_lanes_are_32bit_and_independent() {
         // Regression: `fcvtzs v0.4s, v1.4s` treats each lane as a 32-bit float and
         // writes a 32-bit int per lane. It used movq_load (reads 8 bytes = lane +

@@ -184,6 +184,11 @@ pub enum Inst {
     SimdShl { rd: u8, rn: u8, esize: u8, shift: u8 },
     // ---- SIMD shift-right accumulate: usra/ssra Vd.T, Vn.T, #imm (Vd += Vn >> imm) ----
     SimdShrAcc { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
+    // ---- SIMD plain shift-right immediate: ushr/sshr Vd.T, Vn.T, #imm ----
+    // Marker bits[14:12]==0b000 (vs shl 0b101, usra/ssra 0b001); immh!=0 separates
+    // from the modifed-immediate movi/mvni (which always have immh==0). unsigned =
+    // bit29 (0x2f/0x6f). These previously fell into the broad VecMovi gate.
+    SimdShr { rd: u8, rn: u8, esize: u8, shift: u8, unsigned: bool },
     // ---- SIMD ld2 (load two vectors, deinterleaved) ----
     Ld2 { rd: u8, rn: u8, q: bool, post: i32 },
     // ---- SIMD st2 (structure store of two vectors) ----
@@ -1306,6 +1311,38 @@ pub fn decode(insn: u32) -> Inst {
             shift: shift as u8,
             unsigned: (insn >> 11) & 1 == 1,
         };
+    }
+
+    // ---- SIMD plain shift-right immediate: ushr/sshr Vd.T, Vn.T, #imm ----
+    // Marker (insn & 0x0000_7000)==0b000 (the "ushr's 0x0000" note in ShrAcc), and
+    // immh != 0 to exclude the modified-immediate movi/mvni family (immh==0). This
+    // MUST come before the broad VecMovi gate (top byte {0F,1F,2F,4F,5F,6F}) which
+    // otherwise mis-decodes ushr/sshr as a vector immediate (silent wrong value).
+    // unsigned = bit29 (0x2f/0x6f). shift = esize_bits - (immh:immb), same as ShrAcc.
+    if matches!((insn >> 24) & 0x0f, 0x0f | 0x2f | 0x4f | 0x6f)
+        && (insn & 0x0000_7000) == 0 && (insn & 0x0080_0000) == 0
+    {
+        let immh = (insn >> 19) & 0x7;
+        if immh != 0 {
+            // esize from the MSB position of immh: esize_bytes = 1<<(fls-1).
+            // e.g. immh4=7 (0b0111) -> fls=3 -> esize=4 (32-bit, .2s); immh4=13 -> esize=8.
+            let immh4: u32 = immh | ((insn >> 22) & 1) << 3; // reconstruct full bits[22:19]
+            let fls = 32 - immh4.leading_zeros(); // highest set bit, 1-indexed
+            let esize: u8 = 1u8 << (fls - 1);
+            let esize_bits = 8 * esize as u32;
+            // right shift: amount = 2*esize_bits - (immh4:immb). Verified: ushr.2s #8
+            // (immh4=7,immb=0) -> 64-56=8; ushr.2d #17 (immh4=13,immb=7) -> 128-111=17.
+            let full: u32 = (immh4 << 3) | ((insn >> 16) & 0x7);
+            let max = 2 * esize_bits;
+            let shift: u8 = if full < max { (max - full) as u8 } else { 0 };
+            return Inst::SimdShr {
+                rd: (insn & 0x1f) as u8,
+                rn: ((insn >> 5) & 0x1f) as u8,
+                esize,
+                shift,
+                unsigned: (insn >> 29) & 1 == 1,
+            };
+        }
     }
 
     // ---- SIMD FP multiply by element: fmul Vd.T, Vn.T, Vm.T[L] ----

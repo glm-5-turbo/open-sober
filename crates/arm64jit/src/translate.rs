@@ -2807,16 +2807,27 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 }
                 Inst::SimdShrAcc { rd, rn, esize, shift, unsigned } => {
                     // usra/ssra Vd.T, Vn.T, #imm : Vd_i += Vn_i >> imm (logical if
-                    // unsigned/usra, arithmetic if signed/ssra). Plain GPR-register lanes.
+                    // unsigned/usra, arithmetic if signed/ssra). The source element is
+                    // sign-extended to 64 bits for ssra (zero-extending a negative
+                    // element made the arithmetic shift positive).
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     let lanes = 16 / (esize as i32);
                     for i in 0..lanes {
                         let off = vslot(rn) + (i as i32) * (esize as i32);
                         match esize {
                             8 => buf.mov_load64(RAX, RBX, off),
-                            4 => buf.mov_load32(RAX, RBX, off),
-                            2 => buf.movzx_word_mem(RAX, RBX, off),
-                            _ => buf.movzx_byte_mem(RAX, RBX, off),
+                            4 => {
+                                buf.mov_load32(RAX, RBX, off);
+                                if !unsigned { buf.movsxd_r64_r32(RAX, RAX); }
+                            }
+                            2 => {
+                                if unsigned { buf.movzx_word_mem(RAX, RBX, off); }
+                                else { buf.movsx_word_mem(RAX, RBX, off); }
+                            }
+                            _ => {
+                                if unsigned { buf.movzx_byte_mem(RAX, RBX, off); }
+                                else { buf.movsx_byte_mem(RAX, RBX, off); }
+                            }
                         }
                         if unsigned { buf.shr_ri8(RAX, shift); } else { buf.sar_ri8(RAX, shift); }
                         let dst = vslot(rd) + (i as i32) * (esize as i32);
@@ -2832,6 +2843,54 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                             4 => buf.mov_store32(RBX, dst, RCX),
                             2 => buf.mov_store16(RBX, dst, RCX),
                             _ => buf.mov_store8(RBX, dst, RCX),
+                        }
+                    }
+                    Ok(())
+                }
+                Inst::SimdShr { rd, rn, esize, shift, unsigned } => {
+                    // ushr/sshr Vd.T, Vn.T, #imm : Vd_i = Vn_i >> shift (logical if
+                    // unsigned/ushr, arithmetic if signed/sshr), no accumulate.
+                    // For sshr the esize-bit element must be SIGN-extended to 64 bits
+                    // before the arithmetic shift (zero-extending a negative element
+                    // made it positive); guards shift >= esize*8 (0 for logical,
+                    // all-ones sign-fill for arithmetic - a bare x86 imm clamps).
+                    let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                    let lanes = 16 / (esize as i32);
+                    let esize_bits = (esize as i32) * 8;
+                    for i in 0..lanes {
+                        let off = vslot(rn) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_load64(RAX, RBX, off),
+                            4 => {
+                                buf.mov_load32(RAX, RBX, off);
+                                if !unsigned { buf.movsxd_r64_r32(RAX, RAX); }
+                            }
+                            2 => {
+                                if unsigned { buf.movzx_word_mem(RAX, RBX, off); }
+                                else { buf.movsx_word_mem(RAX, RBX, off); }
+                            }
+                            _ => {
+                                if unsigned { buf.movzx_byte_mem(RAX, RBX, off); }
+                                else { buf.movsx_byte_mem(RAX, RBX, off); }
+                            }
+                        }
+                        if (shift as i32) >= esize_bits {
+                            if unsigned {
+                                buf.xor_rr64(RAX, RAX);
+                            } else {
+                                buf.sar_ri8(RAX, 63);
+                            }
+                        } else if unsigned {
+                            buf.shr_ri8(RAX, shift);
+                        } else {
+                            buf.sar_ri8(RAX, shift);
+                        }
+                        let dst = vslot(rd) + (i as i32) * (esize as i32);
+                        match esize {
+                            8 => buf.mov_store64(RBX, dst, RAX),
+                            4 => buf.mov_store32(RBX, dst, RAX),
+                            2 => buf.mov_store16(RBX, dst, RAX),
+                            _ => buf.mov_store8(RBX, dst, RAX),
                         }
                     }
                     Ok(())
