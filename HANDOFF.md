@@ -4645,6 +4645,24 @@ oracle). This removes the last known-open JIT correctness item on this box.
 
 Next (ordered, all still open): libloader ELF/loader gaps, libbadcpu ISA gaps,
 services/auth — or more fuzz coverage. HARD GATE unchanged (no GPU/APK).
+## Session (Sep 11, 2026) — guest_svc syscall surface expansion (filesystem/IO/network)
+
+Added two batches of AArch64 syscalls to the guest_svc bridge that a real
+Android/Roblox boot path issues early and that previously returned -ENOSYS,
+each number verified against the sysroot asm-generic headers (not guessed):
+  Batch 1 (commit c0073b6): fcntl(25), clock_nanosleep(115), getrusage(165),
+  setpgid(154), rt_sigaction(134), rt_sigprocmask(135), fadvise64(223).
+  Batch 2 (commit a682eea): mkdirat(34)/unlinkat(35)/symlinkat(36)/linkat(37)/
+  renameat(38), pread64(67)/pwrite64(68), socketpair(199), sendto(206)/
+  recvfrom(207)/sendmsg(211)/recvmsg(212)/accept4(213), madvise(233), umask(166),
+  getgroups(158).
+Signal ops accept registration (return 0) but don't dispatch guest trampolines
+(consistent with the shim's no-signal posture); oact/oset outputs are zeroed so
+callers don't deref garbage. madvise DONTNEED keeps host RSS bounded under guest
+allocation churn. Test guest_svc_common_boot_gaps_roundtrip covers both batches
+(mkdir/link/rename/read/write/pipe lifecycle, socketpair+sendmsg/recvmsg byte
+roundtrip, madvise, umask, fcntl, sigaction/procmask zeroing, clock_nanosleep).
+Workspace 290/0. HARD GATE unchanged (no GPU/APK on this box).
 ## Session (Sep 11, 2026) — fuzz_jit loader-mode: PIE + reloc shapes end-to-end (100+ cases)
 
 Extended the differential fuzzer with a loader-mode: gen_globals_pie /
