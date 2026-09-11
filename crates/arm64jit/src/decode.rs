@@ -3439,7 +3439,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                                         // Same walk as Simd4s but size-field == 3 (D lanes), Q=0/1.
                                         // sub = 0x6e.. vs add 0x4e.. (bit29). Disjoint: Simd4s above only when size!=3.
                                         let add2d = insn & 0x2f20_0c00;
-if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 && (insn & 0x4000) == 0 {
+if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && ((insn >> 22) & 3) == 3 && (insn & 0x4000) == 0 {
                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                             let rn = ((insn >> 5) & 0x1f) as u8;
                                             let rd = (insn & 0x1f) as u8;
@@ -3450,7 +3450,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 && 
                                                                                 // size field bits[23:22] == 0 (byte). Same walk residue as Simd4s but byte lane.
                                                                                 {
                                                                                     let bc = insn & 0x2f20_0c00;
-                                                                                    if (bc == 0x0e20_0400 || bc == 0x2e20_0400) && ((insn >> 22) & 3) == 0 && (insn & 0x4000) == 0 {
+                                                                                    if (bc == 0x0e20_0400 || bc == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && ((insn >> 22) & 3) == 0 && (insn & 0x4000) == 0 {
                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                         let rd = (insn & 0x1f) as u8;
@@ -3463,7 +3463,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 22) & 3) == 3 && 
                                                                                 // Same walk/wrap residue as Simd4s/AddB but size-field == 1 (H lanes).
                                                                                 {
                                                                                     let hc = insn & 0x2f20_0c00;
-                                                                                    if (hc == 0x0e20_0400 || hc == 0x2e20_0400) && ((insn >> 22) & 3) == 1 && (insn & 0x4000) == 0 {
+                                                                                    if (hc == 0x0e20_0400 || hc == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && ((insn >> 22) & 3) == 1 && (insn & 0x4000) == 0 {
                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                         let rd = (insn & 0x1f) as u8;
@@ -5931,5 +5931,39 @@ mod logical_imm_regressions {
                 assert_eq!((rd, esize, shift), (31, 4, 25));
             }
             other => panic!("shl v31.4s,#25 -> SimdShl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cmgt_not_swallowed_as_vector_add() {
+        // Regression: cmgt Vd.2d, Vn.2d, Vm.2d shares byte1-residue 0x2f20_0c00
+        // with the integer SIMD add/sub family, but has bit15 CLEAR while every
+        // genuine add/sub (and the Simd4s case) has bit15 SET. The SimdAddD/B/H
+        // gates lacked Simd4s's `(insn>>15)&1 == 1` guard, so gcc vectorized
+        // `a[i] < k ? a[i] : k` (cmgt + bsl min-clamp) silently decoded the cmgt
+        // as a vector ADD -> every lane summed instead of compared (silent wrong
+        // clamp). Real encodings (aarch64-linux-gnu-as):
+        //   cmgt v3.2d, v30.2d, v4.2d = 0x4ee437c3   (bit15 CLEAR)
+        //   add  v3.2d, v30.2d, v4.2d = 0x4ee487c3   (bit15 SET)
+        //   add  v3.16b,v30.16b,v4.16b = 0x4e2487c3
+        //   sub  v3.16b,v30.16b,v4.16b = 0x6e2487c3
+        match decode(0x4ee437c3) {
+            Inst::SimdCmgt { rd, rn, rm, dword, lanes } => {
+                assert_eq!((rd, rn, rm, dword, lanes), (3, 30, 4, true, 2));
+            }
+            other => panic!("cmgt v3.2d,v30,v4 -> SimdCmgt, got {other:?}"),
+        }
+        // And the sibling forms still decode (bit15 must NOT exclude them).
+        match decode(0x4ee487c3) {
+            Inst::SimdAddD { rd, rn, rm, sub } => {
+                assert_eq!((rd, rn, rm, sub), (3, 30, 4, false));
+            }
+            other => panic!("add v3.2d,v30,v4 -> SimdAddD, got {other:?}"),
+        }
+        match decode(0x6e2487c3) {
+            Inst::SimdAddB { rd, rn, rm, sub, .. } => {
+                assert_eq!((rd, rn, rm, sub), (3, 30, 4, true));
+            }
+            other => panic!("sub v3.16b,v30,v4 -> SimdAddB, got {other:?}"),
         }
     }

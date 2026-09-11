@@ -1925,3 +1925,31 @@ long long entry(void){
 "#,
     );
 }
+
+// SIMD integer compare-greater (cmgt) + bsl bit-select used by a vectorized
+// min-clamp `a[i] < k ? a[i] : k`. TWO co-resident JIT bugs lived here:
+// (1) DECODE — the SimdAddD/B/H gates lacked Simd4s's bit15 guard, so cmgt
+// (bit15 CLEAR) was swallowed as a vector ADD, summing lanes instead of
+// comparing (wrong clamp values, silent); (2) TRANSLATE — SimdCmgt used
+// cmovg which sets 0 ON greater (inverted), so the mask came out all-ones
+// where it should be 0. Both fixed. gcc -O3 vectorizes the clamp into
+// cmgt+bsl+add+addp over 64-bit lanes.
+#[test]
+fn diff_simd_cmgt_clamp_min() {
+    assert_diff(
+        "simd_cmgt_clamp",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile unsigned long long seedv = 777313ull;
+    unsigned long long x = seedv;
+    long long b[16];
+    for(int i=0;i<16;i++){ x=x*2862933555777941757ull+3037000493ull; b[i]=(long long)(((x>>40)&0x7ffff)-65536); }
+    long long s1=0, s2=0;
+    for(int i=0;i<16;i++){ long long v=b[i]; if(v>100000ll) v=100000ll; s1+=v; }   // min( ,100000)
+    for(int i=0;i<16;i++){ long long v=b[i]; if(v<100000ll) v=100000ll; s2+=v; }   // max( ,100000)
+    return s1*7 + s2;
+}
+"#,
+    );
+}

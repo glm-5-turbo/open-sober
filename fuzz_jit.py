@@ -592,7 +592,46 @@ def gen_selfimport():
     ch=" + ".join(f"h{i}(x)" for i in range(4))
     return ("\n".join(fns)+"\n"
             f"long long entry(void){{ volatile unsigned long long seedv=77771ull; long long x=(long long)(seedv>>{random.choice([3,7,11,13])}); return {ch}; }}\n")
+def gen_fp_edge():
+    # FP edge cases a graphics/audio engine hits that benign finite-value
+    # generators never exercise: division (incl. by 0 and tiny), NaN
+    # propagation, +/-inf, -0.0 and signed-zero compares, and boundary
+    # int<->float conversions. We only require jit == native x86 oracle
+    # (same C compiled to both), which sidesteps correctness debates.
+    kind=random.choice(["float","double"])
+    op=random.choice(["/","*","+","-"])
+    n=random.choice([8,16,24])
+    specials=['0.0','-0.0','1.0/0.0','-1.0/0.0','0.0/0.0','1e-300','-1e-300']
+    s1=random.choice(specials); s2=random.choice(specials)
+    B="{"                      # literal open brace
+    E="}"                      # literal close brace
+    return (f"long long entry(void){B}\n"
+            + f"    volatile unsigned long long seedv = 777313ull;\n"
+            + f"    unsigned long long x = seedv;\n"
+            + f"    {kind} a[{n}];\n"
+            + f"    for(int i=0;i<{n};i++){B} x=x*2862933555777941757ull+3037000493ull; a[i]=({kind})(((long long)((x>>45)&0x7ffff)-65536))*1e-6; {E}\n"
+            + f"    {kind} acc = 0.0; {kind} lo = 1.0/0.0; {kind} hi = -1.0/0.0;\n"
+            + f"    {kind} sp = ({kind})({s1});\n"
+            + f"    for(int i=0;i<{n};i++){B} acc = acc {op} a[i]; {E}\n"
+            + f"    acc = acc {op} sp;\n"
+            + f"    for(int i=0;i<{n};i++){B} if(a[i]<lo) lo=a[i]; if(a[i]>hi) hi=a[i]; {E}\n"
+            + f"    {kind} nn = ({kind})({s2});\n"
+            + f"    {kind} mn = a[0] < nn ? a[0] : nn;\n"
+            + f"    {kind} mx = a[0] > nn ? a[0] : nn;\n"
+            + f"    long long ivals=0;\n"
+            + f"    for(int i=0;i<{n};i++){B}\n"
+            + f"        long long v=(long long)(a[i]*1e6); if(v>4000000000ll) v=4000000000ll; if(v<-4000000000ll) v=-4000000000ll;\n"
+            + f"        ivals += v;\n"
+            + f"    {E}\n"
+            + f"    {kind} fp = ({kind})ivals;\n"
+            + f"    long long back = (long long)fp;\n"
+            + f"    long long zero_cmp = ({kind})(0.0) > ({kind})-0.0 ? 7 : 3;\n"
+            + f"    long long r = ((long long)acc & 0x1ffff) + (long long)lo + (long long)hi + (long long)mn + (long long)mx + back + zero_cmp + (ivals&0xff);\n"
+            + f"    return r & 0xfffffffff;\n"
+            + f"{E}\n")
+
 gens_shared=[gen_selfimport]
+gens += [gen_fp_edge]
 
 def main():
     fails=0; ok=0; skip=0
