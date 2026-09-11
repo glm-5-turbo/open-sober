@@ -1533,6 +1533,68 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::Fma3 { rd, rn, rm, ra, sz, sub, neg } => {
+            // Scalar 3-source FP: Dd = Da +- (Dn × Dm), optionally negated.
+            //   fmadd(0,0)=ra+rn*rm  fmsub(1,0)=ra-rn*rm
+            //   fnmadd(0,1)=-(ra+rn*rm)  fnmsub(1,1)=rn*rm-ra
+            // xmm0=rn*rm, xmm1=rm(srca), xmm2=ra, xmm3=scratch(negate).
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            if sz {
+                buf.movq_load(0, RBX, vslot(rn));
+                buf.movq_load(1, RBX, vslot(rm));
+                buf.mulsd(0, 1); // xmm0 = rn*rm
+                buf.movq_load(2, RBX, vslot(ra));
+                let result = match (sub, neg) {
+                    (false, false) => {
+                        buf.addsd(2, 0); // ra + prod
+                        2
+                    }
+                    (true, false) => {
+                        buf.subsd(2, 0); // ra - prod
+                        2
+                    }
+                    (false, true) => {
+                        buf.addsd(2, 0); // ra + prod
+                        buf.pxor_xmm(3, 3); // 0.0
+                        buf.subsd(3, 2); // 0 - (ra+prod) = negate
+                        3
+                    }
+                    (true, true) => {
+                        buf.subsd(0, 2); // prod - ra
+                        0
+                    }
+                };
+                buf.movq_store(RBX, vslot(rd), result);
+            } else {
+                let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                let ld = |buf: &mut CodeBuf, x: u8, r: u8| {
+                    buf.mov_load32(RAX, RBX, f(r));
+                    buf.movd_xmm_r32(x, RAX);
+                };
+                // xmm0 = rn, xmm1 = rm, then xmm0 *= xmm1 (rcx), xmm2 = ra.
+                ld(buf, 0, rn);
+                ld(buf, 1, rm);
+                buf.mulss(0, 1); // xmm0 = rn*rm
+                ld(buf, 2, ra);
+                match (sub, neg) {
+                    (false, false) => buf.addss(2, 0), // xmm2 = ra + prod
+                    (true, false) => buf.subss(2, 0),  // xmm2 = ra - prod
+                    (false, true) => {
+                        buf.addss(2, 0); // xmm2 = ra + prod
+                        buf.pxor_xmm(3, 3);
+                        buf.subss(3, 2); // 0 - xmm2
+                    }
+                    (true, true) => {
+                        buf.movd_xmm_r32(2, RAX); // refresh xmm2 unused; do prod - ra
+                        buf.subss(0, 2); // xmm0 = prod - ra
+                    }
+                }
+                let result = if sub && neg { 0 } else if neg { 3 } else { 2 };
+                buf.movd_r32_xmm(RAX, result);
+                buf.mov_store32(RBX, f(rd), RAX);
+            }
+            Ok(())
+        }
         Inst::FpScalar { rd, rn, rm, op, sz } => {
             // scalar FP on d/s regs. d-reg = low 8 bytes of CpuState.v[reg].slot
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16; // low 8B of a 16B slot

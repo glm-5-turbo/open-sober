@@ -419,13 +419,24 @@ pub enum Inst {
         rn: u8,
     },
     // ---- scalar floating-point arithmetic on d-regs (double) ----
-    FpScalar {
-        rd: u8,
-        rn: u8,
-        rm: u8,
-        op: u8, // 4=mul,5=add,6=sub,7=div
-        sz: bool, // true = double
-    },
+        FpScalar {
+            rd: u8,
+            rn: u8,
+            rm: u8,
+            op: u8,
+            sz: bool,
+        },
+        // ---- scalar 3-source FP multiply-accumulate: fmadd/fmsub/fnmadd/fnmsub ----
+        // Dd = Da +- (Dn×Dm), optionally negated. o1=bit21 (fn*), o2=bit15 (sub).
+        Fma3 {
+            rd: u8,
+            rn: u8,
+            rm: u8,
+            ra: u8,
+            sz: bool,
+            sub: bool,  // o2: fmsub/fnmsub
+            neg: bool,  // o1: fnmadd/fnmsub (negate the accumulate term)
+        },
     // ---- scalar 1-source FP (no rn/rm): d-dst<-f(d-src) ----
     FpUnary {
         rd: u8,
@@ -886,6 +897,25 @@ fn rn(insn: u32) -> u8 {
 }
 
 pub fn decode(insn: u32) -> Inst {
+    // ---- scalar 3-source FP multiply-accumulate fmadd/fmsub/fnmadd/fnmsub ----
+    // Byte3 == 0x1f (0b00011111) uniquely identifies the scalar 3-source FP
+    // family (single & double). o1=bit21 (fnmadd/fnmsub), o2=bit15 (sub);
+    // sz=bit22 (1=double). Semantics (ARM): fmadd=ra+rn*rm, fmsub=ra-rn*rm,
+    // fnmadd=-(ra+rn*rm), fnmsub=rn*rm-ra. MUST be near the top: a broad SIMD
+    // vector-immediate gate would otherwise swallow 0x1f4.. as a bogus `movi`
+    // and emit garbage (the compiler contracts every a*b+c into fmadd).
+    if (insn & 0xff00_0000) == 0x1f00_0000 {
+        return Inst::Fma3 {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            ra: ((insn >> 10) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            sz: (insn >> 22) & 1 == 1,
+            sub: (insn >> 15) & 1 == 1,
+            neg: (insn >> 21) & 1 == 1,
+        };
+    }
+
     // ---- SME/SVE feature-off misc (glibc `__libc_arm_za_disable` path) ----
     // These precise masks come before the system-register (0xd5) gates so the
     // smstart/smstop system-link ops are not swallowed, and before any broad

@@ -2791,6 +2791,43 @@ mod tests {
     }
 
     #[test]
+    fn scalar_fma3_all_four_variants() {
+        // Scalar 3-source FP multiply-accumulate: the compiler contracts every
+        // a*b+c (and -O2 fuses a*x*x into) fmadd. These were previously swallowed
+        // by a broad SIMD-immediate gate and silently corrupted. d1=3,d2=4,d3=5
+        // (V1/V2/V3 low u64 = st.v[2/4/6]); each writes d0 (=st.v[0]).
+        let words: [u32; 4] = [0x1f42_0c20, 0x1f42_8c20, 0x1f62_0c20, 0x1f62_8c20];
+        let expect: [i64; 4] = [17, -7, -17, 7]; // fmadd=5+12, fmsub=5-12, fnmadd=-(5+12), fnmsub=12-5
+        for (i, w) in words.iter().enumerate() {
+            let mut st = CpuState::new();
+            st.v[2] = 3.0f64.to_bits();
+            st.v[4] = 4.0f64.to_bits();
+            st.v[6] = 5.0f64.to_bits();
+            let mut code = Vec::new();
+            code.extend_from_slice(&w.to_le_bytes());
+            code.extend_from_slice(&0x1e78_0000u32.to_le_bytes()); // fcvtzs w0,d0
+            code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+            exec_bytes(&mut st, &code, 0).expect("exec scalar fma3");
+            assert_eq!(
+                f64::from_bits(st.v[0]) as i64,
+                expect[i],
+                "fma3 variant {i}"
+            );
+        }
+        // single-precision fmadd s0,s1,s2,s3: s1..s3 low 4B of V1..V3; 2*3+5=11.
+        let mut st = CpuState::new();
+        st.v[2] = 2.0f32.to_bits() as u64;
+        st.v[4] = 3.0f32.to_bits() as u64;
+        st.v[6] = 5.0f32.to_bits() as u64;
+        let mut code = Vec::new();
+        code.extend_from_slice(&0x1f02_0c20u32.to_le_bytes()); // fmadd s0,s1,s2,s3
+        code.extend_from_slice(&0x1e26_0000u32.to_le_bytes()); // fmov w0,s0
+        code.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // ret
+        exec_bytes(&mut st, &code, 0).expect("exec scalar fmadd s");
+        assert_eq!(f32::from_bits(st.x[0] as u32), 11.0, "fmadd s: 5 + 2*3");
+    }
+
+    #[test]
     fn fnmul_scalar_negate_mul() {
         // fnmul s10, s0, s1 = 0x1e21880a (wall): s10 = -(s0*s1).
         let f = |x: f32| x.to_bits() as u64;
