@@ -4529,3 +4529,35 @@ an APK/GPU.
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays
    the HARD GATE, blocked until a capable host + the real binary/APK (none here).
+
+## Session (Sep 11, 2026) — ld2/st2 structure deinterleave element-size FIXED (commit 36813d1, workspace 282/0)
+
+Root-caused and fixed a silent SIMD miscompile in the structure load/store
+(ld2/st2) path: the translate arms DEINTERLEAVED AT BYTE GRANULARITY
+regardless of element size. `ld2 {v.8h, v.8h}` (2-byte elements — gcc's
+strided u16 accumulate `for(i+=2) s2 += b[i]`) read mem[2i],mem[2i+1] instead
+of the correct mem[4i],mem[4i+2]; the even-index sum registered the wrong
+memory elements. Decode already computed `esize` for the 3/4-register forms
+but dropped it for ld2/st2 (the 2-register case made byte-only runs look
+correct, hiding the bug). Passed `esize` through decode and deinterleave at
+element stride (element i of reg j at byte i*(2*es)+j*es, copy es bytes).
+
+Verified end-to-end (no QEMU): isolated strided-u16 repro 311814 -> 281606 ==
+native; differential canary `diff_ld2_halfword_strided_accumulate` added
+(proven sensitive — reverting ONLY the esize change makes it fail again).
++decode regression with assembler-verified 8h/16b/4s encodings.
+`cargo build --workspace` clean; `cargo test --workspace` 282/0 (was 280).
+
+HONEST REMAINING / next high-value target: a SEPARATE pre-existing co-resident
+bug surfaced by the differential sweep — a single function that VECTORIZES TWO
+widen-accumulate loops (e.g. two byte-sums `i+=1` and `i+=2`) into one host
+block produces correct low-32 sums but a stray data byte at bits 32-39 of the
+64-bit accumulator lanes (repro `twov2.c`/`twoloopp.c`: JIT 18916 vs oracle
+16868; isolated each loop passes). Independent of the ld2 fix (byte-only path,
+esize=1, unchanged). Root-cause lead: bits 32-63 of the accumulator lanes are
+contaminated, strongly suggesting a shared host/permscratch register clobber
+across the two co-resident widening loops — NOT a single-Ld2 fault. Next
+session: trace which translate arm leaves permscratch / a host vector scratch
+dirty that the second loop's zip/uxtl reads; this subsumes the "byte-acc
+halved" 2x signature documented in the runs/STATUS ledger. HARD GATE unchanged
+(no GPU/APK/libroblox.so on this VPS).

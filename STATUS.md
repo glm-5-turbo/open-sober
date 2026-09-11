@@ -809,3 +809,31 @@ status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T08:08:57Z
 ---
+cycle: 22
+status: cycle_end
+last_agent_claim: Ad-hoc verification of this turn's changes is complete and clean (the leftover `/tmp/hermes-verify-cycle12.sh` is a pre- (rc=0)
+updated: 2026-09-11T08:19:37Z
+---
+cycle: 23
+status: cycle_end
+last_agent_claim: <no completion claim> (rc=0)
+updated: 2026-09-11T08:41:54Z
+---
+cycle: 24
+status: committed
+last_agent_claim: Fixed a silent SIMD miscompile: the ld2/st2 structure
+(DE)INTERLEAVE translate arms scaled at BYTE granularity regardless of element
+size, so 'ld2 {v.8h,v.8h}' (2-byte elements — gcc strided u16 accumulate
+'for(i+=2) s2+=b[i]') read mem[2i],mem[2i+1] instead of mem[4i],mem[4i+2];
+the even-index sum registered the wrong memory elements (isolated repro
+311814 -> 281606 == native). Decode computed esize for ld3/ld4 but dropped it
+for the 2-register ld2/st2 case. Threaded esize through decode + deinterleave
+at element stride. Verified no-QEMU; +diff_battery canary
+diff_ld2_halfword_strided_accumulate (proven sensitive: reverting only the
+esize change re-fails) + decode regression with assembled 8h/16b/4s encodings.
+cargo build clean; cargo test --workspace 282/0 (was 280). commit 36813d1.
+Pre-existing SEPARATE co-resident bug documented (two widen loops in one block
+contaminate bits 32-63 of acc lanes; byte-only esize=1 path, independent of
+this fix) — next high-value target. HARD GATE unchanged (no GPU/APK).
+updated: 2026-09-11T09:10:00Z
+---
