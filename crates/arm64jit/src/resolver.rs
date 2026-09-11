@@ -13,7 +13,10 @@
 //! args/results (sinf/powf/...) use XMM registers and need a separate
 //! float-ABI path, added later.
 
-use crate::jit::{host_call_addr, register_host_call, HostCall, HostFloat32Call, HostFloatCall};
+use crate::jit::{
+    host_call_addr, register_gles_call, register_host_call, CpuState, HostCall, HostFloat32Call,
+    HostFloatCall, HostGlesCall,
+};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Mutex, OnceLock};
@@ -223,14 +226,24 @@ pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
     b"glStencilOpSeparate\0",
     b"glTexParameteri\0",
     b"glTexParameteriv\0",
+    b"glTexParameterfv\0",
+    b"glGetTexParameterfv\0",
+    b"glGetFloatv\0",
     b"glUniform1i\0",
     b"glUniform1iv\0",
+    b"glUniform1fv\0",
     b"glUniform2i\0",
     b"glUniform2iv\0",
+    b"glUniform2fv\0",
     b"glUniform3i\0",
     b"glUniform3iv\0",
+    b"glUniform3fv\0",
     b"glUniform4i\0",
     b"glUniform4iv\0",
+    b"glUniform4fv\0",
+    b"glUniformMatrix2fv\0",
+    b"glUniformMatrix3fv\0",
+    b"glUniformMatrix4fv\0",
     b"glUseProgram\0",
     b"glValidateProgram\0",
     b"glVertexAttribPointer\0",
@@ -283,6 +296,327 @@ pub fn resolve_gles_int(name: &[u8]) -> Option<u64> {
     let hostf: HostCall = unsafe { std::mem::transmute(ptr) };
     let mut r = resolver().lock().unwrap();
     alloc_slot(&mut r, &key, hostf)
+}
+
+// ---------------------------------------------------------------------------
+// GLES mixed-ABI bridge
+//
+// Most `gl*` functions are integer-ABI (see GLES_INT_NAME_LIST) and run through
+// the integer HostCall. But a core subset takes float arguments (passed in the
+// low 32 bits of the guest SIMD s0..s7 lanes, not the integer x-registers) and
+// several take MORE than 8 args (the 9th+ live on the guest stack). Neither the
+// integer HostCall (8 x-reg args only) nor the uniform-float bridges (all-float
+// ABI) can express these. For each such function we install a `HostGlesCall`
+// wrapper that receives the full guest CpuState, reads the exact x/s/sp lanes
+// its AArch64 signature uses, and dispatches to real Mesa. This is what lets a
+// translated Roblox binary actually clear the framebuffer (glClearColor) and
+// upload textures (glTexImage2D) instead of hitting the NULL/0 graphics stub.
+// ---------------------------------------------------------------------------
+
+/// Cached dlsym of a Mesa GLES symbol (real libGLESv2.so.2, already RTLD_LOCAL'd
+/// by `gles_handle`). Returns the fn address, or 0 if Mesa lacks the symbol.
+fn gles_sym(name: &str) -> usize {
+    static CACHE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    let m = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(a) = m.lock().unwrap().get(name) {
+        return *a;
+    }
+    let mh = gles_handle();
+    let addr = if mh.is_null() {
+        0
+    } else {
+        let c = CString::new(name).unwrap();
+        unsafe { sym_from(mh, c.as_ptr()) as usize }
+    };
+    m.lock().unwrap().insert(name.to_string(), addr);
+    addr
+}
+
+// Guest AArch64 arg-lane readers at a `blr` thunk boundary:
+/// Low 32 bits of guest SIMD register `vN` (an f32 argument in sN).
+#[inline]
+fn gs_f(st: &CpuState, n: usize) -> f32 {
+    f32::from_bits(st.v[2 * n] as u32)
+}
+/// Integer arg register xN (low 32 bits / full u64).
+#[inline]
+fn gs_x(st: &CpuState, n: usize) -> u64 {
+    st.x[n]
+}
+/// The N-th stack argument (N >= 8): the guest spilled args 8+ at the top of
+/// its stack at `[sp + 8*(N-8)]` per the AArch64 calling convention.
+unsafe fn gs_stack(st: &CpuState, n: usize) -> u64 {
+    let sp = st.x[31];
+    core::ptr::read_unaligned((sp + 8 * (n as u64 - 8)) as *const u64)
+}
+
+macro_rules! gles_ret {
+    ($st:expr) => {
+        0u64 // all the wrapped calls below are `void`; the guest ignores x0
+    };
+}
+
+/// Wrapper for the purely-float clear/coverage set (glClearColor/_tl blColor…).
+// (Written explicitly rather than via a rep-macro: Rust can't drive a `$(f32),*`
+// type-list repetition off a distinguished `$($a:expr),*` lane-index matcher.)
+extern "C" fn w_glClearColor(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32, f32, f32, f32) = unsafe { std::mem::transmute(gles_sym("glClearColor")) };
+    unsafe { f(gs_f(s, 0), gs_f(s, 1), gs_f(s, 2), gs_f(s, 3)) };
+    0u64
+}
+extern "C" fn w_glBlendColor(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32, f32, f32, f32) = unsafe { std::mem::transmute(gles_sym("glBlendColor")) };
+    unsafe { f(gs_f(s, 0), gs_f(s, 1), gs_f(s, 2), gs_f(s, 3)) };
+    0u64
+}
+extern "C" fn w_glClearDepthf(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32) = unsafe { std::mem::transmute(gles_sym("glClearDepthf")) };
+    unsafe { f(gs_f(s, 0)) };
+    0u64
+}
+extern "C" fn w_glDepthRangef(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32, f32) = unsafe { std::mem::transmute(gles_sym("glDepthRangef")) };
+    unsafe { f(gs_f(s, 0), gs_f(s, 1)) };
+    0u64
+}
+extern "C" fn w_glLineWidth(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32) = unsafe { std::mem::transmute(gles_sym("glLineWidth")) };
+    unsafe { f(gs_f(s, 0)) };
+    0u64
+}
+extern "C" fn w_glPolygonOffset(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32, f32) = unsafe { std::mem::transmute(gles_sym("glPolygonOffset")) };
+    unsafe { f(gs_f(s, 0), gs_f(s, 1)) };
+    0u64
+}
+
+/// glSampleCoverage(float value, GLboolean invert): value in s0, invert in x1.
+extern "C" fn w_glSampleCoverage(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(f32, u8) = unsafe { std::mem::transmute(gles_sym("glSampleCoverage")) };
+    unsafe { f(gs_f(s, 0), gs_x(s, 1) as u8) };
+    gles_ret!(s)
+}
+
+/// glTexParameterf(GLenum target, GLenum pname, GLfloat param): target/pname in
+/// x0/x1, the float param in s2 (third arg).
+extern "C" fn w_glTexParameterf(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, u32, f32) = unsafe { std::mem::transmute(gles_sym("glTexParameterf")) };
+    unsafe { f(gs_x(s, 0) as u32, gs_x(s, 1) as u32, gs_f(s, 2)) };
+    gles_ret!(s)
+}
+
+/// glUniformNf(GLint location, float...): location in x0, the floats in s1..sN.
+extern "C" fn w_glUniform1f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(i32, f32) = unsafe { std::mem::transmute(gles_sym("glUniform1f")) };
+    unsafe { f(gs_x(s, 0) as i32, gs_f(s, 1)) };
+    gles_ret!(s)
+}
+extern "C" fn w_glUniform2f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(i32, f32, f32) =
+        unsafe { std::mem::transmute(gles_sym("glUniform2f")) };
+    unsafe { f(gs_x(s, 0) as i32, gs_f(s, 1), gs_f(s, 2)) };
+    gles_ret!(s)
+}
+extern "C" fn w_glUniform3f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(i32, f32, f32, f32) =
+        unsafe { std::mem::transmute(gles_sym("glUniform3f")) };
+    unsafe { f(gs_x(s, 0) as i32, gs_f(s, 1), gs_f(s, 2), gs_f(s, 3)) };
+    gles_ret!(s)
+}
+extern "C" fn w_glUniform4f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(i32, f32, f32, f32, f32) =
+        unsafe { std::mem::transmute(gles_sym("glUniform4f")) };
+    unsafe { f(gs_x(s, 0) as i32, gs_f(s, 1), gs_f(s, 2), gs_f(s, 3), gs_f(s, 4)) };
+    gles_ret!(s)
+}
+
+/// glVertexAttribNf(GLuint index, float...): index in x0, floats in s1..sN.
+extern "C" fn w_glVertexAttrib1f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, f32) = unsafe { std::mem::transmute(gles_sym("glVertexAttrib1f")) };
+    unsafe { f(gs_x(s, 0) as u32, gs_f(s, 1)) };
+    gles_ret!(s)
+}
+extern "C" fn w_glVertexAttrib2f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, f32, f32) =
+        unsafe { std::mem::transmute(gles_sym("glVertexAttrib2f")) };
+    unsafe { f(gs_x(s, 0) as u32, gs_f(s, 1), gs_f(s, 2)) };
+    gles_ret!(s)
+}
+extern "C" fn w_glVertexAttrib3f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, f32, f32, f32) =
+        unsafe { std::mem::transmute(gles_sym("glVertexAttrib3f")) };
+    unsafe { f(gs_x(s, 0) as u32, gs_f(s, 1), gs_f(s, 2), gs_f(s, 3)) };
+    gles_ret!(s)
+}
+extern "C" fn w_glVertexAttrib4f(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, f32, f32, f32, f32) =
+        unsafe { std::mem::transmute(gles_sym("glVertexAttrib4f")) };
+    unsafe { f(
+        gs_x(s, 0) as u32,
+        gs_f(s, 1),
+        gs_f(s, 2),
+        gs_f(s, 3),
+        gs_f(s, 4),
+    ) };
+    gles_ret!(s)
+}
+
+// ---- >8-arg integer/pointer GLES: the extra args ride on the guest stack ----
+/// glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width,
+/// GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels):
+/// 9 args — `pixels` (arg 8) is the first stack arg.
+extern "C" fn w_glTexImage2D(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const u8) =
+        unsafe { std::mem::transmute(gles_sym("glTexImage2D")) };
+    unsafe {
+        f(
+            gs_x(s, 0) as u32,
+            gs_x(s, 1) as i32,
+            gs_x(s, 2) as i32,
+            gs_x(s, 3) as i32,
+            gs_x(s, 4) as i32,
+            gs_x(s, 5) as i32,
+            gs_x(s, 6) as u32,
+            gs_x(s, 7) as u32,
+            gs_stack(s, 8) as *const u8,
+        )
+    };
+    gles_ret!(s)
+}
+/// Same shape as glTexImage2D: x0-x7 = target,level,xofs,yofs,width,height,
+/// format,type; pixels on the stack.
+extern "C" fn w_glTexSubImage2D(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const u8) =
+        unsafe { std::mem::transmute(gles_sym("glTexSubImage2D")) };
+    unsafe {
+        f(
+            gs_x(s, 0) as u32,
+            gs_x(s, 1) as i32,
+            gs_x(s, 2) as i32,
+            gs_x(s, 3) as i32,
+            gs_x(s, 4) as i32,
+            gs_x(s, 5) as i32,
+            gs_x(s, 6) as u32,
+            gs_x(s, 7) as u32,
+            gs_stack(s, 8) as *const u8,
+        )
+    };
+    gles_ret!(s)
+}
+/// glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height,
+/// format, imageSize, data): 9 args, `data` on the stack.
+extern "C" fn w_glCompressedTexSubImage2D(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const u8) =
+        unsafe { std::mem::transmute(gles_sym("glCompressedTexSubImage2D")) };
+    unsafe {
+        f(
+            gs_x(s, 0) as u32,
+            gs_x(s, 1) as i32,
+            gs_x(s, 2) as i32,
+            gs_x(s, 3) as i32,
+            gs_x(s, 4) as i32,
+            gs_x(s, 5) as i32,
+            gs_x(s, 6) as u32,
+            gs_x(s, 7) as u32,
+            gs_stack(s, 8) as *const u8,
+        )
+    };
+    gles_ret!(s)
+}
+/// glTexImage3D(...) 10 args: the pixels pointer is arg 9, at [sp+8].
+extern "C" fn w_glTexImage3D(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let f: extern "C" fn(u32, i32, i32, i32, i32, i32, i32, u32, u32, *const u8) =
+        unsafe { std::mem::transmute(gles_sym("glTexImage3D")) };
+    unsafe {
+        f(
+            gs_x(s, 0) as u32,
+            gs_x(s, 1) as i32,
+            gs_x(s, 2) as i32,
+            gs_x(s, 3) as i32,
+            gs_x(s, 4) as i32,
+            gs_x(s, 5) as i32,
+            gs_x(s, 6) as i32,
+            gs_x(s, 7) as u32,
+            gs_stack(s, 8) as u32,
+            gs_stack(s, 9) as *const u8,
+        )
+    };
+    gles_ret!(s)
+}
+
+/// Look up the GLES mixed-ABI bridge for a `gl*` name, or None if it's a pure
+/// integer-ABI / unknown GLES function (the caller should fall back to
+/// `resolve_gles_int` or the NULL stub).
+fn gles_mixed_wrapper(name: &str) -> Option<HostGlesCall> {
+    use HostGlesCall as H;
+    Some(match name {
+        "glClearColor" => w_glClearColor as H,
+        "glBlendColor" => w_glBlendColor as H,
+        "glClearDepthf" => w_glClearDepthf as H,
+        "glDepthRangef" => w_glDepthRangef as H,
+        "glLineWidth" => w_glLineWidth as H,
+        "glPolygonOffset" => w_glPolygonOffset as H,
+        "glSampleCoverage" => w_glSampleCoverage as H,
+        "glTexParameterf" => w_glTexParameterf as H,
+        "glUniform1f" => w_glUniform1f as H,
+        "glUniform2f" => w_glUniform2f as H,
+        "glUniform3f" => w_glUniform3f as H,
+        "glUniform4f" => w_glUniform4f as H,
+        "glVertexAttrib1f" => w_glVertexAttrib1f as H,
+        "glVertexAttrib2f" => w_glVertexAttrib2f as H,
+        "glVertexAttrib3f" => w_glVertexAttrib3f as H,
+        "glVertexAttrib4f" => w_glVertexAttrib4f as H,
+        "glTexImage2D" => w_glTexImage2D as H,
+        "glTexSubImage2D" => w_glTexSubImage2D as H,
+        "glCompressedTexSubImage2D" => w_glCompressedTexSubImage2D as H,
+        "glTexImage3D" => w_glTexImage3D as H,
+        _ => return None,
+    })
+}
+
+/// Resolve a float/mixed-ABI (or >8-arg) `gl*` import to a GLES bridge slot.
+/// Returns `None` if the name isn't a wrapped GLES function, if Mesa GLES isn't
+/// present, or if Mesa lacks the symbol (bridge must not install a dangling
+/// call). These names are NOT in GLES_INT_NAME_LIST (the integer HostCall cannot
+/// marshal their float/stack args); via the bridge they still execute real Mesa.
+pub fn resolve_gles_mixed(name: &[u8]) -> Option<u64> {
+    let ns = name_str(name);
+    if !ns.starts_with("gl") {
+        return None;
+    }
+    let wrapped = gles_mixed_wrapper(ns)?;
+    let mh = gles_handle();
+    if mh.is_null() {
+        return None;
+    }
+    // Only install the bridge if real Mesa actually exports the symbol (a stray
+    // name would give us a null fn pointer in gles_sym and a crash on call).
+    let c = CString::new(ns).ok()?;
+    let ptr = unsafe { sym_from(mh, c.as_ptr()) };
+    if ptr.is_null() {
+        return None;
+    }
+    Some(register_gles_call(wrapped))
 }
 
 /// Give an import name a host call slot. If the host symbol is found via
@@ -821,5 +1155,178 @@ mod tests {
         assert!(resolve_gles_int(b"strlen\0").is_none());
         // Integer-ABI GLES that is NOT in the shipped Mesa GLESv2 (should be absent).
         assert!(resolve_gles_int(b"glTotallyFake\0").is_none());
+    }
+
+    /// Drive one guest `blr x16` to `slot` and return what jit_run leaves in x0.
+    /// The guest image is just `blr x16` (link to the following `brk`) so the
+    /// JIT dispatcher falls through to the host-call bridge for `slot` and then
+    /// stops. `st` persists across calls so float/stack args survive too.
+    fn gcall(slot: u64, st: &mut CpuState) -> u64 {
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0
+        st.x[16] = slot;
+        jit_run(&img, 0x1000, 0x1000, st as *mut CpuState).expect("jit_run")
+    }
+
+    /// Put an f32 into guest SIMD register sN (low 32 bits of v[N] low lane).
+    #[cfg(test)]
+    fn set_sf(st: &mut CpuState, n: usize, f: f32) {
+        st.v[2 * n] = (st.v[2 * n] & !0xffff_ffffu64) | (f.to_bits() as u64);
+    }
+
+    /// Full graphics-translation gate through the JIT bridges (no GPU, Mesa
+    /// llvmpipe software + surfaceless EGL):
+    ///   1. EGL int-ABI slice (resolve_egl) creates a real surfaceless ES3
+    ///      context: eglGetDisplay -> Initialize -> ChooseConfig -> CreateContext
+    ///      -> MakeCurrent, all driven by guest `blr`.
+    ///   2. GLES float/mixed bridge (resolve_gles_mixed) clears a color:
+    ///      glClearColor(0.5,0.25,0.75,1.0) via s0-s3.
+    ///   3. GLES int bridge (resolve_gles_int) reads it back:
+    ///      glGetFloatv(GL_COLOR_CLEAR_VALUE) must round-trip the 4 floats.
+    ///   4. GLES >8-arg bridge uploads a texture: glTexImage2D with the pixels
+    ///      pointer on the guest stack; glGetError returns a sane GL enum (no
+    ///      crash from gl* now reaching real Mesa through the stack-arg bridge).
+    /// Skipped on hosts without Mesa EGL/GLES.
+    #[test]
+    fn resolve_gles_mixed_float_and_stack_abi_execute_real_mesa() {
+        let Some(egl_getdisplay) = resolve_egl(b"eglGetDisplay\0") else {
+            eprintln!("skipping: Mesa EGL not present on this host");
+            return;
+        };
+        let Some(egl_initialize) = resolve_egl(b"eglInitialize\0") else { return };
+        let Some(egl_choose_config) = resolve_egl(b"eglChooseConfig\0") else { return };
+        let Some(egl_create_ctx) = resolve_egl(b"eglCreateContext\0") else { return };
+        let Some(egl_make_current) = resolve_egl(b"eglMakeCurrent\0") else { return };
+        let Some(gl_clear_color) = resolve_gles_mixed(b"glClearColor\0") else {
+            eprintln!("skipping: Mesa GLES float bridge unavailable");
+            return;
+        };
+        let Some(gl_get_floatv) = resolve_gles_int(b"glGetFloatv\0") else { return };
+        let Some(gl_gen_textures) = resolve_gles_int(b"glGenTextures\0") else { return };
+        let Some(gl_bind_texture) = resolve_gles_int(b"glBindTexture\0") else { return };
+        let Some(gl_tex_image_2d) = resolve_gles_mixed(b"glTexImage2D\0") else { return };
+        let Some(gl_get_error) = resolve_gles_int(b"glGetError\0") else { return };
+
+        // EGL constants (egl.h).
+        const EGL_NONE: u64 = 0x3038;
+        const EGL_RENDERABLE_TYPE: u64 = 0x3040;
+        const EGL_OPENGL_ES2_BIT: u64 = 0x4;
+        const EGL_CONTEXT_CLIENT_VERSION: u64 = 0x3098;
+        const EGL_NO_CONTEXT: u64 = 0;
+        const EGL_NO_SURFACE: u64 = 0;
+        // GLES constants (gl2.h / gl3.h).
+        const GL_TEXTURE_2D: u64 = 0x0DE1;
+        const GL_RGBA: u64 = 0x1908;
+        const GL_UNSIGNED_BYTE: u64 = 0x1401;
+        const GL_COLOR_CLEAR_VALUE: u64 = 0x310F;
+
+        let mut st = CpuState::new();
+
+        // (1) Surfaceless EGL context via guest blr, egl_is safe through int ABI.
+        let dpy = gcall(egl_getdisplay, &mut st); // eglGetDisplay(EGL_DEFAULT_DISPLAY=0)
+        assert_ne!(dpy, 0, "eglGetDisplay must return a real display");
+        let mut ver = [0u32; 2];
+        st.x[0] = dpy;
+        st.x[1] = ver.as_mut_ptr() as u64;
+        gcall(egl_initialize, &mut st);
+        assert!(ver[0] >= 1, "eglInitialize returns EGL version >= 1");
+
+        // eglChooseConfig into a 1-element config array.
+        let mut attribs = [EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE, 0];
+        let mut config = 0u64;
+        let mut num = 0i32;
+        st.x[0] = dpy;
+        st.x[1] = attribs.as_mut_ptr() as u64;
+        st.x[2] = (&mut config) as *mut u64 as u64;
+        st.x[3] = 1; // config_size
+        st.x[4] = (&mut num) as *mut i32 as u64;
+        let ok = gcall(egl_choose_config, &mut st);
+        assert_eq!(ok, 1, "eglChooseConfig success (found >=1 config)");
+        assert!(config != 0, "choose_config returned a config handle");
+
+        // eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs{ES3}).
+        let mut ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE, 0];
+        st.x[0] = dpy;
+        st.x[1] = config;
+        st.x[2] = EGL_NO_CONTEXT;
+        st.x[3] = ctx_attribs.as_mut_ptr() as u64;
+        let ctx = gcall(egl_create_ctx, &mut st);
+        assert_ne!(ctx, 0, "eglCreateContext returned a real context");
+
+        // eglMakeCurrent(display, NO_SURFACE, NO_SURFACE, context).
+        st.x[0] = dpy;
+        st.x[1] = EGL_NO_SURFACE;
+        st.x[2] = EGL_NO_SURFACE;
+        st.x[3] = ctx;
+        let made = gcall(egl_make_current, &mut st);
+        assert_eq!(made, 1, "eglMakeCurrent success on surfaceless llvmpipe");
+
+        // (2) glClearColor(0.5, 0.25, 0.75, 1.0) through the float bridge.
+        set_sf(&mut st, 0, 0.5);
+        set_sf(&mut st, 1, 0.25);
+        set_sf(&mut st, 2, 0.75);
+        set_sf(&mut st, 3, 1.0);
+        gcall(gl_clear_color, &mut st);
+
+        // (3) glGetFloatv(GL_COLOR_CLEAR_VALUE, buf) through the int bridge.
+        let mut buf = [0.0f32; 4];
+        st.x[0] = GL_COLOR_CLEAR_VALUE;
+        st.x[1] = buf.as_mut_ptr() as u64;
+        gcall(gl_get_floatv, &mut st);
+        assert_eq!(buf[0], 0.5, "r round-trips through the float bridge");
+        assert_eq!(buf[1], 0.25, "g round-trips");
+        assert_eq!(buf[2], 0.75, "b round-trips");
+        assert_eq!(buf[3], 1.0, "a round-trips");
+
+        // (4) Texture upload through the >8-arg bridge. Bind a real texture so
+        //     Mesa accepts the upload, then glTexImage2D with `pixels` on the
+        //     guest stack, then glGetError -> sane GL enum (not a crash).
+        let mut tex = 0u32;
+        st.x[0] = 1; // n
+        st.x[1] = (&mut tex) as *mut u32 as u64;
+        gcall(gl_gen_textures, &mut st);
+        assert_ne!(tex, 0, "glGenTextures produced a texture id");
+        st.x[0] = GL_TEXTURE_2D;
+        st.x[1] = tex as u64;
+        gcall(gl_bind_texture, &mut st);
+
+        let pixels = [0x88u8, 0x44, 0x22, 0xff]; // 1x1 RGBA
+        let mut stack_slot = [0u64; 1];
+        stack_slot[0] = pixels.as_ptr() as u64; // [guest sp] = pixels ptr
+        st.x[31] = stack_slot.as_mut_ptr() as u64; // guest sp points at the spill
+        st.x[0] = GL_TEXTURE_2D;
+        st.x[1] = 0; // level
+        st.x[2] = GL_RGBA; // internalformat
+        st.x[3] = 1; // width
+        st.x[4] = 1; // height
+        st.x[5] = 0; // border
+        st.x[6] = GL_RGBA; // format
+        st.x[7] = GL_UNSIGNED_BYTE; // type
+        gcall(gl_tex_image_2d, &mut st);
+
+        let err = gcall(gl_get_error, &mut st);
+        // Mesa accepts a valid 1x1 RGBA8 upload: GL_NO_ERROR (0) or nothing worse
+        // than a documented GL enum — certainly not a hang/crash from a garbage
+        // marshalled pixels pointer (the pre-bridge stub would have passed NULL).
+        assert!(
+            err == 0 || (0x0500..=0x0506).contains(&err),
+            "glTexImage2D through the stack bridge leaves a sane GL error (got {err:#x})"
+        );
+    }
+
+    #[test]
+    fn resolve_gles_mixed_resolves_float_gles_but_rejects_unknown() {
+        // Float/mixed GLES names must resolve (bridge allocated) on a Mesa host.
+        if !matches!(resolve_gles_mixed(b"glClearColor\0"), Some(_)) {
+            eprintln!("skipping: Mesa GLES not present");
+            return;
+        }
+        assert!(resolve_gles_mixed(b"glUniform4f\0").is_some());
+        assert!(resolve_gles_mixed(b"glTexImage2D\0").is_some());
+        // Unknown / non-GLES / integer-ABI-only names rejected.
+        assert!(resolve_gles_mixed(b"glTotallyFake\0").is_none());
+        assert!(resolve_gles_mixed(b"strlen\0").is_none());
+        assert!(resolve_gles_mixed(b"glGetError\0").is_none(), "int-ABI stays on the int resolver");
     }
 }

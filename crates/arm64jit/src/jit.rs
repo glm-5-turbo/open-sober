@@ -235,9 +235,21 @@ pub type HostFloatCall = extern "C" fn(f0: f64, f1: f64, f2: f64, f3: f64, f4: f
 /// f32 result back into v0's low lane.
 pub type HostFloat32Call = extern "C" fn(f0: f32, f1: f32, f2: f32, f3: f32, f4: f32, f5: f32, f6: f32, f7: f32) -> f32;
 
+/// A **GLES bridge** function: gets the full guest `CpuState` (both the integer
+/// x0..x7 arguments AND the SIMD v0..v7 registers, plus the guest stack pointer
+/// for >8-arg calls) and returns the value to store back into guest x0. This is
+/// how OpenGL ES functions with *mixed* integer+float ABIs (glClearColor,
+/// glUniform4f) and *more than 8 args* (glTexImage2D, whose 9th arg lives on the
+/// guest stack) reach real Mesa: the generic integer `HostCall` only marshals
+/// 8 x-register args and the uniform-float bridges assume all-float ABIs, so
+/// neither can express GLES. Each registered bridge reads the exact guest
+/// x/s-lanes its signature needs and calls the real Mesa symbol via gles-wrapper.
+pub type HostGlesCall = extern "C" fn(st: *mut CpuState) -> u64;
+
 static HOST_CALLS: Mutex<[Option<HostCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_FLOAT_CALLS: Mutex<[Option<HostFloatCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_FLOAT32_CALLS: Mutex<[Option<HostFloat32Call>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
+static HOST_GLES_CALLS: Mutex<[Option<HostGlesCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 
 /// Register `f` as the host call for guest slot `i`. Returns the guest address
 /// the caller should resolve a JUMP_SLOT/intra-image `blr` target to so that the
@@ -342,6 +354,36 @@ fn host_float32_call_at(pc: u64) -> Option<(HostFloat32Call, usize)> {
     }
     let i = (off / 8) as usize;
     let hc = HOST_FLOAT32_CALLS.lock().unwrap();
+    hc.get(i).copied().flatten().map(|f| (f, i))
+}
+
+/// Guest base address of the **GLES bridge** thunk region (after the f32 slots).
+#[inline(always)]
+pub fn host_gles_base() -> u64 {
+    host_float32_base() + (HOST_THUNK_MAX as u64) * 8
+}
+
+/// Register a GLES mixed-ABI bridge at an auto-allocated slot; returns its guest
+/// address. The bridge is called with the full guest `CpuState` by the dispatcher.
+pub fn register_gles_call(f: HostGlesCall) -> u64 {
+    let mut hc = HOST_GLES_CALLS.lock().unwrap();
+    let i = hc.iter().position(|s| s.is_none()).expect("gles thunk table full");
+    hc[i] = Some(f);
+    host_gles_base() + (i as u64) * 8
+}
+
+/// Look up a GLES bridge fn for a guest `pc` in the GLES region.
+fn host_gles_call_at(pc: u64) -> Option<(HostGlesCall, usize)> {
+    let base = host_gles_base();
+    if pc < base {
+        return None;
+    }
+    let off = pc - base;
+    if off % 8 != 0 {
+        return None;
+    }
+    let i = (off / 8) as usize;
+    let hc = HOST_GLES_CALLS.lock().unwrap();
     hc.get(i).copied().flatten().map(|f| (f, i))
 }
 
@@ -928,6 +970,19 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             let ret = hostf(a0, a1, a2, a3, a4, a5, a6, a7);
             let s = unsafe { &mut *state };
             s.v[0] = (s.v[0] & !0xffff_ffff) | ret.to_bits() as u64; // s0 = f32 return
+            s.pc = s.x[30];
+            continue;
+        }
+        // GLES mixed-ABI bridge: OpenGL ES functions whose signature mixes
+        // integer args (in x0..x7) with float args (in the low 32 bits of
+        // s0..s7) and/or needs >8 args (the extra ones passed on the guest
+        // stack). The uniform integer/float bridges cannot express these, so
+        // hand the full guest CpuState to a per-function wrapper that reads the
+        // exact x/s/sp lanes it needs and calls real Mesa (via gles-wrapper).
+        if let Some((hostg, _slot)) = host_gles_call_at(pc) {
+            let ret = hostg(state);
+            let s = unsafe { &mut *state };
+            s.x[0] = ret;
             s.pc = s.x[30];
             continue;
         }
