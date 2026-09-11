@@ -83,6 +83,28 @@ fn compile(workdir: &std::path::Path, name: &str, src: &str) -> PathBuf {
     elf
 }
 
+/// Compile `src` to a static aarch64 ELF with **-O3** (auto-vectorization on),
+/// the shape the differential pair/reduction generators rely on to emit the
+/// SIMD widening ops (`uaddl`/`uxtl`/`ext`, ...) that -O0 keeps scalar.
+fn compile_o3(workdir: &std::path::Path, name: &str, src: &str) -> PathBuf {
+    let c = workdir.join(format!("{name}.c"));
+    std::fs::write(&c, src).unwrap();
+    let elf = workdir.join(format!("{name}.elf"));
+    let out = Command::new("aarch64-linux-gnu-gcc")
+        .args(["-O3", "-static", "-nostdlib", "-Wl,-e,entry"])
+        .arg(&c)
+        .arg("-o")
+        .arg(&elf)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run cross-gcc: {e}"));
+    assert!(
+        out.status.success(),
+        "cross-gcc failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    elf
+}
+
 /// Compile `src` to a **PIE** (`-fPIE -pie`, dynamic/ET_DYN) aarch64 ELF —
 /// the shape of a real shared library — and return its path. Such a PIE
 /// carries `R_AARCH64_RELATIVE` data relocations for pointer globals that
@@ -354,6 +376,37 @@ fn loader_run_asymmetric_logic_imm_mask_returns_correct() {
         "unsigned long long entry(void){ volatile unsigned long long x = 1234; return (x & 0xffffffff80000001ULL); }\n",
         0,
     );
+}
+
+#[test]
+fn loader_run_pairwise_xor_inplace_uaddl_returns_2314() {
+    // End-to-end gate for the in-place uaddl/saddl ALIAS bug (SimdAddl had no
+    // permscratch snapshot when rd aliases rn/rm). gcc's pair-xor reduction
+    // `s ^= a[i]+a[i+1]` at -O3 emits `uaddl v0.4s, v0.4h, v1.4h` (dest==src):
+    // the widened 2*esrc write of lane i clobbers the still-needed narrow
+    // source bytes of lane i+1, corrupting the sum. The exact program came from
+    // the differential fuzzer (gen_pairwise_reduce) and the 2314 oracle matches
+    // BOTH native gcc and qemu-aarch64. Before the fix this returned 59648.
+    if cross_gcc().is_none() {
+        eprintln!("skipping pairxor: aarch64-linux-gnu-gcc not available");
+        return;
+    }
+    let _guard = lock_run();
+    let wd = workdir("pairxor");
+    let src = "\
+long long entry(void){\n\
+volatile unsigned long long seedv=654321ull; unsigned long long x=seedv; unsigned short a[24];\n\
+for(int i=0;i<24;i++){ x=x*6364136223846793005ull+1442695040888963407ull; a[i]=(unsigned short)((x>>24)^(x&0xffff)); }\n\
+long long s=0;\n\
+for(int i=0;i<24;i+=2) s ^= (long long)a[i] + a[i+1];\n\
+return s;\n\
+}\n";
+    let elf = compile_o3(&wd, "pairxor", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(v, 2314, "pairxor: jit_run returned {v}, expected 2314"),
+        Err(e) => panic!("pairxor: jit_run failed: {e}"),
+    }
+    let _ = std::fs::remove_dir_all(&wd);
 }
 
 #[test]

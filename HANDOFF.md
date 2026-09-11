@@ -4940,3 +4940,38 @@ widening-alias class re-checked for the `.4s→.2d` upper form. Reproducible via
 `fe1e27a` cycle-28 close. The gen_pairwise_reduce generator is a permanent
 asset that keeps surfacing this class. HARD GATE unchanged: real Roblox boot +
 run log on a GPU + APK/binary host (none on this VPS).
+
+---
+
+# Session — in-place uaddl/saddl widening-alias fix (silent SIMD miscompile)
+
+## The bug (found by the gen_pairwise_reduce differential fuzzer)
+The previous session isolated an OPEN pair-xor reduction failing repro
+`/tmp/combw/s13b.c` (u16 `for(i;i+=2) s ^= a[i]+a[i+1]`): native gcc + qemu-aarch64
+oracle `2314`, JIT `59648`. Suspect was "in-place uxtl2 upper", but that was a
+red herring — isolated `uxtl2 v0.2d, v0.4s` returns 3 correctly. The real cause:
+
+**`SimdAddl` (uaddl/saddl/usubl) had NO in-place alias snapshot.** The widened
+2*esrc dest write of lane i at `i*2*esrc` overlaps the narrow source bytes of
+lane i+1 (at `(i+1)*esrc`), so when `rd` aliases `rn`/`rm` a read-then-write
+loop clobbers the still-needed source and corrupts the sum. gcc's pair-xor
+reduction emits `uaddl v0.4s, v0.4h, v1.4h` (dest==src). The sibling widening
+ops `SimdAddw`/`SimdXtl` already snapshotted via `permute_source`; `SimdAddl`
+was the missed gap.
+
+## The fix
+Mirror `SimdAddw`: snapshot `rn`/`rm` to the permscratch slots when either
+aliases `rd`: `nb = if rn==rd { permute_source(..false) } else { vslot(rn) }`,
+`mb = if rm==rd { permute_source(..true) } else { vslot(rm) }`.
+
+## Verification
+- in-place `uaddl v0.4s,v0.4h,v1.4h`: lane1 22 (was 20) — `0x160000000b`.
+- `s13b.c`: 2314 == oracle (was 59648).
+- 400 fresh fuzz cases across 9 seeds (7,19,31,42,5,11,23,55,77): **0 fail / 0 skip**.
+- `cargo test --workspace` 309/0 green. New permanent gate
+  `loader_run_pairwise_xor_inplace_uaddl_returns_2314` compiles the exact
+  program with **-O3** (new `compile_o3` helper — the default `compile()` is -O0
+  and never emits the SIMD uaddl path).
+
+HARD GATE unchanged: real Roblox boot + run log on a GPU + APK/binary host
+(none on this VPS).

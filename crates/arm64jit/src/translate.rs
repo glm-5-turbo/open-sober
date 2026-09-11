@@ -2443,9 +2443,17 @@ pub fn translate(
                                 // 64-bit reg (sign- or zero-extended), so a later lane's high bytes
                                 // never pollute the sum; the widened result is stored EXACTLY de bytes
                                 // (de = 2*esrc) so it never overruns into the neighbouring lane.
-                                let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
-                                let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
-                                let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
+                                // IN-PLACE ALIASING: the widened (2*esrc) dest write
+                                // at i*2*esrc overlaps the narrow source bytes of
+                                // lane i+1 (at (i+1)*esrc), so when rd aliases rn or
+                                // rm a read-then-write loop clobbers the still-needed
+                                // source -- e.g. gcc's `uaddl v0.4s, v0.4h, v1.4h`
+                                // (rd==rn) turned lane 1's sum into garbage. Snapshot
+                                // each source that aliases rd to permscratch first.
+                                let vbase = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                let db = vbase(rd);
+                                let nb = if rn == rd { permute_source(buf, rd, rn, false) } else { vbase(rn) };
+                                let mb = if rm == rd { permute_source(buf, rd, rm, true) } else { vbase(rm) };
                                 let se = esrc as i32;
                                 let de = 2 * se;
                                 let lanes: i32 = 8 / se; // 8-source bytes -> 4 + or (16/2...) 8/se

@@ -938,3 +938,17 @@ status: cycle_end
 last_agent_claim: Found + fixed a REAL silent SIMD miscompile: 'ext' (vector extract immediate) operand-order inversion (commit 826db92). ARM ext Vd,Vn,Vm,#imm returns the window at imm of the concat with VN low-address, VM high: Vd[0..16-imm)=Vn[imm..16), Vd[16-imm..16)=Vm[0..imm). The translate built [Vm.lo,Vm.hi,Vn.lo,Vn.hi] (Vm low) — inverted. qemu-verified (ext(Vn=0x99..,Vm=0x02..,#8)=>lo=Vn[8..15],hi=Vm[0..7]); gcc's pair-xor horizontal reduce ('s ^= a[i]+a[i+1]') emits ext+eor, p1 returned 16 -> now 0 == qemu/native. Found via new gen_pairwise_reduce generator (28->99/160 ok). OPEN, isolated: a separate bug in the 16/32-bit 'i+=2' pair-xor reduction path (uaddl2/uxtl2 upper-half or eor-chain) — repro /tmp/combw/s13b (u16, native 2314 vs jit 59648), reproducible via fuzz_jit.py gen_pairwise_reduce; untouchd by the ext fix. Workspace 308/0, build clean, 3 commits (826db92, bd60f2c, + this). HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
 updated: 2026-09-11T13:05:00Z
 ---
+## Cycle (Sep 11, 2026) — in-place uaddl/saddl widening-alias fix (workspace 309/0)
+status: session-end (committed, tests green)
+last_agent_claim: Found + fixed a REAL silent SIMD miscompile: SimdAddl (uaddl/saddl/subl/usubl)
+had NO in-place alias snapshot, so when the widened (2*esrc) dest write of lane i overlapped the
+narrow source bytes of lane i+1 and rd aliased rn/rm, a read-then-write loop clobbered the
+still-needed source and miscomputed the sum. Reproduced by the gen_pairwise_reduce differential
+fuzzer: s13b (u16 'i+=2' pair-xor reduction), native gcc + qemu-aarch64 oracle 2314 vs JIT 59648.
+The other widening ops (SimdAddw/SimdXtl) already snapshotted via permute_source; SimdAddl was the
+missed gap. Fix mirrors SimdAddw: snapshot rn/rm to permscratch when ==rd. Verified: in-place uaddl
+lane1 22 (was 20), s13b -> 2314 == oracle, 400 fresh fuzz cases across 9 seeds clean, workspace
+309/0. Sealed as gate loader_run_pairwise_xor_inplace_uaddl_returns_2314 (-O3 in-place path).
+HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none here).
+updated: 2026-09-11T23:00:00Z
+---
