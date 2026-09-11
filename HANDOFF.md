@@ -2652,3 +2652,55 @@ Fix: the LdStrReg sext branch now loads the value into RAX (address no longer
 needed), mirroring the LdStrImm sext arm. sumh over `short a[]` (register-offset
 ldrsh) = 26 -> 42. arm64jit 79/79, workspace 113/0. +regression
 ldr_reg_sext_sign_extends_into_dest.
+## Session (Sep 11, 2026) — JIT ABI correctness: struct-by-value + 32-bit semantics (commits b8b5e62, e5d78d3)
+
+Worked the open "struct-by-value + function pointer" item. Reproduced it with a
+cross-gcc battery run through `cargo run -p arm64jit --example elfjit` (real
+compiled aarch64 C, `-static -nostdlib -Wl,-e,entry`), fixed **four real silent
+miscompiles**, gold-locked each with a regression test. `cargo test -p arm64jit`
+-> 82, workspace 116/0. Battery: loop1=45, structs/dispatch/fpfun/vtable=42,
+byvalue=44, bv2=300, signmod=12, iso_wrd=4321, iso_arith=300 — all correct.
+
+1. **LdStPair offset-form ignored its immediate** (`b8b5e62`). `ldp x0,x1,[sp,#16]`
+   (writeback=0) computed `access_off = 0`, so a 16-byte struct passed by value
+   read [sp],[sp+8] (the saved x29/x30) instead of [sp+16],[sp+24] — byvalue.elf
+   got (0,0) and returned garbage. The three addressing modes were conflated;
+   now offset=`(imm,0)`, post-index=`(0,imm)`, pre-index=`(imm,imm)`.
+   +`ldst_pair_offset_form_applies_immediate`.
+
+2. **ADD/SUB rn==31 read SP when the S flag is set** (`b8b5e62`). `negs w1,w0`
+   (subs w1,wzr,w0) computed `sp - w0` instead of `-w0` (rn=31 is XZR for the
+   flag-setting form; only non-S `sub sp,sp,#N` reads rn=31 as SP). This was the
+   documented "ADD/SUB rn==31-as-XZR reads SP" gap — a real repro finally
+   (signmod.elf `%16` produced garbled remainders). Fixed AddSubImm + AddSubReg;
+   also made LogicReg/AddSubReg read rm==31 as XZR (was SP). +`addsub_s_flag_reads_xzr_not_sp_for_rn31`.
+
+3. **32-bit W writes did not zero-extend** (`b8b5e62`). `mov w0,w1` copied the full
+   64-bit x1, so a negative two's-complement w1 propagated as 0xffffffffffffffff.
+   Added `zext_w` (shl32/shr32) and applied to 32-bit LogicReg (operands, the
+   N=1 BIC/ORN/EON half after `not`, and the result) and 32-bit AddSubImm/AdhReg.
+   This was the "Ws must zero-extend" open item; it was silently corrupting any
+   32-bit chain once a negative value entered a W register.
+
+4. **Scalar `fcvtzu` saturates the wrong half** (`e5d78d3`). fcvtzu is unsigned,
+   valid over [0,2^64), but the code used signed `cvttsd2si` which saturates
+   anything >= 2^63 to INT64_MIN(0x8000..0); the old comment wrongly claimed
+   `d>=2^63` was "architecturally out-of-range". Now a three-path sequence
+   (d<2^63 signed; 2^63<=d<2^64 via `2^63 + int64(d-2^63)`; d>=2^64 -> u64::MAX)
+   with in-buffer jc/js/jmp patching (mirrors the Ucvtf2d JNS idiom).
+   +`fcvtzu_handles_u64_beyond_2pow63`.
+
+Also added the `JIT_BUDGET` env knob (default 8192) to `jit_run` for
+instruction-granular tracing under `JIT_TRACE` (`JIT_BUDGET=1`), and a
+diagnostic captured by it: a **bounded-truncation fall-through bug** — a block
+cut off mid straight-line by the budget had no pc write, so the dispatcher
+re-compiled from the same entry forever. compile_image_bounded now diverts the
+fall-through next-pc to a dispatcher-return stub when `truncated && !terminal`
+(same fix that let the budget=1 per-instruction trace work; also a latent real
+hazard for any Roblox function > 8192 insns without an early branch).
+
+The battery lives in /tmp/jitbatt/ (not committed: it was ad-hoc before this
+session). Next items on the JIT path: **FcvVec 4S-lane** conversion (uses
+movq/cvttsd2si on 4-byte lanes), SIMD SMOV/UMOV lane->GPR and remaining
+FP-vs-int lane ops, then libloader gaps -> libbadcpu gaps -> services/auth.
+Real-binary/GPU boot remains blocked (no libroblox.so/APK, no GPU) — HARD GATE.
