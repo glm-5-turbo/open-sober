@@ -607,6 +607,43 @@ long long entry(void){
 }
 
 #[test]
+fn diff_addv_popcount_accumulate() {
+    // gcc auto-vectorizes __builtin_popcountll into `cnt v.8b` + `addv b`
+    // inside an accumulation loop. The ADDV-to-scalar result must CLEAR the
+    // destination register's high bits: gcc then `fmov xD, dN` reads the whole
+    // 64-bit register as the integer popcount. Leaving the per-lane cnt bytes
+    // in v's upper bytes fed a polluting value into the accumulator — the
+    // intermittent (stale-bytes / stack-layout dependent) SIMD-loop corruption
+    // that hit the old maskf/times7/mod_pow2/regidx/mixed canaries. Now the
+    // result is exact and deterministic.
+    assert_diff(
+        "addv_popcnt",
+        "-O2",
+        r#"
+long long entry(void){
+    unsigned long long pc = 0;
+    for (int i = 0; i < 20; i++)
+        pc += __builtin_popcountll((unsigned long long)i * 0x1111111111111111ULL);
+    return (long long)pc;
+}
+"#,
+    );
+    assert_diff(
+        "addv_popcnt3",
+        "-O3",
+        r#"
+long long entry(void){
+    unsigned long long pc = 0;
+    for (int i = 0; i < 30; i++)
+        pc += __builtin_popcountll((unsigned long long)(i*i) * 0x0101010101010101ULL);
+    pc += __builtin_popcountll(0xffffffffffffffffULL);
+    return (long long)pc;
+}
+"#,
+    );
+}
+
+#[test]
 fn diff_float_vector_arith() {
     // Elementwise vector fmla/fmul/fadd on .4s lanes + a final scalar sum.
     assert_diff(

@@ -3169,10 +3169,28 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 buf.add_rr64(RDI, RAX);
             }
             let vdst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            // ADDV <Bd/Hd/Sd>, <Vn>.T writes ONLY the low element of the
+            // destination and CLEARS the remaining bits of the register (ARM
+            // "add across vector, result to scalar" semantics). The caller may
+            // then read the full register as an integer (gcc emits `addv b`;
+            // `fmov xD, dN`), so every byte the scalar result does not write
+            // MUST be zeroed — leaving the source lanes there fed a polluted
+            // 64-bit value into the read (e.g. popcount + stale lane bytes).
             match size {
-                1 => buf.mov_store8(RBX, vdst, RDI),
-                2 => buf.mov_store16(RBX, vdst, RDI),
-                4 => buf.mov_store32(RBX, vdst, RDI),
+                1 => {
+                    // x86 64-bit store of the 8-bit sum also zeroes bytes 1..7;
+                    // mask to a byte first (lanes are signed, so the raw sum can
+                    // be negative and RDI would otherwise sign-extend up top).
+                    buf.and_ri64(RDI, 0xff);
+                    buf.mov_store64(RBX, vdst, RDI);
+                }
+                2 => {
+                    buf.and_ri64(RDI, 0xffff);
+                    buf.mov_store64(RBX, vdst, RDI);
+                }
+                4 => {
+                    buf.mov_store32(RBX, vdst, RDI); // 32-bit store zeroes upper 32
+                }
                 _ => unreachable!(),
             }
             Ok(())
