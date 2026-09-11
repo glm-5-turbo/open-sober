@@ -3207,6 +3207,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             size,
             ld,
             shift,
+            sext,
         } => {
             // addr = rn + (rm << shift_amt), shift_amt = log2(size) when S=1.
             let shift_amt = if shift {
@@ -3229,6 +3230,30 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 }
             }
             buf.add_rr64(RAX, RCX); // RAX = effective address
+            if ld && sext {
+                // Sign-extending register-offset load (ldrsw/ldrsh/ldrsb).
+                match size {
+                    4 => {
+                        buf.mov_load32(RCX, RAX, 0);
+                        buf.movsxd_r64_r32(RCX, RCX);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    2 => {
+                        buf.movzx_word_mem(RCX, RAX, 0);
+                        buf.shl_ri8(RCX, 48);
+                        buf.sar_ri8(RCX, 48);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    1 => {
+                        buf.movzx_byte_mem(RCX, RAX, 0);
+                        buf.shl_ri8(RCX, 56);
+                        buf.sar_ri8(RCX, 56);
+                        stg_if_writable(buf, rt as u32);
+                    }
+                    s => return Err(format!("LdStrReg sign-extend size {} not implemented", s)),
+                }
+                return Ok(());
+            }
             match (size, ld) {
                 (8, true) => {
                     buf.mov_load64(RCX, RAX, 0);

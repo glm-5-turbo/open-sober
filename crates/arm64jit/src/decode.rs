@@ -115,6 +115,9 @@ pub enum Inst {
         size: u8,
         ld: bool,
         shift: bool, // S bit: scaled by element size
+        // Sign-extending register-offset load (ldrsw/ldrsh/ldrsb): bit23=1 +
+        // bit22=0, misread by `ld=bit22` as a store.
+        sext: bool,
     },
     // ---- load/store pair ----
     LdStPair {
@@ -802,20 +805,22 @@ pub fn decode(insn: u32) -> Inst {
         _ => {}
     }
 
-    // ---- MoveWide (MOVZ/MOVK/MOVN): high byte is one of 6 verified encodings.
-    //   0x52 movz32  0xD2 movz64  0x72 movk32  0xF2 movk64  0x12 movn32  0x92 movn64
-    let top = insn >> 24;
-    let sf = insn >> 31 == 1;
-    if matches!(top, 0x12 | 0x52 | 0x72 | 0x92 | 0xD2 | 0xF2) {
+    // ---- MoveWide (MOVZ/MOVK/MOVN): identify by bits[28:23]==0x25 (100101),
+    // i.e. (insn & 0x1f80_0000) == 0x1280_0000. NOTE: the LogicalImmediate family
+    // (AND/ORR/EOR/ANDS with immediate) has bits[28:23]==0x24, so a loose `top`
+    // byte match {0x12,0x92,0x52,0xD2,...} swallowed `and w1,w0,#0xffff` (0x12003c01)
+    // as a `movn` — every AND/EOR/ANDS-immediate broke. Moving it before the
+    // MoveWide gate so AND-immediate decodes as LogicImm.
+    let movewide = insn & 0x1f80_0000 == 0x1280_0000;
+    if movewide && matches!((insn >> 24), 0x12 | 0x52 | 0x72 | 0x92 | 0xD2 | 0xF2) {
         // opc: bit30 (sf=0 uses bit29=m... ). Derive opcode from identifier bits:
         //   -(sf, opc2) : movz <-> opc=0, movk: opc=1, movn: opc=2
         // Use displacement: the top-nibble distinguishes mov | k | n via bit3.
-        let opc = match top & 0xF0 {
+        let opc = match (insn >> 24) & 0xF0 {
             0xD0 | 0x50 => 0, // movz
             0xF0 | 0x70 => 1, // movk
             _ => 2,           // movn
         };
-        let _ = sf;
         let hw = b(insn, 21, 22) as u8;
         let imm16 = (insn >> 5) as u16;
         let rd = rd(insn);
@@ -824,9 +829,14 @@ pub fn decode(insn: u32) -> Inst {
             imm16,
             hw,
             opc,
-            sf,
+            sf: insn >> 31 == 1,
         };
     }
+
+    // `top` (byte 31:24) and `sf` (bit 31) are reused by several later decoders
+    // (add/sub immediate+reg, CSEL, ...).
+    let top = insn >> 24;
+    let sf = (insn >> 31) & 1 == 1;
 
     // ---- add/subtract immediate ----
     // add w=0x11 sub=0x51 ; adds/sub w(=s flag) =0x31/0x71; x: 0x91/0xD1, 0xB1/0xF1
@@ -1076,10 +1086,11 @@ pub fn decode(insn: u32) -> Inst {
             _ => 8,
         };
         let ld = (insn >> 22) & 1 == 1;
-        // Sign-extending load (ldrsw/ldrsh/ldrsb) differs from a store by bit23;
-        // the load/store classifier is `ld=bit22`, but ldrsw has bit22=0 yet IS a
-        // load. Detect the sign-extend form and treat it as a load into X-reg.
-        let sext = !ld && (insn & 0x80_0000) != 0;
+        // Sign-extend load (ldrsw/ldrsh/ldrsb): opc[1]=bit23 is 1 for the 10/11
+        // sign-extend forms and 0 for plain LDR(opc=01)/STR(opc=00). bit22 alone
+        // is ambiguous (ldrsh w0,[x0] at 0x79c0 has bit22=1 yet IS sign-extend),
+        // so key on bit23. Size-8 (X) never sets bit23 (only STR/LDR X exist).
+        let sext = (insn & 0x80_0000) != 0;
         let ld = ld || sext;
         let imm = (insn >> 10) & 0xfff;
         let rn = b(insn, 5, 9) as u8;
@@ -1582,6 +1593,11 @@ pub fn decode(insn: u32) -> Inst {
             _ => 8,
         };
         let ld = (insn >> 22) & 1 == 1;
+        // Sign-extend load (ldrsw/ldrsh/ldrsb): bit23=1 (opc 10/11) is always a
+        // sign-extend load; bit22 alone is ambiguous (0x79c0 ldrsh w0,[x0] has
+        // bit22=1 yet IS sign-extend). Size-8 never sets bit23.
+        let sext = (insn & 0x80_0000) != 0;
+        let ld = ld || sext;
         let rm = b(insn, 16, 20) as u8;
         let shift = (insn >> 12) & 1 == 1; // S bit
         let rn = b(insn, 5, 9) as u8;
@@ -1593,6 +1609,7 @@ pub fn decode(insn: u32) -> Inst {
             size,
             ld,
             shift,
+            sext,
         };
     }
 
@@ -3090,6 +3107,29 @@ mod tests {
         }
     }
     #[test]
+    fn and_immediate_is_logic_imm_not_movn() {
+        // Regression: `and w1,w0,#0xffff` (0x12003c20, LogicalImmediate) was
+        // decoded as `movn` — the MoveWide gate matched the whole `top` byte
+        // {0x12,0x92,0x52,...}, which also spans the AND/EOR/ANDS-immediate
+        // class. MoveWide now keys on bits[28:23]==0x25 (0x1280_0000), so AND
+        // immediates route to LogicImm. Real compiler encodings:
+        //   and w0,w1,#0xffff = 0x12003c20 ; and x0,x1,#0xff = 0x92401c20
+        match decode(0x12003c20) {
+            Inst::LogicImm { rd, rn, mask, op, sf } => {
+                assert_eq!((rd, rn, mask, op, sf), (0, 1, 0xffff, 0, false));
+            }
+            other => panic!("and w1,w0,#0xffff -> LogicImm, got {other:?}"),
+        }
+        match decode(0x92401c20) {
+            Inst::LogicImm { mask, op, sf, .. } => {
+                assert_eq!((mask, op, sf), (0xff, 0, true));
+            }
+            other => panic!("and x1,x0,#0xff -> LogicImm, got {other:?}"),
+        }
+        // MoveWide still decodes correctly.
+        assert!(matches!(decode(0xd2917620), Inst::MoveWide { opc: 0, .. }));
+    }
+    #[test]
     fn ldr_w_reg_ground_truth() {
         // "ldr w0, [x1, x2]" = 0xb8626820
         match decode(0xb8626820) {
@@ -3100,8 +3140,10 @@ mod tests {
                 size,
                 ld,
                 shift,
+                sext,
             } => {
                 assert_eq!(rt, 0);
+                assert!(!sext);
                 assert_eq!(rn, 1);
                 assert_eq!(rm, 2);
                 assert_eq!(size, 4);
