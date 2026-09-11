@@ -1419,3 +1419,38 @@ long long entry(void){
 "#,
     );
 }
+
+#[test]
+fn diff_halfword_minmax_negatives() {
+    // Signed SHORT/CHAR arrays with negatives fed into min/max/sum reductions —
+    // exercises the 16/8-bit sign-extended load pipeline (movsx REX.W fix) and
+    // the across-lanes reduce in a real compiled context.
+    assert_diff(
+        "hw_short_reduce",
+        "-O3",
+        r#"
+long long entry(void){
+    volatile short seed=7; short a[8];
+    long long s=0;
+    for(int i=0;i<8;i++){ a[i]=(short)((i*i-5*(i%2))*seed); s+=a[i]; }
+    short mn=32767, mx=-32768;
+    for(int i=0;i<8;i++){ if(a[i]<mn) mn=a[i]; if(a[i]>mx) mx=a[i]; }
+    return (long long)mn*10000 + (long long)mx*100 + s;
+}
+"#,
+    );
+    assert_diff(
+        "hw_schar_reduce",
+        "-O2",
+        r#"
+long long entry(void){
+    volatile signed char seed=5; signed char a[8];
+    long long s=0;
+    for(int i=0;i<8;i++){ a[i]=(signed char)((i*i-4*i)*seed); s+=a[i]; }
+    signed char mn=127, mx=-128;
+    for(int i=0;i<8;i++){ if(a[i]<mn) mn=a[i]; if(a[i]>mx) mx=a[i]; }
+    return (long long)mn*10000 + (long long)mx*100 + s;
+}
+"#,
+    );
+}
