@@ -1,0 +1,13 @@
+[package]
+name = "texture-codec"
+description = "Android compressed-texture decode for the open-sober graphics layer: ETC1/ETC2/EAC/ASTC/ATC -> RGBA via pure-Rust texture2ddecoder (GRAPHICS_RECOMMENDATION section 4). Shared by the glesv2-wrapper cdylib and the arm64jit GLES bridge so both decode Android uploads identically."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "texture_codec"
+path = "src/lib.rs"
+
+[dependencies]
+texture2ddecoder = "0.1.2"

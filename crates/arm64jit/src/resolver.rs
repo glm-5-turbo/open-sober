@@ -149,7 +149,6 @@ pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
     b"glClearStencil\0",
     b"glColorMask\0",
     b"glCompileShader\0",
-    b"glCompressedTexImage2D\0",
     b"glCopyTexImage2D\0",
     b"glCopyTexSubImage2D\0",
     b"glCreateProgram\0",
@@ -189,6 +188,7 @@ pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
     b"glGetError\0",
     b"glGetFramebufferAttachmentParameteriv\0",
     b"glGetIntegerv\0",
+    b"glGetTexLevelParameteriv\0",
     b"glGetProgramInfoLog\0",
     b"glGetProgramiv\0",
     b"glGetRenderbufferParameteriv\0",
@@ -521,27 +521,6 @@ extern "C" fn w_glTexSubImage2D(st: *mut CpuState) -> u64 {
     };
     gles_ret!(s)
 }
-/// glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height,
-/// format, imageSize, data): 9 args, `data` on the stack.
-extern "C" fn w_glCompressedTexSubImage2D(st: *mut CpuState) -> u64 {
-    let s = unsafe { &*st };
-    let f: extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const u8) =
-        unsafe { std::mem::transmute(gles_sym("glCompressedTexSubImage2D")) };
-    unsafe {
-        f(
-            gs_x(s, 0) as u32,
-            gs_x(s, 1) as i32,
-            gs_x(s, 2) as i32,
-            gs_x(s, 3) as i32,
-            gs_x(s, 4) as i32,
-            gs_x(s, 5) as i32,
-            gs_x(s, 6) as u32,
-            gs_x(s, 7) as u32,
-            gs_stack(s, 8) as *const u8,
-        )
-    };
-    gles_ret!(s)
-}
 /// glTexImage3D(...) 10 args: the pixels pointer is arg 9, at [sp+8].
 extern "C" fn w_glTexImage3D(st: *mut CpuState) -> u64 {
     let s = unsafe { &*st };
@@ -561,6 +540,73 @@ extern "C" fn w_glTexImage3D(st: *mut CpuState) -> u64 {
             gs_stack(s, 9) as *const u8,
         )
     };
+    gles_ret!(s)
+}
+
+/// glCompressedTexImage2D(target, level, internalformat, width, height, border,
+/// imageSize, data): all 8 args fit the integer x-regs. For an Android compressed
+/// format (ETC1/ETC2/EAC/ASTC) decode to RGBA via texture_codec and upload as
+/// GL_RGBA8 through real Mesa glTexImage2D; otherwise fall through to real Mesa
+/// glCompressedTexImage2D. (Not in the integer whitelist on purpose: it needs this
+/// interception, and resolve_gles_mixed is checked after resolve_gles_int.)
+extern "C" fn w_glCompressedTexImage2D(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let target = gs_x(s, 0) as u32;
+    let level = gs_x(s, 1) as i32;
+    let internalformat = gs_x(s, 2) as u32;
+    let width = gs_x(s, 3) as i32;
+    let height = gs_x(s, 4) as i32;
+    let border = gs_x(s, 5) as i32;
+    let image_size = gs_x(s, 6) as i32;
+    let data = gs_x(s, 7) as *const libc::c_void;
+    // Real Mesa glTexImage2D (for the decoded-RGBA upload) and glCompressedTexImage2D
+    // (the fall-through). Both are dlsym'd from the RTLD_LOCAL GLES handle.
+    #[allow(clippy::type_complexity)]
+    let real_tex: unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const libc::c_void) =
+        unsafe { std::mem::transmute(gles_sym("glTexImage2D")) };
+    #[allow(clippy::type_complexity)]
+    let real_compressed: unsafe extern "C" fn(u32, i32, u32, i32, i32, i32, i32, *const u8) =
+        unsafe { std::mem::transmute(gles_sym("glCompressedTexImage2D")) };
+    unsafe {
+        if !texture_codec::handle_compressed_tex_image_2d(
+            target, level, internalformat, width, height, border, image_size,
+            data, real_tex,
+        ) {
+            real_compressed(target, level, internalformat, width, height, border, image_size, data as *const u8);
+        }
+    }
+    gles_ret!(s)
+}
+
+/// glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height,
+/// format, imageSize, data): 9 args — `data` (arg 8) is the first stack arg.
+/// Android format -> decode the sub-rect to RGBA and upload via real glTexSubImage2D;
+/// else fall through to real Mesa glCompressedTexSubImage2D.
+extern "C" fn w_glCompressedTexSubImage2D(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let target = gs_x(s, 0) as u32;
+    let level = gs_x(s, 1) as i32;
+    let xoffset = gs_x(s, 2) as i32;
+    let yoffset = gs_x(s, 3) as i32;
+    let width = gs_x(s, 4) as i32;
+    let height = gs_x(s, 5) as i32;
+    let format = gs_x(s, 6) as u32;
+    let image_size = gs_x(s, 7) as i32;
+    let data = unsafe { gs_stack(s, 8) } as *const libc::c_void;
+    #[allow(clippy::type_complexity)]
+    let real_sub: unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const libc::c_void) =
+        unsafe { std::mem::transmute(gles_sym("glTexSubImage2D")) };
+    #[allow(clippy::type_complexity)]
+    let real_compressed_sub: unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, i32, *const u8) =
+        unsafe { std::mem::transmute(gles_sym("glCompressedTexSubImage2D")) };
+    unsafe {
+        if !texture_codec::handle_compressed_tex_sub_image_2d(
+            target, level, xoffset, yoffset, width, height, format, image_size,
+            data, real_sub,
+        ) {
+            real_compressed_sub(target, level, xoffset, yoffset, width, height, format, image_size, data as *const u8);
+        }
+    }
     gles_ret!(s)
 }
 
@@ -589,6 +635,7 @@ fn gles_mixed_wrapper(name: &str) -> Option<HostGlesCall> {
         "glTexImage2D" => w_glTexImage2D as H,
         "glTexSubImage2D" => w_glTexSubImage2D as H,
         "glCompressedTexSubImage2D" => w_glCompressedTexSubImage2D as H,
+        "glCompressedTexImage2D" => w_glCompressedTexImage2D as H,
         "glTexImage3D" => w_glTexImage3D as H,
         _ => return None,
     })
@@ -1207,6 +1254,11 @@ mod tests {
         let Some(gl_bind_texture) = resolve_gles_int(b"glBindTexture\0") else { return };
         let Some(gl_tex_image_2d) = resolve_gles_mixed(b"glTexImage2D\0") else { return };
         let Some(gl_get_error) = resolve_gles_int(b"glGetError\0") else { return };
+        let Some(gl_compressed_tex_2d) = resolve_gles_mixed(b"glCompressedTexImage2D\0") else {
+            eprintln!("skipping: Mesa GLES compressed-texture bridge unavailable");
+            return;
+        };
+        let Some(gl_get_tex_level) = resolve_gles_int(b"glGetTexLevelParameteriv\0") else { return };
 
         // EGL constants (egl.h).
         const EGL_NONE: u64 = 0x3038;
@@ -1312,6 +1364,34 @@ mod tests {
         assert!(
             err == 0 || (0x0500..=0x0506).contains(&err),
             "glTexImage2D through the stack bridge leaves a sane GL error (got {err:#x})"
+        );
+
+        // (5) Android-compressed (ETC2) upload through the interception bridge: a
+        //     4x4 ETC2 RGB block (8 bytes) must be decompressed to RGBA8 and
+        //     uploaded as GL_RGBA8, NOT passed to Mesa as an undecodable compressed
+        //     format. glGetTexLevelParameteriv(GL_TEXTURE_INTERNAL_FORMAT) returns
+        //     GL_RGBA8 (0x8058) only if our bridge did the decode; a raw-Mesa
+        //     fall-through would leave GL_COMPRESSED_RGB8_ETC2 (0x9274).
+        let etc2 = [0u8; 8]; // one 4x4 ETC2 RGB block
+        st.x[0] = GL_TEXTURE_2D;
+        st.x[1] = 0; // level
+        st.x[2] = 0x9274; // GL_COMPRESSED_RGB8_ETC2
+        st.x[3] = 4; // width
+        st.x[4] = 4; // height
+        st.x[5] = 0; // border
+        st.x[6] = etc2.len() as u64; // imageSize
+        st.x[7] = etc2.as_ptr() as u64; // data
+        gcall(gl_compressed_tex_2d, &mut st);
+
+        let mut internal = 0i32;
+        st.x[0] = GL_TEXTURE_2D;
+        st.x[1] = 0; // level
+        st.x[2] = 0x1003; // GL_TEXTURE_INTERNAL_FORMAT
+        st.x[3] = (&mut internal) as *mut i32 as u64;
+        gcall(gl_get_tex_level, &mut st);
+        assert_eq!(
+            internal, 0x8058,
+            "ETC2 upload was decompressed to GL_RGBA8 by the bridge (got {internal:#x})"
         );
     }
 

@@ -8,6 +8,7 @@ description = "In-process ARM64 -> x86-64 JIT translator for open-sober (drops t
 [dependencies]
 libc = "0.2"
 libloader = { path = "../libloader" }
+texture-codec = { path = "../texture-codec" }
 
 [dev-dependencies]
 

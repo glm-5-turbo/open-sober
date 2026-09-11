@@ -99,6 +99,7 @@ version = "0.1.0-dev"
 dependencies = [
  "libc",
  "libloader",
+ "texture-codec",
 ]
 
 [[package]]
@@ -587,7 +588,7 @@ name = "glesv2-wrapper"
 version = "0.1.0-dev"
 dependencies = [
  "libc",
- "texture2ddecoder",
+ "texture-codec",
 ]
 
 [[package]]
@@ -1635,6 +1636,13 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "texture-codec"
+version = "0.1.0-dev"
+dependencies = [
+ "texture2ddecoder",
 ]
 
 [[package]]

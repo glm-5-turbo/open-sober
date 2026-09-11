@@ -9,6 +9,7 @@ members = [
     "crates/egl-wrapper",
     "crates/glesv2-wrapper",
     "crates/input-wrapper",
+    "crates/texture-codec",
 ]
 
 [workspace.package]

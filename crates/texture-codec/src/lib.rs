@@ -1,11 +1,21 @@
-//! Compressed-texture interception (GRAPHICS_RECOMMENDATION §4).
+//! Compressed-texture interception (GRAPHICS_RECOMMENDATION section 4).
 //!
 //! Roblox uploads Android compressed-texture formats (ETC1/ETC2/EAC/ASTC) that
 //! desktop OpenGL/zink does not necessarily support natively (ASTC especially is
-//! unsupported on NVIDIA). We trap `glCompressedTexImage2D` / `glCompressedTexSubImage2D`
-//! in the GLES wrapper, decompress Android-specific formats to BGRA with the pure-Rust
-//! `texture2ddecoder`, and upload as uncompressed `GL_RGBA8`. Audio/GUI formats that are
-//! not Android-specific (BCn/S3TC, RGTC) are passed straight through to Mesa.
+//! unsupported on NVIDIA). We trap `glCompressedTexImage2D` /
+//! `glCompressedTexSubImage2D` in the GLES path, decompress Android-specific
+//! formats to BGRA with the pure-Rust `texture2ddecoder`, and upload as
+//! uncompressed `GL_RGBA8`. Audio/GUI formats that are not Android-specific
+//! (BCn/S3TC, RGTC) are passed straight through to Mesa.
+//!
+//! This crate is shared by:
+//!   * `glesv2-wrapper` — the `libGLESv2.so` cdylib (guest sees it when the
+//!     Android binary links/dlsyms GLES directly), and
+//!   * `arm64jit` — the in-process JIT resolver, whose float/mixed `HostGlesCall`
+//!     bridge routes compressed-texture calls here too, so both translation paths
+//!     decode Android uploads identically (a JIT path that fell through to raw
+//!     Mesa would upload undecodable ETC2/ASTC on a host whose desktop GL can't
+//!     natively decode them — e.g. ASTC on NVIDIA).
 
 use std::ffi::c_void;
 
@@ -152,6 +162,47 @@ pub unsafe fn handle_compressed_tex_image_2d(
     unsafe {
         real_tex_image2d(
             target, level, GL_RGBA8 as i32, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, rgab,
+        );
+    }
+    true
+}
+
+/// Intercept one glCompressedTexSubImage2D call for an Android format: decompress
+/// the whole `width x height` sub-rect to RGBA and upload it via the real
+/// `glTexSubImage2D`. Returns `true` if handled; `false` means the caller should
+/// fall through to Mesa's own glCompressedTexSubImage2D.
+///
+/// # Safety
+/// `data` must point to `image_size` readable bytes if non-null; `real_tex_sub_image2d`
+/// must be the genuine Mesa glTexSubImage2D.
+pub unsafe fn handle_compressed_tex_sub_image_2d(
+    target: u32,
+    level: i32,
+    xoffset: i32,
+    yoffset: i32,
+    width: i32,
+    height: i32,
+    format: u32,
+    image_size: i32,
+    data: *const c_void,
+    real_tex_sub_image2d: unsafe extern "C" fn(
+        u32, i32, i32, i32, i32, i32, u32, u32, *const c_void,
+    ) -> (),
+) -> bool {
+    if !is_android_format(format) || width <= 0 || height <= 0 || data.is_null() || image_size <= 0 {
+        return false;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let slice = unsafe { std::slice::from_raw_parts(data as *const u8, image_size as usize) };
+    let Some(mut pixels) = decompress(format, w, h, slice) else {
+        return false;
+    };
+    bgra_to_rgba(&mut pixels);
+    let rgab = pixels.as_ptr() as *const c_void;
+    unsafe {
+        real_tex_sub_image2d(
+            target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgab,
         );
     }
     true

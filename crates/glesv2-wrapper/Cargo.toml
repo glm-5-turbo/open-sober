@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libc = "0.2"
-texture2ddecoder = "0.1.2"
+texture-codec = { path = "../texture-codec" }
 
 [dev-dependencies]
 libc = "0.2"
