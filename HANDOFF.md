@@ -3789,3 +3789,39 @@ deterministically (maskf=7001003, mod_pow2=1007005, times7=161119021, count6=24,
 verified vs qemu-aarch64). Two SEPARATE deterministic bugs remain (magic-div
 `%N` reducer: m[0]=-101 for k*7%101; and the -O3 addp/smulh reduction) and are
 #[ignore]d/documented. Workspace 212/0 (3 ignored).
+
+## Session (Sep 11, 2026) — mls + uzp2 implemented, rev64 gate widened; all 3 remaining SIMD bugs CLOSED (workspace 216/0, 0 ignored)
+
+The two leftover deterministic bugs (magic-div %101 m[0]=-101 and the -O3
+vectorized reduction) share one root cause. Isolated the gcc %101 reducer
+chain (smull/smull2/uzp2/sshr/mls) in a scratch example and diffed against
+qemu-aarch64, then pinned the failing ops with decode(insn):
+
+1. **`mls` (multiply-subtract) misdecoded as a plain Simd4s SUBTRACT.** The
+   `(insn & 0xffe0_fc00)` gate for Simd4s caught `mls v26.4s,v0.4s,v28.4s`
+   (0x6ebc941a) as `sub`, **losing the multiply entirely** — so the quotient
+   was never subtracted. Implemented `Inst::SimdMla { rd, rn, rm, lanes,
+   sub }` (mla=0x0ea09400/0x4ea09400 add, mls=0x2ea09400/0x6ea09400 sub),
+   gate placed BEFORE the Simd4s gate; translate does per-lane
+   `Vd = Vd ± Vn*Vm` (low-32 product).
+
+2. **`uzp2` (unpack-high) misdecoded as `rev64`.** The SimdRev gate
+   `(insn & 0x3f00_0c00)==0x0e00_0800` drops bit12 and swallowed the whole
+   uzp1 (0x18) / uzp2 (0x58) opcode family. Tightened it to require
+   bits[13:12]==00, and added `Inst::SimdUz2 { rd, rn, rm, esize, q }`
+   (byte1 high-nibble==0x5) gathering the ODD/upper elements
+   `Vd[i]=Vn[2i+1]; Vd[n/2+i]=Vm[2i+1]` — what feeds the sshr quotient step.
+
+Verified: the previously-`#[ignore]`d `diff_magic_div`, `diff_struct_array_
+fields` and `diff_mixed_arith_accumulate` all pass again as permanent gates
+(un-ignored). Added decode regression `mls_and_uzp2_decode_as_specific_ops_
+not_sub_or_rev`. Workspace 216/0, **0 ignored** — the differential battery is
+fully green with every case a live gate.
+
+### Next
+- Ideal next: keep sweeping the ISA breadth the battery doesn't yet cover —
+  widen the reducer family (umull2/umlal/uaddl to exercise uzp-variant and
+  long-multiply paths), add string/booleans, and push the battery onto more
+  real-compiler idioms (-O3 reductions already live). Then brace for the real
+  Roblox APK path (ELF/loader + JNI stubs) once an APK/GPU host is available.
+  Blocked on this VPS only by the HARD GATE (no GPU/APK).
