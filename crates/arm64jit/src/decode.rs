@@ -303,7 +303,10 @@ pub enum Inst {
     // ---- SIMD widen/long load: uxtl/sxtl Vd.TL, Vn.T (sign/zero extend) ----
     SimdXtl { rd: u8, rn: u8, sign: bool, esrc: u8 },
     // ---- SIMD add/sub-wide: uaddw/saddw Vd.T, Vn.T, Vm.T/2 ----
-    SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8 },
+    // `upper` (Q=1 / saddw2·uaddw2): the narrow source is the UPPER half of
+    // Vm (bytes 8..15), not the lower half — gcc vectorizes string/math loops
+    // with saddw then saddw2 to accumulate both halves.
+    SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8, upper: bool },
     // ---- SIMD vector bitwise AND/ORR/EOR/BIC (128b lanes) ----
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
@@ -604,6 +607,11 @@ pub enum Inst {
     // ADDV Dd,Vn.T : horizontal sum of sign-extended vector elements -> bottom
     // element of Vd. size = element width in bytes (1=B,2=H,4=S), q = 128-bit.
     Addv { rd: u8, rn: u8, size: u8, q: bool },
+    // ---- SIMD scalar-64 pairwise add: addp Dd, Vn.2D (sum of the two 64-bit
+    // lanes of Vn into the low 64 bits of Vd). gcc emits this for reductions.
+    // Encoded 0x5ee0_b800/0x7ee0_b800 with bit20 SET (fcvtzs scalar uses the
+    // same residue with bit20 CLEAR — bit20 is the discriminator).
+    SimdPairAddD { rd: u8, rn: u8, unsigned: bool },
     // ---- SIMD compare (nonzero) test: cmtst Vd.T, Vn.T, Vm.T ----
         SimdCmTest { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8 },
         // ---- SIMD table lookup: tbl Vd.16B, {Vn..Vn+N}, Vm (N+1 regs, N<=3) ----
@@ -997,18 +1005,36 @@ pub fn decode(insn: u32) -> Inst {
         let value_bits = decode_fmov_imm(imm8, esize == 8);
         return Inst::SimdFmovImm { rd: (insn & 0x1f) as u8, esize, value_bits, q };
     }
-    // ---- scalar FP-to-int into an FP register: fcvtzs/fcvtzu Dd, Dn / Sd, Sn ----
-    // Converts the FP value in Vn to an integer stored back into a vector reg.
-    // Scalar D form (double -> 64-bit int): residues 0x5ee0_b800 (fcvtzs, signed)
-    // / 0x7ee0_b800 (fcvtzu, unsigned). One 64-bit lane, q=false — matches the
-    // FcvVec translate with esize=8 (cvttsd2si). Must precede both the FcvVec
-    // vector gate and the SIMD widen gate (which wrongly matched 0x5ee1bbff).
-    if (insn & 0xffe0_fc00) == 0x5ee0_b800 || (insn & 0xffe0_fc00) == 0x7ee0_b800 {
-        let rd = (insn & 0x1f) as u8;
-        let rn = ((insn >> 5) & 0x1f) as u8;
-        let signed = (insn >> 29) & 1 == 0;
-        return Inst::FcvVec { rd, rn, signed, esize: 8, q: false };
-    }
+    // ---- scalar FP-to-int into an FP register: fcvtzs/fcvtzu Dd, Dn / Sd, Sn ----,
+        // Scalar D form (double -> 64-bit int): residues 0x5ee0_b800 (fcvtzs, signed)
+        // / 0x7ee0_b800 (fcvtzu, unsigned). One 64-bit lane, q=false — matches the
+        // FcvVec translate with esize=8 (cvttsd2si). Must precede both the FcvVec
+        // vector gate and the SIMD widen gate (which wrongly matched 0x5ee1bbff).
+        // CRITICAL: bit20 discriminates. fcvtzs scalar leaves it CLEAR (0x5ee1b820),
+        // but the SIMD pairwise `addp Dd, Vn.2D` (0x5ef1b800) shares this residue
+        // with bit20 SET — without the check, every gcc pairwise-add reduction was
+        // silently decoded as a float->int convert (wrong result, not a trap).
+        if ((insn & 0xffe0_fc00) == 0x5ee0_b800 || (insn & 0xffe0_fc00) == 0x7ee0_b800)
+            && (insn & 0x100000) == 0
+        {
+            let rd = (insn & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let signed = (insn >> 29) & 1 == 0;
+            return Inst::FcvVec { rd, rn, signed, esize: 8, q: false };
+        }
+        // ---- SIMD scalar-64 pairwise add: addp Dd, Vn.2D (bit20 SET) ----
+        // Sums the two 64-bit lanes of Vn into the low 64 bits of Vd (signed wrap,
+        // the same as a 64-bit add). See the fcvtzs scalar gate for the bit20
+        // discriminator — this MUST come immediately after it so shared residues
+        // route correctly.
+        if ((insn & 0xffe0_fc00) == 0x5ee0_b800 || (insn & 0xffe0_fc00) == 0x7ee0_b800)
+            && (insn & 0x100000) != 0
+        {
+            let rd = (insn & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let unsigned = (insn >> 29) & 1 == 1;
+            return Inst::SimdPairAddD { rd, rn, unsigned };
+        }
     // ---- SIMD float-to-int (vector): fcvtzu/fcvtzs Vd.T, Vn.T (FPI(FPc))----
     if matches!(insn & 0xffe0_fc00, 0x0ea0_b800 | 0x2ea0_b800 | 0x4ea0_b800 | 0x4ee0_b800 | 0x6ea0_b800 | 0x6ee0_b800) {
         // esize discriminator is bit22: .2d (imm-64) has it set, .4s/.2s clear —
@@ -1580,6 +1606,7 @@ pub fn decode(insn: u32) -> Inst {
             rm: ((insn >> 16) & 0x1f) as u8,
             sign: ((insn >> 29) & 1) == 0,
             esrc,
+            upper: (insn >> 30) & 1 == 1, // Q=1 => saddw2/uaddw2 (upper half of Vm)
         };
     }
 
@@ -4104,6 +4131,42 @@ mod tests {
                 assert_eq!((rd, rn, signed, esize, q), (31, 31, true, 8, false));
             }
             other => panic!("fcvtzs d31,d31 -> FcvVec scalar, got {other:?}"),
+        }
+        // CRITICAL discriminator: `addp d31, v31.2d` = 0x5ef1bbff differs from the
+        // fcvtzs above ONLY by bit20 (SET). It must decode to SimdPairAddD, NOT
+        // FcvVec — the OLD gate silently converted gcc pairwise-add reductions to
+        // float->int (wrong results, not a trap).
+        match decode(0x5ef1bbff) {
+            Inst::SimdPairAddD { rd, rn, .. } => {
+                assert_eq!((rd, rn), (31, 31));
+            }
+            other => panic!("addp d31,v31.2d -> SimdPairAddD, got {other:?}"),
+        }
+        // The vector 3-same ADDP (0x4ee2bc20 = addp v0.2d,v1,v2) stays untouched
+        // by this scalar gate (different residue) — could be Unsupported or SIMD;
+        // just ensure it does NOT silently become the scalar FcvVec.
+        assert!(!matches!(decode(0x4ee2bc20), Inst::FcvVec { .. }));
+        // saddw/saddw2 (SIMD add-wide) share the SimdAddw gate; the Q bit must
+        // route the source to the UPPER half of Vm for saddw2 — the OLD code
+        // always read the lower half, so -O2 vectorized loops accumulated the
+        // wrong lanes (e.g. the i*i reduction gave 30 instead of 76).
+        match decode(0x0ea21020) { // saddw v0.2d, v1.2d, v2.2s  (Q=0, lower)
+            Inst::SimdAddw { rd, rn, rm, esrc, upper, .. } => {
+                assert_eq!((rd, rn, rm, esrc, upper), (0, 1, 2, 4, false));
+            }
+            other => panic!("saddw v0.2d -> SimdAddw, got {other:?}"),
+        }
+        match decode(0x4ea51083) { // saddw2 v3.2d, v4.2d, v5.4s  (Q=1, upper)
+            Inst::SimdAddw { rd, rn, rm, esrc, upper, .. } => {
+                assert_eq!((rd, rn, rm, esrc, upper), (3, 4, 5, 4, true));
+            }
+            other => panic!("saddw2 v3.2d -> SimdAddw upper, got {other:?}"),
+        }
+        match decode(0x6eab1149) { // uaddw2 v9.2d, v10.2d, v11.4s (Q=1, upper)
+            Inst::SimdAddw { rd, rn, rm, sign, upper, .. } => {
+                assert_eq!((rd, rn, rm, sign, upper), (9, 10, 11, false, true));
+            }
+            other => panic!("uaddw2 v9.2d -> SimdAddw upper unsigned, got {other:?}"),
         }
         match decode(0x7ee1b8e0) {
             Inst::FcvVec { rd, signed, .. } => {

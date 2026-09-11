@@ -342,3 +342,19 @@ fn loader_run_asymmetric_logic_imm_mask_returns_correct() {
         0,
     );
 }
+
+#[test]
+fn loader_run_pairwise_add_reduction_returns_76() {
+    // End-to-end gate for the scalar-D `addp Dd, Vn.2D` (SimdPairAddD) fix:
+    // under -O3 gcc vectorizes the i*i loop and reduces with `addp d, v.2d`
+    // (0x5ef1...) + a smulh magic Nr by-97. The sum is 1240 -> 76. Before the
+    // bit20 discriminator, addp collided with the scalar fcvtzs gate and
+    // silently ran as a float->int translate -> 0. Runs the full
+    // loader->bind->jit_run pipeline.
+    assert_runs(
+        "pairsum",
+        // -O3 forces the SIMD pairwise-add reduction path (addp).
+        "int entry(void){ int a[16]; for(int i=0;i<16;i++)a[i]=i*i; long long s=0; for(int i=0;i<16;i++) s+=a[i]; return (int)(s%97); }\n",
+        76,
+    );
+}

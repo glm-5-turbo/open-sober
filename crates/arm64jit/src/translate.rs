@@ -2892,6 +2892,17 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
+        Inst::SimdPairAddD { rd, rn, unsigned: _u } => {
+            // ADDP Dd, Vn.2D : pairwise-add the two 64-bit lanes of Vn into the
+            // low 64 bits of Vd. Plain 64-bit add (signed/unsigned same result).
+            let vsrc = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let vdst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            buf.mov_load64(RAX, RBX, vsrc);        // lane 0
+            buf.mov_load64(RCX, RBX, vsrc + 8);    // lane 1
+            buf.add_rr64(RAX, RCX);
+            buf.mov_store64(RBX, vdst, RAX);       // high 64 bits of Vd left as-is
+            Ok(())
+        }
         Inst::SimdCmEq { rd, rn, rm, lanes, esize } => {
             // cmeq Vd.T, Vn.T, Vm.T: each element is all-ones if Vn[i]==Vm[i]
             // else 0. Compare the esize-byte element (zero-extended via the
@@ -3168,15 +3179,19 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     Ok(())
                 }
-                Inst::SimdAddw { rd, rn, rm, sign, esrc } => {
+                Inst::SimdAddw { rd, rn, rm, sign, esrc, upper } => {
                     // uaddw/saddw Vd.T, Vn.T, Vm.(T/2): Vd[i] = Vn[i] + extend(Vm_hi)
                     // narrow source element = esrc bytes, dest element = 2*esrc.
+                    // `upper` (saddw2/uaddw2): the narrow src is the UPPER 64 bits
+                    // of Vm (byte 8..15), not the lower — a second loop pass
+                    // accumulates the other half.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     let der = (esrc as i32) * 2;      // dest element width
                     let lanes = 8usize >> esrc.trailing_zeros() as usize;
+                    let m_half: i32 = if upper { 8 } else { 0 };
                     for i in 0..lanes {
                         let nsrc = vslot(rn) + (i as i32) * der;   // Vn wide elem
-                        let msrc = vslot(rm) + (i as i32) * (esrc as i32);
+                        let msrc = vslot(rm) + m_half + (i as i32) * (esrc as i32);
                         let dst = vslot(rd) + (i as i32) * der;
                         match der {
                             4 => buf.mov_load32(RAX, RBX, nsrc),
