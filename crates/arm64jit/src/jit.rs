@@ -60,6 +60,22 @@ pub struct CpuState {
     /// Guest thread id assigned by the clone handler (positive u64; 0 = main).
     /// Distinct per spawned thread, stable for the thread's lifetime.
     pub tid: u64,
+    /// When a self-delivered signal / thread-exit must divert execution back to
+    /// the dispatcher loop instead of letting the inlined `svc` continue, the
+    /// syscall sets this to the guest PC the loop should run next (a signal
+    /// handler), or leaves it 0 for a normal post-svc continuation. The Svc
+    /// translate arm early-returns the block when this is nonzero, and the
+    /// dispatcher loop consumes it (runs `redirect_request` then zeroes it).
+    /// Kept before `pending_signal`.
+    pub redirect_request: u64,
+    /// A pending signal posted to THIS guest thread by another guest thread
+    /// (cross-thread `tgkill`/`kill`). The owning thread's dispatcher loop
+    /// picks it up cooperatively at the top of each iteration and runs the
+    /// registered guest handler / applies the default disposition. Read/written
+    /// through `read_volatile`/`write_volatile` raw pointers so the posting
+    /// thread and the owning thread view the same word without a data race.
+    /// 0 = none. Kept last so all earlier field offsets are unchanged.
+    pub pending_signal: u32,
 }
 
 /// Base byte offset of the SIMD vector register file inside CpuState.
@@ -84,6 +100,10 @@ pub const SVC_NEXT_OFF: i32 = PERMSCRATCH_OFF + 32; // 832
 pub const CLEAR_TID_OFF: i32 = SVC_NEXT_OFF + 8; // 840
 /// Byte offset of `CpuState.tid` — right after `clear_tid_addr` (840..848).
 pub const TID_OFF: i32 = CLEAR_TID_OFF + 8; // 848
+/// Byte offset of `CpuState.redirect_request` — right after `tid` (848..856).
+pub const REDIRECT_OFF: i32 = TID_OFF + 8; // 856
+/// Byte offset of `CpuState.pending_signal` — right after `redirect` (856..864).
+pub const SIG_PENDING_OFF: i32 = REDIRECT_OFF + 8; // 864
 
 impl CpuState {
     pub fn new() -> Self {
@@ -99,6 +119,8 @@ impl CpuState {
             svc_next: 0,
             clear_tid_addr: 0,
             tid: 0,
+            redirect_request: 0,
+            pending_signal: 0,
         }
     }
     pub fn set(&mut self, reg: usize, val: u64) {
@@ -748,9 +770,47 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
         // --- limits ---
         163 => unsafe { libc::getrlimit(a[0] as u32, a[1] as *mut libc::rlimit) as c_long },
         164 => unsafe { libc::setrlimit(a[0] as u32, a[1] as *const libc::rlimit) as c_long },
-        // --- signals / timers re-delivery ---
-        129 => unsafe { libc::kill(a[0] as c_int, a[1] as c_int) as c_long },
-        131 => unsafe { libc::tgkill(a[0] as c_int, a[1] as c_int, a[2] as c_int) as c_long },
+        // --- signals / timers / delivery ---
+        // kill(129)/tgkill(131) are routed through the guest signal model
+        // (rt_sigaction default/ignore/handler), NOT forwarded to real libc:
+        // forwarding would deliver the signal to a HOST pid/tid (a guest
+        // getpid()/gettid() ARE the real host ids, so e.g. raise(SIGTERM) or a
+        // default-terminating SIGPIPE would kill the host process spuriously,
+        // and a guest handler would never run). See signals.rs.
+        129 => {
+            // kill(pid, sig). Process-directed: pid 0 / -1 / self are delivered
+            // to this thread; a distinct pid isn't one of our threads -> ESRCH.
+            let sig = a[1] as i32;
+            let pid = a[0] as i64;
+            if sig < 1 || sig > 64 {
+                (-libc::EINVAL) as c_long
+            } else if pid == 0 || pid == unsafe { libc::getpid() as i64 } || pid == -1 {
+                let resume = s.svc_next; // post-svc continuation
+                crate::signals::dispatch_current_thread(s, sig as u32, resume);
+                0
+            } else {
+                (-libc::ESRCH) as c_long
+            }
+        }
+        131 => {
+            // tgkill(tgid, tid, sig). A same-thread target runs the handler
+            // synchronously here; a different guest thread gets a cooperative
+            // pending_signal its own dispatcher loop picks up; an unknown tid
+            // is ESRCH (not a process killer).
+            let sig = a[2] as i32;
+            let tid_arg = a[1] as i64;
+            if sig < 1 || sig > 64 {
+                (-libc::EINVAL) as c_long
+            } else if target_is_self(s, tid_arg) {
+                let resume = s.svc_next; // post-svc continuation
+                crate::signals::dispatch_current_thread(s, sig as u32, resume);
+                0
+            } else if post_signal_to_thread(sig as u32, tid_arg) {
+                0
+            } else {
+                (-libc::ESRCH) as c_long
+            }
+        }
         107 => unsafe { libc::timer_create(a[0] as libc::clockid_t, a[1] as *mut libc::sigevent, a[2] as *mut libc::timer_t) as c_long },
         110 => unsafe { libc::timer_settime(a[0] as libc::timer_t, a[1] as c_int, a[2] as *const libc::itimerspec, a[3] as *mut libc::itimerspec) as c_long },
         // --- common Android boot-path gaps (ARGID asm-generic table) ---
@@ -767,15 +827,23 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
             // a3 as the optional arg so both shapes land correctly on x86-64.
             libc::syscall(libc::SYS_fcntl, a[0] as usize, a[1] as usize, a[2] as usize) as c_long
         },
-        134 => unsafe { // rt_sigaction(134): sig, act, oact, sigsetsize. We cannot
-            // actually install a *guest* trampoline handler in the host, so we
-            // accept the register (return 0) and do NOT invoke one — matching the
-            // treatment of signals elsewhere in this shim (signals return 0/ignored).
-            // oact (a2, non-null) is cleared to keep guest callers from derefing
-            // garbage; a null oact is tolerated.
-            if a[2] != 0 {
-                unsafe { std::ptr::write_bytes(a[2] as *mut u8, 0, 128); }
-            }
+        134 => {
+            // rt_sigaction(134): sig, act, oact, sigsetsize. Records the guest
+            // action (SIG_DFL / SIG_IGN / a guest handler fn) into the signal
+            // table, and reports the previous action back into oact. The guest
+            // handler is dispatched by kill/tgkill via signals.rs.
+            crate::signals::rt_sigaction(a[0], a[1], a[2]) as c_long
+        },
+        130 => 0, // rt_sigsuspend(130): we never block signals; no-op success.
+        133 => 0, // sigaltstack(133): handlers run on the normal guest stack.
+        139 => {
+            // rt_sigreturn(139): a dispatched guest handler is finishing via the
+            // restorer-loaded `svc #139` path. Restore the saved interrupted
+            // context (the SIGRET handler-`ret` path is handled by the dispatcher
+            // loop instead of a syscall). The inlined `svc` would otherwise
+            // continue at restorer+4; re-route to the restored PC instead.
+            crate::signals::sigreturn(s);
+            s.redirect_request = s.pc;
             0
         },
         135 => unsafe { // rt_sigprocmask(135): how, set, oset, sigsetsize. No-op: we
@@ -940,6 +1008,73 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
     }
 }
 
+/// A live guest thread: its guest tid, real host tid, and CpuState pointer.
+/// Used to route a cross-thread `tgkill`/`kill` signal to the owning thread
+/// (which picks it up cooperatively via `pending_signal`). The CpuState lives
+/// for the thread's whole `jit_run` (owned by the main scope or the clone
+/// child's spawned host thread), so the raw pointer is valid while registered.
+struct GuestThreadRec {
+    guest_tid: u64,
+    host_tid: i32,
+    state: *mut CpuState,
+}
+static GUEST_THREADS: Mutex<Vec<GuestThreadRec>> = Mutex::new(Vec::new());
+// The raw CpuState pointer is deliberately shared across the owning thread
+// (its dispatcher loop) and signal posters on other threads (which only touch
+// the single-word `pending_signal` via volatile access). This makes the record
+// sendable so a `Mutex<Vec<_>>` of them can be shared; the access pattern is
+// race-safe by construction (non-overlapping volatile u32).
+unsafe impl Send for GuestThreadRec {}
+
+/// Register `state` as a live guest thread (re-registration is idempotent by
+/// guest tid). Called at `jit_run` entry (each thread that runs the dispatcher)
+/// and kept current for the thread's lifetime.
+pub fn register_guest_thread(state: *mut CpuState) {
+    let host_tid = unsafe { libc::gettid() };
+    let guest_tid = unsafe { (*state).tid };
+    let mut v = GUEST_THREADS.lock().unwrap();
+    v.retain(|r| r.guest_tid != guest_tid);
+    v.push(GuestThreadRec {
+        guest_tid,
+        host_tid,
+        state,
+    });
+}
+
+/// Is the `tgkill` target the current guest thread (`s`)? The guest's
+/// gettid() returns the REAL host tid (mirroring kernel behavior), and a clone
+/// child also has an internal guest tid; match either so pthread_kill(self)
+/// / raise() self-delivery works on both the main thread and children.
+fn target_is_self(s: &CpuState, tid_arg: i64) -> bool {
+    if tid_arg == 0 {
+        return false;
+    }
+    if s.tid != 0 && tid_arg as u64 == s.tid {
+        return true;
+    }
+    tid_arg as i32 == unsafe { libc::gettid() }
+}
+
+/// Route a signal to another live guest thread: write its cooperative
+/// `pending_signal` word (the target's dispatcher loop picks it up and runs the
+/// handler on its own thread). Returns false when no live thread matches `tid`
+/// (the `tgkill` target is one of ours or not — caller returns -ESRCH).
+fn post_signal_to_thread(sig: u32, tid_arg: i64) -> bool {
+    let v = GUEST_THREADS.lock().unwrap();
+    for r in &*v {
+        if r.host_tid as i64 == tid_arg || r.guest_tid as i64 == tid_arg {
+            // SAFETY: the target thread is live (registered) and its CpuState
+            // is valid until it exits; a single-word volatile store races safely
+            // with the owning thread's volatile read in the dispatcher loop.
+            unsafe {
+                std::ptr::write_volatile(&mut (*r.state).pending_signal, sig);
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// Spawn a guest child thread on a real host thread (clone(220)/clone3(435)'s
 /// shared-VM thread case). `s` is the parent CpuState (its `svc_next` holds the
 /// post-svc PC); `flags`/`child_stack`/`parent_tid`/`tls`/`child_tid` come from
@@ -1005,6 +1140,10 @@ fn spawn_guest_thread(
                 let image: &[u8] = unsafe {
                     std::slice::from_raw_parts(img_addr as *const u8, img_len)
                 };
+                // Register the child as a live guest thread so another thread's
+                // `tgkill`/`kill` can route a signal to it (its dispatcher loop
+                // picks the signal up cooperatively below).
+                register_guest_thread(&mut child as *mut CpuState);
                 // The child runs to its thread-local exit, then pc==0 halts
                 // jit_run and the host thread ends.
                 let _ = jit_run(image, base, post_svc, &mut child as *mut CpuState);
@@ -1159,6 +1298,10 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
         image_len: image.len(),
         base,
     });
+    // Register this guest thread so a cross-thread `tgkill`/`kill` on another
+    // guest thread can route a signal to it (cooperative pending_signal pickup
+    // below). Each thread that runs the dispatcher registers itself.
+    register_guest_thread(state);
     let mut guard: u64 = 0;
     const MAX_STEPS: u64 = 20_000_000; // safety net against an infinite guest loop
     loop {
@@ -1166,6 +1309,34 @@ pub fn jit_run(image: &[u8], base: u64, entry: u64, state: *mut CpuState) -> Res
             return Err("run_loop: step budget exceeded (infinite guest loop?)".into());
         }
         guard += 1;
+        // Guest signal handling, before any instruction execution:
+        //  1. A cross-thread signal (posted via pending_signal) runs its
+        //     handler / default disposition on THIS thread.
+        //  2. A self-delivered signal recorded a handler redirect (the Svc arm
+        //     early-returned because `redirect_request` was nonzero); run it.
+        //  3. A just-finished signal handler `ret`-ed to x30 == SIGRET; restore
+        //     the saved interrupted context.
+        // SIGRET deliberately lies outside the guest image, so it MUST be
+        // checked before the bounds/`host_call_at` path below.
+        unsafe {
+            let resume = (*state).pc; // interrupted pc for a pending pickup
+            let pend = std::ptr::read_volatile(&(*state).pending_signal);
+            if pend != 0 {
+                std::ptr::write_volatile(&mut (*state).pending_signal, 0);
+                crate::signals::dispatch_current_thread(&mut *state, pend, resume);
+                continue;
+            }
+            let redirect = (*state).redirect_request;
+            if redirect != 0 {
+                (*state).redirect_request = 0;
+                (*state).pc = redirect;
+                continue;
+            }
+            if (*state).pc == crate::signals::SIGRET {
+                crate::signals::sigreturn(&mut *state);
+                continue;
+            }
+        }
         let pc = unsafe { (*state).pc };
         if pc == 0 {
             return Ok(unsafe { (*state).x[0] });
@@ -1454,6 +1625,66 @@ fn body_contains_host_plt_bl(image: &[u8], base: u64, entry: u64) -> bool {
     false
 }
 
+/// Detect whether the body reachable from guest `entry` contains an `svc`
+/// (transitively, following guest `bl`/`b` targets). A function that issues a
+/// supervisor call must run as its OWN top-level block: when it is inlined into
+/// a caller's monolithic block and its `svc` needs to *yield* to the dispatcher
+/// (a self-delivered signal's redirect, or a child thread's local `exit` which
+/// both set a fork in the Svc translate arm), the Svc-arm early-`ret` pops the
+/// *inlined-caller* return address instead of jit_run's — corrupting the host
+/// return stack. Diverting svc-bearing `bl` callees through the dispatcher puts
+/// every `svc` at a top-level block boundary where the yield is correct.
+/// Unlike `body_contains_host_plt_bl` we DO follow guest `bl` into callees,
+/// because a nested `helper -> ... -> svc` chain has exactly the same hazard.
+fn body_contains_svc(image: &[u8], base: u64, entry: u64) -> bool {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut frontier: Vec<u64> = vec![entry];
+    let mut scanned = 0usize;
+    while let Some(start) = frontier.pop() {
+        if !seen.insert(start) {
+            continue;
+        }
+        if scanned > BODY_SCAN_BUDGET {
+            return true; // give up conservatively: treat as svc-bearing
+        }
+        let mut cur = start;
+        loop {
+            if cur != start && seen.contains(&cur) {
+                break;
+            }
+            let Some(word) = word_at(image, base, cur) else { break };
+            let inst = decode::decode(word);
+            scanned += 1;
+            if scanned > BODY_SCAN_BUDGET {
+                return true;
+            }
+            match inst {
+                Inst::Svc { .. } => return true,
+                Inst::B { imm, link } => {
+                    let target = cur.wrapping_add(imm as u64);
+                    frontier.push(target);
+                    if link {
+                        frontier.push(cur + 4); // continue after the call
+                    }
+                    break;
+                }
+                Inst::BCond { imm, .. } | Inst::Cbz { imm, .. } | Inst::Tbz { imm, .. } => {
+                    frontier.push(cur.wrapping_add(imm as u64));
+                }
+                Inst::Ret
+                | Inst::Br { .. }
+                | Inst::Blr { .. }
+                | Inst::Unsupported(_)
+                | Inst::Brk { .. }
+                | Inst::Udf { .. } => break,
+                _ => {}
+            }
+            cur += 4;
+        }
+    }
+    false
+}
+
 /// Detect whether the instructions at guest address `addr` (within `image`
 /// mapped at `base`) are a PLT stub
 /// (`adrp xd,P; ldr xc,[xd,#imm]; add xd,xd,#off; br xc`) whose GOT slot holds a
@@ -1573,6 +1804,10 @@ pub fn compile_image_bounded(
     // given callee body at most once per compile (it may be inlined from many
     // call sites within one block).
     let mut memo_divert: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+    // Memo of body_contains_svc() per guest-bl target (a callee that issues an
+    // `svc` must run as its own top-level block so the Svc-arm yield is a real
+    // block-level yield, not a nested-call `ret`).
+    let mut memo_svc: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
     // Truncation fall-through tracking: when the budget cuts a straight-line
     // body short (no terminal instruction writes pc), the last emitted
     // instruction falls through to `trunc_next_pc` with nothing updating
@@ -1642,6 +1877,17 @@ pub fn compile_image_bounded(
                         let import_bearing = hps || memo_divert.get(&target).copied().unwrap_or_else(|| {
                             let b = body_contains_host_plt_bl(image, base, target);
                             memo_divert.insert(target, b);
+                            b
+                        }) || memo_svc.get(&target).copied().unwrap_or_else(|| {
+                            // An `svc`-bearing callee is diverted for the same
+                            // reason as an import-bearing one: its body must
+                            // compile as its own top-level block so a signal
+                            // redirect / thread-local exit inside the `svc`
+                            // yields to the dispatcher with a real block `ret`
+                            // (inlining it would turn that `ret` into a
+                            // corrupt nested-call return). See body_contains_svc.
+                            let b = body_contains_svc(image, base, target);
+                            memo_svc.insert(target, b);
                             b
                         });
                         #[cfg(debug_assertions)]
@@ -3889,6 +4135,37 @@ mod tests {
     }
 
     #[test]
+    fn body_contains_svc_follows_call_graph() {
+        // caller 0x00: bl 0x20 ; ret
+        // callee 0x20: svc #0 ; ret    (an `svc` must divert the caller's `bl`)
+        let mut image = Vec::<u8>::new();
+        image.extend_from_slice(&0x9400_0008u32.to_le_bytes()); // 0x00 bl 0x20
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x04 ret
+        while image.len() < 0x20 {
+            image.push(0);
+        }
+        image.extend_from_slice(&0xd400_0001u32.to_le_bytes()); // 0x20 svc #0
+        image.extend_from_slice(&0xd65f_03c0u32.to_le_bytes()); // 0x24 ret
+        // The callee body itself issues an svc.
+        assert!(
+            body_contains_svc(&image, 0, 0x20),
+            "callee 0x20 issues an svc"
+        );
+        // The caller transitively reaches it (body_contains_svc follows the bl).
+        assert!(
+            body_contains_svc(&image, 0, 0x00),
+            "caller 0x00 transitively reaches an svc via its bl"
+        );
+        // A body with no svc anywhere reports false.
+        let mut plain = image.clone();
+        plain[0x20..0x24].copy_from_slice(&0xd280_0000u32.to_le_bytes()); // mov x0,#0
+        assert!(
+            !body_contains_svc(&plain, 0, 0x00),
+            "no svc in the call graph -> false"
+        );
+    }
+
+    #[test]
     fn guest_bl_to_import_bearing_callee_diverts_through_dispatcher() {
         // Same layout as body_contains_host_plt_bl test. A generous budget would
         // normally inline the callee, but because the callee body itself calls a
@@ -4892,13 +5169,20 @@ mod tests {
         assert_eq!(r as i64, 0, "clock_nanosleep 0-time");
 
         // rt_sigaction(134): installing a handler succeeds (returns 0) and a
-        // non-null oact output is zeroed, not left as garbage.
+        // non-null oact is written back with the PREVIOUS action as the aarch64
+        // `struct sigaction` (32 bytes: handler/flags/restorer/mask). With no
+        // prior action that is SIG_DFL (all-zero); the 32-byte struct must be
+        // zeroed, not left as garbage.
         let act = [0u8; 128]; let mut oact = [0xabu8; 128];
         st.x[8] = 134; st.x[0] = 2 /*SIGINT*/; st.x[1] = act.as_ptr() as u64;
         st.x[2] = oact.as_mut_ptr() as u64; st.x[3] = 8;
         let r = guest_svc(&mut st as *mut CpuState);
         assert_eq!(r as i64, 0, "rt_sigaction register ok");
-        assert_eq!(oact.iter().all(|&b| b == 0), true, "rt_sigaction oact zeroed");
+        assert!(
+            oact[..32].iter().all(|&b| b == 0),
+            "rt_sigaction oact (SIG_DFL) zeroed: {:02x} {:02x} {:02x} ...",
+            oact[0], oact[1], oact[2]
+        );
 
         // rt_sigprocmask(135): reports empty old set.
         let mut oset = [0xffu8; 8];

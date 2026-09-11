@@ -1497,18 +1497,28 @@ pub fn translate(
             buf.sub_ri64(4, 8); // RSP(4) -= 8  ->  RSP ≡ 0 mod 16 at the call
             buf.call_r64(RAX); // guest_svc(st); returns the syscall result in RAX
             buf.add_ri64(4, 8); // RSP += 8  ->  back to block-entry alignment
+            // Thread-exit AND signal-redirect early-return. `state.pc` is NOT
+            // updated per-instruction during block execution (it holds the
+            // block-entry address), so we can't compare it to `svc_next`.
+            // A signal redirect is decided FIRST, BEFORE the syscall-result
+            // store: when a self-delivered signal set `redirect_request =
+            // handler`, guest x0 must stay the signal handler's signo argument
+            // (set by signals::begin_handler), NOT the syscall return — so we
+            // yield to the dispatcher without overwriting x0. Only on the
+            // non-redirect path do we store the syscall result (x0) and then
+            // early-return when `pc == 0` (a spawned child's thread-local
+            // `exit`). Both redirect and pc==0 return from the block so the
+            // dispatcher loop re-reads `state.pc`.
+            buf.mov_load64(RCX, RBX, crate::jit::REDIRECT_OFF); // RCX = redirect
+            buf.test_rr64(RCX, RCX);
+            buf.jne_rel8(16); // redirect != 0 -> jump to the yield `ret` (16 on)
             stg(buf, 0, RAX); // system value -> guest x0 (AArch64 return reg)
-            // Thread-exit early-return: guest_svc sets state.pc == 0 to halt the
-            // current guest thread (a spawned child's `exit`/thread-local-exit,
-            // syscall 220's child, etc.). In that case jit_run's caller sees
-            // pc==0 and unwinds — but this *inlined* svc would otherwise continue
-            // into the next guest instruction. So: if state.pc == 0, `ret` from
-            // the block now. The `jne` skips the single-byte `ret` when pc != 0.
             buf.mov_load64(RAX, RBX, crate::jit::PC_OFF); // RAX = state.pc
             buf.test_rr64(RAX, RAX);
-            buf.jne_rel8(1); // if pc != 0, jump over the 1-byte `ret`
-            buf.ret(); // pc == 0: return from block (jit_run halts this thread)
-            Ok(())
+            buf.jne_rel8(2); // pc != 0 -> skip both `ret`s, continue inline
+            buf.ret(); // pc == 0: thread-local exit -> return to the dispatcher
+            buf.ret(); // redirect != 0: yield to the dispatcher (x0 keeps signo)
+            Ok(()) // <-- continue inline after the rets (pc != 0, redirect == 0)
         }
         Inst::Brk { imm } => {
             // Guest breakpoint (brk #imm): on a real AArch64 CPU this traps

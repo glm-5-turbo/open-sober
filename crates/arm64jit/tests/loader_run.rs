@@ -1260,3 +1260,254 @@ int entry(void){
     eprintln!("\x1b[32mPASS\x1b[0m clone3: struct-arg clone spawned+joined a guest thread (10! via futex join)");
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// Guest signal delivery — self-delivered handler dispatch. The guest installs a
+/// SIGUSR1(10) handler via rt_sigaction(134), then tgkill(131)s its own thread.
+/// The handler must run (set a global), and the interrupted tgkill syscall must
+/// resume normally on the guest's `ret` (x30 -> SIGRET -> sigreturn) with x0=0.
+#[test]
+fn loader_run_self_signal_handler_runs_and_resumes() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_self_signal: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("sig-self");
+
+    let src = r#"
+volatile long g_hit = 0;
+volatile long g_sig = 0;
+
+void on_usr1(int sig){ g_hit = 1; g_sig = sig; }
+
+struct ksa {
+    unsigned long handler;   // 0
+    unsigned long flags;     // 8
+    unsigned long restorer;  // 16
+    unsigned char mask[8];   // 24
+};
+
+static long my_rt_sigaction(long sig, long act, long oact) {
+    register long x8 asm("x8") = 134;
+    register long x0 asm("x0") = sig;
+    register long x1 asm("x1") = act;
+    register long x2 asm("x2") = oact;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_tgkill(long tid, long sig) {
+    register long x8 asm("x8") = 131;
+    register long x0 asm("x0") = 0;   // tgid (unused by the runtime)
+    register long x1 asm("x1") = tid;
+    register long x2 asm("x2") = sig;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_gettid(void) {
+    register long x8 asm("x8") = 178;
+    register long x0 asm("x0") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+
+int entry(void){
+    struct ksa sa = {0};
+    struct ksa old = {0};
+    sa.handler = (unsigned long)on_usr1;
+    long r = my_rt_sigaction(10, (long)&sa, (long)&old);
+    if (r != 0) return 1000;              // rt_sigaction failed
+    r = my_tgkill(my_gettid(), 10);
+    if (r != 0) return 2000;              // self tgkill failed
+    if (g_hit != 1) return 3000;          // handler never ran
+    if (g_sig != 10) return 4000;         // handler got the wrong signo
+    return 42;
+}
+"#;
+    let elf = compile(&wd, "sig-self", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "sig-self: entry() -> {v}, expected 42 (guest signal dispatch failed?)"
+        ),
+        Err(e) => panic!("sig-self: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m sig-self: self-delivered SIGUSR1 handler ran + resumed");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// The SIG_IGN default-disposition path: a guest that installs SIG_IGN for a
+/// default-terminating signal (SIGPIPE, 13) and then sends itself that signal
+/// must survive (the default would _exit(141)); the runtime honors SIG_IGN.
+#[test]
+fn loader_run_sig_ign_prevents_termination() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_sig_ign: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("sig-ign");
+
+    let src = r#"
+struct ksa {
+    unsigned long handler;   // 0
+    unsigned long flags;     // 8
+    unsigned long restorer;  // 16
+    unsigned char mask[8];   // 24
+};
+static long my_rt_sigaction(long sig, long act, long oact) {
+    register long x8 asm("x8") = 134;
+    register long x0 asm("x0") = sig;
+    register long x1 asm("x1") = act;
+    register long x2 asm("x2") = oact;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_tgkill(long tid, long sig) {
+    register long x8 asm("x8") = 131;
+    register long x0 asm("x0") = 0;
+    register long x1 asm("x1") = tid;
+    register long x2 asm("x2") = sig;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long my_gettid(void) {
+    register long x8 asm("x8") = 178;
+    register long x0 asm("x0") = 0;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+int entry(void){
+    struct ksa sa = {0};
+    sa.handler = 1;                       // SIG_IGN
+    long r = my_rt_sigaction(13, (long)&sa, 0); // SIGPIPE -> ignore
+    if (r != 0) return 1000;
+    r = my_tgkill(my_gettid(), 13);       // would _exit(141) if not ignored
+    if (r != 0) return 2000;
+    return 42;                            // survived the default-death signal
+}
+"#;
+    let elf = compile(&wd, "sig-ign", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "sig-ign: entry() -> {v}, expected 42 (SIG_IGN default disposition not honored?)"
+        ),
+        Err(e) => panic!("sig-ign: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m sig-ign: SIG_IGN for SIGPIPE let the guest survive a self-delivered signal");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+/// Cross-thread signal delivery: one guest thread (the PARENT) posts SIGUSR1 to
+/// a spawned child via `tgkill`, and the CHILD's dispatcher loop picks it up
+/// cooperatively (pending_signal) and runs its installed handler. The handler's
+/// effect (g_hit) is observed by the child, which publishes g_result, thread-
+/// exits (CLONE_CHILD_CLEARTID wake), and the parent futex-joins. This is the
+/// "signal to a specific child thread" delivery a real boot needs for worker
+/// threads (render/audio/network) to be interrupted.
+#[test]
+fn loader_run_cross_thread_signal_delivers_to_child() {
+    let gcc = match cross_gcc() {
+        Some(g) => g,
+        None => {
+            eprintln!("skipping loader_run_cross_thread_signal: aarch64-linux-gnu-gcc not available");
+            return;
+        }
+    };
+    let _ = gcc;
+    let _guard = lock_run();
+    let wd = workdir("sig-xthread");
+
+    let src = r#"
+volatile long g_ready = 0;
+volatile long g_hit = 0;
+volatile long g_result = 0;
+volatile int g_ctlid = 0;
+
+void on_usr1(int sig){ g_hit = sig; }
+
+struct ksa { unsigned long h; unsigned long f; unsigned long r; unsigned char m[8]; };
+
+static long my_rt_sigaction(long sig,long act,long oact){
+    register long x8 asm("x8")=134; register long x0 asm("x0")=sig;
+    register long x1 asm("x1")=act; register long x2 asm("x2")=oact;
+    asm volatile("svc #0":"+r"(x0):"r"(x8),"r"(x1),"r"(x2):"memory"); return x0;
+}
+static long my_tgkill(long tgt,long sig){
+    register long x8 asm("x8")=131; register long x0 asm("x0")=0;
+    register long x1 asm("x1")=tgt; register long x2 asm("x2")=sig;
+    asm volatile("svc #0":"+r"(x0):"r"(x8),"r"(x1),"r"(x2):"memory"); return x0;
+}
+static long my_yield(void){
+    register long x8 asm("x8")=124; register long x0 asm("x0")=0;
+    asm volatile("svc #0":"+r"(x0):"r"(x8):"memory"); return x0;
+}
+
+int entry(void){
+    static char stack[131072] __attribute__((aligned(16)));
+    int cctlid = 0;
+    // Install the handler (process-wide SIG_ACTIONS; the child sees it too).
+    struct ksa sa = {0};
+    sa.h = (unsigned long)on_usr1;
+    long r = my_rt_sigaction(10, (long)&sa, 0);
+    if (r != 0) return 8000;
+
+    // clone(flags, newsp, ptid, tls, ctid)
+    register long x8 asm("x8") = 220;
+    register long x0 asm("x0") = 0xF00 | 0x10000 | 0x200000 | 0x1000000;
+    register long x1 asm("x1") = (long)(stack + 131072 - 128);
+    register long x2 asm("x2") = 0;
+    register long x3 asm("x3") = 0;
+    register long x4 asm("x4") = (long)&cctlid;
+    asm volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    long tid = x0;
+
+    if (tid == 0) {
+        // ---- child: announce readiness, then spin (yielding each pass so the
+        // dispatcher loop re-checks pending_signal) until the cross-thread
+        // SIGUSR1 arrives; the handler runs on this child's own thread.
+        g_ready = 1;
+        while (g_hit == 0) { my_yield(); }
+        g_result = (g_hit == 10) ? 5 : 5000;
+        register long x8c asm("x8") = 93;
+        register long x0c asm("x0") = 0;
+        asm volatile("svc #0" :: "r"(x8c), "r"(x0c) : "memory");
+        return -2;
+    }
+
+    // ---- parent: wait for child readiness, then post the cross-thread signal.
+    while (g_ready == 0) {}
+    long rr = my_tgkill(tid, 10);
+
+    // futex-join the child (CLONE_CHILD_CLEARTID wake on its exit).
+    int expect = (int)tid;
+    register long x8f asm("x8") = 98;
+    register long x0f asm("x0") = (long)&cctlid;
+    register long x1f asm("x1") = 0;  // FUTEX_WAIT
+    register long x2f asm("x2") = expect;
+    register long x3f asm("x3") = 0;
+    asm volatile("svc #0" : "+r"(x0f) : "r"(x8f), "r"(x1f), "r"(x2f), "r"(x3f) : "memory");
+    if (x0f != 0) return 7000;             // join failed
+    if (rr != 0) return 6000;              // cross-thread tgkill failed
+    if (g_result != 5) return g_result;    // child handler effect missing/wrong
+    return 42;
+}
+"#;
+    let elf = compile(&wd, "sig-xthread", src);
+    match run_elf(&elf) {
+        Ok(v) => assert_eq!(
+            v, 42,
+            "sig-xthread: entry() -> {v}, expected 42 (cross-thread tgkill delivery failed?)"
+        ),
+        Err(e) => panic!("sig-xthread: jit_run failed: {e}"),
+    }
+    eprintln!("\x1b[32mPASS\x1b[0m sig-xthread: parent tgkill delivered SIGUSR1 to the child's own thread");
+    let _ = std::fs::remove_dir_all(&wd);
+}

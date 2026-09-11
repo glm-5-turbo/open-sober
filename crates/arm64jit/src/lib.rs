@@ -9,3 +9,4 @@ pub mod shims;
 pub mod plt;
 pub mod jni;
 pub mod boot;
+pub mod signals;
