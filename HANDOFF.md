@@ -4724,3 +4724,19 @@ NOT reproduce when the same ops are isolated; needs a JIT execution tracer to
 pin the exact guest instruction. Low smoking-gun priority: all constituent ops
 validate individually. Next sessions: add a per-instruction traced run to
 diff_battery or resolve via reducing vmult.c further.
+
+## Session (Sep 11, 2026) — MOVI Vd.2D immediate decode FIXED — the 10th JIT bug
+
+Root-caused and fixed the 'fmla/div vector pipeline' bug that had resisted
+isolation all session. It was NOT a lane-coalescing interaction — it was a
+fundamental decode error in MOVI Vd.2D, #<imm>. The 2D immediate is a
+BYTE-SELECT pattern (bits[9:5] low nibble picks which bytes 0..3 of the low 32
+are 0xff), but the decode treated it as a generic imm8-replicate, so
+mov v27.2d,#0xffff produced 0x03 lanes instead of 0x000000000000ffff. Any
+vector AND-mask built this way corrupted bit-field extraction (gcc's
+shr->and->uzp1->scvtf reduction), collapsing values. Fixed the decode with 6
+qemu-verified ground-truth lane values; new unit test (movi_2d_byte_select_
+ground_truth) + moved the flow canary from #[ignore]d to a real regression
+(diff_fmla_div_pipeline_lcg). Sensitivity-proven both ways (695 vs 7777753).
+cargo test --workspace 293/0. This is the 10th JIT correctness fix this
+campaign; the fma_chain fuzzer is responsible for surfacing it.
