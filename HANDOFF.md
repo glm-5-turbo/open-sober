@@ -5823,6 +5823,17 @@ s[3]=both. Every .4s by-element s[2]/s[3] (and fmla s[1] via the swap) used
 the wrong element. Cleared with regression tests for all 4 fmul indices +
 fmla index-1 execution. Workspace 376/0.
 
+## Cycle 44k (Sep 11, 2026) — SIMD int pairwise smaxp/sminp/umaxp/uminp (383/0)
+
+Commit `54bfb8d` (dev). gen_int_pairwise_maxmin exposed smaxp/sminp/umaxp/
+uminp mis-decoding as SimdAddB/SimdAddH/Simd4s or Unsupported. New
+`Inst::SimdMaxMinP`: prefix 0x0e/2e/4e/6e + **byte2&0xfc in {0xa4=max,
+0xac=min}** (byte2 low bits carry rn — high-reg self-alias like v30,v31,v30
+clears them), placed before the mla/add gates. `min` discriminator = byte2
+bit3 (word bit11). Translate: pairwise-reduce each source into halves of Vd;
+sign/zero-extend; cmov **must use 0x4x cmov cc** (L=0x4C,G=0x4F,B=0x42,
+A=0x47 — the jcc-0x40 codes are wrong); permute_source for self-alias.
+
 ## Cycle 44j (Sep 11, 2026) — SIMD saturating shift-left sqshl/uqshl/sqshlu (382/0)
 
 Commit `f3dd4d7` (dev). gen_sat_left_shift exposed sqshl (emitted by
