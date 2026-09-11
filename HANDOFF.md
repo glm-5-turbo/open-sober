@@ -5091,3 +5091,41 @@ libroblox.so init code, so it is directly on the boot path.
 before running). `cargo build --workspace` clean; `cargo test --workspace`
 316/0. HARD GATE unchanged: real Roblox boot + run log on a GPU/APK host (none
 on this VPS).
+
+## Session 32c (Sep 11, 2026, hermes-worker) — the documented once-routine regression ROOT-CAUSED + FIXED (commit fce362c, 317/0)
+
+While validating the self-import fix against real cross-gcc fixtures, a
+`-shared` module that recurses `f(n)=n<=0?7:f(n-1)+helper(n)` (f calls BOTH
+itself AND helper@plt) returned 21 instead of native 27 at JIT_BUDGET>=64.
+This is the long-documented **"nested guest bl-inline regression to once-
+routine"** boot blocker, finally reproduced minimally end-to-end.
+
+Root cause (all three pieces):
+1. f's body calls `helper@plt` -> `body_contains_host_plt_bl(f)`=true -> f is
+   **import-bearing**, so the recursion `bl f` must DIVERT via a dispatcher-
+   return stub (a fresh f frame) rather than inline.
+2. Compile-time handling was correct (`import_bearing` -> `force_stubs=true`,
+   target NOT pushed to frontier). BUT the fixup-RESOLUTION step still checked
+   `host_of_guest.contains_key(fx.target_pc)` FIRST — and f IS the current
+   block's own start, so it's in `host_of_guest`. The recursion was re-inlined
+   as a self-host-call anyway.
+3. Inlining the recursive f AND diverting the inner helper@plt through the stub
+   table regresses exactly like the QEMU once-body did: the inner import's
+   dispatcher bookkeeping clashes with the inlined caller, so f(5)+helper
+   produced 21 (one helper contribution lost) instead of 27.
+
+Fix (jit.rs): a `divert_set` of guest-bl targets decided import-bearing. Stub
+targets are built for them even when present in `host_of_guest`, and fixup
+resolution routes them to the stub first (call rewritten call->jmp) so the
+dispatcher runs each recursive f frame cleanly.
+
+Exposed by the session-32b self-import fix: before it, `helper@plt` bound to the
+NULL/0 catch-all and f got a garbage return (this exact fixture returned 0), so
+the recursion bug was masked. Now the whole chain is exercised.
+
+Verified: d.so returns 27 == native at EVERY JIT_BUDGET (1,2,8,64,8192; was 21
+at >=64); all self-import family (a=1,b=61,c=720,d=27) match native; C++ guard
+fixture still 21; fib/shared and plain-static recursion still correct. Fuzzer
+re-run 3 fresh seeds 0 fail. +loader_run_recursive_import_bearing_callee_returns_
+correct regression. `cargo test --workspace` 317/0, build clean. HARD GATE
+unchanged: real Roblox boot + run log on a GPU/APK host (none on this VPS).
