@@ -4658,3 +4658,25 @@ The JIT correctness work is now broadly covered (~620 differential cases green
 total). Next (unchanged, in RECOMMENDATION order): libloader ELF/loader gaps
 then libbadcpu ISA gaps then services/auth; or more precision on the open
 co-resident two-loop widening bug. HARD GATE unchanged (no GPU/APK on this box).
+
+## Session (Sep 11, 2026) — guest_svc boot-path gaps + co-resident bug RESOLVED (290/0)
+
+Added seven AArch64 syscalls a real Android/Roblox boot issues early, that
+previously fell to -ENOSYS: fcntl(25), clock_nanosleep(115), getrusage(165),
+setpgid(154), rt_sigaction(134), rt_sigprocmask(135), fadvise64(223) — numbers
+verified against the sysroot asm-generic headers (commit c0073b6). +unit test
+guest_svc_common_boot_gaps_roundtrip.
+
+MAJOR: the long-documented co-resident two-loop widening bug — and the it
+subsumed "intermittent SIMD-loop block-liveness" bug — are BOTH RESOLVED. After
+the 8 JIT correctness fixes this session (ld2/st2 esize, W-form bitfield mask,
+shrn/sh2 narrow decode, rbit 64-bit mask, clz REX.W order, shl#imm decode, UBFM
+mask sign-extension, ubfx-vs-ror), the original reproducers pass exactly:
+twov2.c 18788==18788 (was 7465833), twoloopp.c 3776==3776, maskf.c 2416==2416.
+They were SYMPTOMS of the same shift/immediate-mask miscompiles, not a separate
+register-liveness fault. ~950 differential fuzz cases green (incl. PIE+reloc
+loader-mode via fuzz_jit.py). No known-open JIT correctness items remain.
+
+Workspace 290/0, build clean, ~18 focused commits on dev. Next (RECOMMENDATION
+order): more boot-path syscalls, libloader/libbadcpu/services gaps, or more fuzz
+coverage. HARD GATE unchanged (no GPU/APK/libroblox.so on this box).
