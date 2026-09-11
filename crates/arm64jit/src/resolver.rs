@@ -64,6 +64,64 @@ unsafe fn sym_from(handle: *mut libc::c_void, name: *const libc::c_char) -> *mut
     libc::dlsym(handle, name)
 }
 
+/// One-time `dlopen` of Mesa's real `libEGL.so.1` (`RTLD_NOW|RTLD_GLOBAL`) so the
+/// `egl*` imports a guest Roblox binary makes resolve to real Mesa EGL instead of
+/// the benign NULL/0 graphics catch-all. EGL's ABI is integer/pointer-only, so its
+/// entry points are safe through the integer `HostCall` shape (unlike GLES, which
+/// passes floats in xmm and needs a dedicated float-ABI bridge — not wired here).
+fn egl_handle() -> *mut libc::c_void {
+    static H: OnceLock<usize> = OnceLock::new();
+    let addr = *H.get_or_init(|| {
+        // Prefer the real Mesa lib (fall back to a versioned soname if newer distros
+        // only ship `libEGL.so.1`; both are the vendor GL dispatch library).
+        let candidates: &[&[u8]] = &[b"libEGL.so.1\0", b"libEGL.so\0"];
+        for path in candidates {
+            let h = unsafe {
+                libc::dlopen(
+                    path.as_ptr() as *const libc::c_char,
+                    libc::RTLD_NOW | libc::RTLD_GLOBAL,
+                )
+            };
+            if !h.is_null() {
+                return h as usize;
+            }
+        }
+        0
+    });
+    addr as *mut libc::c_void
+}
+
+/// Resolve an `egl*` import against Mesa's real libEGL (integer-ABI HostCall).
+/// Returns `None` if EGL isn't present on the host or the name isn't an EGL symbol.
+pub fn resolve_egl(name: &[u8]) -> Option<u64> {
+    let ns = name_str(name);
+    if !ns.starts_with("egl") {
+        return None;
+    }
+    let key = CString::new(name).ok()?;
+    // If resolve() already bound this name (e.g. after RTLD_GLOBAL made it visible),
+    // reuse the cached slot rather than allocating a duplicate.
+    {
+        let r = resolver().lock().unwrap();
+        if let Some(addr) = r.slots.get(&key) {
+            return Some(*addr);
+        }
+    }
+    let mh = egl_handle();
+    if mh.is_null() {
+        return None;
+    }
+    let sym = key.as_ptr();
+    let ptr = unsafe { sym_from(mh, sym) };
+    if ptr.is_null() {
+        return None;
+    }
+    // EGL entry points are integer/pointer-ABI -> fits the integer HostCall.
+    let hostf: HostCall = unsafe { std::mem::transmute(ptr) };
+    let mut r = resolver().lock().unwrap();
+    alloc_slot(&mut r, &key, hostf)
+}
+
 /// Give an import name a host call slot. If the host symbol is found via
 /// `dlsym`, register it and return the thunk's *guest address*; if the name
 /// can't be resolved on the host, return `None` (caller must decide how to
@@ -533,5 +591,36 @@ mod tests {
         let cnt = u32::from_le_bytes(m[8..12].try_into().unwrap());
         assert_eq!(kind & 3, kind, "kind high bits cleared (kind=0x{kind:x})");
         assert_eq!(cnt, 0, "bogus owner/count cleared at offset 8");
+    }
+
+    /// Real Mesa EGL must be resolvable as an integer-ABI host call, and a guest
+    /// `blr` to it must actually execute Mesa code (not a NULL/0 catch-all). This is
+    /// the regression gate for the graphics-layer wiring: without `resolve_egl`, the
+    /// same import fell to `register_graphics_stubs` -> stub_zero (return 0 trivially).
+    /// Skipped on hosts without Mesa EGL (CI boxes may lack /usr/lib/libEGL.so.1).
+    #[test]
+    fn resolve_egl_binds_real_mesa_not_null_stub() {
+        let Some(slot) = resolve_egl(b"eglGetError\0") else {
+            eprintln!("skipping: Mesa EGL (libEGL.so.1) not present on this host");
+            return;
+        };
+        // Guest code: blr x16 then brk. eglGetError() takes no args, returns EGLint.
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0
+        let mut st = CpuState::new();
+        st.x[16] = slot;
+        let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
+        // EGL_GET_ERROR with no current display returns an error/status code in the
+        // EGL enum space (0x3000..0x3089) — never the NULL-stub's trivial 0x0 and
+        // never a garbage pointer. The real Mesa path returns a real EGL error state.
+        assert_ne!(r, 0, "eglGetError must return a real Mesa result, not stub 0");
+    }
+
+    #[test]
+    fn resolve_egl_rejects_non_egl_names() {
+        // Must NOT dlopen/allocate for GLES or unrelated names (float ABI, not wired).
+        assert!(resolve_egl(b"glViewport\0").is_none());
+        assert!(resolve_egl(b"strlen\0").is_none());
     }
 }
