@@ -1139,6 +1139,23 @@ mod tests {
     }
 
     #[test]
+    fn str_xzr_stores_zero_not_sp() {
+        // Regression: `str xzr,[x0]` must write 0, never the stack pointer.
+        // AArch64 stores read the source field x31 as XZR (zero); the JIT used to
+        // load CpuState.x[31] (= SP), so zero-init stored SP and corrupted memory.
+        //   str xzr,[x0]  = 0xf900001f ; ldr x0,[x0] = 0xf9400000 ; ret = 0xd65f03c0
+        let code = [0x1fu8, 0x00, 0x00, 0xf9, 0x00, 0x00, 0x40, 0xf9, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut buf = [0xdead_beef_cafe_f00du64; 2];
+        let mut st = CpuState::new();
+        st.x[0] = buf.as_ptr() as u64;
+        st.x[31] = 0xaaaa_bbbb_cccc_dddd; // sentinel SP: must survive untouched
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(r, 0, "str xzr zeroes the slot (must not write SP)");
+        assert_eq!(buf[0], 0, "memory actually zeroed");
+        assert_eq!(st.x[31], 0xaaaa_bbbb_cccc_dddd, "SP (x31) untouched");
+    }
+
+    #[test]
     fn cbz_controls_branch() {
         // Real aarch64 from objdump (f:); if x0==0 return 10, else return 20.
         //  d2800281 mov x1,#20 ; b4000060 cbz x0,#10 ;

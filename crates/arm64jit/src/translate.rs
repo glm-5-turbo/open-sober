@@ -41,6 +41,31 @@ fn stg0(buf: &mut CodeBuf, g: u32) {
     buf.mov_store64(RBX, slot(g), RAX);
 }
 
+/// Load guest register `g` into RAX as a *store source value*. In AArch64 the
+/// source register field of a STORE (`str x0,[..]`) reads x31 as XZR (zero),
+/// NOT SP — a store of `xzr` (extremely common: compilers zero-init stack slots
+/// and objects with `str xzr,[..]`) must store 0, never the stack pointer.
+/// Distinguish this from an *addressing base* (`rn`, where x31 = SP), which
+/// `ldg` continues to handle directly.
+#[inline]
+fn ldg_src(buf: &mut CodeBuf, g: u32) {
+    if g == 31 {
+        buf.mov_ri64(RAX, 0); // XZR reads as zero
+    } else {
+        buf.mov_load64(RAX, RBX, slot(g));
+    }
+}
+
+/// Store RAX into guest register `g` after a LOAD, but only if `g` is a real
+/// register. When the load destination field is x31 (`ldr xzr,[..]`) ARM treats
+/// it as a no-op that must NOT write the SP slot (which x31 also aliases).
+#[inline]
+fn stg_if_writable(buf: &mut CodeBuf, g: u32) {
+    if g != 31 {
+        buf.mov_store64(RBX, slot(g), RAX);
+    }
+}
+
 /// Byte offset of `CpuState.nzcv` (after pc@256: nzcv u32 at 264).
 const NZCV_OFF: i32 = 8 * 32 + 8; // 264
 /// Byte offset of `CpuState.pad`.
@@ -666,34 +691,34 @@ pub fn translate(
             match (size, ld) {
                 (8, true) => {
                     buf.mov_load64(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (8, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store64(RDX, 0, RAX);
                 }
                 (4, true) => {
                     buf.mov_load32(RAX, RDX, 0); // w zero-extends
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (4, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store32(RDX, 0, RAX);
                 }
                 (2, true) => {
                     buf.movzx_word_mem(RAX, RDX, 0); // ldrh zero-extends
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (2, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store16(RDX, 0, RAX);
                 }
                 (1, true) => {
                     buf.movzx_byte_mem(RAX, RDX, 0); // ldrb zero-extends
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (1, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store8(RDX, 0, RAX);
                 }
                 (s, _) => return Err(format!("LdStrImm size {} not implemented", s)),
@@ -707,34 +732,34 @@ pub fn translate(
             match (size, ld) {
                 (3, true) => {
                     buf.mov_load64(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (3, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store64(RDX, 0, RAX);
                 }
                 (2, true) => {
                     buf.mov_load32(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (2, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store32(RDX, 0, RAX);
                 }
                 (1, true) => {
                     buf.movzx_word_mem(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (1, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store16(RDX, 0, RAX);
                 }
                 (0, true) => {
                     buf.movzx_byte_mem(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (0, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store8(RDX, 0, RAX);
                 }
                 (s, _) => return Err(format!("AcqRel size {} not implemented", s)),
@@ -749,37 +774,37 @@ pub fn translate(
             match (size, ld) {
                 (3, true) => {
                     buf.mov_load64(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (3, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store64(RDX, 0, RAX);
                     stg0(buf, rs as u32);
                 }
                 (2, true) => {
                     buf.mov_load32(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (2, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store32(RDX, 0, RAX);
                     stg0(buf, rs as u32);
                 }
                 (1, true) => {
                     buf.movzx_word_mem(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (1, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store16(RDX, 0, RAX);
                     stg0(buf, rs as u32);
                 }
                 (0, true) => {
                     buf.movzx_byte_mem(RAX, RDX, 0);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                 }
                 (0, false) => {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store8(RDX, 0, RAX);
                     stg0(buf, rs as u32);
                 }
@@ -939,7 +964,7 @@ pub fn translate(
                 }
                 if !read && rt != 31 {
                     // msr nzcv, xN: shift xN's low 4 flag bits up to NZCV@28..31.
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.and_ri64(RAX, 0x0f);
                     buf.shl_ri8(RAX, 28);
                     buf.mov_store32(RBX, NZCV_OFF, RAX);
@@ -954,7 +979,7 @@ pub fn translate(
             } else {
                 // tpidr_el0 = Rt
                 if rt != 31 {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store64(RBX, crate::jit::TPIDR_OFF, RAX);
                 }
             }
@@ -3076,36 +3101,36 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 // load rt = [RDX + access_off], rt2 = [.. + esize]
                 if size_64 {
                     buf.mov_load64(RAX, RDX, access_off);
-                    stg(buf, rt as u32, RAX);
+                    stg_if_writable(buf, rt as u32);
                     buf.mov_load64(RAX, RDX, access_off + esize);
-                    stg(buf, rt2 as u32, RAX);
+                    stg_if_writable(buf, rt2 as u32);
                 } else {
                     if sext {
                         // ldpsw: load 32-bit, sign-extend to 64-bit X reg.
                         buf.mov_load32(RAX, RDX, access_off);
                         buf.movsxd_r64_r32(RAX, RAX);
-                        stg(buf, rt as u32, RAX);
+                        stg_if_writable(buf, rt as u32);
                         buf.mov_load32(RAX, RDX, access_off + esize);
                         buf.movsxd_r64_r32(RAX, RAX);
-                        stg(buf, rt2 as u32, RAX);
+                        stg_if_writable(buf, rt2 as u32);
                     } else {
                         buf.mov_load32(RAX, RDX, access_off);
-                        stg(buf, rt as u32, RAX);
+                        stg_if_writable(buf, rt as u32);
                         buf.mov_load32(RAX, RDX, access_off + esize);
-                        stg(buf, rt2 as u32, RAX);
+                        stg_if_writable(buf, rt2 as u32);
                     }
                 }
             } else {
                 // store rt at [eff], rt2 at [eff+esize]
                 if size_64 {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store64(RDX, access_off, RAX);
-                    ldg(buf, RAX, rt2 as u32);
+                    ldg_src(buf, rt2 as u32);
                     buf.mov_store64(RDX, access_off + esize, RAX);
                 } else {
-                    ldg(buf, RAX, rt as u32);
+                    ldg_src(buf, rt as u32);
                     buf.mov_store32(RDX, access_off, RAX);
-                    ldg(buf, RAX, rt2 as u32);
+                    ldg_src(buf, rt2 as u32);
                     buf.mov_store32(RDX, access_off + esize, RAX);
                 }
             }
@@ -3292,7 +3317,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             rt, imm, nonzero, ..
         } => {
             let target = pc.wrapping_add(imm as u64);
-            ldg(buf, RAX, rt as u32); // test rt
+            ldg_src(buf, rt as u32); // test rt
             buf.test_rr64(RAX, RAX);
             let cc = if nonzero { 0x85 } else { 0x84 }; // jnz / jz
             let disp = buf.jcc_rel32(cc);
@@ -3311,7 +3336,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             ..
         } => {
             let target = pc.wrapping_add(imm as u64);
-            ldg(buf, RAX, rt as u32); // load rt
+            ldg_src(buf, rt as u32); // load rt
             // test the single bit: test rax, 1<<bit
             buf.mov_ri64(RCX, (1u64 << bit.min(63)) & (if bit >= 64 { 0 } else { 0xffff_ffff_ffff_ffff }));
             // simpler: AND with constant handled per-bit via a cached reg
