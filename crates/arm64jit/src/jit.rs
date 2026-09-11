@@ -2756,6 +2756,63 @@ mod tests {
     }
 
     #[test]
+    fn sxtl_in_place_rd_eq_rn_widening_does_not_clobber_src() {
+        // Regression (found by gen_signed_div differential fuzz): a widening
+        // `sxtl/uxtl Vd.<long>, Vd.<short>` where the DEST is the SAME vector as
+        // the source (rd==rn, what gcc emits for a reduction) clobbers its own
+        // still-needed source: the widened 8-byte write of lane 0 at byte 0
+        // overwrites the narrow source bytes lane 1 reads at byte 4. The fix
+        // snapshots Vn to permscratch first. Convention: vector n lives at
+        // st.v[2n] (lo) / st.v[2n+1] (hi).
+        // sxtl v0.2d, v0.2s (0x0f20a400) on v0.4s = {1,2,3,4} -> v0.2d = {1,2}.
+        let mut st = CpuState::new();
+        st.v[0] = (2u64 << 32) | 1; // s-lanes 0,1
+        st.v[1] = (4u64 << 32) | 3; // s-lanes 2,3
+        exec_bytes(&mut st, &0x0f20a400u32.to_le_bytes(), 0).expect("exec sxtl v0,v0");
+        assert_eq!(st.v[0], 1, "in-place sxtl lane0 = 1");
+        assert_eq!(st.v[1], 2, "in-place sxtl lane1 = 2 (was clobbered to 0)");
+        // sxtl2 v1.2d, v1.4s (0x4f20a421) upper s-lanes {300,400} -> {300,400}
+        let mut st = CpuState::new();
+        st.v[2] = (200u64 << 32) | 100;
+        st.v[3] = (400u64 << 32) | 300;
+        exec_bytes(&mut st, &0x4f20a421u32.to_le_bytes(), 0).expect("exec sxtl2 v1,v1");
+        assert_eq!(st.v[2], 300, "in-place sxtl2 lane0 (upper src) = 300");
+        assert_eq!(st.v[3], 400, "in-place sxtl2 lane1 (upper src) = 400");
+        // sxtl v2.4s, v2.4h (0x0f10a442): 2-byte -> 4-byte, 4 lanes, in place.
+        // v2.4h = {1,2,3,4} -> v2.4s = {1,2,3,4} each in a 32-bit lane.
+        let mut st = CpuState::new();
+        st.v[4] = (0x0004_0003_0002_0001u64); // h-lanes 0..3
+        exec_bytes(&mut st, &0x0f10a442u32.to_le_bytes(), 0).expect("exec sxtl v2,v2 4h");
+        assert_eq!(st.v[4], 0x0000_0002_0000_0001, "in-place sxtl.4s lane0/1 = 1,2");
+        assert_eq!(st.v[5], 0x0000_0004_0000_0003, "in-place sxtl.4s lane2/3 = 3,4");
+    }
+
+    #[test]
+    fn shifted_reg_asr_32bit_sign_extends_before_sar() {
+        // Regression (found by gen_signed_div differential fuzz): gcc's signed
+        // magic-division remainder computes `q = hi - (a asr 31)` to correct the
+        // sign. `sub w3, w3, w4, asr #31` (0x4b847c63): the JIT zero-extended the
+        // 32-bit operand and did a 64-bit `sar`, so a NEGATIVE w4 shifted right by
+        // 31 became +1 instead of -1 (bit-31 wasn't the 64-bit sign), producing
+        // q off-by-2 and corrupting signed quotients/remainders for every divisor.
+        // Fix: sign-extend the W operand to 64 bits before the 64-bit asr.
+        // w3 = 0 - asr31(0x80000000 = -2147483648) = 0 - (-1) = 1.
+        let mut st = CpuState::new();
+        st.x[3] = 0;
+        st.x[4] = 0x8000_0000u64; // negative as 32-bit
+        exec_bytes(&mut st, &0x4b847c63u32.to_le_bytes(), 0).expect("exec sub asr#31");
+        assert_eq!(st.x[3], 1, "asr#31 of negative W = -1, so w3 = 0 - (-1) = 1");
+        // sub w0, w1, w2, asr #10 (0x4b822820): w1=200, w2=0x80000000.
+        // asr10(w2) sign-extends bit-31: -2^31 >> 10 = -2^21 = -2097152.
+        // w0 = 200 - (-2097152) = 2097352.
+        let mut st = CpuState::new();
+        st.x[1] = 200;
+        st.x[2] = 0x8000_0000u64;
+        exec_bytes(&mut st, &0x4b822820u32.to_le_bytes(), 0).expect("exec sub asr#10");
+        assert_eq!(st.x[0] & 0xffff_ffff, 2097352, "asr#10 of negative W sign-correct");
+    }
+
+    #[test]
     fn simd_stp_q_preindex_store_and_writeback() {
         // REBUILD maskf's real instruction stream END-TO-END (no seeded
         // v-registers): movi v30.4s,#4 / movi v29.4s,#0xf, ldr q31=[init],

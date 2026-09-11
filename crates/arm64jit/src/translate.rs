@@ -359,7 +359,13 @@ fn x86_cc_for_cond(cond: u8) -> Option<u8> {
 /// Apply AArch64 shift `kind` by `amt` to the value currently in x86 reg `x`
 /// (uses RCX for the count). Only constant shifts are handled (guest encodes
 /// the amount as an immediate in ADD/SUB shifted-register).
-fn apply_shift_const(buf: &mut CodeBuf, x: u8, kind: ShiftKind, amt: u8) {
+/// `sf` = operand size: when the guest op is 32-bit (`!sf`) and the shift is
+/// ASR, the value has been zero-extended to 64 bits, so its bit-31 is NOT the
+/// sign bit and a plain 64-bit `sar` would shift in zeros and give the wrong
+/// (non-negative) result — e.g. compiler magic-division `sub w1,w1,w2,asr#31`
+/// turns the sign-correction `-1` into `+1`, corrupting signed quotients.
+/// Sign-extend the 32-bit value to 64 bits first so the sar replicates bit 31.
+fn apply_shift_const(buf: &mut CodeBuf, x: u8, kind: ShiftKind, amt: u8, sf: bool) {
     if amt == 0 {
         return;
     }
@@ -373,7 +379,12 @@ fn apply_shift_const(buf: &mut CodeBuf, x: u8, kind: ShiftKind, amt: u8) {
     match kind {
         ShiftKind::Lsl => buf.shl_ri8(x, amt),
         ShiftKind::Lsr => buf.shr_ri8(x, amt),
-        ShiftKind::Asr => buf.sar_ri8(x, amt),
+        ShiftKind::Asr => {
+            if !sf {
+                buf.movsxd_r64_r32(x, x); // sign-extend bit-31 before 64-bit asr
+            }
+            buf.sar_ri8(x, amt);
+        }
         ShiftKind::Ror => buf.ror_ri8(x, amt),
     }
 }
@@ -530,7 +541,7 @@ pub fn translate(
                 zext_w(buf, RAX); // 32-bit add/sub: zero high garbage in operands
                 zext_w(buf, RCX);
             }
-            apply_shift_const(buf, RCX, shift, sh_amt);
+            apply_shift_const(buf, RCX, shift, sh_amt, sf);
             if sub {
                 if sf {
                     buf.sub_rr64(RAX, RCX);
@@ -685,7 +696,7 @@ pub fn translate(
                 zext_w(buf, RAX); // 32-bit ops: ignore high garbage in operands
                 zext_w(buf, RCX);
             }
-            apply_shift_const(buf, RCX, shift, sh_amt);
+            apply_shift_const(buf, RCX, shift, sh_amt, sf);
             match op {
                 0 => buf.and_rr64(RAX, RCX), // AND
                 1 => buf.or_rr64(RAX, RCX),  // ORR
@@ -3764,13 +3775,20 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     // uxtl/sxtl Vd.<long>, Vn.<short>: widen each esrc-byte lane
                     // to a (esrc*2)-byte lane (zero/sign extend). Lanes = 8/esrc,
                     // the dest occupies the full 16-byte vector (Q=1 long form).
+                    // IN-PLACE ALIASING: when rd==rn the widened write of lane i
+                    // (2*esrc bytes at i*2*esrc) overlaps the narrow source bytes
+                    // of later lanes (esrc bytes at (i+1)*esrc), so a naive
+                    // read-then-write loop clobbers the still-needed source — e.g.
+                    // gcc's `sxtl v30.2d, v30.2s` (rd==rn) dropped lane 1. Snapshot
+                    // Vn to the permscratch slot first when they alias.
                     let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                     // upper (sxtl2/uxtl2): the narrow src lanes live in the
                     // UPPER 64 bits of Vn (byte 8..15), like saddw2.
                     let n_half: i32 = if upper { 8 } else { 0 };
+                    let srcbase = permute_source(buf, rd, rn, false);
                     let lanes = 8usize >> esrc.trailing_zeros() as usize;
                     for i in 0..lanes {
-                        let src = vslot(rn) + n_half + (i as i32) * (esrc as i32);
+                        let src = srcbase + n_half + (i as i32) * (esrc as i32);
                         let dst = vslot(rd) + (i as i32) * (esrc as i32) * 2;
                         match (esrc, sign) {
                             (1, false) => buf.movzx_byte_mem(RAX, RBX, src),
