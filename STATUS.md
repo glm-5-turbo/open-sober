@@ -996,3 +996,37 @@ status: cycle_end
 last_agent_claim: <no completion claim> (rc=0)
 updated: 2026-09-11T12:42:56Z
 ---
+
+## Session (cycle 33, Sep 11) — SIMD cmgt clamp-swallow FIXED (2 real bugs); FP-edge gen added (322/0)
+New differential generator `gen_fp_edge` (fuzz_jit.py, 22nd generator) targets FP
+edge cases a graphics/audio engine hits that the benign finite-value generators
+never do: division (by 0/tiny), NaN/inf propagation, -0.0/signed-zero compares,
+fixed-point int<->float boundaries. It IMMEDIATELY exposed two co-resident REAL
+silent miscompiles in the SIMD integer compare-greater (cmgt) path that gcc's
+vectorized min/max-clamp `a[i]<k?a[i]:k` emits as cmgt+bsl over 64-bit lanes,
+both committed (322/0, was 320):
+1. DECODE: SimdAddD/B/H gates lacked Simd4s's (insn>>15)&1==1 guard, so `cmgt`
+   (bit15 CLEAR) was swallowed as a vector ADD (lanes summed instead of masked).
+   cmgt v3.2d,v30,v4=0x4ee437c3 (bit15=0) vs add v3.2d=0x4ee487c3 (bit15=1).
+   +decode regression cmgt_not_swallowed_as_vector_add (also verifies add/sub
+   .2d/.16b still decode).
+2. TRANSLATE: SimdCmgt used `cmovg` (RDI->RDX=0 ON greater) — INVERTED — so the
+   compare mask came out all-ones exactly where it should be 0, silently
+   corrupting every (a<k?a:k) min/max clamp and cmgt-gated select. cmovle (0x4e)
+   now keeps ones when Vn>Vm, zero otherwise. +diff_battery canary
+   diff_simd_cmgt_clamp_min (16×i64 min(,100000) AND max(,100000), jit==native==
+   qemu==556058) + hand-asm cmgt+bsl min lock.
+Fixed values: rt_clamp3 180->21, explicit clamp 556058 (was 1170353/1270521),
+all 3 fresh fuzz seeds (2000-2002, 170 cases) green + existing gens re-campaign
+clean (no regression). Sensitivity-proven: reverting each fix re-fails the canary.
+OPEN residual (documented, repro in fuzz_repros/fp_edge_9000_58.c, NOT fixed):
+gen_fp_edge 9000_58/9000_21 diverge jit 2474795 vs both-oracles 2039651
+(+435144 = exactly one a[i]*1e6). All components pass in isolation (scalar fcvtzs
+inf/NaN matches native-x86; mn/mx NaN->INT64MIN; in-place fcvtzs v.2d=15 vs qemu;
+back round-trip clean; zero_cmp clean) — ONLY the full gcc -O3 joint allocation
+of SIMD `fcvtzs v.2d`(in-place)+integer cmgt-clamps+scalar fcsel min/max+fcvtzs
+reduce in one block reproduces it (removing ANY one part makes it pass). Root
+cause is a co-resident host-register scheduling clobber in translate; needs a
+single-instruction host-emission diff (JIT_STEP is block-granular) to nail the
+exact scratch-reg collision. Next targeted step for this bug.
+HARD GATE unchanged (no GPU/APK host — real Roblox boot + run log impossible here).
