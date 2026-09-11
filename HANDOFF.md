@@ -4901,3 +4901,36 @@ permanent gates. Workspace unchanged (304/0; Rust untouched this commit).
 real Roblox boot + reproducible run log on a GPU + APK/binary host (none on this
 VPS) — nothing here can satisfy it, so this session closed loader/TLS + fuzz-
 correctness work as far as physically verifiable.
+
+## Session (Sep 11, 2026 cont.) — EXT extract-immediate bug FIXED; open u16/32 pair-xor reduction bug isolated
+
+### Fixed: `ext` (SIMD vector extract immediate) operand-order inversion — commit `826db92`
+Found by the new `gen_pairwise_reduce` differential generator. ARM
+`ext Vd.16B, Vn.16B, Vm.16B, #imm` returns the 16-byte window at `imm` of the
+concatenation where **Vn is the low-address half and Vm the high**:
+`Vd[0..16-imm)=Vn[imm..16)`, `Vd[16-imm..16)=Vm[0..imm)`. The translate built the
+concat as `[Vm.lo, Vm.hi, Vn.lo, Vn.hi]` (Vm low, Vn high) — inverted for every
+non-symmetric `ext`. **qemu-verified** with distinct bytes: `ext(Vn,Vm,#8)` ⇒
+lo=`Vn[8..15]`, hi=`Vm[0..7]`. gcc's horizontal XOR-reduce for pair reductions
+(`s ^= a[i]+a[i+1]`) emits `ext v0,v30,v0,#8` + `eor`; the old code collapsed
+it to a single 64-bit-lane xor instead of the full one. Minimal repro p1
+(const int pair-xor): returned **16**, now **0** == qemu and native. 28→99/160
+of the pairwise-reduce stress now correct.
+
+### OPEN (isolated, reproducible) — 16/32-bit `i+=2` pair-xor reduction
+A second, independent bug in the pair-xor reduction path remains, unaffected
+by the ext fix. Minimal repro `/tmp/combw/s13b.c` (`unsigned short a[24]`,
+`for(i+=2) s ^= (long long)a[i]+a[i+1]`): **native 2314 vs jit 59648**. The
+path uses `uxtl/uxtl2` + `uaddl/uaddl2` (element-wise widen-add, upper-half
+reads) + `eor` chain + the (now-correct) `ext` horizontal combine. Suspect the
+`uaddl2`/`uxtl2` upper-half read or an eor-chain lane-composition bug, not the
+(now-correct) ext. Reproducible via `fuzz_jit.py` `gen_pairwise_reduce`
+(int/short/u32/u16 variants all trip it). Next debug pass: isolate `uaddl2`
+(upper) with a hand-controlled fixture vs qemu, then the eor-chain.
+
+### State
+`cargo build --workspace` clean; `cargo test --workspace` **308/0**. Commits
+`826db92` (ext fix), `bd60f2c` (generator + this doc), plus the earlier
+`fe1e27a` cycle-28 close. The gen_pairwise_reduce generator is a permanent
+asset that keeps surfacing this class. HARD GATE unchanged: real Roblox boot +
+run log on a GPU + APK/binary host (none on this VPS).
