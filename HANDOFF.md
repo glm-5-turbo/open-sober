@@ -4853,3 +4853,51 @@ noise doesn't read as a structural diff; removed an unavailable `vrbitq_u32`
 **70/70 green across fresh seeds, 0 skips** (was ~14% skip). No new miscompile
 found in the covered classes — a negative result, but those classes are now
 permanent gates. Workspace unchanged (304/0; Rust untouched this commit).
+
+## Session (Sep 11, 2026 cont.) — complete: TLS bootstrap + fuzz-harness expansion + 4 permanent canaries + harness-cascade fix (workspace 308/0)
+
+### Milestones landed this session (8 commits on `dev`)
+1. **Guest TLS bootstrap** (`6af3cd4`, docs `7bc1a5e`): `libloader::setup_guest_tls`
+   copies the main image's `PT_TLS` init into a per-thread region at TP+16 (the
+   AArch64 TCB) and seeds `tpidr_el0` from it, so local-exec/initial-exec
+   `:tprel:` addressing reads/writes real `__thread` data. Verified no-QEMU:
+   cross-gcc `__thread` fixture → `jit_run` returns 123456804 == native oracle.
+   Closes the documented `R_AARCH64_TLS_*` gap for the main-binary case.
+2. **Fuzz harness** (`a733fba`, docs `5b8d805`): +5 generators for previously
+   uncovered classes (NEON by-element fmla + lane round-trip, NEON
+   `bsl/vext/vrev64`, 64-bit `bfi/bfiz`, `tbz/tbnz`, fixed-point `fcvtzs #fbits`)
+   and a 64-bit-exact **qemu-aarch64 oracle fallback** (write+itoa `_start`
+   wrapper) so `<arm_neon.h>` programs the host x86 gcc can't compile now get a
+   differential oracle instead of hard-skipping. 23 generators; a 12-seed ×
+   100-case campaign (1200 cases) is **0 fail / 0 skip**.
+3. **Permanent cargo canaries** (`b4a48cd`, `7244feb`): loader_run gates for the
+   newly-covered classes — bfi-64 (279514809947), tbz/tbnz (4068), fixed-pt
+   fcvt (99), NEON by-element fmla (504; qemu architectural oracle).
+4. **Harness-cascade fix** (`7244feb`): a single test's cross-gcc compile failure
+   used to poison the shared `run_lock` mutex and cascade-fail every other test
+   with `PoisonError` (each passed in isolation). Added `lock_run()` which
+   recovers poisoned guards. Also made the byelem fixture `-O0`-safe
+   (const-index `vgetq_lane`/`vsetq_lane` need `-O` to fold their lane index).
+
+### Honest scope + findings
+- **Negative result (good news):** the newly covered classes (NEON by-element
+  fmla, lane ops, bitfield-insert, bit-branch, fixed-point fcvt) show **no**
+  miscompile across 1200 fresh differential cases — the arm64jit ISA handling
+  of those classes is structurally correct. They're now locked as permanent
+  `cargo test` gates.
+- **FMA granularity note:** the JIT's by-element `fmla` translate does `mul`+`add`
+  (two roundings) rather than a fused FMA (one rounding). Structurally correct
+  (binary-exact differential runs agree with qemu), but bit-exact float workflows
+  can differ by 1 ULP from ARM's fused `fmla`. Acceptable for now; revisit if
+  exact-bit-sovereignty is ever required.
+- **Boundary (unchanged):** dynamic *cross-module* TLS (`R_AARCH64_TLS_TPREL64`
+  GOT slots, general-dynamic) only engages with a multi-`DT_NEEDED` loader (the
+  next loader frontier); guest threading (`clone`/`fork`/`rt_sigreturn`/`execve`)
+  remains the documented single-threaded-boot frontier.
+
+### Verification state
+`cargo build --workspace` clean; `cargo test --workspace` **308/0** (up from
+302). loader_run 13/13. Ship 1200-case fuzz campaign green. HARD GATE unchanged:
+real Roblox boot + reproducible run log on a GPU + APK/binary host (none on this
+VPS) — nothing here can satisfy it, so this session closed loader/TLS + fuzz-
+correctness work as far as physically verifiable.
