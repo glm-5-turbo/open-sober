@@ -2611,3 +2611,31 @@ earlier ones). Workspace 111/0, build clean.
 - ADD/SUB with rn==31-as-XZR (`add xD, xzr, #imm` reads SP today; assembler
   uses movz/orr, so low priority).
 - Then libbadcpu gaps; services/auth. GPU ev-boards: HARD GATE.
+## Session (Sep 11, 2026) — register-offset sext + LogicalImm-vs-MoveWide (commit 716876c); JIT executes broad real C
+
+Extended the synthetic-C battery to arrays/shorts/structs and found+fixed two
+more silent miscompiles:
+
+1. LdStrReg register-offset ldrsw/ldrsh/ldrsb shared the bit23 mis-lead (decoded
+   as stores) — same fix as the unsigned-offset form (sext field + translate).
+2. LogicalImmediate (AND/ORR/EOR/ANDS #imm) collided with MoveWide: the MOVZ/
+   MOVK/MOVN gate matched top bytes {0x12,0x92,0x52,0xD2,...} which span the
+   AND/EOR/ANDS-immediate class, so `and w1,w0,#0xffff` decoded as `movn`.
+   MoveWide now gates on bits[28:23]==0x25 ((insn & 0x1f800000)==0x12800000);
+   LogicalImm has 0x24, so AND-immediates route to LogicImm. Verified shacc
+   (short acc) and arr (int+short arrays) = 42.
+
+Net: the JIT now correctly executes ~20 real compiled aarch64 C programs
+(loops, recursion, FP, mul/div, sign-extend loads both offset forms, short/int
+arrays, AND-immediates, MOVK constants, SP prologues). arm64jit 78/78, workspace
+112/0.
+
+### Open (next session, honest)
+- struct-by-value + function-pointer (`blr` to computed addr) still FAILS:
+  `structs.c` → "pc 0x600000005 outside image". The fn-ptr arg gets corrupted
+  through the struct-passing / dispatcher path — a deeper control-flow/ABI
+  interaction (how the emitted GOT/adrp computes a callable and the dispatcher
+  resolves it). Worth a focused session.
+- FcvVec 4S lane uses movq/cvttsd2si on 4-byte lanes (possibly wrong); fcvtzu
+  for >= 2^63; ADD/SUB rn==31-as-XZR reads SP (assembler prefers movz/orr, low
+  priority).
