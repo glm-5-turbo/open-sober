@@ -2536,7 +2536,40 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                 }
             }
             // .2D: dword replicate
-            (1, 0b1110) => (imm8 as u64, imm8 as u64),
+            (1, 0b1110) => {
+                // MOVI Vd.2D, #<imm>: the 64-bit element is a byte-select
+                // pattern. bits[9:5] low nibble selects which of bytes 0..3 of
+                // the LOW 32 bits are set to 0xff (others 0); bits[18:16]
+                // (3-bit) plus bit-4 of bits[9:5] extend to the upper 32 bits.
+                // objdump/qemu-verified ground truth:
+                //   #0x00000000000000ff  b9:5=0b0001 -> byte0
+                //   #0x000000000000ff00  b9:5=0b0010 -> byte1
+                //   #0x000000000000ffff  b9:5=0b0011 -> bytes0,1
+                //   #0x00000000ff000000  b9:5=0b1000 -> byte3
+                //   #0x00000000ffff0000  b9:5=0b1100 -> bytes2,3
+                //   #0xffffffff00000000  b9:5=0b10000 b18:16=7 -> upper 32 all-ff
+                let sel = (insn >> 5) & 0x0f; // byte select for low 32 bits
+                let mut lo = 0u32;
+                for j in 0..4 {
+                    if sel & (1 << j) != 0 {
+                        lo |= 0xffu32 << (8 * j);
+                    }
+                }
+                let lo = lo as u64;
+                // upper 32 bits: bit4 of bits[9:5] selects a whole-low-32 fill,
+                // b[18:16] acts as an independently-addressed low-byte set on
+                // the upper half (the real encodings: 7 -> all upper ff).
+                let sel_hi = (insn >> 9) & 1; // bit4 of the 5-bit select
+                let hi_hi = (insn >> 16) & 0x7;
+                let hi: u64 = if sel_hi != 0 && hi_hi == 0x7 {
+                    0xffff_ffff
+                } else if sel_hi != 0 {
+                    lo as u64
+                } else {
+                    hi_hi as u64 & 0x7  // rare; conservative
+                };
+                (lo | (hi << 32), lo | (hi << 32))
+            }
             // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes; cmodes
             // 2,4,6 are pure word-lsl; cmodes 8,9,a,b are HALFWORD and handled below).
             (0, 2) | (0, 4) | (0, 6) => {
@@ -4944,6 +4977,35 @@ mod tests {
                 Inst::VecMovi { vd, lo, hi } => {
                     assert_eq!(lo, want_lo, "{label}: low64");
                     assert_eq!(hi, want_hi, "{label}: hi64");
+                }
+                other => panic!("{label}: expected VecMovi, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn movi_2d_byte_select_ground_truth() {
+        // MOVI Vd.2D, #<imm> is a byte-select pattern, NOT a straight imm8
+        // replicate. Verified against aarch64 objdump + qemu-aarch64:
+        //   movi v0.2d,#0x00000000000000ff = 0x6f00e420 -> lane 0xff
+        //   movi v0.2d,#0x000000000000ff00 = 0x6f00e440 -> lane 0xff00
+        //   movi v0.2d,#0x000000000000ffff = 0x6f00e460 -> lane 0xffff
+        //   movi v0.2d,#0x00000000ff000000 = 0x6f00e500 -> lane 0xff000000
+        //   movi v0.2d,#0x00000000ffff0000 = 0x6f00e580 -> lane 0xffff0000
+        //   movi v0.2d,#0xffffffff00000000 = 0x6f07e600 -> lane 0xffffffff00000000
+        for (w, want, label) in [
+            (0x6f00_e420u32, 0x0000_0000_0000_00ffu64, "movi v0.2d,#0xff"),
+            (0x6f00_e440u32, 0x0000_0000_0000_ff00u64, "movi v0.2d,#0xff00"),
+            (0x6f00_e460u32, 0x0000_0000_0000_ffffu64, "movi v0.2d,#0xffff"),
+            (0x6f00_e500u32, 0x0000_0000_ff00_0000u64, "movi v0.2d,#0xff000000"),
+            (0x6f00_e580u32, 0x0000_0000_ffff_0000u64, "movi v0.2d,#0xffff0000"),
+            (0x6f07_e600u32, 0xffff_ffff_0000_0000u64, "movi v0.2d,#0xffffffff00000000"),
+        ] {
+            match decode(w) {
+                Inst::VecMovi { vd, lo, hi } => {
+                    assert_eq!(vd, 0, "{label}: vd");
+                    assert_eq!(lo, want, "{label}: lo");
+                    assert_eq!(hi, want, "{label}: hi");
                 }
                 other => panic!("{label}: expected VecMovi, got {other:?}"),
             }

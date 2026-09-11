@@ -1874,17 +1874,11 @@ long long entry(void){
     );
 }
 
-// KNOWN-OPEN: vectorized fused mul-add + division reduction pipeline.
-// `acc += a[i]*b[i]+c[i]; acc += a[i]/b[i]` with a/b/c computed by shifting a
-// 64-bit LCG collapses the result (jit ~4/2^63 vs oracle 7.78e6). Narrowed to
-// the vector `.2d` lane path: `fmul Vd.2D,Vn.2D,Vm.2D` (Simd2dFp) -> `fcvtn2`
-// (VecFcvtn) -> `fmla Vd.4S` acc. Every op passes qemu in isolation, so this is
-// an interaction bug (lane-offset or store/load coalescing between the .2d
-// producers and .4s consumer) that needs a per-instruction JIT tracer to pin.
-// Reproduces from the fuzz_jit gen_fma_chain next-el too (0x3 run). Keep
-// ignored so `cargo test` stays green while preserving the reproducer.
+// RESOLVED: the MOVI Vd.2D, #imm immediate was mis-decoded (byte-select #0xffff
+// became 0xff), giving a wrong AND-extract mask that silently collapsed every
+// vector reduction (fmla/div pipeline: acc += a[i]*b[i]+c[i]). Regression guard;
+// also reproduces via fuzz_jit gen_fma_chain.
 #[test]
-#[ignore = "open FP pipeline bug: needs a per-instruction JIT tracer to pin"]
 fn diff_fmla_div_pipeline_lcg() {
     assert_diff(
         "fmla_div_pipeline_lcg",
