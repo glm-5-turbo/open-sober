@@ -2766,3 +2766,44 @@ everywhere NEON 4-element scalar writes are edited into vectors.
 2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
 3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
    HARD GATE, blocked until a capable host + the real binary/APK are available.
+
+## Session (Sep 11, 2026) — SIMD widening families: add/sub-long + multiply-long (commits 80d27e5, d052723)
+
+Driving the cross-gcc asm battery (logical.elf / addl.elf / mull.elf) through
+`elfjit` cleared two more ISA walls AND exposed that the "already-implemented"
+widening-multiply path shipped several silent miscompiles. Workspace now 121/0.
+
+### ADDL: saddl/uaddl/subl/usubl (80d27e5)
+- Gate only matched the 8 esrc=2 residues (0x..60), so esrc=4 (.2s->.2d, 0x..a0)
+  and esrc=1 (.8b->.8h, 0x..20) fell through to Unsupported. Expanded `alres` to
+  all 24 esrc x signedness x upper x add|sub residues; esrc = 1<<bits[23:22].
+- Translate had the same width bug class as the old FcvVec/Mull code: esrc=4 read
+  64 bits (both lanes), esrc=2-unsigned read 32 (polled next lane), esrc=1 stored
+  32 (overran a 2-byte element). Now reads EXACTLY esrc bytes (sign/zero-ext to
+  a 64-bit reg) and stores EXACTLY de=2*esrc bytes (8/4/2).
+
+### MULL: smull/umull/smlal/umlal (d052723) — FIVE silent miscompiles
+mull.elf "ran" without stopping, but that only proved no-unsupported. Inspecting
+decode+translate against objdump found:
+1. `res_esize = bit22 ? 8 : 4` — mis-sized smull .4h->.4s as 8, never .8b->.8h (res 2).
+2. `unsigned = bit28` — bit28 is 0 for BOTH signed 0x0e and unsigned 0x2e, so
+   umull/umlal were sign-extended (0xFE*2 => -4 not 508). Now bit29.
+3. `acc = bit15` — set on plain smull/umull too, so every plain widening multiply
+   ACCUMULATED instead of overwriting Rd. acc = gateway clause (c000=mul, 8000=acc).
+4. translate `lanes = res==8?2:4` — missing the .8b->.8h 8-lane form.
+5. store width not exact (store32 for res=2) overran the next lane.
+
+### Verified
+- saddl .2d {7,-2}+{3,9}={10,7}; uaddl .4s {1,2,3,4}+{10,20,30,40}; uaddl .8h
+  1..8+1..8; smull .2d {7,-3}*{5,-2}={35,6}; umull .8h 0xFE*2=508 (would be -4 if
+  still signed) — all exec_bytes'd with objdump-verified encodings.
+- decode binds (res_esize/unsigned/acc/q) asserted for all six mull + three addl forms.
+- logical.elf / addl.elf / mull.elf run to completion; prior battery + lane_test
+  (-570) unchanged. arm64jit 87/87, workspace 121/0.
+
+### Next (ordered, no APK/GSI/GPU on this box)
+1. Keep pressing the SIMD surface (the battery will keep surfacing the next wall,
+   e.g. shift-by-immediate / tbl / dup .b / post-index SIMD ld, then svc on real use).
+2. libloader ELF/loader gaps -> libbadcpu ISA gaps -> services/auth.
+3. Real-binary/GPU boot proof (`elfjit <libroblox.so> 0x1f0db20 --jni`) stays the
+   HARD GATE, blocked until a capable host + the real binary/APK are available.
