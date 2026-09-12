@@ -554,6 +554,11 @@ pub enum Inst {
     // (a+b+1)>>1 per lane. byte-lane forms (.16b/.8b), esize 1 only for now.
     // Gate (insn & 0xffe0_fc00) == {0x6e201400 (q=1), 0x2e201400 (q=0)}.
     Urhadd { rd: u8, rn: u8, rm: u8, bytes: u8 },
+    // ---- SIMD FP16 3-same: fadd/fsub/fmul Vd.8h/.4h, Vn.8h/.4h, Vm.8h/.4h ----
+    // Half-precision per-lane arithmetic (promote->op->demote via F16C).
+    // op: 0=fadd, 1=fsub, 2=fmul. Gate (insn & 0x9f60_f400) == 0x0e40_1400;
+    // q=bit30 (1=.8h 8 lanes, 0=.4h 4 lanes); fmul sets bit29, fsub bit23.
+    SimdFp16As { rd: u8, rn: u8, rm: u8, op: u8, q: bool },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
            rd: u8,
@@ -2116,6 +2121,24 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             rm: ((insn >> 16) & 0x1f) as u8,
             op: 1, // EOR
         };
+    }
+
+    // ---- SIMD FP16 3-same: fadd/fsub/fmul Vd.8h/.4h ----
+    // Half-precision per-lane arithmetic (promote->op->demote via F16C). MUST decode
+    // before the SIMD-select (bsl) gate below: the FP16 `fmul Vd.8h` opcode (byte1
+    // 0x1c, e.g. 0x6e451c82) shares the select gate's byte1 0x1c pattern and was
+    // being swallowed as a bitwise select. Gate (insn & 0x9f60_f400) == 0x0e40_1400
+    // (widen to clear vn/vm/vd/Q) is disjoint from f32 three-same / FP16-by-element /
+    // urhadd / imm-ops / real bsl (verified vs compiler + real fadd v1.8h=0x4e401421).
+    if (insn & 0x9f60_f400) == 0x0e40_1400 {
+        let q = (insn >> 30) & 1 == 1; // 1 => .8h, 0 => .4h
+        let op = if insn & 0x2000_0000 != 0 { 2 } // fmul (bit29)
+            else if insn & 0x80_0000 != 0 { 1 }     // fsub (bit23)
+            else { 0 };                             // fadd
+        let rm = ((insn >> 16) & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let rd = (insn & 0x1f) as u8;
+        return Inst::SimdFp16As { rd, rn, rm, op, q };
     }
 
     // ---- SIMD bitwise select BSL only (Vd = (Vd&Vn)|(~Vd&Vm)); bit/bif handled by SimdBit ----
@@ -6980,5 +7003,25 @@ mod fp16_scalar_and_gate_regressions {
             Inst::Urhadd { rd: 0, rn: 1, rm: 2, bytes: 16 }));
         assert!(matches!(decode_op(0x2e221420),
             Inst::Urhadd { rd: 0, rn: 1, rm: 2, bytes: 8 }));
+    }
+
+    #[test]
+    fn fp16_threesame_add_sub_mul_decode() {
+        // fadd/fsub/fmul vD.8h/.4h (compile ground truth).
+        assert!(matches!(decode_op(0x4e451482),
+            Inst::SimdFp16As { rd: 2, rn: 4, rm: 5, op: 0, q: true })); // fadd v2.8h,v4,v5
+        assert!(matches!(decode_op(0x4ec51482),
+            Inst::SimdFp16As { rd: 2, rn: 4, rm: 5, op: 1, q: true })); // fsub v2.8h,v4,v5
+        assert!(matches!(decode_op(0x6e451c82),
+            Inst::SimdFp16As { rd: 2, rn: 4, rm: 5, op: 2, q: true })); // fmul v2.8h,v4,v5
+        assert!(matches!(decode_op(0x0e451482),
+            Inst::SimdFp16As { rd: 2, rn: 4, rm: 5, op: 0, q: false })); // fadd v2.4h
+        assert!(matches!(decode_op(0x0ec51482),
+            Inst::SimdFp16As { rd: 2, rn: 4, rm: 5, op: 1, q: false })); // fsub v2.4h
+        assert!(matches!(decode_op(0x2e451c82),
+            Inst::SimdFp16As { rd: 2, rn: 4, rm: 5, op: 2, q: false })); // fmul v2.4h
+        // real Roblox fadd v1.8h,v1.8h,v0.8h = 0x4e401421
+        assert!(matches!(decode_op(0x4e401421),
+            Inst::SimdFp16As { rd: 1, rn: 1, rm: 0, op: 0, q: true }));
     }
 }

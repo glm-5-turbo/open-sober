@@ -7272,4 +7272,26 @@ mod fp16_and_fabd_fccmp_exec {
         assert_eq!((st.v[0] & 0xffff) as u16, h(4.0),
             "fadd h -> 4.0h got {:#x}", st.v[0]);
     }
+
+    #[test]
+    fn fp16_vector_add_exec() {
+        // fadd v2.4h, v4.4h, v5.4h = 0x0e451482: 4 half lanes add.
+        // reg r maps to st.v[2r] (low u64) / st.v[2r+1] (high).
+        let code = [0x82u8, 0x14, 0x45, 0x0e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        let pk = |vals: &[u16]| -> u64 {
+            let mut acc: u64 = 0;
+            for (i, v) in vals.iter().enumerate() { acc |= (*v as u64) << (16 * i); }
+            acc
+        };
+        // vn=4 -> v[8], vm=5 -> v[10], vd=2 -> v[4].
+        st.v[8] = pk(&[h(1.5), h(2.5), h(-1.0), h(0.5)]);
+        st.v[10] = pk(&[h(0.5), h(0.5), h(1.0), h(1.5)]);
+        exec_bytes(&mut st, &code, 0).unwrap();
+        let half = |off: usize| -> u16 { ((st.v[4] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(half(0), h(2.0), "1.5+0.5");
+        assert_eq!(half(1), h(3.0), "2.5+0.5");
+        assert_eq!(half(2), h(0.0), "-1.0+1.0");
+        assert_eq!(half(3), h(2.0), "0.5+1.5");
+    }
 }

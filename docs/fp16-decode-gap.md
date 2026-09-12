@@ -6,7 +6,7 @@
 - decode() PANIC hits:  0        (decode never aborts — safe)
 - distinct opcodes:     7,225     (was 7,743)
 
-**Closed this cycle (commit …): the scalar FP16 + real scalar-FP gate families.**
+**Closed this cycle (commit 4dd5e3d): the scalar FP16 + real scalar-FP gate families.**
 - **Scalar FP16 convert** (`fcvt s,h / h,s / d,h / h,d`) — new `FcvtHalf`, translated via
   F16C (`vcvtph2ps` / `vcvtps2ph $0` RN, emitted as raw VEX bytes; host confirmed f16c).
 - **Scalar FP16 arithmetic** (`fadd/fmul/fsub/fdiv h`) — extended `FpScalar` with a

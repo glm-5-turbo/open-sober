@@ -3077,6 +3077,32 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdFp16As { rd, rn, rm, op, q } => {
+            // fadd/fsub/fmul Vd.8h/.4h, Vn, Vm (half-precision 3-same): per-h laneke
+            // promote (clean, even with rd aliasing rn/rm because each lane's sources
+            // are read before its dest write), op in f32, demote. F16C:
+            //   vcvtph2ps xmm,xmm = C4 E2 79 13 /r ; vcvtps2ph $0 = C4 E3 79 1D /r 00.
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 8 } else { 4 }; // half-precision lanes
+            let opcode: u8 = match op { 0 => 0x58, 1 => 0x5c, 2 => 0x59, _ => 0x58 }; // addss/subss/mulss
+            for i in 0..lanes {
+                let off = i * 2;
+                // Vn[lan] promote -> xmm0
+                buf.mov_load32(RAX, RBX, f(rn) + off);
+                buf.movd_xmm_r32(0, RAX);
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                // Vm[lan] promote -> xmm1
+                buf.mov_load32(RAX, RBX, f(rm) + off);
+                buf.movd_xmm_r32(1, RAX);
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc9]); // vcvtph2ps xmm1,xmm1
+                buf.bytes.extend_from_slice(&[0xf3, 0x0f, opcode, 0xc1]); // opss xmm0,xmm1
+                // demote -> f16, store 2 bytes at Vd[lan]
+                buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                buf.movd_r32_xmm(RAX, 0);
+                buf.mov_store16(RBX, f(rd) + off, RAX);
+            }
+            Ok(())
+        }
         Inst::InsD1D0 { rd, rn } => {
             // mov v{rd}.d[1], v{rn}.d[0] : copy the low 64 (D[0]) of Rn into
             // the high 64 (D[1]) of Rd.
