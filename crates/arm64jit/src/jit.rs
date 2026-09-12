@@ -3166,6 +3166,36 @@ mod tests {
     }
 
     #[test]
+    fn uxtw_index_load_masks_sentinel_high_bit() {
+        // `ldr w8, [x8, w0, uxtw #2]` = 0xb8605908. The index is W0: ONLY the
+        // low 32 bits of x0 form the byte offset (`base + (w0<<2)`), so a
+        // bit-32 "sentinel" stored in x0's upper half MUST be dropped — real
+        // Roblox book code returns x0 = 0x100000000 | hash from its hash table
+        // and indexes with `[xN, w0, uxtw#2]`, relying on the uxtw to mask it.
+        // Regression: the JIT previously treated this as `[x8, x0, lsl#2]`
+        // (full 64-bit index) and SIGSEGV'd with fault = base + (0x100000665<<2).
+        let code = [
+            0x08u8, 0x59, 0x60, 0xb8, // ldr w8, [x8, w0, uxtw #2]
+            0xe0, 0x03, 0x08, 0xaa, // mov x0, x8   (return loaded w8)
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let mut mem = [0u8; 0x2000];
+        let base = mem.as_mut_ptr() as u64;
+        // Place a sentinel-tagged index into the low 32: base + (0x665<<2).
+        let off = 0x665usize * 4;
+        mem[off..off + 4].copy_from_slice(&0xDEADBEEFu32.to_le_bytes());
+        let mut st = CpuState::new();
+        st.x[8] = base; // address base
+        st.x[0] = 0x10000_0665; // high half set (sentinel) + valid w0 = 0x665
+        let r = exec_bytes(&mut st, &code, 0).expect("exec");
+        assert_eq!(
+            r & 0xffff_ffff,
+            0xDEADBEEF,
+            "uxtw must index base + (w0<<2), ignoring the sentinel high bits"
+        );
+    }
+
+    #[test]
     fn mullong_umull_exec() {
         // umull x1, w3, w7 = 0x9ba77c61 : x1 = (u64)w3 * (u64)w7 (unsigned 32x32).
         // mov x0,x1 (orr) = 0xaa0103e0 ; ret = 0xd65f03c0.

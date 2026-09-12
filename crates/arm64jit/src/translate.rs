@@ -5581,6 +5581,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             ld,
             shift,
             sext,
+            index_ext,
         } => {
             // addr = rn + (rm << shift_amt), shift_amt = log2(size) when S=1.
             let shift_amt = if shift {
@@ -5595,6 +5596,17 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             };
             ldg(buf, RAX, rn as u32); // address base in RAX
             ldg(buf, RCX, rm as u32); // index in RCX
+            // index_ext (option bits[14:13]): 2 = UXTW (index is rm's low 32
+            // bits, zero-extended to 64 before the shift), 1 = UXTB (low byte).
+            // Real book code stores a bit-32 "sentinel" in the X register and
+            // relies on `[xN, wM, uxtw#S]` dropping it — using the full 64-bit
+            // rm here indexes OOB and SIGSEGVs (`ldr w8,[x8,w0,uxtw#2]` at 0x2173218
+            // with x0=0x100000665). 3 (LSL) keeps the full 64-bit rm index.
+            match index_ext {
+                2 => buf.zero_ext_r32(RCX),
+                1 => buf.and_ri64(RCX, 0xff),
+                _ => {} // 3 (LSL/UXTX) or 0 (reserved): full-width index
+            }
             if shift_amt != 0 {
                 // Currently only constant <=3 via the (unused) sar_cl; emit shift left.
                 // x86 has no shl-by-imm op in this emitter; use add-based *2 for 1..3.
@@ -5781,7 +5793,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             stg(buf, rn as u32, RCX);
             Ok(())
         }
-        Inst::FpLdStrReg { vt, rn, rm, size, ld, shift } => {
+        Inst::FpLdStrReg { vt, rn, rm, size, ld, shift, index_ext } => {
             // addr = x[rn] + (x[rm] << log2(size)) in RDX ; transfer `size`
             // bytes between [addr] and the low bytes of guest vector slot v[vt].
             // Scalar register-offset (B/H/S/D); bit26=1 vector file.
@@ -5797,6 +5809,11 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             };
             ldg(buf, RDX, rn as u32); // base address
             ldg(buf, RAX, rm as u32); // index
+            match index_ext {
+                2 => buf.zero_ext_r32(RAX), // UXTW: low-32 index (drop sentinel high)
+                1 => buf.and_ri64(RAX, 0xff), // UXTB
+                _ => {}                     // LSL (full 64-bit)
+            }
             for _ in 0..shift_amt {
                 buf.add_rr64(RAX, RAX);
             }

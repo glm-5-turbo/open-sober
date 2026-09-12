@@ -188,6 +188,15 @@ pub enum Inst {
         // Sign-extending register-offset load (ldrsw/ldrsh/ldrsb): bit23=1 +
         // bit22=0, misread by `ld=bit22` as a store.
         sext: bool,
+        // Option field (bits[14:13]) of the register-offset address operand,
+        // telling how to extend the INDEX register rm before the shift:
+        //   3 = LSL  (UXTX/SXTX) -> full 64-bit rm (the common `[xN,xM,lsl#S]`).
+        //   2 = UXTW (W index)   -> zero-extend rm's low 32 bits (a `[xN,wM,
+        //       uxtw#S]` array-index load; MUST mask to 32 — real book code
+        //       stores a bit-32 sentinel in the X reg and expects it dropped).
+        //   1 = UXTB -> zero-extend low byte.
+        //   0 = reserved -> treat as full 64 (historical behavior).
+        index_ext: u8,
     },
     // ---- load/store pair ----
     LdStPair {
@@ -249,6 +258,7 @@ pub enum Inst {
         size: u8, // 1/2/4/8
         ld: bool,
         shift: bool, // S bit: scale index by log2(size)
+        index_ext: u8, // option bits[14:13]: 3=LSL(x), 2=UXTW(w), 1=UXTB, 0=reserved
     },
     // ---- FP/SIMD scalar-register load/store (ldr/str d0,s0,h0,b0,[xN,#imm]) ----
     // bit26=1 selects the vector/FP register file; width = size (1/2/4/8 bytes:
@@ -3000,6 +3010,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             size,
             ld: (insn >> 22) & 1 == 1,
             shift: (insn >> 12) & 1 == 1,
+            index_ext: ((insn >> 13) & 3) as u8,
         };
     }
 
@@ -3063,6 +3074,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             ld,
             shift,
             sext,
+            index_ext: ((insn >> 13) & 3) as u8,
         };
     }
 
@@ -5318,6 +5330,7 @@ mod tests {
                 ld,
                 shift,
                 sext,
+                ..
             } => {
                 assert_eq!(rt, 0);
                 assert!(!sext);
@@ -5328,6 +5341,29 @@ mod tests {
                 assert!(!shift);
             }
             other => panic!("expected LdStrReg, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ldr_reg_index_ext_uxtw_vs_lsl() {
+        // `ldr w8,[x8,w0,uxtw#2]` = 0xb8605908 (option[14:13]=2 = UXTW: index is
+        // w0, zero-extended — real Roblox hash-table load that MUST mask a
+        // bit-32 sentinel). vs `ldr x5,[x14,x5]` = 0xf86569c5 (option 3 = LSL:
+        // full 64-bit x5 index). The translator must extend the index per this
+        // field or the sentinel high bit leaks into the address (SIGSEGV).
+        match decode(0xb8605908) {
+            Inst::LdStrReg { rn, rt, rm, index_ext, .. } => {
+                assert_eq!((rn, rt, rm), (8, 8, 0));
+                assert_eq!(index_ext, 2, "uxtw index load must decode index_ext=2");
+            }
+            other => panic!("expected LdStrReg for uxtw load, got {other:?}"),
+        }
+        match decode(0xf86569c5) {
+            Inst::LdStrReg { index_ext, rm, rn, .. } => {
+                assert_eq!((rm, rn), (5, 14));
+                assert_eq!(index_ext, 3, "full-64 `ldr x5,[x14,x5]` must decode index_ext=3");
+            }
+            other => panic!("expected LdStrReg for lsl load, got {other:?}"),
         }
     }
 

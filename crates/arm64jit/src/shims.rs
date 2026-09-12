@@ -426,6 +426,25 @@ extern "C" fn bionic_pthread_join(
     0
 }
 
+/// pthread_key_create(key*, destructor): create a real glibc key but DROP the
+/// destructor (pass NULL to glibc).
+///
+/// Why: the worker thread (spawned during JNI_OnLoad) calls
+/// `pthread_key_create(&key, dtor)` during mempool/per-thread-TLS init. Left
+/// to real glibc, it stores the *guest* AArch64 destructor and, when the
+/// thread exits, glibc runs it natively as x86 — jumping into guest `.text`
+/// (SIGILL on the first `paciasp`, backtrace frames in `__pthread_keys`, the
+/// post-crossed-boot worker/teardown crash). The book's own
+/// `pthread_getspecific/setspecific` on the returned key keep working against
+/// real glibc's per-thread storage (we return the real key); we only skip the
+/// destructor call, which is insignificant to headless boot (same rationale as
+/// `__cxa_thread_atexit_impl`).
+extern "C" fn pthread_key_create(
+    key: u64, _dtor: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    unsafe { libc::pthread_key_create(key as *mut libc::pthread_key_t, None) as u64 }
+}
+
 /// Register all guest C++ runtime shims (__cxa_guard_*, __cxa_atexit).
 pub fn register_cxx_shims() -> usize {
     let shims: &[(&[u8], HostCall)] = &[
@@ -437,6 +456,7 @@ pub fn register_cxx_shims() -> usize {
         (b"pthread_once\0", bionic_pthread_once),
         (b"pthread_create\0", bionic_pthread_create),
         (b"pthread_join\0", bionic_pthread_join),
+        (b"pthread_key_create\0", pthread_key_create),
     ];
     for (name, f) in shims {
         crate::resolver::register_named(name, *f);
@@ -595,6 +615,7 @@ mod tests {
             "__cxa_guard_abort",
             "__cxa_atexit",
             "__cxa_thread_atexit_impl",
+            "pthread_key_create",
         ] {
             let addr = crate::resolver::resolve(name.as_bytes())
                 .unwrap_or_else(|| panic!("{name:?} not resolvable by name"));
