@@ -1,5 +1,37 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH23) — the engine's OWN render recipe now runs as a LIVE ANIMATED render loop: new elfjit `--rendersustain <fps>` drives bind -> frame-fn 0x105b32c00 -> post-frame swap CONTINUOUSLY on the detached host thread (concurrent with StartApp's idle main-loop jit_run), cycling a 5-color palette per frame. Workspace 472/0; HEAD b692077.
+
+SH22d proved the recipe reentrant (N=3, frozen color). SH23 makes it
+**sustainable + animated**: the engine's own frame-fn is driven on a real
+time-base for the whole run — 160 consecutive frame-fn->swap pairs, every
+`frame-fn returned Ok(0x..)` + `post-frame swap returned Ok(0x1)`, exit 124
+stable, zero crash/heap abort. A real x11grab recording proves every frame is
+a **fresh render**: majority pixel color tracks the per-frame palette exactly
+(green->red->blue->yellow->magenta; float fracs match to 3 dp), 12+ distinct
+frames over 6 s. Each iteration re-writes both engine clear-color sources (the
+frame-fn 5th-arg clear-state obj at base+0x400 [+4..16] and the 6th-arg
+color-source obj at base+0x500 [+0..16]) before calling the real frame-fn, so a
+capture can't be a static buffer.
+
+- New lever: `--rendersustain <fps>` (sustain loop; bounds via
+  `--renderframe-loop <N>` only when --rendersustain absent). Per-frame color is
+  re-seeded into both clear-color objects each iteration.
+- Reproducible artifact: `runs/capture_sustain_loop.sh` (starts elfjit, waits
+  for frame iteration 2, x11grab 2fps for CAP_SECS, then decodes each recorded
+  frame's majority color). Run-log: runs/sh23-sustain-loop.txt (160 iters);
+  video: runs/sh23-sustain-loop.mp4. Doc: docs/frontier-sh23-sustain-render.md.
+- Baselines re-verified unchanged: `--jni` exit 0; stable idle exit 124.
+
+**Honest framing (unchanged shape):** still harness-driven — fabricated
+renderer/view/clear-state objects and a clear-only frame (the engine's real
+glDrawElements draw path is gated on a coherent renderer C++ object not yet
+reversed). The engine's own main-loop producer still never enqueues a render
+task, so it does not call frame-fn by itself yet — we drive its own code on a
+time base. But the GLES dispatch-slot map is complete and the engine's GL path
+is proven bridge-functional **and sustainable**, the two properties a real
+main-loop frame drive needs.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH22) — BROKEN THE SH21 WALL: the engine's OWN frame-fn 0x105b32c00 now presents a real, correctly-colored 1280x720 frame through the GLES bridge (18430/18432 sampled px = the exact --renderframe-color 0.4,0.2,0.95), stable exit 124, zero crash. Workspace 472/0 (was 471).
 
 SH21 left the window black, blaming "the per-buffer clear loop clears depth-style buffers via a guessed slot2=glClearDepthf". Disassembly of the clear-state
