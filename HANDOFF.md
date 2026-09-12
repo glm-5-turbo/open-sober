@@ -1,5 +1,49 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH7) — IDLE TASK-DEQUE BARRIER CROSSED: the gate is the drain's INFINITE TIMEOUT; `--drain-poll` runs the engine's own pop-loop + dispatch handler (0x10285371c). Workspace 467/0; HEAD 22a32fb.
+
+The ~35-cycle "engine producer never enqueues / consumer never drains" wall is
+broken. Empirical stack dump of a parked consumer resolved the true frame and
+the gate:
+
+- The parked consumers are the **drain fn 0x2856e40** calling generic-wait
+  **0x284d014 with timeout = -1 (infinite)** (live x20 = -1; sp+0x30 = -1).
+  generic-wait shares the drain's frame (the drain `bl`s to 0x284d018, skipping
+  its `sub sp,#80`), parked sp+0x28 = drain return-into after `bl 0x284d014`
+  (0x102856f48).
+- An infinite timeout jumps straight into a bare blocking futex
+  `futex(Q+4, WAIT_BITSET, epoch, NULL, NULL, ~0)`; the drain's **pop-loop at
+  0x2856f94 runs ONLY when the wait returns 1 (timed out)**. With an infinite
+  timeout it never times out → the pop-loop is never reached → work is never
+  consumed no matter what is in the deque. That was the whole wall.
+
+**New elfjit `--drain-poll <ms>`** patches guest `mov x2,x22` (0x102856f40,
+the drain's infinite-timeout copy) to `mov x2,#<ms>` (imm12) before jit_run, so
+the drain block compiles with a finite timeout. The wait now times out, the
+drain reaches the pop-loop, and it **continuously pops + dispatches the deque**,
+executing the real engine dispatch handler **0x10285371c** / 0x1028538c0 /
+0x1028539e8 millions of times — stable (flat 1673 compiles, no crash, exit 124,
+hits → ~8M). This is the engine's own task-deque dispatch machinery running.
+Run-log: /home/hermes-worker/runs/boot-drainpoll-crossing.txt.
+
+Also: fixed `--deque-node` to write the node to **[headcell+0x0]** (the cell the
+pop actually reads: `x23=[x20]; x24=ldar([x23])`) instead of the ring's
+internal HEAD/TAIL cells (+0x10/+0x18) prior code wrote to — that is why SH6
+nodes sat unconsumed. Added JIT_STACKDUMP / JIT_DEQUE_PROBE2 diagnostics (frame
+resolution) and a `dump` region-disassembler example. Doc:
+docs/frontier-sh7-drainpoll-crossing.md.
+
+**Where this leaves the frontier:** the consumer side is provably live and
+drains continuously — but it is dispatching the deque's sentinel/self node, so
+0x10285371c is a degenerate self-dispatch (maintenance), not the render/EGL
+path (no egl*/gl* hostcall yet). **Next lever:** inject a REAL task node that
+passes the drain's tag guard (0x2856e78 `cmp x9,[head]>>48`) and low-48 pointer
+truncation, with `[node+112]` pointing at a render/tick vtable (not the
+sentinel's 0x106829f00), so the dispatched handler reaches egl*/gl*/frame.
+Because the consumer now drains continuously, a correctly-placed node is
+consumed immediately — no futex wake/version bookkeeping needed.
+Baseline (no --drain-poll) unchanged: stable idle futex park.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH6) — host enqueue into the task-deque PROVEN not-a-producer (two strategies); deque model corrected from full producer/drain disassembly; new `--deque-node` harness. Workspace 467/0; HEAD 6003441.
 
 Implemented the documented SH5b next-experiment (host side enqueue into the
