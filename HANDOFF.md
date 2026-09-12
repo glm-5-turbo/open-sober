@@ -22,13 +22,22 @@ racing in parallel; now `.lock()`). Workspace 411/0; real boot unchanged (stable
 idle main loop, exit 124, real X11 window wired). Run-log:
 `/home/hermes-worker/runs/` (status in STATUS.md).
 
-### Next lever (unchanged wall, now contract-ready for the looper)
-Nobody runs the app-glue looper, so `ALooper_pollOnce` is never called and the
-queued APP_CMDs never drain into `eglCreateWindowSurface`. Now that the shim
-honors the real poll-source contract, the missing piece is a guest thread started
-at 0x102bcd5d0 with a fabricated `android_app` (looper handle, flags at +8/+9/+10,
-app ptr at +24, poll_source at +0x10) OR enqueuing a real work item onto the
-per-thread idle futex (0x10284d134). Posting APP_CMDs is already wired.
+### Next lever (RECORRECTED this cycle — do not chase 0x102bcd5d0)
+**The app-glue looper at guest 0x102bcd5d0 is COMPLETELY ORPHANED** in the real
+binary (zero BL/B callers AND zero 8-byte pointer-constant references, scripted
+scan). real libroblox.so uses GameActivity (`nativeAppBridgeV2StartAppWithParams`
+driven by `--startapp`), not legacy android_native_app_glue; its prologue derefs
+`[x19+24]` as a framework-initialized object only ANativeActivity_onCreate builds.
+So fabricating an android_app and starting 0x102bcd5d0 as a guest thread is the
+WRONG lever — it would not launch the engine's real render path. The ALooper
+shim change is still correct (any real ALooper_pollOnce caller gets the right
+android_poll_source* outData layout), but the wall is the engine's OWN producer:
+its main loop runs, yet nothing enqueues work onto the per-thread idle futex
+(0x10284d134) it parks on. The last-remaining cross-session lever was disproven
+this cycle — the next real lever is either feeding the engine's own work queue or
+finding the GameActivity-side producer that posts render tasks. Additionally,
+real `.text` has 14,918 Unsupported FP16/NEON instructions (see
+docs/fp16-decode-gap.md) that will block-tracker-break any real frame/audio path.
 
 Prior cycles claimed "decode() never panics" but verified it only against `.text`.
 The **whole-executable** scandecode scan (all PF_X segments — including the
