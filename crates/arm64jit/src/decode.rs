@@ -1526,7 +1526,16 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     if (insn & 0xffe0_f800) == 0x0ea0_f800 || (insn & 0xffe0_f800) == 0x2ea0_f800
         || (insn & 0xffe0_f800) == 0x4ea0_f800 || (insn & 0xffe0_f800) == 0x4ee0_f800
         || (insn & 0xffe0_f800) == 0x6ea0_f800 || (insn & 0xffe0_f800) == 0x6ee0_f800
+        // FP16 two-reg-misc fabs/fneg Vd.4H/.8H: byte1(bits15:8)==0xf8 (NOT the
+        // fp16 compare-to-zero 0x..f8_c820/d820/e820 residue; that's SimdFp16Cmpz)
+        // and byte2(bits23:16)&0xfc==0xf8. fabs = bit29 clear, fneg = bit29 set.
+        // Prefix 0x0e/2e/4e/6e AND byte1(bits23:16)&0xfc==0xf8 (fp16 two-reg-misc
+        // size marker; f32 fneg/fabs 0x..a0_fa8x have byte1 0xa0.. and are excluded).
+        || ((insn & 0x0f00_fc00) == 0x0e00_f800 && (insn >> 16 & 0xfc) == 0xf8)
     {
+        let esize: u8 = if (insn & 0x0040_0000) != 0 { 8 } else { 4 };
+        // fp16 (0x..f8_f820, byte1&0xfc==0xf8) => esize 2
+        let esize = if (insn >> 16 & 0xfc) == 0xf8 { 2u8 } else { esize };
         let op = if (insn >> 29) & 1 == 0 {
             1 // fabs
         } else if (insn >> 16) & 1 == 1 {
@@ -1534,7 +1543,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         } else {
             0 // fneg
         };
-        let esize = if (insn >> 22) & 1 == 1 { 8u8 } else { 4u8 };
+        let esize = if (insn >> 22) & 1 == 1 && ((insn >> 8) & 0xfc) != 0xf8 { 8u8 } else { esize };
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let q = (insn >> 30) & 1 == 1;
@@ -7627,6 +7636,20 @@ mod fp16_scalar_and_gate_regressions {
             "got {:?}", decode_op(0x2ec22462));
         // negatives must NOT match: mov v3.s[2] insert (0x6e1424a3, byte1 0x14).
         assert!(!matches!(decode_op(0x6e1424a3), Inst::SimdFp16Cmp { .. }), "mov .S[idx] stays SimdInsD");
+        // FP16 two-reg-misc fabs/fneg: fabs v0.4h = 0x0ef8f820 (op1, esize2, q0),
+        // fneg v0.4h = 0x2ef8f820 (op0), fabs v0.8h = 0x4ef8f820 (q1). The fp16
+        // compare-to-zero (0x0ef8d820, byte2 0xd8) must NOT hit SimdFpUnary.
+        assert!(matches!(decode_op(0x0ef8f820),
+            Inst::SimdFpUnary { rd: 0, rn: 1, op: 1, esize: 2, q: false }),
+            "got {:?}", decode_op(0x0ef8f820));
+        assert!(matches!(decode_op(0x2ef8f820),
+            Inst::SimdFpUnary { rd: 0, rn: 1, op: 0, esize: 2, q: false }));
+        assert!(matches!(decode_op(0x4ef8f820),
+            Inst::SimdFpUnary { rd: 0, rn: 1, op: 1, esize: 2, q: true }));
+        assert!(matches!(decode_op(0x0ef8f8a5),
+            Inst::SimdFpUnary { rd: 5, rn: 5, op: 1, esize: 2, q: false }),
+            "got {:?}", decode_op(0x0ef8f8a5));
+        assert!(!matches!(decode_op(0x0ef8d820), Inst::SimdFpUnary { .. }), "fcmeq-to-zero must be SimdFp16Cmpz");
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),

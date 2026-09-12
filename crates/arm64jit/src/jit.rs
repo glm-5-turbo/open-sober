@@ -7832,6 +7832,32 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fp16_fabs_fneg_exec() {
+        // fabs v0.4h, v1.4h = 0x0ef8f820 : clear sign bit of each halfword.
+        // v1 halves = {-1.0=0xBC00, 2.5=0x4100, -3.0=0xC200, sqrt(2) sign set... use clean
+        // {-1.0, 0x8000(-0.0), -3.0, 7.25=0x4740}. fabs -> {0x3C00, 0x0000, 0x4200, 0x4740}.
+        let mut st = CpuState::new();
+        st.v[2] = (0x4740u64 << 48) | (0xC200u64 << 32) | (0x8000u64 << 16) | 0xBC00u64;
+        exec_bytes(&mut st, &[0x20, 0xf8, 0xf8, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h(&st, 0), 0x3C00, "fabs(-1.0)=1.0");
+        assert_eq!(h(&st, 1), 0x0000, "fabs(-0.0)=0.0");
+        assert_eq!(h(&st, 2), 0x4200, "fabs(-3.0)=3.0");
+        assert_eq!(h(&st, 3), 0x4740, "fabs(7.25)=7.25");
+        // fneg v0.4h, v1.4h = 0x2ef8f820 : flip sign bit of each halfword.
+        // v1 = {1.0=0x3C00, -0.0=0x8000, 2.5=0x4100, 0.0=0x0000} ->
+        //      {-1.0=0xBC00, 0.0=0x0000, -2.5=0xC100, -0.0=0x8000}.
+        let mut st2 = CpuState::new();
+        st2.v[2] = (0x0000u64 << 48) | (0x4100u64 << 32) | (0x8000u64 << 16) | 0x3C00u64;
+        exec_bytes(&mut st2, &[0x20, 0xf8, 0xf8, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h2 = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h2(&st2, 0), 0xBC00, "fneg(1.0)=-1.0");
+        assert_eq!(h2(&st2, 1), 0x0000, "fneg(-0.0)=0.0");
+        assert_eq!(h2(&st2, 2), 0xC100, "fneg(2.5)=-2.5");
+        assert_eq!(h2(&st2, 3), 0x8000, "fneg(0.0)=-0.0");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

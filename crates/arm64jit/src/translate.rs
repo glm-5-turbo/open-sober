@@ -5481,7 +5481,8 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
             let lanes = if q { 16 / esize as i32 } else { 8 / esize as i32 };
             let m = esize as i32;
-            let sign64: u64 = if esize == 8 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
+            let sign64: u64 = if esize == 8 { 0x8000_0000_0000_0000 }
+                else if esize == 2 { 0x8000 } else { 0x8000_0000 };
             for l in 0..lanes {
                 let off = l * m;
                 buf.movq_load(0, RBX, src + off); // xmm0 <- lane bits
@@ -5502,6 +5503,9 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 }
                 if esize == 8 {
                     buf.movq_store(RBX, dst + off, 0);
+                } else if esize == 2 {
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store16(RBX, dst + off, RAX); // fp16 fabs/fneg: 2 bytes
                 } else {
                     buf.movd_r32_xmm(RAX, 0);
                     buf.mov_store32(RBX, dst + off, RAX);
