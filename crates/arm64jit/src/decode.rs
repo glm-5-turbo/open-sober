@@ -756,6 +756,8 @@ pub enum Inst {
     // Gate (insn & 0xffe0_fc00)==0x6ea0c000 (verified vs real 0x6ea4c1c1).
     // Lane => all-ones if Vn[i] > Vm[i] (unsigned), else 0.
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD unsigned compare-higher halfword: cmhi Vd.8H/.4H ----
+    SimdCmhiH { rd: u8, rn: u8, rm: u8, lanes: u8 },
     // ---- SIMD unsigned compare-higher 2D: cmhi Vd.2D, Vn.2D, Vm.2D ----
     SimdCmhiD { rd: u8, rn: u8, rm: u8 },
     // ---- SIMD unsigned compare-higher-or-same: cmhs Vd.T, Vn.T, Vm.T ----
@@ -4266,11 +4268,22 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                 // Each 32-bit lane = all-ones if Vn[i] > Vm[i] (unsigned), else 0.
                                                                                                                                 let scm = insn & 0xffe0_fc00;
                                                                                                                                 let cm_lanes = if scm == 0x6ea0_3400 { Some(4) } else if scm == 0x2ea0_3400 { Some(2) } else { None };
-                                                                                                                                if let Some(clanes) = cm_lanes {
-                                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
-                                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                                    let rd = (insn & 0x1f) as u8;
-                                                                                                                                    return Inst::SimdCmhi { rd, rn, rm, lanes: clanes };
+                                                                                                                                                                                                if let Some(clanes) = cm_lanes {
+                                                                                                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                    let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                    return Inst::SimdCmhi { rd, rn, rm, lanes: clanes };
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    // halfword 8H/4H: 0x6e60_3400 (Q=1, 8 lanes) / 0x2e60_3400 (Q=0, 4 lanes).
+                                                                                                                                                                                                    // Real Roblox: cmhi v3.8h,v4,v3 = 0x6e633483 (0x6e60_3400 residue).
+                                                                                                                                                                                                    let cmlh = if scm == 0x6e60_3400 { Some(8u8) } else if scm == 0x2e60_3400 { Some(4u8) } else { None };
+                                                                                                                                                                                                    if let Some(cl) = cmlh {
+                                                                                                                                                                                                        return Inst::SimdCmhiH {
+                                                                                                                                                                                                            rd: (insn & 0x1f) as u8,
+                                                                                                                                                                                                            rn: ((insn >> 5) & 0x1f) as u8,
+                                                                                                                                                                                                            rm: ((insn >> 16) & 0x1f) as u8,
+                                                                                                                                                                                                            lanes: cl,
+                                                                                                                                                                                                        };
                                                                                                                                                                                                     }
                                                                                                                                                                                                     // 2D (64-bit lanes): 0x6ee0_3400 (Q=1). Per 8-byte lane all-ones if Vn>Vm.
                                                                                                                                                                                                     if scm == 0x6ee0_3400 {
@@ -6841,6 +6854,14 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x2e3ef7ff), Inst::SimdFpPair3 { rd:31, rn:31, rm:30, .. }), "got {:?}", decode(0x2e3ef7ff));
         // plain fadd (0x0e23d441, prefix 0x0e) must NOT be captured as FpPair3
         assert!(matches!(decode(0x0e23d441), Inst::VecFpArith { op: 0, .. }), "got {:?}", decode(0x0e23d441));
+        // halfword unsigned compare: cmhi v3.8h,v4,v3 = 0x6e633483 (real Roblox).
+        assert!(matches!(decode(0x6e633483),
+            Inst::SimdCmhiH { rd: 3, rn: 4, rm: 3, lanes: 8 }),
+            "got {:?}", decode(0x6e633483));
+        assert!(matches!(decode(0x2e623420),
+            Inst::SimdCmhiH { rd: 0, rn: 1, rm: 2, lanes: 4 }));
+        // the 32-bit cmhi ops stay on SimdCmhi
+        assert!(matches!(decode(0x6ea13461), Inst::SimdCmhi { lanes: 4, .. }));
     }
 
     #[test]

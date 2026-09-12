@@ -7655,6 +7655,63 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn cmhi_halfword_exec() {
+        // cmhi v0.8h, v1.8h, v2.8h = 0x6e623420: per 16-bit lane all-ones if
+        // Vn>Vm (unsigned). v1 = {1,2,3,4,5,6,7,8}, v2 = {8,7,6,5,4,3,2,1}.
+        let mut st = CpuState::new();
+        // v1 (reg1) = {1..8}, v2 (reg2) = {8..1}; low-64 = lanes 0-3, high-64 = 4-7
+        st.v[2] = (1u64) | (2 << 16) | (3 << 32) | (4 << 48);
+        st.v[3] = (5u64) | (6 << 16) | (7 << 32) | (8 << 48);
+        st.v[4] = (8u64) | (7 << 16) | (6 << 32) | (5 << 48);
+        st.v[5] = (4u64) | (3 << 16) | (2 << 32) | (1 << 48);
+        exec_bytes(&mut st, &[0x20, 0x34, 0x62, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        // Vd (reg0) = st.v[0] (lanes 0-3) and st.v[1] (lanes 4-7).
+        let h = |s: &CpuState, off: usize| -> u16 {
+            let slot = if off < 4 { 0usize } else { 1usize };
+            ((s.v[slot] >> (16 * (off % 4))) & 0xffff) as u16
+        };
+        assert_eq!(h(&st, 0), 0, "1>8 no");
+        assert_eq!(h(&st, 1), 0, "2>7 no");
+        assert_eq!(h(&st, 2), 0, "3>6 no");
+        assert_eq!(h(&st, 3), 0, "4>5 no");
+        assert_eq!(h(&st, 4), 0xffff, "5>4 yes");
+        assert_eq!(h(&st, 5), 0xffff, "6>3 yes");
+        assert_eq!(h(&st, 6), 0xffff, "7>2 yes");
+        assert_eq!(h(&st, 7), 0xffff, "8>1 yes");
+    }
+
+    #[test]
+    fn cmhi_word_and_cmhs_exec() {
+        // cmhi v0.4s, v1.4s, v2.4s = 0x6ea03420 (unsigned greater-per-word):
+        // v1={1,2,5,6} v2={5,5,2,4} -> lanes: 0,1 no; 2,3 yes.
+        let mut st = CpuState::new();
+        st.v[2] = (2u64 << 32) | 1; // lanes 0,1 = 1,2
+        st.v[3] = (6u64 << 32) | 5; // lanes 2,3 = 5,6
+        st.v[4] = (5u64 << 32) | 5; // lanes 0,1 = 5,5
+        st.v[5] = (4u64 << 32) | 2; // lanes 2,3 = 2,4
+        exec_bytes(&mut st, &[0x20, 0x34, 0xa2, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let w = |s: &CpuState, off: usize| -> u32 {
+            let slot = if off < 2 { 0usize } else { 1usize };
+            (s.v[slot] >> (32 * (off % 2))) as u32
+        };
+        assert_eq!(w(&st, 0), 0, "1>5 no");
+        assert_eq!(w(&st, 1), 0, "2>5 no");
+        assert_eq!(w(&st, 2), 0xffff_ffff, "5>2 yes");
+        assert_eq!(w(&st, 3), 0xffff_ffff, "6>4 yes");
+        // cmhs v0.4s = 0x6ea03c20 (unsigned >=): v1={1,5} v2={1,5} equal passes.
+        let mut st2 = CpuState::new();
+        st2.v[2] = (5u64 << 32) | 1;
+        st2.v[4] = (5u64 << 32) | 1;
+        exec_bytes(&mut st2, &[0x20, 0x3c, 0xa2, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let w2 = |s: &CpuState, off: usize| -> u32 {
+            let slot = if off < 2 { 0usize } else { 1usize };
+            (s.v[slot] >> (32 * (off % 2))) as u32
+        };
+        assert_eq!(w2(&st2, 0), 0xffff_ffff, "1>=1 yes (equal passes)");
+        assert_eq!(w2(&st2, 1), 0xffff_ffff, "5>=5 yes (equal passes)");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.
