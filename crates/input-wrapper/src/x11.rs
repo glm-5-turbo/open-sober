@@ -25,6 +25,19 @@ pub enum XError {
 /// Open a connection to the X server given by `display` (e.g. ":99" for Xvfb) and
 /// create a mapped 640x480 window. Returns the connection + window id, or an error.
 pub fn open_window(display: Option<&str>) -> Result<(RustConnection, u32), XError> {
+    open_window_sized(display, 640, 480)
+}
+
+/// Like [`open_window`] but with an explicit framebuffer `width`/`height`. The
+/// runtime's ANativeWindow layer (GRAPHICS_RECOMMENDATION §5.3) hands the guest
+/// a desktop window as its ANativeWindow handle, so the window is sized to the
+/// framebuffer `ANativeWindow_getWidth/Height` report (1280x720) — a coherent
+/// window whose EGL window surface is buildable by Mesa's x11 platform.
+pub fn open_window_sized(
+    display: Option<&str>,
+    width: u16,
+    height: u16,
+) -> Result<(RustConnection, u32), XError> {
     let (conn, screen_num) = x11rb::connect(display)
         .map_err(|e| XError::Connect(format!("x11rb connect: {e}")))?;
     let screen = &conn.setup().roots[screen_num];
@@ -37,8 +50,8 @@ pub fn open_window(display: Option<&str>) -> Result<(RustConnection, u32), XErro
         screen.root,
         0,
         0,
-        640,
-        480,
+        width,
+        height,
         0,
         WindowClass::INPUT_OUTPUT,
         0,

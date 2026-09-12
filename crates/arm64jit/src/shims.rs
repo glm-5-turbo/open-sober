@@ -10,6 +10,7 @@
 
 use crate::jit::HostCall;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 
 unsafe extern "C" {
@@ -218,19 +219,35 @@ extern "C" fn alooper_pollonce(
 }
 
 // ---- ANativeWindow ----
-/// A stable, process-lifetime, non-null native-window handle. The engine's
-/// window-surface path (GRAPHICS_RECOMMENDATION §5.3) maps an Android
-/// `ANativeWindow` to a desktop window; until the looper reaches a real EGL
-/// window surface we hand out a single stable sentinel so the window layer is
-/// *coherent* — `ANativeWindow_fromSurface` returns a non-null handle that
-/// `ANativeWindow_getWidth/Height` answer (1280x720), instead of a NULL window
-/// that pretends to have a size. When the looper/EGL path is reached, this
-/// sentinel must be replaced by a real X11 Window XID so Mesa's
-/// `eglCreateWindowSurface(dpy, config, win, ...)` accepts it (same pattern as
-/// the `egl_window_present` gate).
+/// The real desktop X11 Window XID the runtime maps this Android `ANativeWindow`
+/// to (GRAPHICS_RECOMMENDATION §5.3). Set by the host window layer (elfjit under
+/// JIT_DRIVE_LIFECYCLE, or any caller wiring a real window) via
+/// [`set_anativewindow_xid`]. Zero = no real window wired yet — in that case
+/// [`anativewindow_fromsurface`] falls back to a stable non-null sentinel so the
+/// window layer stays *coherent* (a non-null window with a sane size) even on a
+/// headless/plain run.
+static ANATIVE_WINDOW_XID: AtomicU64 = AtomicU64::new(0);
+
+/// Register the real desktop X11 Window XID backing the guest's `ANativeWindow`.
+/// Call once the host window is created (before the guest reaches the window/
+/// EGL surface path); `anativewindow_fromsurface` then hands that XID to the
+/// guest so `eglCreateWindowSurface(dpy, config, win, ...)` builds a surface on
+/// a genuine window.
+pub fn set_anativewindow_xid(xid: u64) {
+    ANATIVE_WINDOW_XID.store(xid, AtomicOrdering::Relaxed);
+}
+
+/// The currently-registered real desktop X11 Window XID (0 = none wired).
+pub fn anativewindow_xid() -> u64 {
+    ANATIVE_WINDOW_XID.load(AtomicOrdering::Relaxed)
+}
 extern "C" fn anativewindow_fromsurface(
     _env: u64, _surf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
+    let xid = ANATIVE_WINDOW_XID.load(AtomicOrdering::Relaxed);
+    if xid != 0 {
+        return xid; // the real X11 Window XID backing the window surface path
+    }
     crate::jit::HOST_THUNK_BASE | 0x2000 // stable non-null sentinel ANativeWindow*
 }
 extern "C" fn anativewindow_release(
@@ -586,6 +603,8 @@ mod tests {
     /// inconsistent and guaranteed eglCreateWindowSurface would never be reached.
     #[test]
     fn anativewindow_fromsurface_returns_stable_nonnull_handle_with_size() {
+        // Default (no real window wired): stable non-null sentinel with a size.
+        set_anativewindow_xid(0);
         let win = anativewindow_fromsurface(0, 0, 0, 0, 0, 0, 0, 0);
         assert_ne!(win, 0, "ANativeWindow_fromSurface must not return NULL");
         // Stable across calls (same sentinel each time) so a guest that holds the
@@ -594,6 +613,23 @@ mod tests {
         let w = anativewindow_getwidth(win, 0, 0, 0, 0, 0, 0, 0);
         let h = anativewindow_getheight(win, 0, 0, 0, 0, 0, 0, 0);
         assert_eq!((w, h), (1280, 720), "non-null window reports a sane framebuffer");
+    }
+
+    /// When a real desktop X11 window is wired (set_anativewindow_xid), the guest
+    /// ANativeWindow_fromSurface returns exactly that XID — the window surface
+    /// eglCreateWindowSurface builds on is a genuine window, not a sentinel
+    /// (GRAPHICS_RECOMMENDATION §5.3). Resetting to 0 restores the sentinel
+    /// fallback so a headless run stays coherent.
+    #[test]
+    fn anativewindow_fromsurface_returns_registered_real_x11_window() {
+        set_anativewindow_xid(0x2c00000du64); // some real X11 Window XID
+        let handle = anativewindow_fromsurface(0, 0, 0, 0, 0, 0, 0, 0);
+        assert_eq!(handle, 0x2c00000du64, "guest receives the real X11 Window XID");
+        // Unwired -> sentinel fallback is a different, still-non-null value.
+        set_anativewindow_xid(0);
+        let fallback = anativewindow_fromsurface(0, 0, 0, 0, 0, 0, 0, 0);
+        assert_ne!(fallback, 0);
+        assert_eq!(fallback, anativewindow_fromsurface(0, 0, 0, 0, 0, 0, 0, 0));
     }
 
     #[test]
