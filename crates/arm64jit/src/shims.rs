@@ -576,6 +576,180 @@ extern "C" fn bionic_fwrite(
     let f: F = unsafe { std::mem::transmute(sym) };
     unsafe { f(ptr as *const libc::c_void, size as usize, nmemb as usize, stream as *mut libc::c_void) as u64 }
 }
+
+// ---- vfprintf (guest bionic FILE* + AArch64 va_list -> host carriage) ----
+// libc++'s `std::terminate` / abort-message handler writes the fatal reason with
+// `vfprintf(stderr, "terminating due to %s exception of type %s: %s", ap)` — the
+// `fwrite` shim above only catches the "libc++abi: " prefix it emits first; the
+// message body goes through the guest's imported `vfprintf`, which we currently
+// bind to real glibc vfprintf. The guest passes its bionic `FILE*` (e.g. stderr
+// = 0x130) and an AAPCS64 `va_list`, which glibc reads as a host FILE_ + host
+// va_list -> SIGSEGV, masking the terminate reason. Interpose: when the stream is
+// not a real glibc FILE_ (guest/bionic), decode the AArch64 va_list ourselves and
+// write the formatted message to host fd 2 so the abort reason surfaces; a real
+// host FILE_ is forwarded to glibc unchanged.
+// AAPCS64 va_list (per ARM IHI 0055 §A.2.9): { void *__stack; void *__gr_top;
+// void *__vr_top; int __gr_offs; int __vr_offs; }, passed by reference (32B).
+// GP args are read at `__gr_top + __gr_offs`, each 8B, with __gr_offs advancing by
+// 8; once __gr_offs >= 0, the remainder come from __stack (also +8/arg).
+struct Aapcs64VaList {
+    stack: u64,
+    gr_top: u64,
+    _vr_top: u64,
+    gr_offs: i32,
+    _vr_offs: i32,
+}
+
+fn read_va_gp(ap: &mut Aapcs64VaList) -> Option<u64> {
+    let raw = |p: u64| -> Option<u64> {
+        if p & 7 == 0 && p >= 0x100000000 && p >> 56 == 0 {
+            Some(unsafe { std::ptr::read_unaligned(p as *const u64) })
+        } else {
+            None
+        }
+    };
+    if ap.gr_offs < 0 {
+        let addr = (ap.gr_top as i64).wrapping_add(ap.gr_offs as i64) as u64;
+        let v = raw(addr)?;
+        ap.gr_offs += 8;
+        Some(v)
+    } else {
+        let v = raw(ap.stack)?;
+        ap.stack = ap.stack.wrapping_add(8);
+        Some(v)
+    }
+}
+
+/// Format a guest `vfprintf(stream, fmt, ap)` with an AArch64 va_list into `out`.
+/// Supports the common abort-message conversions (%s, %d, %u, %x, %p, %c and
+/// plain text / %% literals), which is what libc++ terminate emits; anything more
+/// exotic degrades gracefully (the conversion char is copied literally). Returns
+/// true if any bytes were produced.
+fn render_vfprintf(fmt: u64, ap: &mut Aapcs64VaList, out: &mut Vec<u8>) -> bool {
+    if fmt == 0 {
+        return false;
+    }
+    let bytes = unsafe {
+        let mut len = 0usize;
+        while unsafe { *((fmt as *const u8).add(len)) } != 0 && len < 4096 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(fmt as *const u8, len)
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c != b'%' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // Parse a printf directive: %[flags][width][.prec][len]conv
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j].is_ascii() && !bytes[j].is_ascii_alphabetic() && bytes[j] != b'%' {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let conv = bytes[j];
+        let convs = [b'%', b's', b'd', b'i', b'u', b'x', b'X', b'p', b'c', b'f', b'e', b'g', b'l', b'h', b'z', b'S'];
+        if conv == b'%' { // %% literal
+            out.push(b'%');
+            i = j + 1;
+            continue;
+        }
+        // Some conversions (l/z/h prefixes) consume no arg themselves; skip past
+        // the length modifier to the real conversion char, then read the arg.
+        let mut read_at = j;
+        while bytes[read_at] == b'l' || bytes[read_at] == b'h' || bytes[read_at] == b'z' || bytes[read_at] == b't' || bytes[read_at] == b'j' {
+            if bytes[read_at] == b'l' && read_at + 1 < bytes.len() && bytes[read_at + 1] == b'l' {
+                read_at += 2;
+            } else {
+                read_at += 1;
+            }
+            if read_at >= bytes.len() { break; }
+        }
+        if read_at < bytes.len() && convs.contains(&bytes[read_at]) && bytes[read_at] != b'%' {
+            let lconv = bytes[read_at];
+            if lconv == b's' || lconv == b'S' {
+                if let Some(p) = read_va_gp(ap) {
+                    if p != 0 {
+                        let s = unsafe {
+                            let mut n = 0usize;
+                            while unsafe { *((p as *const u8).add(n)) } != 0 && n < 4096 {
+                                n += 1;
+                            }
+                            std::slice::from_raw_parts(p as *const u8, n)
+                        };
+                        out.extend_from_slice(s);
+                    } else {
+                        out.extend_from_slice(b"(null)");
+                    }
+                }
+            } else if lconv == b'c' {
+                if let Some(v) = read_va_gp(ap) {
+                    out.push(v as u8);
+                }
+            } else if lconv == b'p' {
+                if let Some(v) = read_va_gp(ap) {
+                    out.extend_from_slice(format!("{v:#x}").as_bytes());
+                }
+            } else if lconv.is_ascii_alphabetic() && matches!(lconv, b'd' | b'i' | b'u' | b'x' | b'X' | b'f' | b'e' | b'g') {
+                // Integer/float: read as u64 (GP). Floats travel in SIMD regs and
+                // aren't in __gr_offs; render ints, and place a marker for floats.
+                if let Some(v) = read_va_gp(ap) {
+                    match lconv {
+                        b'x' | b'X' => out.extend_from_slice(format!("{v:#x}").as_bytes()),
+                        _ if matches!(lconv, b'f' | b'e' | b'g') => out.extend_from_slice(b"<fp>"),
+                        _ => out.extend_from_slice(format!("{v}").as_bytes()),
+                    }
+                }
+            }
+        }
+        i = read_at + 1;
+    }
+    !out.is_empty()
+}
+
+extern "C" fn bionic_vfprintf(
+    stream: u64, fmt: u64, ap: u64,
+    _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let host_file = stream >= 0x100000000 && stream >= 0x300000000 && (stream & 0xf) == 0;
+    if !host_file {
+        let mut vl = Aapcs64VaList {
+            stack: if ap & 7 == 0 { unsafe { std::ptr::read_unaligned(ap as *const u64) } } else { 0 },
+            gr_top: if ap & 7 == 0 { unsafe { std::ptr::read_unaligned((ap + 8) as *const u64) } } else { 0 },
+            _vr_top: if ap & 7 == 0 { unsafe { std::ptr::read_unaligned((ap + 16) as *const u64) } } else { 0 },
+            gr_offs: if ap & 7 == 0 { unsafe { std::ptr::read_unaligned((ap + 24) as *const i32) } } else { 0 },
+            _vr_offs: 0,
+        };
+        let mut out = Vec::with_capacity(128);
+        render_vfprintf(fmt, &mut vl, &mut out);
+        if !out.is_empty() {
+            let _ = unsafe { libc::write(2, out.as_ptr() as *const libc::c_void, out.len()) };
+            if std::env::var_os("JIT_TRACE").is_some() {
+                eprintln!("[shim] vfprintf({}B, stream={stream:#x}) -> fd2: {:?}", out.len(), String::from_utf8_lossy(&out));
+            }
+            return out.len() as u64;
+        }
+        return 0;
+    }
+    // Real host FILE_: forward to glibc vfprintf (va_list ABI differs between the
+    // guest (AAPCS64) and host (SysV, also pointer-based), but a real host FILE_
+    // only reaches here via our own host-driven EGL/GL paths, not the guest's
+    // stdio — keep the passthrough for completeness).
+    type F = unsafe extern "C" fn(*mut libc::c_void, *const libc::c_char, *mut libc::c_void) -> i32;
+    let sym = unsafe { libc::dlsym(libc::RTLD_NEXT, b"vfprintf\0".as_ptr() as *const libc::c_char) };
+    if sym.is_null() {
+        return 0;
+    }
+    let f: F = unsafe { std::mem::transmute(sym) };
+    unsafe { f(stream as *mut libc::c_void, fmt as *const libc::c_char, ap as *mut libc::c_void) as u64 }
+}
 /// Real glibc pthread_create calls the guest start_routine natively (SIGILL).
 /// Interpose: spawn a fresh host thread running the guest start routine through
 /// `jit_run` (per-thread guest stack + TLS), and write its guest tid as the
@@ -657,6 +831,10 @@ pub fn register_shims() -> usize {
         // guest bionic FILE* isn't a host glibc FILE_; divert abort-message
         // writes to fd 2 so a libc++ terminate reason surfaces instead of SIGSEGV
         (b"fwrite\0", bionic_fwrite),
+        // libc++ terminate writes the message body via vfprintf (not fwrite), and
+        // the guest hands it a bionic FILE* + AAPCS64 va_list that glibc can't
+        // read (SIGSEGV). Divert guest streams -> fd 2, decoding the va_list.
+        (b"vfprintf\0", bionic_vfprintf),
         // Android asset manager
         (b"AAssetManager_fromJava\0", aassetmanager_fromjava),
         (b"AAssetManager_open\0", aassetmanager_open),
@@ -965,5 +1143,57 @@ mod tests {
         alooper_pollonce(0, 0, 0, &mut outdata as *mut u64 as u64, 0, 0, 0, 0);
         assert_eq!(outdata, APP_CMD_RESUME as u64, "no registration -> raw app_cmd fallback");
         poll_source_registry().lock().unwrap().clear();
+    }
+
+    /// The AArch64 va_list decoder renders libc++'s terminate message from a
+    /// guest AAPCS64 va_list (all-`%s` args in the GP save area), so a guest
+    /// bionic-FILE* `vfprintf` diverge surfaces the abort reason instead of a
+    /// SIGSEGV. Build a guest-layout va_list: __gr_top points just past the GP
+    /// save area (3 ptr args = 24 bytes), __gr_offs=-24 so the first arg is at
+    /// __gr_top-24; __stack unused. This mirrors what bionic's va_start produces
+    /// for `vfprintf(stream, fmt, a1, a2, a3)` when all args are in registers.
+    #[test]
+    fn vfprintf_va_list_decoder_renders_terminate_message() {
+        // Strings live at guest-ish valid addresses (>= 0x100000000, 8-aligned).
+        let s1 = Box::leak(b"uncaught\0".to_vec().into_boxed_slice());
+        let s2 = Box::leak(b"std::runtime_error\0".to_vec().into_boxed_slice());
+        let s3 = Box::leak(b"Error creating context: eglCreateWindowSurface 300b\0".to_vec().into_boxed_slice());
+        let fmt = Box::leak(b"terminating due to %s exception of type %s: %s\0".to_vec().into_boxed_slice());
+        // GP save area: three 8B pointers in ascending memory; base is 16-aligned.
+        let gpr_area = Box::leak(vec![0u8; 64].into_boxed_slice()).as_mut_ptr() as u64;
+        let base = if gpr_area & 15 == 0 { gpr_area } else { (gpr_area + 8) & !15 };
+        let area = base as *mut u64;
+        unsafe {
+            std::ptr::write_unaligned(area.add(0), s1.as_ptr() as u64);
+            std::ptr::write_unaligned(area.add(1), s2.as_ptr() as u64);
+            std::ptr::write_unaligned(area.add(2), s3.as_ptr() as u64);
+        }
+        // va_list struct: { __stack, __gr_top, __vr_top, __gr_offs(i32), __vr_offs(i32) }.
+        let vl = Box::leak(vec![0u8; 32].into_boxed_slice());
+        let vlp = vl.as_mut_ptr() as *mut u64;
+        unsafe {
+            std::ptr::write_unaligned(vlp, 0); // __stack (unused; all args in GP area)
+            std::ptr::write_unaligned(vlp.add(1), base + 24); // __gr_top = past the 3 args
+            std::ptr::write_unaligned(vlp.add(2), 0); // __vr_top
+            std::ptr::write_unaligned((vlp.add(3)) as *mut i32, -24); // __gr_offs = -(3*8)
+            std::ptr::write_unaligned((vlp.add(3) as *mut u8).add(4) as *mut i32, 0); // __vr_offs
+        }
+        let mut ap = Aapcs64VaList {
+            stack: 0,
+            gr_top: base + 24,
+            _vr_top: 0,
+            gr_offs: -24,
+            _vr_offs: 0,
+        };
+        let mut out = Vec::new();
+        let rendered = render_vfprintf(fmt.as_ptr() as u64, &mut ap, &mut out);
+        assert!(rendered, "decoder produced output");
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("terminating due to uncaught exception of type std::runtime_error: Error creating context: eglCreateWindowSurface 300b"),
+            "decoded message: {s:?}"
+        );
+        // No dangling bytes beyond the last '=' string (the earlier over-read guard).
+        assert!(!s.ends_with('\u{10}'), "no stray trailing byte: {s:?}");
     }
 }

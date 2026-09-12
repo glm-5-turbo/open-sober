@@ -52,6 +52,41 @@ either (a) feeding render-init a complete coherent EGL context/native-window, or
 the state render-init derefs — the SH14/SH7/N/P framework-emulation path. The
 glorious part: the real binary's EGL path is now **executing**, not just gated.
 
+## SH16 additions (2026-09-12) — the abort reason now SURFACES + render-init reaches eglCreateWindowSurface with a FAILED window
+
+Two findings closed this cycle (workspace still green, test total 470 → **470/0**):
+
+1. **The terminate reason was masked by a SECOND unshimmed print.** The libc++ terminate
+   handler writes its body with **`vfprintf`** — not just `fwrite` (which SH15 shimmed).
+   The guest hands glibc's `vfprintf` its bionic `FILE*` (=0x130 stderr) + an AAPCS64
+   `va_list`; glibc derefs it as a host `FILE_`/host va_list → SIGSEGV before ANY text
+   of the real exception showed. New **`vfprintf` shim** (`bionic_vfprintf`) diverts
+   guest/bionic streams to fd 2, decoding the AArch64 va_list (`__stack/__gr_top/
+   __gr_offs`). Now the reason is fully visible:
+   ```
+   libc++abi: terminating due to uncaught exception of type std::runtime_error:
+   Error creating context: eglCreateWindowSurface ...
+   ```
+   Regression `vfprintf_va_list_decoder_renders_terminate_message` pins the decoder.
+
+2. **The real binary's render-init now reaches `eglCreateWindowSurface`** (the SH14
+   gateway) when the run wires a real window: run under `JIT_DRIVE_LIFECYCLE=1`
+   (which calls `wire_real_window` → sets DISPLAY/EGL_PLATFORM=x11 → XID 0x200000):
+   ```
+   ANativeWindow_fromSurface -> ANativeWindow_acquire -> eglGetDisplay
+     -> eglInitialize -> eglChooseConfig(x3) -> eglCreateContext -> eglCreateWindowSurface
+   ```
+   Which then FAILS: the call lands with `x2=0x0` (native window arg NULL) because the
+   the render-init's context reads its native window from the framework-built context
+   object (`[ctx+24]`) which the isolated-thread harness cannot populate (x0 is a bare
+   scratch buffer; passing the live `*0x1067d16f0` corrupts it since render-init's
+   prologue stores INTO *x0). eglCreateWindowSurface returns NULL → runtime_error →
+   terminate — now VISIBLE instead of a silent SIGSEGV. With NO window wired the abort
+   is the eglInitialize error; WITH the window the rund goes one full EGL stage farther
+   to the surface. The exact next lever is supplying a coherent native window handle in
+   the render-init's context — through the ALooper/framework path or by seeding the
+   guest window global render-init reads.
+
 ## Repro
 ```bash
 cargo build -p arm64jit --example elfjit
