@@ -782,8 +782,15 @@ fn real_libc_pthread(name: &[u8]) -> Option<*mut libc::c_void> {
     Some(unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) })
 }
 
-/// Normalize a candidate bionic-layout pthread_mutex_t in place to glibc layout:
-/// clear the robust/high kind bits at offset 16 and a stray __owner at offset 8.
+/// Normalize a candidate pthread_mutex_t in place to a form glibc can lock:
+/// clear the robust/high kind bits at offset 16. It MUST leave offset 8 alone:
+/// that is glibc's `__owner` (the owning host TID) on the glibc pthread_mutex_t
+/// layout, and a TID is typically > 0x10000 — zeroing it on a LIVE recursive
+/// mutex makes glibc see `__owner==0 != self` on the next same-thread re-lock,
+/// so the owner futex-blocks on its OWN mutex (the GameActivity 0x6edae60 wall:
+/// __owner=0x0 while __count=1, both threads parked at pthread_mutex_lock).
+/// Bionic stores owner_tid at offset 4 (not 8), so offset 8 is never a bionic
+/// recursion/owner leak worth clearing on either ABI.
 ///
 /// # Safety
 /// `m` must be a non-null, writable pointer to at least 20 bytes (the mutex).
@@ -793,10 +800,6 @@ unsafe fn sanitize_mutex(m: *mut u8) {
     }
     let kind = core::ptr::read_unaligned(m.add(16) as *const i32);
     core::ptr::write_unaligned(m.add(16) as *mut i32, kind & 3);
-    let cnt = core::ptr::read_unaligned(m.add(8) as *const i32);
-    if cnt > 0x0001_0000 || cnt < 0 {
-        core::ptr::write_unaligned(m.add(8) as *mut i32, 0);
-    }
 }
 
 type MutexLockFn = unsafe extern "C" fn(*mut u8) -> i32;
@@ -1537,21 +1540,28 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_mutex_clears_bionic_kind_and_bogus_owner() {
-        // Simulate a bionic-layout pthread_mutex_t that glibc would misread:
-        // __kind (offset 16) = 0x10 (BIONIC ROBUST_NORMAL), __count (offset 8)
-        // = 0x7fff1234 (a stray bionic owner leaking into glibc's recursive
-        // count), which glibc's pthread_mutex_lock sees as already-held/reentrant.
+    fn sanitize_mutex_clears_kind_but_preserves_glibc_owner() {
+        // glibc pthread_mutex_t: __lock@0, __count@4, __owner@8 (host TID),
+        // __kind@16. sanitize must mask the robust/high kind bits at 16 (so
+        // glibc locks a NORMAL/RECURSIVE mutex it understands) but MUST NOT
+        // touch __owner at offset 8 — a real owner TID (e.g. 3392123) is
+        // > 0x10000 and is the field glibc checks to allow a recursive
+        // same-thread re-lock. Zeroing it made a held recursive mutex look
+        // unowned, so the owner futex-blocked on its own lock (0x6edae60 wall).
         let mut m = [0u8; 24];
-        m[16..20].copy_from_slice(&0x10u32.to_le_bytes());
-        m[8..12].copy_from_slice(&0x7fff_1234u32.to_le_bytes());
+        m[16..20].copy_from_slice(&0x10u32.to_le_bytes()); // robust kind bit
+        let owner_tid = 3392123u32; // a plausible glibc __owner (> 0x10000)
+        m[8..12].copy_from_slice(&owner_tid.to_le_bytes());
 
         unsafe { super::sanitize_mutex(m.as_mut_ptr()) };
 
         let kind = u32::from_le_bytes(m[16..20].try_into().unwrap());
-        let cnt = u32::from_le_bytes(m[8..12].try_into().unwrap());
+        let owner = u32::from_le_bytes(m[8..12].try_into().unwrap());
         assert_eq!(kind & 3, kind, "kind high bits cleared (kind=0x{kind:x})");
-        assert_eq!(cnt, 0, "bogus owner/count cleared at offset 8");
+        assert_eq!(
+            owner, owner_tid,
+            "glibc __owner at offset 8 MUST survive sanitize (recursive re-lock depends on it)"
+        );
     }
 
     /// Real Mesa EGL must be resolvable as an integer-ABI host call, and a guest
