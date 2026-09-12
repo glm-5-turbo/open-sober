@@ -280,6 +280,21 @@ impl CodeBuf {
         self.b(modrm(3, dst & 7, src & 7));
     }
 
+    /// PCLMULQDQ dst, src, imm — carry-less (polynomial) multiply of a selectable
+    /// 64-bit half of dst and src -> 128-bit result (66 0F 3A 44 /r ib). imm bits
+    /// 1:0 select the src dst half, bits 5:4 the src src half (0=low 64, 1=high 64).
+    pub fn pclmulq(&mut self, dst: u8, src: u8, imm: u8) {
+        self.b(0x66);
+        if dst >= 8 || src >= 8 {
+            self.b(rex(false, dst, 0, src));
+        }
+        self.b(0x0F);
+        self.b(0x3A);
+        self.b(0x44);
+        self.b(modrm(3, dst & 7, src & 7));
+        self.b(imm);
+    }
+
     /// Set xmm register to all-ones (128 bits): pxor x,x + pcmpeqd x,x (66 0F 76 /r).
     pub fn movdqu_ones(&mut self, xmm: u8) {
         // pxor xmm, xmm

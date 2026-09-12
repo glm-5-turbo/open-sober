@@ -7759,6 +7759,27 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn pmull1q_exec() {
+        // pmull v0.1q,v1.1d,v2.1d = 0x0ee2e020 : 64x64 carry-less multiply of the
+        // low 64-bit lanes of v1 and v2. clmul(0b101=5, 0b011=3) = x^2*(x+1)=x^3+x^2
+        // = 0b1100 = 12. Register r's low 64 = st.v[2r], high = st.v[2r+1].
+        let mut st = CpuState::new();
+        st.v[2] = 5;  // v1 low
+        st.v[4] = 3;  // v2 low
+        exec_bytes(&mut st, &[0x20, 0xe0, 0xe2, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.v[0], 15, "clmul(5,3): (x^2+1)(x+1)=x^3+x^2+x+1=0b1111=15");
+        assert_eq!(st.v[1], 0, "clmul 64x64 result fits in 4 bits, high zero");
+        // pmull2 v4.1q,v5.2d,v6.2d = 0x4ee6e0a4 uses the HIGH 64-bit lanes:
+        // v5 high (st.v[11]) = 2^63, v6 high (st.v[13]) = 1. clmul(2^63,1)=2^63.
+        let mut st2 = CpuState::new();
+        st2.v[11] = 0x8000_0000_0000_0000u64; // v5 high = 2^63
+        st2.v[13] = 1;                        // v6 high = 1
+        exec_bytes(&mut st2, &[0xa4, 0xe0, 0xe6, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st2.v[8], 0x8000_0000_0000_0000u64, "clmul(2^63,1)=2^63 lands at bit 63 -> low u64");
+        assert_eq!(st2.v[9], 0, "high u64 of result zero");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

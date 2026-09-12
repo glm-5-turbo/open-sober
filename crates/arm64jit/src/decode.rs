@@ -450,6 +450,12 @@ pub enum Inst {
     SimdAdalp { rd: u8, rn: u8, src_esize: u8, n_pairs: u8, signed: bool, upper: bool, acc: bool },
     // ---- SIMD saturating add/sub: sqadd/uqadd/sqsub/uqsub Vd.T, Vn, Vm ----
     SimdSatAdd { rd: u8, rn: u8, rm: u8, esize: u8, sub: bool, unsigned: bool, q: bool },
+    // ---- SIMD polynomial multiply-long / long-extended: pmull/pmull2 Vd.1Q, Vn.1D, Vm.1D ----
+    // Carry-less 64x64 -> 128 (matches x86 PCLMULQDQ imm=0 after placing the
+    // selected 64-bit half in the low lane). q=bit30 distinguishes pmull(0, even
+    // D element 0 in Vn.2D) vs pmull2(1, uses element 1 = high 64). size bits
+    // 23:22 must be 0b11 (.1q); the .8h/.4s byte variants are left for later.
+    Pmull1q { rd: u8, rn: u8, rm: u8, hi: bool },
     // ---- scalar FP multiply / negate-multiply: fmul/fnmul Sd/Dd, Sn, Sm ----
     FmulScalar { rd: u8, rn: u8, rm: u8, double: bool, neg: bool },
     // ---- SIMD signed/unsigned integer min/max: smin/smax/umin/umax Vd.T, Vn, Vm ----
@@ -2188,7 +2194,21 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         };
     }
 
-    // ---- SIMD FP reciprocal/rsqrt estimate: frecpe/frsqrte Vd.T, Vn.T ----
+    // ---- SIMD polynomial multiply-long: pmull/pmull2 Vd.1Q, Vn.1D, Vm.1D ----
+    // Carry-less 64x64 -> 128 (x86 PCLMULQDQ). 3-same: byte0 0x0e/4e, byte2
+    // (bits15:8)==0xe0, byte1 top-nibble==0xe (bits23:20 = 0b1110 => size=0b11
+    // .1q + bit21 CLEAR; .8h uses byte1 0x22, excluded). q=bit30 picks pmull2.
+    // U=bit29 must be CLEAR (0x0e/0x4e prefix both clear it); 0x6e (U set) excluded.
+    if ((insn & 0xff00_fc00) == 0x0e00_e000 || (insn & 0xff00_fc00) == 0x4e00_e000)
+        && (insn >> 20 & 0xf) == 0xe
+    {
+        return Inst::Pmull1q {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            hi: (insn & 0x4000_0000) != 0,
+        };
+    }
     // Per-lane approximate reciprocal (frecpe) or 1/sqrt (frsqrte), two-reg-misc.
     // Gate: byte3 low-nibble 0x0e (0x..e prefix), byte1 == 0xd8 family (0xfc mask
     // clears the rn-spill bits 1:0), byte2 bit23 SET (0x0080_0000; disjoint from
@@ -7485,6 +7505,25 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x2e220c20), Inst::SimdAbd { .. }));
         assert!(!matches!(decode_op(0x0e220420), Inst::SimdAbd { .. }));
         assert!(!matches!(decode_op(0x4ea1d801), Inst::SimdAbd { .. }));
+        // SIMD polynomial multiply-long: pmull v0.1q,v1.1d,v2.1d = 0x0ee2e020
+        // (hi=false), pmull2 v4.1q,v5.2d,v6.2d = 0x4ee6e0a4 (hi=true), and the
+        // real hits pmull2 v2.1q,v0,v2 = 0x4ee2e002 / v5 = 0x4ee5e065.
+        assert!(matches!(decode_op(0x0ee2e020),
+            Inst::Pmull1q { rd: 0, rn: 1, rm: 2, hi: false }),
+            "got {:?}", decode_op(0x0ee2e020));
+        assert!(matches!(decode_op(0x4ee6e0a4),
+            Inst::Pmull1q { rd: 4, rn: 5, rm: 6, hi: true }));
+        assert!(matches!(decode_op(0x4ee2e002),
+            Inst::Pmull1q { rd: 2, rn: 0, rm: 2, hi: true }),
+            "got {:?}", decode_op(0x4ee2e002));
+        assert!(matches!(decode_op(0x4ee5e065),
+            Inst::Pmull1q { rd: 5, rn: 3, rm: 5, hi: true }));
+        // negatives must NOT match: pmull .8h (0x0e22e020, byte1 0x22), smull
+        // (0x4e629400), pmul (0x0e209c00), fmul 2d (0x4ee1dc00).
+        assert!(!matches!(decode_op(0x0e22e020), Inst::Pmull1q { .. }), "pmull .8h must stay unsupported");
+        assert!(!matches!(decode_op(0x4e629400), Inst::Pmull1q { .. }));
+        assert!(!matches!(decode_op(0x0e209c00), Inst::Pmull1q { .. }));
+        assert!(!matches!(decode_op(0x4ee1dc00), Inst::Pmull1q { .. }));
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),

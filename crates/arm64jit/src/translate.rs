@@ -3408,6 +3408,23 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::Pmull1q { rd, rn, rm, hi } => {
+            // pmull/pmull2 Vd.1Q, Vn.1D, Vm.1D : 64x64 carry-less (polynomial)
+            // multiply -> 128-bit. x86 PCLMULQDQ with imm=0 (low64 x low64),
+            // loading the selected 64-bit half of Vn/Vm into the low lane first.
+            // pmull (hi=false): element 0 (bytes 0..7); pmull2 (hi=true): element
+            // 1 (bytes 8..15). Result (128b) is stored to Vd's 16-byte slot.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let n_off = slot(rn) + if hi { 8 } else { 0 };
+            let m_off = slot(rm) + if hi { 8 } else { 0 };
+            let d_off = slot(rd);
+            // xmm0 = low64 of selected itmem of Vn, high64 zeroed (movq_load zeroes).
+            buf.movq_load(0, RBX, n_off);
+            buf.movq_load(1, RBX, m_off);
+            buf.pclmulq(0, 1, 0x00); // xmm0 = clmul(xmm0.low64, xmm1.low64)
+            buf.movdqu_store(RBX, d_off, 0); // 128-bit result to Vd
+            Ok(())
+        }
         Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
         Inst::SimdDupD { rd, rn, index } => {
             // dup Vd.2D, Vn.D[index]: broadcast the selected 64-bit lane of Vn
