@@ -1,5 +1,37 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH20) — resolve_gles_int/resolve_egl now accept trailing-NUL names: ALL 8 of the engine's GLES dispatch slots resolve through the bridge (was 2). Workspace 471/0; HEAD 78eca29.
+
+Built on SH19's --renderframe-seedgles. The 6 int-ABI slots (glClear, glViewport,
+glColorMask, glDepthMask, glStencilMask, glClearStencil) printed "NOT resolvable"
+even though whitelisted — root cause: resolve_gles_int built its CString
+cache-key from the RAW name, so a NUL-terminated caller (elfjit's seedgles
+`format!("{name}\0")`, a guest eglGetProcAddress C-string) always got None.
+resolve_gles_mixed strips the NUL first and worked (that's why slots 0/2 float
+seeded in SH19); the int resolver did not. Same latent bug in resolve_egl. Fix =
+build the key from the NUL-stripped name in both; regression
+`resolve_gles_int_accepts_trailing_nul_like_mixed` pins all 8 names with a
+trailing NUL.
+
+**Real-binary proof (runs/sh20-seedgles-all-slots-ok.txt):** the engine's own
+frame-fn 0x105b32c00 now dispatches its ENTIRE clear path through the bridge
+(all 8 slots <- bridge slots, incl. the int-ABI glClear/glViewport/glColorMask/
+glDepthMask/glStencilMask/glClearStencil that were raw/garbage before) — frame-fn
+returns Ok, post-frame swap Ok(0x1), exit 124 stable, no heap abort.
+
+**Un-skipped a dead gate:** resolve_gles_mixed_float_and_stack_abi_execute_real_mesa
+silently SKIPPED its whole body for its entire life (every NUL resolve_egl ->
+None -> `else return`). It now genuinely runs a surfaceless EGL->ES3->GLES chain
+through the JIT bridges and passes, exposing+fixing 3 latent harness bugs: (1)
+eglChooseConfig/eglCreateContext attrib arrays must be i32 (EGLint*), not u64;
+(2) surfaceless needs a bound pbuffer surface (not EGL_NO_SURFACE) for a
+queryable buffer; (3) Mesa surfaceless llvmpipe GL_INVALID_ENUM on
+glGetFloatv(GL_COLOR_CLEAR_VALUE) — replaced the state-query with a real
+glClear+glReadPixels check (float-bridge color renders [132,65,189,255] px).
+
+Doc: docs/frontier-sh20-gles-nul-resolver.md. Baselines unchanged (--jni exit 0;
+stable idle exit 124).
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH19b) — the engine's OWN frame-fn 0x105b32c00 now RETURNS Ok THROUGH the GLES bridge. Workspace 470/0; HEAD 5c72e22.
 
 SH19 pinned the frame-fn wall: it dispatches through 8 GL function-pointer slots

@@ -1,0 +1,48 @@
+SH20 seedgles — all 8 engine GLES dispatch slots now resolve through the bridge.
+Command (real Roblox v2.738.1397, headless llvmpipe+Xvfb on this GPU-less VPS):
+
+  cd /home/hermes-worker/runs/open-sober
+  timeout 100 env JIT_DRIVE_LIFECYCLE=1 ./target/debug/examples/elfjit \
+    ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 \
+    --jni --startapp 0x258b144 --kicker 0x106863af8 \
+    --renderinit 0x105b3a280 --renderthunk \
+    --renderframe 0x105b3b408 --renderframe-drive --renderframe-seedgles
+  exit 124 (stable to harness timeout; NO crash / NO heap abort)
+
+Key result — BEFORE (SH19) vs AFTER (SH20) slot seeding:
+
+  slot  name            SH19                          SH20
+  0    glClearColor    <- bridge 0x7f0000018050       <- bridge 0x7f0000018050  (unchanged)
+  1    glClear         NOT resolvable                 <- bridge 0x7f00000029c0   [NEW]
+  2    glClearDepthf   <- bridge 0x7f0000018058       <- bridge 0x7f0000018058  (unchanged)
+  3    glClearStencil  NOT resolvable                 <- bridge 0x7f00000029b8   [NEW]
+  4    glColorMask     NOT resolvable                 <- bridge 0x7f0000002978   [NEW]
+  5    glDepthMask     NOT resolvable                 <- bridge 0x7f0000002998   [NEW]
+  6    glStencilMask   NOT resolvable                 <- bridge 0x7f00000029b0   [NEW]
+  7    glViewport      NOT resolvable                 <- bridge 0x7f0000002918   [NEW]
+
+Outcome:
+  [elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok(0x7f1ee1d9d9c0)
+  [elfjit:renderframe-drive] post-frame swap returned Ok(0x1) (eglSwapBuffers)
+  exit=124 (stable)
+
+Why the 6 int-ABI slots resolved now (the SH20 fix): resolve_gles_int built its
+CString cache-key from the RAW name (with a trailing NUL), so elfjit's
+--renderframe-seedgles (which passes format!("{name}\0")) always got None even
+for whitelisted int-ABI names (glClear/glViewport/glColorMask/glDepthMask/
+glStencilMask/glClearStencil) that Mesa exports. resolve_gles_mixed strips the
+NUL first and worked (that's why slots 0/2 resolved), the int resolver did not.
+Fixed resolve_gles_int (and the identical latent bug in resolve_egl) to build the
+key from the NUL-stripped name. Regression test pins the 8 names resolve with a
+trailing NUL. Workspace 471/0 (was 470).
+
+Un-skipped graphics gate (SH20): resolve_gles_mixed_float_and_stack_abi_
+execute_real_mesa formerly silently SKIPPED its whole EGL/GLES body because
+every NUL-terminated resolve_egl call returned None -> `else return`. Now it
+runs a real surfaceless EGL->GLES chain through the JIT bridges and passes,
+including a float-bridge glClearColor -> glReadPixels real-pixel check. That
+exposed and fixed 3 latent harness bugs: (1) eglChooseConfig/eglCreateContext
+attrib arrays must be i32 (EGLint*), not u64; (2) surfaceless needs a bound
+pbuffer surface (not EGL_NO_SURFACE) for a queryable draw buffer; (3) Mesa surfaceless
+llvmpipe reports GL_INVALID_ENUM for glGetFloatv(GL_COLOR_CLEAR_VALUE), so the
+state-query form was replaced with glClear+glReadPixels pixel verification.
