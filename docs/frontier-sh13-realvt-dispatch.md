@@ -49,3 +49,18 @@ pthread/JNI/mem, zero GLES). The next lever is to find/construct a node whose
 `[node+32]` (the dispatcher arg 2) or dispatch index reaches a render/tick
 handler in that obfuscated table — or supply the task-maintenance path real
 framework state so it proceeds to render.
+
+## SH13b (same cycle) — `--deque-arg2 <hex>` sweep is a NEGATIVE
+Added an elfjit `--deque-arg2 <hex>` override for the injected node's
+`[node+32]` (becomes dispatch arg2 = `[node+32]&~1`, the controllable node-content
+selector). Swept 1/2/3/4/8/0x100 against the real vtable (0x106829f00):
+- All values stable (exit 124, no crash).
+- Block-cache count is NOISY run-to-run (434..2212 — depends on whether injection
+  lands inside a large init window, not on arg2); the deeper-2212 observation for
+  arg2=1 did not reproduce, so it is NOT a discriminator.
+- Hostcall histogram identical across all values (syscall + pthread/JNI/mem, zero
+  egl/gl). The obfuscated render table is not reachable via arg2 sweep alone.
+Takeaway for the next session: `[node+32]` does not select a render handler;
+the engine's render dispatch lives behind its runtime-built BSS vtable graph and
+obfuscated hash-table internals (mul-high at 0x102853a04..9b4), not a linear
+arg2 index. Do not re-run the arg2 sweep.
