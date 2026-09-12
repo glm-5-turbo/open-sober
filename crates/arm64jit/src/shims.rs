@@ -147,12 +147,74 @@ extern "C" fn aconfig_get_navhidden(
     2 // ACONFIGURATION_KEYSHIDDEN_YES = 2
 }
 
-// ---- ALooper ----
+// ---- ALooper + Android app-command dispatch ----
+// GameActivity's post-barrier main loop drives lifecycle by polling the native
+// app-command queue (`ALooper_pollOnce`). The old shim returned 0 immediately
+// (ALOOPER_POLL_TIMEOUT) with no event channel, so even a boot that crossed the
+// recursive-mutex rendezvous would busy-spin the loop rather than dispatch
+// APP_CMD_START/RESUME/INIT_WINDOW. This implements a real, host-feedable
+// app-command FIFO: `post_app_command` (host side, e.g. elfjit under
+// JIT_DRIVE_LIFECYCLE) pushes lifecycle events, and ALooper_pollOnce drains them
+// into the guest's outFd/outEvents/outData slots, returning the ident like the
+// real android_native_app_glue. APP_CMD_* values are the standard Android ones
+// (native_activity.h): START=1, RESUME=2, PAUSE=3, STOP=4, WINDOW_RESIZED=5,
+// CONFIGURATION_CHANGED=6, WINDOW_REDRAW_NEEDED=7, GAINED_FOCUS=8,
+// LOST_FOCUS=9, INIT_WINDOW=11.
+pub const APP_CMD_START: i32 = 1;
+pub const APP_CMD_RESUME: i32 = 2;
+pub const APP_CMD_INIT_WINDOW: i32 = 11;
+pub const ALOOPER_POLL_CALLBACK: i32 = -2; // a callback was invoked
+pub const ALOOPER_POLL_TIMEOUT: i32 = -3; // nothing ready before timeout
+
+/// Process-wide FIFO of pending `APP_CMD_*` values (host -> guest).
+fn app_cmd_queue() -> &'static Mutex<std::collections::VecDeque<i32>> {
+    static Q: OnceLock<Mutex<std::collections::VecDeque<i32>>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Host side: queue an Android app command for the next `ALooper_pollOnce`.
+pub fn post_app_command(cmd: i32) {
+    app_cmd_queue().lock().unwrap().push_back(cmd);
+}
+
+/// ALooper_pollOnce(timeoutMillis, outFd*, outEvents*, outData*).
+///
+/// Drains one pending app command into the guest's out slots and returns the
+/// command's synthetic looper ident (a small non-negative fd-like value), so the
+/// guest's `while ((ident = ALooper_pollOnce(...)) >= 0)` loop dispatches it.
+/// When the queue is empty it returns ALOOPER_POLL_TIMEOUT immediately (never
+/// blocks/hangs the guest on an fd we never signal). Under JIT_DRIVE_LIFECYCLE a
+/// host feed drives the queue concurrently.
 extern "C" fn alooper_pollonce(
-    _timeout: u64, _outfd: u64, _outevents: u64, _outdata: u64, _a4: u64, _a5: u64, _a6: u64,
+    _timeout: u64, outfd: u64, outevents: u64, outdata: u64, _a4: u64, _a5: u64, _a6: u64,
     _a7: u64,
 ) -> u64 {
-    0 // ALOOPER_POLL_TIMEOUT: no real event yet, don't block or error
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[alooper] ALooper_pollOnce (queue={})", app_cmd_queue().lock().unwrap().len());
+    }
+    let Some(cmd) = app_cmd_queue().lock().unwrap().pop_front() else {
+        // Nothing to dispatch: report a benign timeout so the game loop checks
+        // destroyRequested/lifecycle and re-polls rather than erroring out.
+        return ALOOPER_POLL_TIMEOUT as u32 as u64;
+    };
+    // Android app-glue convention: outFd = the command pipe's read end (a small
+    // fd-like token), outEvents = ALOOPER_EVENT_INPUT (1) meaning readable, and
+    // outData = a pointer-sized app-command token the guest decodes. We encode
+    // the APP_CMD_* value in outData so a guest that reads it (android_app_read_cmd)
+    // sees the lifecycle event even though we don't host a real pipe.
+    if outfd != 0 {
+        unsafe { std::ptr::write(outfd as *mut i32, 0x23 /* synthetic readable fd */) };
+    }
+    if outevents != 0 {
+        unsafe { std::ptr::write(outevents as *mut i32, 1 /* ALOOPER_EVENT_INPUT */) };
+    }
+    if outdata != 0 {
+        unsafe { std::ptr::write(outdata as *mut u64, cmd as u64) };
+    }
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[alooper] ALooper_pollOnce -> app_cmd={cmd} (APP_CMD dispatch)");
+    }
+    cmd as u64
 }
 
 // ---- ANativeWindow ----
@@ -163,6 +225,59 @@ extern "C" fn anativewindow_fromsurface(
 }
 extern "C" fn anativewindow_release(
     _win: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+// ANativeWindow_getWidth/getHeight: report a tablet-ish framebuffer so Roblox's
+// ANativeWindow query on its (non-null stub) surface returns a sane size instead
+// of 0 (which some engines treat as a headless/error path).
+extern "C" fn anativewindow_getwidth(
+    _win: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    1280
+}
+extern "C" fn anativewindow_getheight(
+    _win: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    720
+}
+// ALooper_prepare / ALooper_forThread: return a stable non-null looper handle so
+// GameActivity's `ALooper_forThread()` in its main loop gets a real object it can
+// pass to ALooper_pollOnce (rather than NULL, which would take a crash path).
+// acquire/release are no-ops; addFd/removeFd return 0 (nothing was registered)
+// because our pollOnce doesn't watch real fds — lifecycle comes through the
+// app-command queue instead.
+extern "C" fn alooper_prepare(
+    _a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    crate::jit::HOST_THUNK_BASE | 0x2001
+}
+extern "C" fn alooper_forthread(
+    _a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    crate::jit::HOST_THUNK_BASE | 0x2001
+}
+// ALOOPER_POLL_CALLBACK convention: ALooper_addFd returns 1 on success (registered
+// for callbacks). We register nothing but still indicate success; pollOnce uses
+// the queue, so the fd is never actually polled.
+extern "C" fn alooper_addfd(
+    _looper: u64, _fd: u64, _iden: u64, _events: u64, _cb: u64, _data: u64,
+    _a6: u64, _a7: u64,
+) -> u64 {
+    1
+}
+extern "C" fn alooper_removefd(
+    _looper: u64, _fd: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+extern "C" fn alooper_acquire(
+    _looper: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    0
+}
+extern "C" fn alooper_release(
+    _looper: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
     0
 }
@@ -347,11 +462,19 @@ pub fn register_shims() -> usize {
         (b"AConfiguration_getScreenHeightDp\0", aconfig_get_screenheightdp),
         (b"AConfiguration_getScreenSize\0", aconfig_get_screensize),
         (b"AConfiguration_getNavHidden\0", aconfig_get_navhidden),
-        // Android looper
+        // Android looper (app-command dispatch + lifecycle handle)
         (b"ALooper_pollOnce\0", alooper_pollonce),
+        (b"ALooper_prepare\0", alooper_prepare),
+        (b"ALooper_forThread\0", alooper_forthread),
+        (b"ALooper_addFd\0", alooper_addfd),
+        (b"ALooper_removeFd\0", alooper_removefd),
+        (b"ALooper_acquire\0", alooper_acquire),
+        (b"ALooper_release\0", alooper_release),
         // Android native window
         (b"ANativeWindow_fromSurface\0", anativewindow_fromsurface),
         (b"ANativeWindow_release\0", anativewindow_release),
+        (b"ANativeWindow_getWidth\0", anativewindow_getwidth),
+        (b"ANativeWindow_getHeight\0", anativewindow_getheight),
         // Roblox JNI purchase gateway
         (
             b"Java_com_roblox_client_purchase_IAPPurchaseManager_nativeFinishPaymentsProtocolPurchaseWithReturn\0",
@@ -480,5 +603,50 @@ mod tests {
                 "{name:?} bound to a real host thunk"
             );
         }
+    }
+
+    /// The ALooper app-command dispatch: post_app_command feeds the guest a
+    /// lifecycle event that ALooper_pollOnce drains into its outFd/outEvents/
+    /// outData slots and returns as the looper ident — the mechanism that lets a
+    /// GameActivity main loop dispatch APP_CMD_* instead of busy-spinning on a
+    /// never-signalled fd. Regression: empty queue returns ALOOPER_POLL_TIMEOUT;
+    /// a posted command is returned exactly once and written to outData.
+    #[test]
+    fn alooper_pollonce_dispatches_host_fed_app_commands() {
+        // Empty queue -> timeout (-3), nothing written.
+        let mut fd = 0i32;
+        let mut ev = 0i32;
+        let mut data = 0u64;
+        let r = alooper_pollonce(
+            0, &mut fd as *mut i32 as u64, &mut ev as *mut i32 as u64,
+            &mut data as *mut u64 as u64, 0, 0, 0, 0,
+        );
+        assert_eq!(r, ALOOPER_POLL_TIMEOUT as u32 as u64);
+
+        // Post START, then RESUME; each poll drains one exactly-once.
+        post_app_command(APP_CMD_START);
+        post_app_command(APP_CMD_RESUME);
+        let r1 = alooper_pollonce(
+            0, &mut fd as *mut i32 as u64, &mut ev as *mut i32 as u64,
+            &mut data as *mut u64 as u64, 0, 0, 0, 0,
+        );
+        assert_eq!(r1, APP_CMD_START as u64, "ident == posted command");
+        assert_eq!(data, APP_CMD_START as u64, "outData carries the app command");
+        assert_eq!(ev, 1, "ALOOPER_EVENT_INPUT");
+        assert_eq!(fd, 0x23, "synthetic readable fd");
+
+        let r2 = alooper_pollonce(
+            0, &mut fd as *mut i32 as u64, &mut ev as *mut i32 as u64,
+            &mut data as *mut u64 as u64, 0, 0, 0, 0,
+        );
+        assert_eq!(r2, APP_CMD_RESUME as u64);
+        assert_eq!(data, APP_CMD_RESUME as u64);
+
+        // Queue now drained -> timeout again.
+        let r3 = alooper_pollonce(
+            0, &mut fd as *mut i32 as u64, &mut ev as *mut i32 as u64,
+            &mut data as *mut u64 as u64, 0, 0, 0, 0,
+        );
+        assert_eq!(r3, ALOOPER_POLL_TIMEOUT as u32 as u64);
     }
 }

@@ -141,6 +141,17 @@ unsafe fn install_fault_debug() {
     }
 }
 
+/// How a single `--kicker` drives its target guest global.
+#[derive(Clone, Copy)]
+enum KickerMode {
+    /// `pthread_cond_broadcast` the address every tick.
+    Broadcast,
+    /// Write an exact u64 value every tick (`--kicker 0xADDR=0xVAL`).
+    Fixed(u64),
+    /// Historical lifecycle pulse: write 1 through the first gate, then 2.
+    Pulse,
+}
+
 fn main() {
     unsafe {
         install_fault_debug();
@@ -516,7 +527,8 @@ fn main() {
         // thread that writes the value to that guest global repeatedly WHILE
         // jit_run is parked, to test whether releasing the awaited predicate
         // lets StartApp proceed past the rendezvous toward the looper.
-        let mut kickers: Vec<(u64, bool)> = Vec::new();
+        // Host-side lifecycle kicker (experimental): the engine owner parks
+        let mut kickers: Vec<(u64, KickerMode)> = Vec::new();
         let args: Vec<String> = std::env::args().collect();
         let mut i = 0;
         while i < args.len() {
@@ -530,34 +542,80 @@ fn main() {
                 };
                 let (addr_s, val_s) = spec.split_once('=').unwrap_or((spec.trim_start_matches("0x"), "1"));
                 let addr = u64::from_str_radix(addr_s.trim_start_matches("0x"), 16).expect("bad kicker addr");
-                let is_bcast = val_s.trim_start_matches("0x").to_ascii_lowercase() == "bcast";
-                kickers.push((addr, is_bcast));
+                let val_l = val_s.trim_start_matches("0x").to_ascii_lowercase();
+                // `=bcast` broadcasts the pthread_cond at that address; `=0xVAL`
+                // writes the exact u64 value repeatedly; a bare `--kicker ADDR`
+                // (no explicit `=`) keeps the historical 1->2 lifecycle pulse.
+                let mode = if val_l == "bcast" {
+                    KickerMode::Broadcast
+                } else if spec.contains('=') {
+                    let v = u64::from_str_radix(val_s.trim_start_matches("0x"), 16).expect("bad kicker val");
+                    KickerMode::Fixed(v)
+                } else {
+                    KickerMode::Pulse
+                };
+                kickers.push((addr, mode));
             }
             i += 1;
         }
-        for (addr, is_bcast) in kickers {
+        for (addr, mode) in kickers {
             std::thread::spawn(move || {
-                eprintln!("[elfjit:kicker] host thread drives 0x{addr:x} ({})", if is_bcast { "pthread_cond_broadcast" } else { "=value" });
+                let what = match mode {
+                    KickerMode::Broadcast => "pthread_cond_broadcast".to_string(),
+                    KickerMode::Fixed(v) => format!("write 0x{v:x}"),
+                    KickerMode::Pulse => "pulse 1->2".to_string(),
+                };
+                eprintln!("[elfjit:kicker] host thread drives 0x{addr:x} ({what})");
                 let bc: unsafe extern "C" fn(*const u8) -> i32 = unsafe {
                     std::mem::transmute(libc::dlsym(libc::RTLD_NEXT, c"pthread_cond_broadcast".as_ptr()))
                 };
                 for it in 0..400 {
                     unsafe {
-                        if is_bcast {
-                            bc(addr as *const u8);
-                        } else {
-                            // PULSE: hold 1 through the first gate (init poll wants *pred==1),
-                            // then set 2 — the wait loops while *pred==1 (cd7c
-                            // b.eq) and proceeds only when *pred !=1 and !=0
-                            // (cd84 cbz-on-zero); 2 is the terminal "done" state.
-                            let v = if it < 60 { 1u64 } else { 2u64 };
-                            *((addr) as *mut u64) = v;
-                            if it % 100 == 0 {
-                                eprintln!("[elfjit:kicker] t={it} guest_global 0x{addr:x}=%{:#x}", *((addr) as *const u64));
+                        match mode {
+                            KickerMode::Broadcast => {
+                                bc(addr as *const u8);
                             }
+                            KickerMode::Fixed(v) => {
+                                *((addr) as *mut u64) = v;
+                            }
+                            KickerMode::Pulse => {
+                                // PULSE: hold 1 through the first gate (init poll
+                                // wants *pred==1), then set 2 — the wait loops while
+                                // *pred==1 (cd7c b.eq) and proceeds only when
+                                // *pred !=1 and !=0 (cd84 cbz-on-zero); 2 is the
+                                // terminal "done" state.
+                                let v = if it < 60 { 1u64 } else { 2u64 };
+                                *((addr) as *mut u64) = v;
+                            }
+                        }
+                        if it % 100 == 0 {
+                            eprintln!("[elfjit:kicker] t={it} guest_global 0x{addr:x}=%{:#x}", *((addr) as *const u64));
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
+        }
+        // Synthetic app-command feed (JIT_DRIVE_LIFECYCLE): a host thread pushes
+        // Android lifecycle commands into the ALooper app-command queue, so a
+        // GameActivity main loop that reaches `ALooper_pollOnce` dispatches
+        // APP_CMD_START then APP_CMD_RESUME (the two commands that precede a real
+        // EGL context / first frame on Android) instead of spinning on the empty
+        // queue. `post_app_command` is the same channel the ALooper shim drains.
+        if std::env::var_os("JIT_DRIVE_LIFECYCLE").is_some() {
+            use arm64jit::shims::post_app_command;
+            std::thread::spawn(|| {
+                for (it, cmd) in [
+                    arm64jit::shims::APP_CMD_START,
+                    arm64jit::shims::APP_CMD_RESUME,
+                    arm64jit::shims::APP_CMD_INIT_WINDOW,
+                ]
+                .iter()
+                .enumerate()
+                {
+                    eprintln!("[elfjit:appcmd] posting APP_CMD_{it} ({cmd})");
+                    post_app_command(*cmd);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             });
         }
