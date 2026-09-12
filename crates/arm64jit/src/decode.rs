@@ -2298,12 +2298,16 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // from fcvtl (0xe217..) / fcvtzs-v (0x0ea1b8..) / fabs (0x0ea0f8..) /
     // fcvtps-v (0x0ea1a8..) / scalar fcvtzs (0x1e78). Real-boot form is the
     // .4s signed fcvtas (0x4e21c8xx), e.g. render/color math.
-    if (insn & 0xbf20_fc00) == 0x0e20_c800 {
+    if (insn & 0xbf20_fc00) == 0x0e20_c800
+        || (insn & 0xbf20_fc00) == 0x0e20_a800
+    {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let q = (insn & 0x4000_0000) != 0;
         let esize: u8 = if (insn & 0x0040_0000) != 0 { 8 } else { 4 };
         let unsigned = (insn & 0x2000_0000) != 0;
+        // byte2 0xc8 = fcvtas (round nearest-away), 0xa8 = fcvtns (round nearest,
+        // ties-even). Both hit the same cvtsd2si nearest-even path in translate.
         return Inst::SimdFpToInt { rd, rn, unsigned, esize, q, mode: 2 };
     }
 
@@ -5833,6 +5837,10 @@ mod tests {
         assert!(!matches!(decode(0x1e780020), Inst::SimdFpToInt { .. }));
         assert!(!matches!(decode(0x0ea0f800), Inst::SimdFpToInt { .. }));
         assert!(!matches!(decode(0x2e21c820), Inst::SimdFpToInt { .. })); // fcvtau
+        // fcvtns (round-nearest ties-even) v3.4s = 0x4e21a863 (same family, byte2 0xa8).
+        assert!(matches!(decode(0x4e21a863),
+            Inst::SimdFpToInt { rd: 3, rn: 3, unsigned: false, esize: 4, q: true, mode: 2 }),
+            "got {:?}", decode(0x4e21a863));
         // FP16 integer->float: scvtf v12.4h = 0x0e79d98c (real), 0x0e79d963,
         // ucvtf v11.8h = 0x6e79d8ab. fcvtl f32->f64 (0x4e61d800) stays VecFcvtl.
         assert!(matches!(decode(0x0e79d98c),
