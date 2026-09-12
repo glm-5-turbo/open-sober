@@ -7949,6 +7949,37 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn cmge_8h_exec() {
+        // cmge v0.8h, v1.8h, v2.8h = 0x4e633cc3 (real): per signed halfword lane,
+        // all-ones (0xffff) if Vn >= Vm else 0. v1={5,-3,2,6,-8,1,0,-2},
+        // v2={3,2,5,-3,-10,9,0,-2}. lanes: 5>=- 3=>1, -3>-2=>0, 2>-5=>0, 6>=-3=>1,
+        // -8>=-10=>1, 1>-9=>0, 0>=0=>1, -2>=-2=>1. (real roblox cmge v3.8h,v6,v3.)
+        let mut st = CpuState::new();
+        // slot(2)=v[4]/v[5] => v1 (rn=2) lanes {5,-3,2,6, -8,1,0,-2}
+        st.v[4] = 0x0006_0002_FFFD_0005; // lanes 0-3: 5,-3,2,6
+        st.v[5] = 0x0002_0000_0001_FFF8; // lanes 4-7: -8,1,0,2
+        // slot(4)=v[8]/v[9] => v2 (rm=4) lanes {3,2,5,-3, -10,9,0,-2}
+        st.v[8] = 0xFFFD_0005_0002_0003; // lanes 0-3: 3,2,5,-3
+        st.v[9] = 0xFFFE_0000_0009_FFF6; // lanes 4-7: -10,9,0,-2
+        // 0x4e633cc3: rd=3,rn=6,rm=3 (size[23:22]=01 halfword, bit21 SET, rm in bits20:16).
+        // Build cmge rd=0,rn=2,rm=4,size=01: 0x4e000000 | (size 01 + bit21 + rm<<16)
+        // | (Byte2 0x3c << 8) | rn<<5 | rd. rm=4 -> bits20:16; size=01 -> bits23:22=01
+        // (0x400000 = 0x40<<16); bit21 = 0x20<<16. So bits23:16 = 0x40|0x20|0x04 = 0x64.
+        let w = 0x4e000000u32 | (0x64 << 16) | (0x3c << 8) | (0x02 << 5) | 0;
+        exec_bytes(&mut st, &w.to_le_bytes(), 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[if off < 4 { 0 } else { 1 }] >> (16 * (off % 4))) & 0xffff) as u16 };
+        // rn=2 -> st.v[2]; rm=4 -> st.v[4]; rd=0 -> st.v[0].
+        assert_eq!(h(&st,0), 0xffff, "5>=3");
+        assert_eq!(h(&st,1), 0,      "-3>=2 no");
+        assert_eq!(h(&st,2), 0,      "2>=5 no");
+        assert_eq!(h(&st,3), 0xffff, "6>=-3");
+        assert_eq!(h(&st,4), 0xffff, "-8>=-10");
+        assert_eq!(h(&st,5), 0,      "1>=9 no");
+        assert_eq!(h(&st,6), 0xffff, "0>=0");
+        assert_eq!(h(&st,7), 0xffff, "-2>=-2");
+    }
+
+    #[test]
     fn smlsl_widen_exec() {
         // smlsl v0.4s, v1.4h, v2.4h = 0x0e62a020: Vd = Vd - widen(s16*s16) per lane.
         // v1s = {2,5,-3,7}, v2s = {3,-2,4,10} -> prods {6,-10,-12,70}.

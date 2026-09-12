@@ -808,9 +808,12 @@ pub enum Inst {
     SimdCmhs { rd: u8, rn: u8, rm: u8, lanes: u8 },
     // ---- SIMD unsigned compare-higher-or-same 2D: cmhs Vd.2D, Vn.2D, Vm.2D ----
     SimdCmhsD { rd: u8, rn: u8, rm: u8 },
-    // ---- SIMD signed compare-greater: cmgt Vd.T, Vn.T, Vm.T (per 32/64-bit lane) ----
-    // Gate 0x4ea0_3400(.4s q1)/0x0ea0_3400(.2s q0)/0x4ee0_3400(.2d); lanes 4/2/2.
-    SimdCmgt { rd: u8, rn: u8, rm: u8, lanes: u8, dword: bool },
+    // ---- SIMD signed compare: cmgt/cmge Vd.T, Vn.T, Vm.T (per B/H/S/D lane) ----
+    // cmgt=byte2 0x34 (>), cmge=byte2 0x3c (>=, same as word/dword forms); each lane
+    // all-ones if the signed compare holds. esize=1<<bits[23:22], lanes = (q?16:8)/esize.
+    // Gate must precede the bitwise AND/ORR/BIC gate (VLog) which also matches the
+    // 0x1c00 residue and was silently swallowing cmge as BIC (a miscompile).
+    SimdCmgt { rd: u8, rn: u8, rm: u8, lanes: u8, esize: u8, ge: bool },
     // ---- SIMD unzip even: uzp1 Vd.T, Vn.T, Vm.T ----
     SimdUz1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD unzip odd: uzp2 Vd.T, Vn.T, Vm.T (gcc magic-division gather) ----
@@ -2197,6 +2200,28 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         }
     }
 
+    if matches!((insn >> 24) & 0x3f, 0x0e | 0x4e)
+        && (((insn >> 8) & 0xfc) == 0x34 || ((insn >> 8) & 0xfc) == 0x3c)
+        && (insn & 0x0000_0200) == 0
+        && !(((insn & 0x9f60_f400) == 0x0e40_1400) || ((insn & 0x9f60_f400) == 0x0e40_3400) || ((insn & 0x9f60_f400) == 0x0e40_0400))
+    {
+        // signed 3-same compare cmgt (0x34, >)/cmge (0x3c, >=) — per B/H/S/D lane.
+        // esize=1<<(bits23:22), dword carries esize==8. MUST precede SimdVLog: the
+        // cmge 0x3c residue's bits12:10==0b111 matches VLog's 0x1c00 and was
+        // silently compiled as BIC before this gate existed (a real miscompile).
+        let ge = ((insn >> 8) & 0xfc) == 0x3c;
+        let es = 1u8 << ((insn >> 22) & 3);
+        let esz = es;
+        let nbytes: i32 = if insn & 0x4000_0000 != 0 { 16 } else { 8 };
+        return Inst::SimdCmgt {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            lanes: (nbytes / esz as i32) as u8,
+            esize: esz,
+            ge,
+        };
+    }
     // ---- SIMD vector bitwise AND/ORR/BIC (Vd.T = Vn.T op Vm.T) ----
     // Gate: prefix byte {0x0e,0x4e} (bit29=0 → and/orr/bic, NOT bit/bif/bsl which
     // are 0x6e-prefixed, and NOT eor which is 0x2e). `&0x0000_1c00==0x1c00`.
@@ -4553,9 +4578,9 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                                                                                                                                                     }
                                                                                                                                                                                                                                                                                                                                             // ---- SIMD signed compare-greater (cmgt) 0x4ea0_3400(.4s)/0x0ea0_3400(.2s)/0x4ee0_3400(.2d) ----
                                                                                                                                                                                                                                                                                                                                             let cgt = insn & 0xffe0_fc00;
-                                                                                                                                                                                                                                                                                                                                            if cgt == 0x4ea0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:4, dword:false }; }
-                                                                                                                                                                                                                                                                                                                                            if cgt == 0x0ea0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:2, dword:false }; }
-                                                                                                                                                                                                                                                                                                                                            if cgt == 0x4ee0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:2, dword:true }; }
+                                                                                                                                                                                                                                                                                                                                            if cgt == 0x4ea0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:4, esize:4, ge:false }; }
+                                                                                                                                                                                                                                                                                                                                            if cgt == 0x0ea0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:2, esize:4, ge:false }; }
+                                                                                                                                                                                                                                                                                                                                            if cgt == 0x4ee0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:2, esize:8, ge:false }; }
                                                                                                                                                                                                                                                                                                                                             // ---- SIMD unzip even: uzp1 Vd.T, Vn.T, Vm.T ----
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 // opcode bits[13:8] = 0x18 (verified non-colliding vs uzp2/zip1/zip2/trn1/trn2).
                                                                                                                                                                                                                                                                                                                                                                                                                 // esize = 1 << bits[23:22]; q = bit30. Vd[i] = Vn[2i], Vd[n+i] = Vm[2i].
@@ -7501,8 +7526,8 @@ mod logical_imm_regressions {
         //   add  v3.16b,v30.16b,v4.16b = 0x4e2487c3
         //   sub  v3.16b,v30.16b,v4.16b = 0x6e2487c3
         match decode(0x4ee437c3) {
-            Inst::SimdCmgt { rd, rn, rm, dword, lanes } => {
-                assert_eq!((rd, rn, rm, dword, lanes), (3, 30, 4, true, 2));
+            Inst::SimdCmgt { rd, rn, rm, esize, lanes, ge } => {
+                assert_eq!((rd, rn, rm, esize, lanes, ge), (3, 30, 4, 8, 2, false));
             }
             other => panic!("cmgt v3.2d,v30,v4 -> SimdCmgt, got {other:?}"),
         }
@@ -7747,6 +7772,32 @@ mod fp16_scalar_and_gate_regressions {
             "saddw must stay Addw, got {:?}", decode_op(0x0e6a1128));
         assert!(matches!(decode_op(0x2e6a1128),
             Inst::SimdAddw { rd: 8, rn: 9, rm: 10, sign: false, esrc: 2, upper: false, .. }));
+        // signed cmgt/cmge across element sizes: cmgt .8h=0x4e6334c3 (esize2, gt),
+        // cmge .8h=0x4e633cc3 (esize2, ge), cmgt .4s=0x4ea334c3 (esize4),
+        // cmge .4s=0x4ea33cc3 (esize4, ge), cmgt .2d=0x4ee334c3 (esize8),
+        // cmge .2d=0x4ee33cc3. The cmge forms were SILENTLY mis-decoded as bitwise
+        // BIC (SimdVLog op:3) by the AND/ORR gate before this gate existed.
+        assert!(matches!(decode_op(0x4e6334c3),
+            Inst::SimdCmgt { rd: 3, rn: 6, rm: 3, lanes: 8, esize: 2, ge: false }));
+        assert!(matches!(decode_op(0x0e6334c3),
+            Inst::SimdCmgt { rd: 3, rn: 6, rm: 3, lanes: 4, esize: 2, ge: false }));
+        assert!(matches!(decode_op(0x4e633cc3),
+            Inst::SimdCmgt { rd: 3, rn: 6, rm: 3, lanes: 8, esize: 2, ge: true }),
+            "cmge .8h must be SimdCmgt ge, got {:?}", decode_op(0x4e633cc3));
+        assert!(matches!(decode_op(0x4ea33cc3),
+            Inst::SimdCmgt { rd: 3, rn: 6, rm: 3, lanes: 4, esize: 4, ge: true }),
+            "cmge .4s got {:?}", decode_op(0x4ea33cc3));
+        assert!(matches!(decode_op(0x0ea33cc3),
+            Inst::SimdCmgt { lanes: 2, esize: 4, ge: true, .. }));
+        assert!(matches!(decode_op(0x4ee33cc3),
+            Inst::SimdCmgt { lanes: 2, esize: 8, ge: true, .. }));
+        // unsigned cmhi/cmhs must NOT become cmgt: cmhi .8h=0x6e6334c3 -> SimdCmhiH.
+        assert!(matches!(decode_op(0x6e6334c3), Inst::SimdCmhiH { rd: 3, rn: 6, rm: 3, lanes: 8 }),
+            "cmhi .8h got {:?}", decode_op(0x6e6334c3));
+        // fp16 fmax/fmin .8h (byte1 0x34/0x3c, fp16-3same residue) must NOT become cmgt:
+        // fmax v0.8h=0x4e413400 stays SimdFp16As.
+        assert!(matches!(decode_op(0x4e413400), Inst::SimdFp16As { rd: 0, rn: 0, rm: 1, op: 4, .. }),
+            "fmax .8h must stay Fp16As, got {:?}", decode_op(0x4e413400));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).
