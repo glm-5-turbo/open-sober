@@ -1734,6 +1734,21 @@ pub fn translate(
                 }
                 return Ok(());
             }
+            if sysreg == 9 {
+                // msr fpcr, xN: FP control write. The JIT pins all FP rounding
+                // per-op (roundsd modes, cvt*), never reading FPCR, so accept any
+                // value silently. (read never produced for fpcr.)
+                return Ok(());
+            }
+            if sysreg == 10 {
+                // mrs xN, ctr_el0: cache-type register. Report 16-byte lines:
+                // IminLine(15:0)=2, DminLine(19:16)=2, Cwg(23:20)=0, DIC/IDC=0.
+                if read && rt != 31 {
+                    buf.mov_ri64(RAX, 0x0002_0002); // Dmin=2<<16 | Imin=2
+                    stg(buf, rt as u32, RAX);
+                }
+                return Ok(());
+            }
             if read {
                 // Rt = [RBX + TPIDR_OFF]  (commit to the guest slot, same fix as
                 // the other MRS reads: rt is a guest register, not a host one)

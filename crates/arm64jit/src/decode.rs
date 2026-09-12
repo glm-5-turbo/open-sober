@@ -5003,6 +5003,18 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
             let rt = (insn & 0x1f) as u8;
             return Inst::SysReg { sysreg: 7, rt, read }; // tpidr2_el0 -> 0
         }
+        // msr fpcr, xN = 0xd51b4408: FP control/status write. The JIT performs all
+        // FP rounding per-op with explicit modes (roundsd/cvt*), not a global FPCR,
+        // so the write is a benign no-op. op1=3, CRn=4, CRm=4, op2=0, L=0 (write).
+        if op1 == 3 && crn == 4 && crm == 4 && op2 == 0 && !read {
+            return Inst::SysReg { sysreg: 9, rt: (insn & 0x1f) as u8, read };
+        }
+        // mrs xN, ctr_el0 = 0xd53b0029: cache type register. DminLine/IminLine
+        // (bits 19:16 / 15:0) = log2(line size in words); Cwg=0. Report 16-byte
+        // lines (log2(4)=2) so glibc's cache-size probes pick sane values.
+        if op1 == 3 && crn == 0 && crm == 0 && op2 == 1 && read {
+            return Inst::SysReg { sysreg: 10, rt: (insn & 0x1f) as u8, read };
+        }
         // mrs xN, midr_el1 = 0xd5380000|rt: op1=0, CRn=0, CRm=0, op2=0. The
         // Main ID Register (implementer/part). glibc's __libc_cpu_features
         // reads it to name a known core for memcpy/IFUNC tuning. Return 0
@@ -6256,6 +6268,14 @@ mod tests {
         }
         // A non-TLS sysreg (mrs x0, cntfrq_el0) must NOT decode to SysReg.
                 assert!(!matches!(decode(0xd53be020), Inst::SysReg { .. }));
+                // msr fpcr, x8 = 0xd51b4408 (real): FP control write -> no-op sysreg.
+                assert!(matches!(decode(0xd51b4408),
+                    Inst::SysReg { sysreg: 9, rt: 8, read: false }),
+                    "msr fpcr got {:?}", decode(0xd51b4408));
+                // mrs x9, ctr_el0 = 0xd53b0029 (real): cache-type read.
+                assert!(matches!(decode(0xd53b0029),
+                    Inst::SysReg { sysreg: 10, rt: 9, read: true }),
+                    "mrs ctr_el0 got {:?}", decode(0xd53b0029));
             }
 
             #[test]
