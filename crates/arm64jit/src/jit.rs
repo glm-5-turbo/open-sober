@@ -7055,6 +7055,10 @@ mod thread_snapshot_tests {
         st.x[0] = 0x106edae60; // the lifecycle-await mutex
         st.x[29] = 0x1111;
         st.x[31] = 0x2222;
+        // Predicate pointer (x19) carried so the sampler can name the awaited
+        // global (gate-2 cond_wait's predicate arg); also x20.
+        st.x[19] = 0x106863af8; // upstream: gate-1 init poll / gate-2 cond predicate
+        st.x[20] = 0x3333;
         register_guest_thread(&mut st as *mut CpuState);
 
         let snaps = snapshot_threads();
@@ -7063,5 +7067,8 @@ mod thread_snapshot_tests {
         assert_eq!(mine.lr, 0x102b53bb0, "x30 = guest call-site of the blocking call");
         assert_eq!(mine.x0, 0x106edae60, "x0 = the wait object (mutex)");
         assert_eq!(mine.sp, 0x2222);
+        assert_eq!(mine.x19, 0x106863af8, "x19 = predicate pointer the waiter re-checks");
+        assert_eq!(mine.x20, 0x3333, "x20 survives");
+        assert_eq!(mine.x29, 0x1111);
     }
 }

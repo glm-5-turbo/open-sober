@@ -1,8 +1,8 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle F) — boot wall's FIRST gate CROSSED from the host: engine owner now leaves the idle ldaxr-poll, bursts 919→948 blocks, reaches a real cond_wait (workspace 395/0)
+## Session (Sep 12, 2026, hermes-worker, cycle F) — boot wall's FIRST TWO gates CROSSED from the host: owner leaves idle ldaxr-poll AND the gate-2 cond_wait, bursts 919→946 blocks, lands at the recursive-mutex rendezvous (workspace 395/0)
 
-Commits `5dd02ee` + `a69c42a` (dev). For cycles C-E the boot froze at the
+Commits `5dd02ee` + `a69c42a` + `4b488af` (dev). For cycles C-E the boot froze at the
 GameActivity rendezvous: all three guest threads parked while the engine owner
 busy-polled guest global **0x106863af8 until == 1** (`adrp x8,#0x106863000; add
 x8,x8,#0xaf8; ldar x8,[x8]; cmp #1; b.eq`) holding the recursive rendezvous
@@ -28,15 +28,18 @@ This cycle added **host-side lifecycle release** and proved the boot advances:
    mutex=0x10683a140)` at guest call-site 0x102b4cd78 (gate 2), re-checking
    `*x19` each 2 ms wake and re-parking while `*0x106863af8 == 1`.
 
-### Gate 2 (the new precise frontier)
-The wait-loop at 0x102b4cd50 re-parks while `*0x106863af8 == 1` and proceeds
-only when it differs; the guest RE-ARMS the flag to 1 (store 0x102b4cdb4)
-after consuming it, so driving it to 2 from the host does not persist. It is a
-guest-managed state that must transition via its own refcount paths, not a
-static flag. Releasing gate 2 needs the engine's app-command / ALooper
-dispatch to broadcast 0x10683a168 with accompanying state.
+### Gate 2 (now also crossed; commit `4b488af`)
+With the re-arm store at 0x102b4cdb4 NOP'd (under `JIT_DRIVE_LIFECYCLE=1`
+only), the host terminal value 2 persists and the owner LEAVES the cond_wait
+back into the outer init/refcount region (0x102206c00), compiles growing
+926→946. Residual wall: all three threads futex-park on the recursive
+rendezvous mutex 0x6edae60 (call-site 0x102b53bb0) — the engine's genuine
+multi-thread barrier, released on real Android by the Java layer's
+app-command / ALooper dispatch. So cycle F crossed TWO lifecycle predicates
+with host-supplied state.
 
-Run-log: `/home/hermes-worker/runs/kicker-gate1-runlog.txt`.
+Run-log: `/home/hermes-worker/runs/kicker-gate1-runlog.txt` (updated for
+gate 2).
 
 ## Session (Sep 12, 2026, hermes-worker, cycle E) — boot wall pinned at register+futex level; concurrent thread-state sampler + GLIBC mutex owner/count/kind (workspace 395/0)
 
