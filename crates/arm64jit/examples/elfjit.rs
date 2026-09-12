@@ -1084,6 +1084,17 @@ fn main() {
                         // counter — the controlled type-4 crossing SH7b demanded.
                         // This avoids hand-resolving a real render/tick vtable.
                         extern "C" fn probe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, _a6: u64, _a7: u64) -> u64 {
+                            use std::sync::atomic::{AtomicU64, Ordering};
+                            static CNT: AtomicU64 = AtomicU64::new(0);
+                            let c = CNT.fetch_add(1, Ordering::Relaxed) + 1;
+                            // The drain re-enqueues every popped node, so the head
+                            // stays = our node while it IS being dispatched; the
+                            // only discriminating signal is this type-4 dispatch.
+                            if c <= 3 || c % 10000 == 0 {
+                                eprintln!(
+                                    "[elfjit:deque-probe] type-4 dispatch #{c}: x0(vt+16)={a0:#x} x1(consumer)={a1:#x} x2(node+32&~1)={a2:#x} x3(node)={a3:#x} w4={a4} x5={a5}"
+                                );
+                            }
                             0
                         }
                         let probe_addr = arm64jit::jit::register_host_call_auto(probe);
@@ -1133,11 +1144,13 @@ fn main() {
                         }
                         continue; // keep polling until popped
                     }
-                    // Recon for the first ~40 ticks: dump the deque struct and
-                    // the LIVE head node's internals (vt/[vt+40], +40, +32,
-                    // +112) so the true layout is reversed from live memory
-                    // before we inject.
-                    if it < 40 {
+                    // Recon for the first ~3 ticks only (a tiny window): the new
+                    // SH11 strategy needs OUR node at head BEFORE the first forced
+                    // pop, so we must inject almost immediately. The --drain-force-
+                    // pop path faults the sentinel-as-task at ~200ms, so a 2s recon
+                    // (SH9's it<40) structurally loses the race. Collapse recon to
+                    // a one-shot diagnostic, then inject right away.
+                    if it < 3 {
                         let snaps = arm64jit::jit::snapshot_threads();
                         let mut rr = 0u64;
                         for t in &snaps {
@@ -1147,6 +1160,7 @@ fn main() {
                             }
                         }
                         if rr != 0 && is_ptr(rr) {
+                            ROOT.store(rr, Ordering::Relaxed);
                             let cell = unsafe { *(rr as *const u64) };
                             if is_ptr(cell) {
                                 let head = unsafe { *(cell as *const u64) };
@@ -1167,7 +1181,8 @@ fn main() {
                                 }
                             }
                         }
-                        continue;
+                        // fall through to inject on ticks >= 1 (root may be 0 on
+                        // tick 0; re-captured below if so).
                     }
                     // Capture the live drainer's deque root once.
                     let root = ROOT.load(Ordering::Relaxed);
@@ -1232,19 +1247,61 @@ fn main() {
                     // node on pop.
                     let tag = unsafe { *(root as *const u64).add(1) }; // [root+8]
                     // Bind the dispatch handler: [node+112]&~0x3f -> vt, [vt+40]=handler.
-                    let node = unsafe { libc::calloc(1, 256) as *mut u8 };
+                    // CLONE the live head node's coherent payload as the base so
+                    // the drain's post-dispatch RE-ENQUEUE (producer 0x285682c)
+                    // walks valid link/refcount fields instead of zeroed garbage.
+                    // The live head node (sentinel during idle, `low48(headcell[0])`)
+                    // is a fully-constructed task node the drain already pops and
+                    // re-enqueues every maintenance iteration — the ideal template.
+                    // (SH9's "[consumer+104]" indexing is unreliable: the consumer
+                    // x19 is rarely snapshotted in-body, so fall back to the head
+                    // node, which is guaranteed present and coherent.)
+                    let node: *mut u8 = {
+                        let mut sentinel = 0u64;
+                        let hn = old & 0xffff_ffff_ffff;
+                        let n = unsafe { libc::calloc(1, 256) as *mut u8 };
+                        if !n.is_null() {
+                            if is_ptr(hn) && hn != n as u64 {
+                                // Copy head-node node-constructor layout (link + refcount
+                                // + args + vtable handled below).
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        hn as *const u8, n, 256,
+                                    );
+                                }
+                                sentinel = hn;
+                                eprintln!(
+                                    "[elfjit:deque-node-live] cloned head node 0x{sentinel:x} as node base (headcell[0]=0x{old:x})"
+                                );
+                            } else {
+                                eprintln!(
+                                    "[elfjit:deque-node-live] no coherent head-node template, using zeroed node (may crash on re-enqueue)"
+                                );
+                            }
+                        }
+                        n
+                    };
                     if node.is_null() {
                         continue;
                     }
                     let np = node as u64;
                     unsafe {
-                        *((np as *mut u64)) = 0; // node.next = null tail
-                        // [node+40] != 0 so the drain DISPATCHES the handler on pop.
-                        (np as *mut u64).add(5).write_volatile(1);
-                        // [node+32] = arg (0 is fine; drain passes it &~1 as x2).
-                        (np as *mut u64).add(4).write_volatile(0);
+                        // Fresh tail: the re-enqueue producer (0x285682c) walks the
+                        // node's [node+0] next-link to find the tail; the *cloned*
+                        // head-node template still points at the old sentinel ring,
+                        // so zero it to a clean tail before publishing (else the
+                        // producer follows the stale link and faults at pc 0x51).
+                        (np as *mut u64).write_volatile(0);
                         // [node+112] = vtable; [vt+40] must be a real handler fn.
                         (np as *mut u64).add(14).write_volatile(vt);
+                        // [node+40] != 0 so the drain DISPATCHES the handler on pop.
+                        (np as *mut u64).add(5).write_volatile(
+                            ((np as *const u64).add(5).read_volatile()) | 1,
+                        );
+                        // [node+32] = arg; keep sentinel's (or 0 if none).
+                        (np as *mut u64).add(4).write_volatile(
+                            (np as *const u64).add(4).read_volatile(),
+                        );
                         // Pack: low48 = node pointer (so pop truncates to it),
                         // high16 = tag matching [root+8].
                         let packed = np | ((tag & 0xffff) << 48);
@@ -1252,6 +1309,39 @@ fn main() {
                         (headcell as *mut u64).write_volatile(packed);
                         HEADCELL.store(headcell, Ordering::Relaxed);
                         PLACED.store(packed, Ordering::Relaxed);
+                        // ARM FORCE-POP (deferred from startup when --deque-node-live
+                        // is set): now that OUR node is placed at head, patch the
+                        // drain's pop-loop to always fall through — `mov w24,w0`
+                        // (0x102856f4c) -> mov w24,#1 and NOP the tbz (0x102856f7c) —
+                        // so the next drain iteration pops+dispatches OUR foreign
+                        // node (passes the self-skip guard, [node+40]=1 -> probe),
+                        // NOT the sentinel. This is the SH11 sequencing lever: stable
+                        // drain while placing, force-pop only after placement.
+                        let arm = [0x102856f4cu64, 0x102856f7cu64];
+                        for a in arm {
+                            let p = a & !0xfff;
+                            unsafe {
+                                libc::mprotect(p as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE);
+                            }
+                            let before = unsafe { *(a as *const u32) };
+                            let word = if a == 0x102856f7c { 0xd503_201fu32 /* NOP */ } else { 0x5280_0018u32 /* mov w24,#1 */ };
+                            unsafe { *(a as *mut u32) = word };
+                            unsafe {
+                                libc::mprotect(p as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC);
+                            }
+                            eprintln!(
+                                "[elfjit:deque-node-live] ARMED force-pop {:#x} (was {before:08x}) -> {word:08x}",
+                                a
+                            );
+                        }
+                        // The drain body was already compiled (unpatched) into the
+                        // block cache; drop those entries so the dispatcher
+                        // recompiles it from the now-patched guest bytes on the
+                        // next re-entry (otherwise the force-pop has no effect).
+                        arm64jit::jit::block_cache_drop_region(0x102856e40, 0x1028570c0);
+                        eprintln!(
+                            "[elfjit:deque-node-live] dropped cached drain blocks [0x102856e40,0x1028570c0) — pop-loop will recompile patched"
+                        );
                         eprintln!(
                             "[elfjit:deque-node-live] INJECTED node 0x{np:x} packed=0x{packed:x} into headcell 0x{headcell:x} (tag {tag:#x}) — awaiting pop by live drainer"
                         );
@@ -1431,7 +1521,15 @@ fn main() {
             // opt-in via --drain-force-pop; plain --drain-poll keeps its
             // documented stable (finite-timeout maintenance heartbeat) behavior.
             let force = std::env::args().any(|a| a == "--drain-force-pop");
-            if force {
+            // If --deque-node-live is also present, DEFER the force-pop patches to
+            // the injector thread (see its "arm force-pop" step): patching here at
+            // startup makes the drain pop the SENTINEL as the first task and fault
+            // (~200ms) before any injected node can land. Left unpatched here, the
+            // drain stays stable (never pops) while we place our node, then the
+            // injector arms the pop-loop so the FIRST forced pop takes OUR foreign
+            // node (passes the self-node-skip guard, [node+40]=1) and dispatches it.
+            let deferred = std::env::args().any(|a| a == "--deque-node-live");
+            if force && !deferred {
             let latch_addr: u64 = 0x102856f4c; // mov w24,w0 (=0x2a0003f8)
             let _latch_patch: u32 = 0x52800018; // mov w24,#1 (MOVZ W24,#1)
             let tbz_addr: u64 = 0x102856f7c;

@@ -1748,6 +1748,20 @@ fn clear_block_cache() {
     }
 }
 
+/// Public: drop cached blocks whose entry pc is in `[lo, hi)`. Used by elfjit
+/// host-side patchers (e.g. --drain-poll/--deque-node-live arming the pop-loop)
+/// that rewrite guest code after a hot region has already been compiled: the
+/// JIT dispatcher recompiles the region from the (now-patched) guest bytes on
+/// its next re-entry, picking up the new instruction stream. Blocks leaked
+/// (executable mappings discarded) but the map entry is removed so the caller
+/// never executes a stale compiled drain body.
+pub fn block_cache_drop_region(lo: u64, hi: u64) {
+    if let Some(c) = BLOCK_CACHE.get() {
+        let mut m = c.lock().unwrap();
+        m.retain(|&(_, pc, _), _| !(pc >= lo && pc < hi));
+    }
+}
+
 fn cached_block(
     image: &[u8],
     base: u64,
