@@ -596,6 +596,36 @@ fn main() {
                                     "  [deque] waiter_sp={sp:#x} drain_root=[sp+64]={root:#x} drain_struct={cstruct:#x} Q=[struct+104]={q:#x} headcell=[root]={headcell:#x} head={head:#x} (node={:#x} tag={:#x})",
                                     head & 0xffffffffffff, head >> 48
                                 );
+                                // Read the head node's internals to tell a real
+                                // pending task node from a sentinel/garbage cell:
+                                // next=[node], cb40=[node+40], vt=[node+112]&~0x3f
+                                // then dispatch-cb [vt+40]; and [root+8] tag.
+                                let node = head & 0xffffffffffff;
+                                let rt8 = if is_ptr(root) { unsafe { *(root as *const u64).add(1) } } else { 0 };
+                                if is_ptr(node) {
+                                    let nxt = unsafe { *(node as *const u64) };
+                                    let cb40 = unsafe { *(node as *const u64).add(5) }; // +40
+                                    let v112 = unsafe { *(node as *const u64).add(14) }; // +112
+                                    let vt = v112 & !0x3f;
+                                    let dcb = if is_ptr(vt) { unsafe { *(vt as *const u64).add(5) } } else { 0 }; // [vt+40]
+                                    eprintln!(
+                                        "      node.next={nxt:#x} node[+40]={cb40:#x} node[+112]={v112:#x} vt={vt:#x} [vt+40]={dcb:#x} root[+8]tag={rt8:#x}"
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "      head cell not a valid node (0); root[+8]tag={rt8:#x}"
+                                    );
+                                }
+                                // Epoch: waiter x19 = the wait object Q' whose
+                                // high-32 is the self-syncing version epoch, futex
+                                // at Q'+4 = x1.
+                                if is_ptr(t.x19) {
+                                    let qw = unsafe { *(t.x19 as *const u64) };
+                                    eprintln!(
+                                        "      Q'=t.x19={:#x} [Q']={:#x} (refc=low32 {:#x} epoch=high32 {:#x}) futex_uaddr=x1={:#x}",
+                                        t.x19, qw, qw & 0xffffffff, qw >> 32, t.x1
+                                    );
+                                }
                             }
                         }
                     }

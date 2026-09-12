@@ -108,11 +108,17 @@ vaguer "x19/Q+4" notes. file vaddr = guest − 0x100000000.
   `JIT_DEQUE_PROBE=1` (elfjit): each parked consumer's `[root]` resolves to a
   **stable guest-bss head-cell** (0x10682a6x38, 0x10682b338 for two per-CPU
   slots) — the exact address a host producer must push onto.
-- **Is a host enqueue now feasible?** Yes in mechanism (we can locate the
-  per-CPU head-cell from the host and CAS a node onto it + bump `[Q]` epoch +
-  FUTEX_WAKE), but the popped node's dispatch needs a **real engine task node**
-  (`[node+112]→[vt+40]` callback + `[node+32]` arg referencing initialized
-  render/job state). A fully-zeroed node will drain (proving the enqueue works)
-  then fault deref'ing `[0x28]` — a controlled, capturable first crossing; the
-  follow-on is supplying a valid vt/node matching the engine's real
-  frame/render task. This is the concrete next experiment.
+- **The deque is a circular INTRUSIVE list, not a 0-terminated head (corrected
+  SH5b):** the head node is a **self-referential sentinel** at the drain struct
+  itself: `head.node == drain_struct`, and `[struct+112]=vt=0x106829f00` with
+  `[vt+40]` = a REAL guest handler (0x10285371c). So the consumers are NOT
+  waiting on a "head==0 empty" — the sentinel is always present; they park in
+  the generic `Q'` wait (`[Q']`=refc=1 / epoch high-32=0, futex at `Q'+4`)
+  waiting for a producer to (a) insert a task node into the circular list and
+  (b) bump `[Q']>>32` epoch + FUTEX_WAKE.
+- **Host enqueue plan (correct for the circular list):** allocate a node, link
+  it into the circular intrusive list around the sentinel (the drain struct),
+  set `[node+112]=0x106829f00` so the dispatch resolves to the real handler
+  `[vt+40]=0x10285371c` (a zeroed node instead faults deref'ing `[0x28]`), then
+  bump `[Q']>>32` epoch and FUTEX_WAKE on `[Q']+4`. The loop's work is the real
+  engine task dispatched at `[vt+40]`.
