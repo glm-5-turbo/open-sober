@@ -1,4 +1,4 @@
-[plt] patched __stack_chk_guard GOT 0x631aa30 (0x0) -> 0x55e82310f010
+[plt] patched __stack_chk_guard GOT 0x631aa30 (0x0) -> 0x55644888cc60
 [plt] bound 534 JUMP_SLOT + 67 GLOB_DAT/ABS64 (0 unresolved), 11 unresolved
 PLT imports bound: 534 to host thunks (0 unbound)
 [mempool] big-alloc 0x1d9801c routed to host calloc (thunk @ 0x1062d9000)
@@ -10,52 +10,52 @@ loaded '/home/hermes-worker/.cache/open-sober/robbox/libroblox.so': is_pie=true 
 [tail] reserved 402653184B guest RW tail @0x107334000
 [lsm-map] allocator 0x1d97744 routed to host calloc(x0) (thunk @ 0x1062d9800)
 [lsm-map] NOP'd LSM init store at 0x101d975f8 (guest 0x1d975f8) to keep seeded empty map
-[lsm-map] seeded static empty LocalStorageManager map: global 0x10726f8c0 -> bucket array 0x7f7299242010 (4194304 buckets, shared zero sub @0x7f729b242010)
+[lsm-map] seeded static empty LocalStorageManager map: global 0x10726f8c0 -> bucket array 0x7fb927522010 (4194304 buckets, shared zero sub @0x7fb929522010)
 [JNICall-singleton] seeded ptr 0x107333948 -> object 0x107333950 (zeroed bss ~ PTHREAD_MUTEX_INITIALIZER at +8)
-[lsm-map] readback global 0x10726f8c0 = 0x7f7299242010 (must be non-zero)
+[lsm-map] readback global 0x10726f8c0 = 0x7fb927522010 (must be non-zero)
 running entry guest=0x102173ff4 host=0x102173ff4 (segment base guest=0x100000000 size=0x7333c3c)
-guest sp=0x55e82f30f470 tls(tpidr)=0x55e82f30f580
-JNI boot: x0 = JavaVM* 0x55e82eefa8a0
+guest sp=0x556476721470 tls(tpidr)=0x556476721580
+JNI boot: x0 = JavaVM* 0x55647630c8a0
 [roblox:JNIMain] TelemetryProtocol::setProcessTimeOverride: %ld
 [roblox:JNIMain] DeviceStaticParams is null.
 [elfjit] jit_run returned Ok(0x10006) — entering post-run phase
 JIT(no-QEMU) entry() -> 65542 (0x10006)
-[elfjit] driving StartApp @ guest 0x10258b144 after JNI_OnLoad (env=0x55e82eefa870 jobject=0x55e82f4489d0 params=0x55e82f8f98c0)
+[elfjit] driving StartApp @ guest 0x10258b144 after JNI_OnLoad (env=0x55647630c870 jobject=0x55647686af80 params=0x556476d08710)
 [elfjit:kicker] host thread drives 0x106863af8 (pulse 1->2)
-[elfjit:appcmd] posting APP_CMD_0 (1)
 [elfjit:kicker] t=0 guest_global 0x106863af8=%0x1
+[elfjit:appcmd] posting APP_CMD_0 (1)
 [elfjit:anativewindow] wired real X11 window XID=0x200000 on :261 as the guest ANativeWindow
 [elfjit:appcmd] posting APP_CMD_1 (2)
 [elfjit:appcmd] posting APP_CMD_2 (11)
 [elfjit:kicker] t=100 guest_global 0x106863af8=%0x2
 [elfjit:kicker] t=200 guest_global 0x106863af8=%0x2
 [elfjit:kicker] t=300 guest_global 0x106863af8=%0x2
-[elfjit:renderinit] driving THUNK 0x105b3a280 after 5000ms warm-up (ctx 0x1067d16f0=0x55e82310f008, x0=0x200000, x1=0x0)
-[elfjit:renderinit] returned Ok(0x7f727c001d90)
-[elfjit:renderthunk] REAL ctx 0x7f727c001d90 vtable=0x106731ae0 egl: display=0x7f727c08b5e0 surface=0x7f727c0a8f30 context=0x7f727c0a9970
+[elfjit:renderinit] driving THUNK 0x105b3a280 after 5000ms warm-up (ctx 0x1067d16f0=0x55644888cc58, x0=0x200000, x1=0x0)
+[elfjit:renderinit] returned Ok(0x7fb910001d90)
+[elfjit:renderthunk] REAL ctx 0x7fb910001d90 vtable=0x106731ae0 egl: display=0x7fb91008b5e0 surface=0x7fb9100a8e80 context=0x7fb9100a9870
 [elfjit:renderthunk] ctx vtable[0..5] = 0x105b3b288 0x105b3b334 0x105b3b358 0x105b3b408 0x101dc7428 — [vt+16](idx2)=disp target
-[elfjit:renderframe] ctx=0x7f727c001d90 [+32]=display 0x7f727c08b5e0 [+40]=surface 0x7f727c0a8f30 [+48]=context 0x7f727c0a9970
+[elfjit:renderframe] ctx=0x7fb910001d90 [+32]=display 0x7fb91008b5e0 [+40]=surface 0x7fb9100a8e80 [+48]=context 0x7fb9100a9870
 [elfjit:renderframe] swap returned Ok(0x1) (eglSwapBuffers)
-[elfjit:renderframe-drive] clear-color x5 obj 0x7f727dd9bc50 (RGBA [0.4, 0.2, 0.95, 1.0] at [+0..16])
+[elfjit:renderframe-drive] clear-color x5 obj 0x7fb911d9db30 (RGBA [0.4, 0.2, 0.95, 1.0] at [+0..16])
 [elfjit:renderframe-drive] gles-dispatch slot 0 guest 0x106d3b2f0 = 0x7f0000003010
-[elfjit:renderframe-drive] gles-dispatch slot 1 guest 0x106d3b2f8 = 0x7f729b32b460
-[elfjit:renderframe-drive] gles-dispatch slot 2 guest 0x106d3b300 = 0x7f0000003018
-[elfjit:renderframe-drive] gles-dispatch slot 3 guest 0x106d3b308 = 0x7f729b32b420
-[elfjit:renderframe-drive] gles-dispatch slot 4 guest 0x106d3b310 = 0x7f729b32d840
-[elfjit:renderframe-drive] gles-dispatch slot 5 guest 0x106d3b318 = 0x7f729b32b0e0
-[elfjit:renderframe-drive] gles-dispatch slot 6 guest 0x106d3b320 = 0x7f729b32b100
-[elfjit:renderframe-drive] gles-dispatch slot 7 guest 0x106d3b328 = 0x7f729b32c600
-[elfjit:renderframe-drive] gles-dispatch values = [139637976739856, 140130206790752, 139637976739864, 140130206790688, 140130206799936, 140130206789856, 140130206789888, 140130206795264]
+[elfjit:renderframe-drive] gles-dispatch slot 1 guest 0x106d3b2f8 = 0x7f0000003018
+[elfjit:renderframe-drive] gles-dispatch slot 2 guest 0x106d3b300 = 0x7f0000003020
+[elfjit:renderframe-drive] gles-dispatch slot 3 guest 0x106d3b308 = 0x7fb92960b420
+[elfjit:renderframe-drive] gles-dispatch slot 4 guest 0x106d3b310 = 0x7fb92960d840
+[elfjit:renderframe-drive] gles-dispatch slot 5 guest 0x106d3b318 = 0x7fb92960b0e0
+[elfjit:renderframe-drive] gles-dispatch slot 6 guest 0x106d3b320 = 0x7fb92960b100
+[elfjit:renderframe-drive] gles-dispatch slot 7 guest 0x106d3b328 = 0x7fb92960c600
+[elfjit:renderframe-drive] gles-dispatch values = [139637976739856, 139637976739864, 139637976739872, 140433239880736, 140433239889984, 140433239879904, 140433239879936, 140433239885312]
 [elfjit:renderframe-seedgles] slot 0 (glDrawBuffers) <- bridge 0x7f0000003010
-[elfjit:renderframe-seedgles] slot 1 (glClear) <- bridge 0x7f00000029c0
-[elfjit:renderframe-seedgles] slot 2 (glClearBufferfv) <- bridge 0x7f0000003018
+[elfjit:renderframe-seedgles] slot 1 (glClearBufferiv) <- bridge 0x7f0000003018
+[elfjit:renderframe-seedgles] slot 2 (glClearBufferfv) <- bridge 0x7f0000003020
 [elfjit:renderframe-seedgles] slot 3 (glClearStencil) <- bridge 0x7f00000029b8
 [elfjit:renderframe-seedgles] slot 4 (glColorMask) <- bridge 0x7f0000002978
 [elfjit:renderframe-seedgles] slot 5 (glDepthMask) <- bridge 0x7f0000002998
 [elfjit:renderframe-seedgles] slot 6 (glStencilMask) <- bridge 0x7f00000029b0
 [elfjit:renderframe-seedgles] slot 7 (glViewport) <- bridge 0x7f0000002918
-[elfjit:renderframe-drive] fabricated renderer 0x7f727dd9b750 (+16=1,+24->0x7f727dd9b850[+552]=1,+40->0x7f727dd9b950[+140]=1) view 0x7f727dd9ba50 ([+128]=1280 [+132]=720 [+140]=0)
-[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok(0x7f727dd9b750)
+[elfjit:renderframe-drive] fabricated renderer 0x7fb911d9d630 (+16=1,+24->0x7fb911d9d730[+552]=1,+40->0x7fb911d9d830[+140]=1) view 0x7fb911d9d930 ([+128]=1280 [+132]=720 [+140]=0)
+[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok(0x7fb911d9d630)
 [elfjit:renderframe-drive] post-frame swap returned Ok(0x1)
 ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers
   built with gcc 14 (Debian 14.2.0-19)
@@ -68,23 +68,23 @@ ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers
   libswscale      8.  3.100 /  8.  3.100
   libswresample   5.  3.100 /  5.  3.100
   libpostproc    58.  3.100 / 58.  3.100
-[x11grab @ 0x563d781fb1c0] Stream #0: not enough frames to estimate rate; consider increasing probesize
+[x11grab @ 0x561592a471c0] Stream #0: not enough frames to estimate rate; consider increasing probesize
 Input #0, x11grab, from ':261':
-  Duration: N/A, start: 1789222290.707694, bitrate: 883852 kb/s
+  Duration: N/A, start: 1789222793.338838, bitrate: 883852 kb/s
   Stream #0:0: Video: rawvideo (BGR[0] / 0x524742), bgr0, 1280x720, 883852 kb/s, 29.97 fps, 1000k tbr, 1000k tbn
 Stream mapping:
   Stream #0:0 -> #0:0 (rawvideo (native) -> png (native))
 Press [q] to stop, [?] for help
-Output #0, image2, to '/home/hermes-worker/runs/sh21-engine-frame.png':
+Output #0, image2, to '/home/hermes-worker/runs/sh22-engine-frame.png':
   Metadata:
     encoder         : Lavf61.7.103
   Stream #0:0: Video: png, rgb24(pc, gbr/unknown/unknown, progressive), 1280x720, q=2-31, 200 kb/s, 29.97 fps, 29.97 tbn
       Metadata:
         encoder         : Lavc61.19.101 png
-[image2 @ 0x563d78203380] The specified filename '/home/hermes-worker/runs/sh21-engine-frame.png' does not contain an image sequence pattern or a pattern is invalid.
-[image2 @ 0x563d78203380] Use a pattern such as %03d for an image sequence or use the -update option (with -frames:v 1 if needed) to write a single image.
-[out#0/image2 @ 0x563d78203280] video:4KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown
-frame=    1 fps=0.0 q=-0.0 Lsize=N/A time=00:00:00.03 bitrate=N/A speed=1.06x    
+[image2 @ 0x561592a4f380] The specified filename '/home/hermes-worker/runs/sh22-engine-frame.png' does not contain an image sequence pattern or a pattern is invalid.
+[image2 @ 0x561592a4f380] Use a pattern such as %03d for an image sequence or use the -update option (with -frames:v 1 if needed) to write a single image.
+[out#0/image2 @ 0x561592a4f280] video:4KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown
+frame=    1 fps=0.0 q=-0.0 Lsize=N/A time=00:00:00.03 bitrate=N/A speed=0.573x    
 ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers
   built with gcc 14 (Debian 14.2.0-19)
   configuration: --prefix=/usr --extra-version=0+deb13u1 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --disable-stripping --disable-libmfx --disable-omx --enable-gnutls --enable-libaom --enable-libass --enable-libbs2b --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libharfbuzz --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-openal --enable-opencl --enable-opengl --disable-sndio --enable-libvpl --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-ladspa --enable-libbluray --enable-libcaca --enable-libdvdnav --enable-libdvdread --enable-libjack --enable-libpulse --enable-librabbitmq --enable-librist --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libx264 --enable-libzmq --enable-libzvbi --enable-lv2 --enable-sdl2 --enable-libplacebo --enable-librav1e --enable-pocketsphinx --enable-librsvg --enable-libjxl --enable-shared
@@ -96,17 +96,17 @@ ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers
   libswscale      8.  3.100 /  8.  3.100
   libswresample   5.  3.100 /  5.  3.100
   libpostproc    58.  3.100 / 58.  3.100
-Input #0, png_pipe, from '/home/hermes-worker/runs/sh21-engine-frame.png':
+Input #0, png_pipe, from '/home/hermes-worker/runs/sh22-engine-frame.png':
   Duration: N/A, bitrate: N/A
   Stream #0:0: Video: png, rgb24(pc, gbr/unknown/unknown), 1280x720, 25 fps, 25 tbr, 25 tbn
 Stream mapping:
   Stream #0:0 -> #0:0 (png (native) -> rawvideo (native))
 Press [q] to stop, [?] for help
-Output #0, rawvideo, to '/home/hermes-worker/runs/sh21-engine-frame.rgb':
+Output #0, rawvideo, to '/home/hermes-worker/runs/sh22-engine-frame.rgb':
   Metadata:
     encoder         : Lavf61.7.103
   Stream #0:0: Video: rawvideo (RGB[24] / 0x18424752), rgb24(pc, gbr/unknown/unknown, progressive), 1280x720, q=2-31, 552960 kb/s, 25 fps, 25 tbn
       Metadata:
         encoder         : Lavc61.19.101 rawvideo
-[out#0/rawvideo @ 0x56392f87cec0] video:2700KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.000000%
-frame=    1 fps=0.0 q=-0.0 Lsize=    2700KiB time=00:00:00.04 bitrate=552960.0kbits/s speed=5.35x    
+[out#0/rawvideo @ 0x55688a22aec0] video:2700KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.000000%
+frame=    1 fps=0.0 q=-0.0 Lsize=    2700KiB time=00:00:00.04 bitrate=552960.0kbits/s speed=5.33x    
