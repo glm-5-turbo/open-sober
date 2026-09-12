@@ -5,7 +5,9 @@ Reversed the engine's real GEOMETRY draw path and completed the 16-slot GLES
 dispatch table that --renderframe-seedgles covers. The clear path uses slots
 0-7 (SH22 map); the real draw path uses slots 9/10 = glDrawElements /
 glDrawArrays via wrapper 0x5b35288. These were left UNSEEDED (raw-Mesa, SH19
-bug class). Now seeded + regression-pinned. Workspace 473/0.
+bug class). Now seeded + regression-pinned, and a new --renderframe-drawprobe
+lever PROVES the engine's own geometry wrapper dispatches glDrawElements
+through the bridge. Workspace 473/0.
 
 ## What the clear-only frame was hiding
 The frame-fn 0x105b32c00 (driven by --rendersustain / --renderframe-drive) is a
@@ -52,14 +54,44 @@ bridge (both are pure int-ABI, <=8 args). New regression
 `draw_slots_gl_draw_elements_arrays_resolve_via_int_bridge` pins both resolve
 with a trailing NUL (the seedgles calling convention) and rejects mixed-wrapping.
 
+## --renderframe-drawprobe (real-geometry proof)
+In addition to completing the map (above) we now DRIVE the engine's own
+geometry wrapper 0x5b35288 with a fabricated minimal renderer (empty primitive
+list -> primitive-setup 0x5b353d0 returns fast; nonzero [renderer+120]
+index-buffer obj + w5=3 count -> INDEXED path). With slots 9/10 seeded, the
+wrapper dispatches a REAL glDrawElements through the bridge:
+
+```
+[elfjit:renderframe-seedgles] slot 9 (glDrawElements)  <- bridge 0x7f0000002a38
+[elfjit:renderframe-seedgles] slot 10 (glDrawArrays)   <- bridge 0x7f0000002a40
+hostcall@glBindBuffer pc=0x7f00000029f8 x0=0x8893 ...     x30=0x105b35550 (GL_ELEMENT_ARRAY_BUFFER)
+hostcall@glDrawElements pc=0x7f0000002a38 x0=0x4 x1=0x0 x2=0x1405 x30=0x105b352f8  (mode=GL_TRIANGLES, type=GL_UNSIGNED_INT)
+[elfjit:renderframe-drawprobe] geometry wrapper 0x5b35288 returned Ok(0x0)
+[elfjit:renderframe-drawprobe] post-draw swap returned Ok(0x1)
+```
+
+exit 124 stable, zero crash/heap abort. This is the FIRST time the engine's
+real geometry draw path (primitive-setup -> buffer-bind -> indexed
+glDrawElements) dispatches through the GLES bridge — analogous to SH17/22's
+proof for the clear path. Run-log: runs/sh24-drawprobe.txt.
+
+Honest scope: the geometry wrapper ran with a fabricated EMPTY renderer (no
+real mesh/buffer/VAO data), so this dispatches a glDrawElements with
+mode=GL_TRIANGLES / count routed but no actual vertices — it proves the DRAW
+DISPATCH is bridge-functional, not that real geometry renders yet. The next
+wall is feeding this primitive-setup path a coherent primitive list + vertex
+buffers (the RENDERER C++ object reverse).
+
 ## Verify
 - Workspace 473/0 (was 472; +1 regression).
 - `--jni` clean exit 0; stable idle exit 124 (baselines unchanged).
 - Clear/sustain render path unchanged (slots 0-7 seeded as before).
+- New repr: `--renderframe-drawprobe` reaches glDrawElements through bridge.
 
-## Frontier (unchanged shape, now one wall shorter)
-The draw dispatch slots route through the bridge, so the ONLY remaining blocker
-to a real geometry draw is the coherent renderer C++ object that wrapper
-0x5b35288 / primitive-setup 0x5b353d0 take as x0 — its primitive-list /
-vertex-buffer / VAO layout (the multi-cycle frontier). Slots 11+ (texture /
+## Frontier (unchanged shape, now two walls shorter)
+The draw dispatch slots route through the bridge AND the engine's own geometry
+wrapper demonstrably reaches glDrawElements through it. The ONLY remaining
+blocker to a real rendered triangle is the coherent renderer C++ object that
+wrapper 0x5b35288 / primitive-setup 0x5b353d0 take as x0 — its primitive-list
+/ vertex-buffer / VAO layout (the multi-cycle frontier). Slots 11+ (texture /
 uniform / shader dispatch) still need reversing before a textured/shaded draw.

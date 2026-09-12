@@ -1989,17 +1989,29 @@ fn main() {
                         // Seeding slots 9/10 too means a real geometry draw (reaching
                         // the RENDERER C++ object reverse) dispatches through the
                         // bridge instead of jumping to a raw Mesa addr (SH19 class).
-                        let seed_names = [
-                            "glDrawBuffers", "glClearBufferiv", "glClearBufferfv",
-                            "glClearStencil", "glColorMask", "glDepthMask",
-                            "glStencilMask", "glViewport",
-                            "glDrawElements", "glDrawArrays", // slots 8-9 (draw)
-                            // slots 10+ are texture/uniform/shader dispatch (see
-                            // docs/frontier-sh24-draw-slots.md); leave unseeded
-                            // until the wrapper needs them.
+                        // Seed EVERY dispatch slot explicitly by (slot, name). Slots
+                        // 0-7 are the clear path (SH22-corrected names below). The
+                        // real geometry draw dispatches slot 9 as glDrawElements
+                        // (indexed draw, wrapper 0x5b35288 @0x5b352f4 bl 0x5b3a22c)
+                        // and slot 10 as glDrawArrays (array draw @0x5b35368 bl
+                        // 0x5b3a238), after primitive-setup 0x5b353d0 binds buffers +
+                        // sets vertex attrib pointers via direct @plt. Seeding 9/10
+                        // means a real geometry draw dispatches through the bridge
+                        // instead of jumping to a raw Mesa addr (SH19 class).
+                        let seed_slots: [(usize, &str); 10] = [
+                            (0, "glDrawBuffers"),
+                            (1, "glClearBufferiv"),
+                            (2, "glClearBufferfv"),
+                            (3, "glClearStencil"),
+                            (4, "glColorMask"),
+                            (5, "glDepthMask"),
+                            (6, "glStencilMask"),
+                            (7, "glViewport"),
+                            (9, "glDrawElements"),
+                            (10, "glDrawArrays"),
                         ];
                         if renderframe_args.iter().any(|a| a == "--renderframe-seedgles") {
-                            for (i, name) in seed_names.iter().enumerate() {
+                            for (i, name) in seed_slots {
                                 let slot_v = 0x106d3b2f0u64 + (i as u64) * 8;
                                 // Mixed (float) ABI first; fall back to int ABI for
                                 // glClear/glColorMask/glViewport etc.
@@ -2111,6 +2123,70 @@ fn main() {
                                 }
                             } else if (iter as usize) >= loop_n {
                                 break;
+                            }
+                        }
+                        // --renderframe-drawprobe: drive the engine's REAL geometry
+                        // draw wrapper 0x5b35288 (the fn that calls primitive-setup
+                        // 0x5b353d0 then dispatches the indexed/array draw through
+                        // GLES dispatch-table slots 9/10). Fabricate a minimal
+                        // coherent renderer: empty primitive list ([container+72]==
+                        // [container+80]==0 -> 0x5b353d0 returns mask 0 fast), but a
+                        // NONZERO [renderer+120] index-buffer object + nonzero count
+                        // arg (w5) so the wrapper takes the INDEXED path and
+                        // dispatches slot 9 (glDrawElements) through the bridge.
+                        // This proves the geometry draw dispatch reaches a real
+                        // glDrawElements (currently the recorded clear-state maxes
+                        // out before any gl*Draw*).
+                        if renderframe_args.iter().any(|a| a == "--renderframe-drawprobe") {
+                            let objs = Box::leak(vec![0u8; 8192].into_boxed_slice());
+                            let base = objs.as_ptr() as u64;
+                            let renderer = base;
+                            let container = base + 0x100;
+                            let ibo = base + 0x200;
+                            unsafe {
+                                // renderer[56] = container (0x5b353f0 ldr x25,[x0,#56])
+                                *(renderer.wrapping_add(56) as *mut u64) = container;
+                                // renderer[120] = index-buffer object (nonzero -> indexed path)
+                                *(renderer.wrapping_add(120) as *mut u64) = ibo;
+                                // renderer[142] u16 element count (w8 in wrapper 0x5b352b8)
+                                *(renderer.wrapping_add(142) as *mut u16) = 3;
+                                // container[72]/[80] = begin/end primitive list, empty (equal)
+                                *(container.wrapping_add(72) as *mut u64) = 0;
+                                *(container.wrapping_add(80) as *mut u64) = 0;
+                                // ibo[72] = element-buffer id (bound by 0x5b353d0's tail)
+                                *(ibo.wrapping_add(72) as *mut u32) = 0;
+                            }
+                            eprintln!(
+                                "[elfjit:renderframe-drawprobe] fabricated renderer 0x{renderer:x} ([+56]->cont, [+120]=ibo, [+142]=3, empty prim list)"
+                            );
+                            let mut sd = arm64jit::jit::CpuState::new();
+                            sd.tpidr = tpidr;
+                            sd.x[31] = isp;
+                            sd.x[0] = renderer;
+                            sd.x[1] = 0; // w22: draw-mode table index (GL_TRIANGLES-ish)
+                            sd.x[2] = 0; // w23: stride multiplier
+                            sd.x[3] = 0; // -> w1 for primitive-setup
+                            sd.x[4] = 0; // w20: offset/count arg
+                            sd.x[5] = 3; // w21: count (nonzero -> indexed path w/ slot 9)
+                            match arm64jit::jit::jit_run(
+                                iimg, ibase, 0x105b35288, &mut sd as *mut CpuState,
+                            ) {
+                                Err(e) => eprintln!(
+                                    "[elfjit:renderframe-drawprobe] geometry wrapper stopped: {e}"
+                                ),
+                                Ok(ok) => eprintln!(
+                                    "[elfjit:renderframe-drawprobe] geometry wrapper 0x5b35288 returned Ok({ok:#x})"
+                                ),
+                            }
+                            let mut se = arm64jit::jit::CpuState::new();
+                            se.tpidr = tpidr;
+                            se.x[31] = isp;
+                            se.x[0] = real_ctx;
+                            match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
+                                Err(e) => eprintln!("[elfjit:renderframe-drawprobe] swap stopped: {e}"),
+                                Ok(ok) => eprintln!(
+                                    "[elfjit:renderframe-drawprobe] post-draw swap returned Ok({ok:#x})"
+                                ),
                             }
                         }
                     }
