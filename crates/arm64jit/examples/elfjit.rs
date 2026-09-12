@@ -3000,6 +3000,20 @@ fn main() {
                             // ASTC void-extent alphas (255/190/128/64) render as 4 gray lobes.
                             let astc_mode = renderframe_args.iter().any(|a| a == "--renderframe-astc");
                             let comp_gray = etc2a_mode || astc_mode;
+                            // --renderframe-quad-loop <N>: SUSTAINABLE textured-quad rendering —
+                            // after the single proof frame, re-drive clear(cycling bg) ->
+                            // engine geometry wrapper -> swap N times on the detached host thread,
+                            // so a recording proves a fresh textured geometry render every frame
+                            // (the last property a real main-loop frame drive needs for the
+                            // textured/mesh path; geometry analog of SH25b's triangle-loop).
+                            let quad_loop_n: Option<u32> = renderframe_args
+                                .iter()
+                                .position(|a| a == "--renderframe-quad-loop")
+                                .and_then(|i| renderframe_args.get(i + 1))
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| {
+                                    renderframe_args.iter().any(|a| a == "--renderframe-quad-loop").then_some(6)
+                                });
                             const GL_ARRAY_BUFFER: u64 = 0x8892;
                             const GL_ELEMENT_ARRAY_BUFFER: u64 = 0x8893;
                             const GL_STATIC_DRAW: u64 = 0x88e4;
@@ -3230,6 +3244,42 @@ fn main() {
                                 match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
                                     Err(e) => eprintln!("[elfjit:renderframe-quad] swap stopped: {e}"),
                                     Ok(ok) => eprintln!("[elfjit:renderframe-quad] post-draw swap returned Ok({ok:#x})"),
+                                }
+                                // --renderframe-quad-loop <N>: SUSTAINABLE textured-quad frames.
+                                // The single proof frame is done above (including the readback).
+                                // Now re-drive clear(cycling bg) -> wrapper -> swap N times so a
+                                // recording proves a FRESH textured render every iteration.
+                                if let Some(n) = quad_loop_n {
+                                    let bgs: [[f32; 4]; 5] = [
+                                        [0.9, 0.1, 0.1, 1.0], [0.1, 0.9, 0.1, 1.0], [0.1, 0.1, 0.9, 1.0],
+                                        [0.9, 0.9, 0.1, 1.0], [0.9, 0.1, 0.9, 1.0],
+                                    ];
+                                    for iter in 0..n {
+                                        let bg = bgs[(iter as usize) % 5];
+                                        let mut sc = arm64jit::jit::CpuState::new();
+                                        sc.tpidr = tpidr; sc.x[31] = isp;
+                                        sc.v[0] = bg[0].to_bits() as u64;
+                                        sc.v[2] = bg[1].to_bits() as u64;
+                                        sc.v[4] = bg[2].to_bits() as u64;
+                                        sc.v[6] = bg[3].to_bits() as u64;
+                                        let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7710, &mut sc as *mut CpuState); // glClearColor
+                                        let _ = gcall(0x1062d7740, GL_COLOR_BUFFER_BIT, 0, 0, 0, 0, 0);                    // glClear
+                                        let mut swn = arm64jit::jit::CpuState::new();
+                                        swn.tpidr = tpidr; swn.x[31] = isp;
+                                        swn.x[0] = renderer; swn.x[1] = 0; swn.x[2] = 0; swn.x[3] = 0;
+                                        swn.x[4] = 6; swn.x[5] = 3;
+                                        if let Err(e) = arm64jit::jit::jit_run(iimg, ibase, 0x105b35288, &mut swn as *mut CpuState) {
+                                            eprintln!("[elfjit:renderframe-quad-loop] iter {iter} wrapper stopped: {e}");
+                                            continue;
+                                        }
+                                        let mut sen = arm64jit::jit::CpuState::new();
+                                        sen.tpidr = tpidr; sen.x[31] = isp; sen.x[0] = real_ctx;
+                                        match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut sen as *mut CpuState) {
+                                            Err(e) => eprintln!("[elfjit:renderframe-quad-loop] iter {iter} swap stopped: {e}"),
+                                            Ok(ok) => eprintln!("[elfjit:renderframe-quad-loop] iter {iter} drew+swap Ok({ok:#x}) bg={bg:?} (fresh textured-quad frame)"),
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(350));
+                                    }
                                 }
                             }
                         }
