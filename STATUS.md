@@ -1,5 +1,19 @@
 # Long-Run Goal — Status Ledger
 
+## Session (Sep 12, 2026) — SH9: drain SELF-NODE-SKIP guard; `--deque-node-live probe` gives a controlled foreign-node guest dispatch (workspace 468/0)
+status: session-end (committed, tests green)
+last_agent_claim: Disassembled the engine task-deque drain pop-loop
+(0x2856e40..0x28570a4) and found the self-node-skip guard SH8 missed at
+0x2856fc8 (`cmp x8,[x19,#104]; b.eq 28570a4`) — the drain RETURNS without
+dispatching any popped node that equals [consumer+104]. Since the idle sentinel
+IS [consumer+104], SH8's `--deque-probe` (repoint sentinel [node+112]) can never
+fire; the correct lever is a FOREIGN node. New `--deque-node-live probe` injects
+a foreign node with a host-thunk PROBE vtable; the pop-loop now dispatches it in
+a real guest thread (tid 0) — the first controlled crossing through the
+foreign-node dispatch path. Still needs a real render/tick vtable to reach
+egl*/gl*. Doc: docs/frontier-sh9-drain-selfskip.md. Run-log:
+/home/hermes-worker/runs/deque-nodelive-probe-crossing.txt.
+
 goal: run Roblox through the Open-Sober runtime (specialized runtime, graphics,
 sound) — the full "Roblox boots on the JIT/no-QEMU path" gate.
 started: 2026-09-11T01:20:42Z

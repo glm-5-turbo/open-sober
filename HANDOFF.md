@@ -1,6 +1,38 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle SH8) — dispatch ABI fully reversed + pinned; `--deque-probe` live-repoints sentinel vtable (works) but sentinel-as-task still faults (honest failure). Workspace 468/0; HEAD 415e384+.
+## Session (Sep 12, 2026, hermes-worker, cycle SH9) — drain SELF-NODE-SKIP guard discovered (correction to SH8): sentinel-repoint can never fire; foreign-node path gives a controlled guest dispatch. Workspace 468/0; HEAD 480196f+.
+
+Disassembled the drain pop-loop `0x2856e40..0x28570a4` (file vaddr = guest−0x100000000)
+and found the piece SH8's model omitted — the **self-node-skip guard**:
+
+```
+0x2856fc8  ldr  x8,[x19,#104]   ; x8 = [consumer+104]
+0x2856fcc  cmp  x8,x22          ; x22 = popped node
+0x2856fd0  b.eq 0x28570a4       ; equal -> RETURN, never dispatch
+```
+The idle sentinel IS `[consumer+104]` (the drain's own struct, vtable
+0x106829f00), so repointing the sentinel's `[node+112]` (`--deque-probe`, SH8)
+is **structurally futile** — the sentinel never reaches the type-4 dispatch at
+`0x2857008`. The correct lever is the **foreign node** path: a calloc'd node
+(addr != [consumer+104]) passes the guard and reaches the real dispatch.
+
+**New `--deque-node-live probe`** (elfjit, opt-in): auto-builds a HOST-THUNK
+PROBE vtable (`[vt+40]`=registered host thunk, `[vt+16]`=ctx) and injects a
+foreign node (`[node+112]=that vt`, `[node+40]=1`, tagged into the live
+headcell). Observed: the pop-loop NOW dispatches in a **real guest thread**
+(tid 0, `rbx_matches_gueststate=true`, `in_jit_run=true`, guestpc→0x7f0000002068)
+— a controlled first crossing through the foreign-node dispatch path — vs SH8's
+sentinel-repoint which faulted only in an untracked host thread. It still faults
+(exit 134, /home/hermes-worker/runs/deque-nodelive-probe-crossing.txt) because
+the handler is our probe host-thunk, not a real engine render callback.
+
+**Next lever (mechanism now correct):** identify a REAL render/tick vtable for
+`[node+112]` (+ coherent payload) so `--deque-node-live <vt>` reaches egl*/gl*;
+or invoke the REAL producer 0x285682c as a guest call with a valid task node.
+Baselines unchanged: `--jni` clean exit 0; stable idle exit 124. Doc:
+docs/frontier-sh9-drain-selfskip.md.
+
+## Session (Sep 12, 2026, hermes-worker, cycle SH8) — dispatch ABI fully reversed + pinned; `--deque-probe` live-repoints sentinel vtable (works) but sentinel-as-task still faults (honest failure, later corrected by SH9).
 
 Reversed the engine task-deque consumer's POP-LOOP dispatch ABI from live disasm
 (libroblox 0x2856fd4..0x2857008, qemu/objdump-verified) and pinned it as a new

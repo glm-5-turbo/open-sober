@@ -1075,7 +1075,32 @@ fn main() {
             args.iter()
                 .position(|a| a == "--deque-node-live")
                 .and_then(|i| args.get(i + 1).cloned())
-                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).expect("--deque-node-live needs hex vtable"))
+                .map(|v| {
+                    if v == "probe" {
+                        // Auto-build a HOST-THUNK PROBE vtable: [vt+40]=registered
+                        // host thunk, [vt+16]=ctx marker. The drain dispatch of a
+                        // FOREIGN node ([node+112]&~0x3f -> [vt+40]) then calls OUR
+                        // probe with the real engine ABI args, firing the logging
+                        // counter — the controlled type-4 crossing SH7b demanded.
+                        // This avoids hand-resolving a real render/tick vtable.
+                        extern "C" fn probe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, _a6: u64, _a7: u64) -> u64 {
+                            0
+                        }
+                        let probe_addr = arm64jit::jit::register_host_call_auto(probe);
+                        let v = unsafe { libc::calloc(1, 8 * 8) as *mut u8 };
+                        unsafe {
+                            (v as *mut u64).add(2).write_volatile(0x_dead_beef); // [vt+16] ctx
+                            (v as *mut u64).add(4).write_volatile(probe_addr); // [vt+40] handler
+                        }
+                        eprintln!(
+                            "[elfjit:deque-node-live] PROBE vtable (vt=0x{:x}, [vt+40]=0x{probe_addr:x}) — foreign-node dispatch will hit a registered host-thunk",
+                            v as u64
+                        );
+                        v as u64
+                    } else {
+                        u64::from_str_radix(v.trim_start_matches("0x"), 16).expect("--deque-node-live needs hex vtable or 'probe'")
+                    }
+                })
         } {
             // Drain body span (guest vaddrs) where the drain holds x20 = deque root.
             const DRAIN_LO: u64 = 0x102856e40;
@@ -1290,11 +1315,6 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     let is_ptr = |p: u64| p >= 0x100000000 && p >> 56 == 0 && p & 7 == 0;
                     let snaps = arm64jit::jit::snapshot_threads();
-                    // Candidate roots: every thread's x20/x19 that looks like a
-                    // deque-builder, PLUS the SH7 parked-frame recovery
-                    // ([sp+64]=root). The deque root's FIRST qword ([headcell])
-                    // is itself a pointer; that headcell's [0] (packed head) has
-                    // low48 = the sentinel node whose [node+112]==0x106829f00.
                     let mut roots: Vec<u64> = Vec::new();
                     for t in &snaps {
                         for r in [t.x20, t.x19] {
@@ -1325,12 +1345,6 @@ fn main() {
                         if cur_v112 == 0x106829f00 {
                             unsafe {
                                 (sentinel as *mut u64).add(112 / 8).write_volatile(vtaddr);
-                                // NOTE: do NOT write [node+40]/[node+32] — the
-                                // sentinel IS the live drain struct and its own
-                                // [node+40]/[node+32] are already nonzero, so the
-                                // dispatch guard passes without corrupting the
-                                // drain's internal state (writing them caused a
-                                // host-slot deref SIGSEGV).
                             }
                             repointed.push(sentinel);
                             eprintln!(
