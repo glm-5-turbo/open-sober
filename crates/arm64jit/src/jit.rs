@@ -7910,6 +7910,45 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn tbl_tbx_exec() {
+        // tbl v0.8b, {v2.16b}, v4.8b -- rn=table(2), rm=index(4), rd=0.
+        // encode = 0x0e000000 | (4<<16) | (2<<5) | 0 = 0x0e400080? check: (4<<16)=
+        // 0x40000, (2<<5)=0x40, so 0x0e000000|0x40000|0x40 = 0x0e040040 -> but decode
+        // earlier showed 0x0e040042 = rd2 rn2 rm4. We want rd=0 rn=2 rm=4.
+        let mut st = CpuState::new();
+        // table in v2 (16 bytes = st.v[4..6]): byte i = i.
+        for b in 0..16u8 {
+            let half = (b as usize) % 2; // st.v[4]=bytes0-7, st.v[5]=bytes8-15
+            let sh = ((b as usize) / 2) * 32; // 8 bytes * 8 bits... store at byte b
+            let byte_off = b as usize; // absolute byte offset 0..15
+            let u64_idx = byte_off / 8; // which u64
+            let bit_off = (byte_off % 8) * 8;
+            st.v[4 + u64_idx] |= (b as u64) << bit_off;
+        }
+        // index vector v4 (rm=4): bytes {15, 40, 0, 1, 2, 3, 4, 5} -> bytes 1..7 ->
+        // offsets 1*8..5*8 in v[8]; byte0 at v[8] bit0.
+        st.v[8] = (5u64 << 56) | (4 << 48) | (3 << 40) | (2 << 32) | (1 << 24) | (0 << 16) | (40 << 8) | 15;
+        let w = 0x0e000000u32 | (4 << 16) | (2 << 5); // rd=0, rn=2, rm=4, tbl 8b
+        exec_bytes(&mut st, &w.to_le_bytes(), 0).unwrap();
+        // table byte at index idx = idx for idx<16, else 0. byte0 idx=15 -> 15.
+        assert_eq!(st.v[0] & 0xff, 15, "tbl idx0=15 -> table[15]=15");
+        // byte1 idx=40 (>=16) -> 0
+        assert_eq!((st.v[0] >> 8) & 0xff, 0, "tbl idx1=40 out-of-range -> 0");
+        // byte2 idx=0 -> 0
+        assert_eq!((st.v[0] >> 16) & 0xff, 0, "tbl idx2=0 -> 0");
+        // byte3 idx=1 -> 1
+        assert_eq!((st.v[0] >> 24) & 0xff, 1, "tbl idx3=1 -> 1");
+        // byte4 idx=2 -> 2
+        assert_eq!((st.v[0] >> 32) & 0xff, 2, "tbl idx4=2 -> 2");
+        // byte5 idx=3 -> 3
+        assert_eq!((st.v[0] >> 40) & 0xff, 3, "tbl idx5=3 -> 3");
+        // byte6 idx=4 -> 4
+        assert_eq!((st.v[0] >> 48) & 0xff, 4, "tbl idx6=4 -> 4");
+        // byte7 idx=5 -> 5
+        assert_eq!((st.v[0] >> 56) & 0xff, 5, "tbl idx7=5 -> 5");
+    }
+
+    #[test]
     fn smlsl_widen_exec() {
         // smlsl v0.4s, v1.4h, v2.4h = 0x0e62a020: Vd = Vd - widen(s16*s16) per lane.
         // v1s = {2,5,-3,7}, v2s = {3,-2,4,10} -> prods {6,-10,-12,70}.

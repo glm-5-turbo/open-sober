@@ -216,6 +216,21 @@ impl CodeBuf {
         self.emit_mem(rd, base, disp);
     }
 
+    /// movzx r64 <- byte [base + idx*1 + disp]  (zero-extend indexed byte load).
+    /// Used by TBL/TBX: table byte at a runtime index. `idx` is a 64-bit reg.
+    /// ModRM rm=base(r), SIB scale=0 index=idx base=base, then disp32.
+    pub fn movzx_byte_mem_idxd(&mut self, rd: u8, base: u8, idx: u8, disp: i32) {
+        if rd >= 8 || base >= 8 || idx >= 8 {
+            self.b(rex(false, rd, idx, base));
+        }
+        self.b(0x0F);
+        self.b(0xB6);
+        // modrm reg=rd, rm=100 (SIB follows); SIB scale=0, index=idx, base=base.
+        self.b(modrm(2, rd & 7, 0b100));
+        self.b((idx & 7) << 3 | (base & 7));
+        self.u32(disp as u32);
+    }
+
     /// mov [mem (base+disp)] <- r8 (byte store)
     pub fn mov_store8(&mut self, base: u8, disp: i32, src: u8) {
         if base >= 8 || src >= 8 {

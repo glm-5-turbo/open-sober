@@ -3308,6 +3308,39 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdTbl { rd, rn, rm, len2, tbx, q } => {
+            // tbl/tbx Vd.16B|8B, {Vn..Vn+len2}, Vm: per byte lane i, idx=Vm[i].
+            // Table = len2+1 contiguous 16-byte regs starting at slot(rn); because
+            // they're contiguous, table byte `idx` lives at slot(rn)+idx. If
+            // idx < 16*(len2+1): Vd[i]=table[idx]; else Vd[i]=0 (tbl) / keep (tbx).
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 16 } else { 8 };
+            let table_bytes = 16 * (len2 as i32 + 1);
+            for i in 0..lanes {
+                // idx = Vm[i]
+                buf.movzx_byte_mem(RAX, RBX, f(rm) + i);
+                buf.cmp_ri64(RAX, table_bytes as u32);
+                // If idx >= table_bytes, skip the table lookup (keep Vd[i] for tbx,
+                // or remember to clear it below for tbl).
+                let j_ge = buf.jcc_rel32(0x83); // JAE (unsigned >=)
+                // table[idx] -> AL
+                buf.movzx_byte_mem_idxd(RAX, RBX, RAX, f(rn));
+                buf.mov_store8(RBX, f(rd) + i, RAX);
+                let j_end = buf.jmp_rel32();
+                let ge_target = buf.bytes.len() as i64;
+                let disp_ge = (ge_target - (j_ge as i64 + 4)) as i32;
+                buf.bytes[j_ge..j_ge + 4].copy_from_slice(&disp_ge.to_le_bytes());
+                // for tbl (not tbx), clear Vd[i] when idx out of table range:
+                if !tbx {
+                    buf.mov_ri64(RAX, 0);
+                    buf.mov_store8(RBX, f(rd) + i, RAX);
+                }
+                let end_target = buf.bytes.len() as i64;
+                let disp_end = (end_target - (j_end as i64 + 4)) as i32;
+                buf.bytes[j_end..j_end + 4].copy_from_slice(&disp_end.to_le_bytes());
+            }
+            Ok(())
+        }
         Inst::SimdFreFrsqrte { rd, rn, sqrt, esize, q } => {
             // frecpe/frsqrte Vd.T, Vn.T: per-lane approximate reciprocal or
             // 1/sqrt. esize 4 -> rcpss/rsqrtss on the promoted 32-bit; esize 8

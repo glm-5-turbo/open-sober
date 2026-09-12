@@ -794,6 +794,14 @@ pub enum Inst {
     SimdCmhiB { rd: u8, rn: u8, rm: u8, lanes: u8, ge: bool },
     // ---- SIMD unsigned compare-higher 2D: cmhi Vd.2D, Vn.2D, Vm.2D ----
     SimdCmhiD { rd: u8, rn: u8, rm: u8 },
+    // ---- SIMD table lookup: tbl/tbx Vd.16B|8B, {Vn..}, Vm ----
+    // Byte-based: per lane i, idx = Vm[i]; if idx < 16*(len+1) then Vd[i] =
+    // table byte idx (table = bytes of regs rn..rn+len, contiguous => byte idx is
+    // at slot(rn)+idx), else Vd[i] = 0 for tbl / unchanged for tbx. Gate:
+    // (insn & 0xbfe0_8c00) == 0x0e00_0000 (0x0e=Q0, 0x4e=Q1); rm=bits[20:16],
+    // len2=bits[14:13], tbx=bit12, rn=bits[9:5]. Verified vs real 0x0e000063,
+    // 0x0e022084, 0x0e040042 and assembled 1/2/4-reg forms.
+    SimdTbl { rd: u8, rn: u8, rm: u8, len2: u8, tbx: bool, q: bool },
     // ---- SIMD unsigned compare-higher-or-same: cmhs Vd.T, Vn.T, Vm.T ----
     // Byte2 0x3c (vs cmhi's 0x34, bit10 set) => per lane all-ones if Vn>=Vm
     // (unsigned); the "or same" variant of cmhi. cmovae (cc 0x43) not cmova.
@@ -2113,6 +2121,23 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             sign: xt == 0x0f00_0400,
             esrc,
             upper: (insn >> 30) & 1 == 1, // Q=1 => sxtl2/uxtl2 (upper half)
+        };
+    }
+
+    // ---- SIMD table lookup: tbl/tbx Vd.16B|8B, {Vn..}, Vm ----
+    // Gate (insn & 0xbfe0_8c00) == 0x0e00_0000: base 0x0e (Q0)/0x4e (Q1),
+    // rm=bits[20:16], len2=bits[14:13] (regs=len2+1), tbx=bit12, rn=bits[9:5].
+    // MUST precede SimdAddw (0x..1128 saddw shares byte0 0x0e and bit12=1 with
+    // tbx): saddw/uaddw fail this gate (their bits23:16=0x6a != 0x00 masked by
+    // 0xe0) but tbx 0x0e00_10xx passes. Real: 0x0e000063 tbl v3.8b,{v3},v0.
+    if (insn & 0xbfe0_8c00) == 0x0e00_0000 {
+        return Inst::SimdTbl {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            len2: ((insn >> 13) & 0x3) as u8,
+            tbx: (insn & 0x1000) != 0,
+            q: (insn >> 30) & 1 == 1,
         };
     }
 
@@ -4465,8 +4490,8 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                                                                                                                                     sub: true,
                                                                                                                                                                                                                                                                                                                                 };
                                                                                                                                                                                                                                                                                                                             }
-                                                                                                                                                                                        }
-                                                                                                                            // ---- SIMD unsigned compare-higher: cmhi Vd.4S/Vd.2S, Vn., Vm. ----
+                                                                                                                                                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                                                                                                                                                                                                        // ---- SIMD unsigned compare-higher: cmhi Vd.4S/Vd.2S, Vn., Vm. ----
                                                                                                                                 // Gate &0xffe0_fc00: 0x6ea03400 (4S, Q=1, real 0x6ea13461) / 0x2ea03400 (2S).
                                                                                                                                 // Each 32-bit lane = all-ones if Vn[i] > Vm[i] (unsigned), else 0.
                                                                                                                                 let scm = insn & 0xffe0_fc00;
@@ -7697,6 +7722,31 @@ mod fp16_scalar_and_gate_regressions {
         assert!(matches!(decode_op(0x4ef0e0d0),
             Inst::Pmull1q { rd: 16, rn: 6, rm: 16, hi: true }),
             "got {:?}", decode_op(0x4ef0e0d0));
+        // tbl/tbx table lookup: real tbl v3.8b={v3},v0 = 0x0e000063 (1 reg),
+        // real tbl v2.8b={v2},v4 = 0x0e040042 (1 reg, rm=4 index), tbx 1-reg =
+        // 0x0e001063 (bit12 set, must stay tbl not Addw); saddw 0x0e6a1128 / uaddw
+        // 0x2e6a1128 must stay SimdAddw; assembled 2-reg tbl v4.8b={v4,v5},v2 =
+        // 0x0e022084 and 4-reg tbl v4.16b={v4..v7},v2 = 0x4e026084.
+        assert!(matches!(decode_op(0x0e000063),
+            Inst::SimdTbl { rd: 3, rn: 3, rm: 0, len2: 0, tbx: false, q: false }),
+            "got {:?}", decode_op(0x0e000063));
+        assert!(matches!(decode_op(0x4e000063),
+            Inst::SimdTbl { rd: 3, rn: 3, rm: 0, len2: 0, tbx: false, q: true }));
+        assert!(matches!(decode_op(0x0e022084),
+            Inst::SimdTbl { rd: 4, rn: 4, rm: 2, len2: 1, tbx: false, q: false }));
+        assert!(matches!(decode_op(0x4e026084),
+            Inst::SimdTbl { rd: 4, rn: 4, rm: 2, len2: 3, tbx: false, q: true }));
+        assert!(matches!(decode_op(0x0e040042),
+            Inst::SimdTbl { rd: 2, rn: 2, rm: 4, len2: 0, tbx: false, q: false }),
+            "got {:?}", decode_op(0x0e040042));
+        assert!(matches!(decode_op(0x0e001063),
+            Inst::SimdTbl { rd: 3, rn: 3, rm: 0, len2: 0, tbx: true, q: false }),
+            "tbx must be SimdTbl, got {:?}", decode_op(0x0e001063));
+        assert!(matches!(decode_op(0x0e6a1128),
+            Inst::SimdAddw { rd: 8, rn: 9, rm: 10, sign: true, esrc: 2, upper: false, .. }),
+            "saddw must stay Addw, got {:?}", decode_op(0x0e6a1128));
+        assert!(matches!(decode_op(0x2e6a1128),
+            Inst::SimdAddw { rd: 8, rn: 9, rm: 10, sign: false, esrc: 2, upper: false, .. }));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).
