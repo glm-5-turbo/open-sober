@@ -4957,16 +4957,20 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movdqu_store(RBX, vslot(rd), RAX);
                     Ok(())
                 }
-                Inst::SimdHighNarrow { rd, rn, rm, dst_esize, sub, round } => {
+                Inst::SimdHighNarrow { rd, rn, rm, dst_esize, sub, round, q } => {
                                         // addhn/subhn/raddhn Vd.T, Vn.W, Vm.W: dst[i] = high half of the
-                                        // src-width (Vn[i] +/- Vm[i]), narrowed to dst_esize bytes. Q=0.
+                                        // src-width (Vn[i] +/- Vm[i]), narrowed to dst_esize bytes. Q=1
+                                        // (addhn2/raddhn2) uses the UPPER 64 bits of Vn/Vm and writes the
+                                        // upper half of Vd; Q=0 uses the lower and writes the lower.
                                         let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
                                         let src_esize = 2 * (dst_esize as i32);
-                                        let lanes = 8 / (dst_esize as i32);
+                                        let lanes = if q { 8 / (dst_esize as i32) } else { 8 / (dst_esize as i32) };
                                         let dst_bits = (8 * (dst_esize as i32)) as u8;
+                                        let src_base = 0; // source lanes always start at 0 (full 128-bit read regardless of Q)
+                                        let dst_base = if q { 8 } else { 0 }; // Q=1 writes the upper half of Vd
                                         for i in 0..lanes {
-                                            let so = (i as i32) * src_esize;
-                                            let de = (i as i32) * (dst_esize as i32);
+                                            let so = src_base + (i as i32) * src_esize;
+                                            let de = dst_base + (i as i32) * (dst_esize as i32);
                                             if src_esize >= 4 {
                                                 buf.mov_load64(RAX, RBX, slot(rn)+so);
                                                 buf.mov_load64(RCX, RBX, slot(rm)+so);
@@ -4983,8 +4987,11 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                                                 _ => buf.mov_store8(RBX, slot(rd)+de, RAX),
                                             }
                                         }
-                                        buf.mov_ri64(RAX, 0);
-                                        buf.mov_store64(RBX, slot(rd)+8, RAX);
+                                        // Q=0 writes only the low half of Vd; the upper 8 bytes stay 0.
+                                        if !q {
+                                            buf.mov_ri64(RAX, 0);
+                                            buf.mov_store64(RBX, slot(rd)+8, RAX);
+                                        }
                                         Ok(())
                                     }
                                         Inst::Ld2 { rd, rn, q, post, esize } => {

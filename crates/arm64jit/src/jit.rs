@@ -8012,6 +8012,32 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn addhn_q_exec() {
+        // addhn2 v5.8h, v16.4s, v0.4s = 0x4e604205 (real): word+word then take the
+        // HIGH 16 bits, narrowed to .8h; Q=1 writes the UPPER 64 of Vd. Oracle
+        // (qemu): rn words {0x00020001,0x00040003,0x00060005,0x00080007}, rm all
+        // 0x00010001 -> each (a+b)>>16 = 0x3,0x5,0x7,0x9 in output lanes 4-7.
+        let mut st = CpuState::new();
+        // slot(16)=v[32..33] (rn), slot(0)=v[0..1] (rm), slot(5)=v[10..11] (rd).
+        st.v[32] = 0x00040003_00020001u64; // rn words lane0, lane1
+        st.v[33] = 0x00080007_00060005u64; // rn words lane2, lane3
+        st.v[0] = 0x00010001_00010001u64;  // rm lane0, lane1
+        st.v[1] = 0x00010001_00010001u64;  // rm lane2, lane3
+        // addhn2 0x4e604205 -> bytes LE [0x05,0x42,0x60,0x4e]
+        exec_bytes(&mut st, &[0x05, 0x42, 0x60, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        // rd=5 upper 64 = st.v[11]: lanes 4-7 = {0x9,0x7,0x5,0x3} as halfwords
+        // (lane0 word result 0x3 -> lane4). low16 of v[11] = lane4 = 0x3? qemu
+        // printed out[4..7] = {0x3,0x5,0x7,0x9}: lane4=0x3 => v[11] low16=0x3.
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[11] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h(&st,0), 0x3, "addhn2 lane4");
+        assert_eq!(h(&st,1), 0x5, "addhn2 lane5");
+        assert_eq!(h(&st,2), 0x7, "addhn2 lane6");
+        assert_eq!(h(&st,3), 0x9, "addhn2 lane7");
+        // lower 64 of Vd (st.v[10]) must be untouched (0).
+        assert_eq!(st.v[10], 0, "addhn2 lower half untouched");
+    }
+
+    #[test]
     fn srshl_rounding_exec() {
         // srshl v0.4s, v1.4s, v2.4s = 0x4ea154c4 (real): signed ROUNDING variable
         // right shift. Oracle (qemu): v1={5,-7,100,-101}, shifts {-1,-1,-2,-2}
