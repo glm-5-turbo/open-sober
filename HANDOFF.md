@@ -1,5 +1,39 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH17) — REAL Roblox binary now RENDERS a real COLORED FRAME headlessly on this GPU-less VPS: live EGL context + engine's own eglSwapBuffers succeed, and glClearColor→glClear→eglSwapBuffers through the GLES bridge present a solid-green 1280x720 frame. Workspace 470/0. HEAD a629d9c.
+
+First real rendered pixels from the running engine's own render path, all through the JIT
+bridges against Mesa llvmpipe + a real Xvfb X11 window. Two new opt-in elfjit levers:
+
+1. **`--renderframe`**: after `--renderinit` returns Ok(0x0), drive the engine's OWN swap
+   fn 0x105b3b408 (`ldp x8,x1,[x0,#32]; mov x0,x8; b eglSwapBuffers`) with x0 = the
+   scratch context buffer that render-init wrote into → `eglSwapBuffers([+32]=display,
+   [+40]=surface)` returns **Ok(0x1)=EGL_TRUE**. The real binary presents its surface
+   headlessly (llvmpipe+Xvfb), stable exit 124, zero crash.
+2. **`--renderclear <r,g,b,a>`**: draw a colored clear through the JIT's GLES float bridge
+   on the live context (drive glClearColor@plt 0x1062d7710 with s0..s3, glClear@plt
+   0x1062d7740 with GL_COLOR_BUFFER_BIT=0x4000, then swap). Captured with ffmpeg x11grab:
+   the frame is a **solid green canvas** (the 0.1,0.7,0.2,1 color) — real rendered pixels.
+
+**Key reverse:** render-init's inner fn 0x105b3a2d8 stores real EGL handles at fixed
+ctx offsets [ctx+32]=display,[ctx+40]=surface,[ctx+48]=context; because the harness passes
+a guest-writable scratch as x0 (the "prologue STORES into *x0" pattern from SH16), that
+same buffer already holds the live handles the swap fn reads — no thunk-return plumbing.
+Abandoned (don't re-run): driving the render-init THUNK 0x105b3a280 to recover the "real"
+ctx → SIGSEGV (thunk shifts parent/window args across the inner call). Doc:
+docs/frontier-sh17-renderframe-clear.md; run-logs: runs/sh17-renderframe2.txt,
+runs/sh17-frame-clearcap.txt; frame artifact: runs/sh17-frame-green.png (solid green).
+
+**Frontier (now with a fully-working render pipeline behind the wall):** the engine's own
+main-loop producer still never enqueues a render task onto its idle futex/ALooper, so the
+engine itself never issues glViewport/glClear/glDrawElements in its loop — this cycle's
+clear+swap were harness-driven on the live context. Next: (1) drive the ALooper app-command
+lifecycle so StartApp's real producer enqueues a render task → the engine's OWN frame loop
+runs natively (all endpoints verified bridge-reachable: glViewport@0x105b32ca4,
+glClearColor@0x105b32f8c, glClear@0x105b32fdc, glDrawElements@0x105b35334); or (2) drive the
+engine's render-loop fn (region 0x105b32c40-…) directly with a coherent render-state object
+once its layout is reversed. Baselines unchanged (--jni exit 0; idle main loop exit 124).
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH16) — the real render-init's FULL EGL chain now SUCCEEDS headlessly: window surface created + context made current against Mesa llvmpipe+Xvfb, returned Ok(0x0). Workspace 470/0. HEAD 114d5f2+.
 
 Crossed the SH14-identified gateway (eglCreateWindowSurface + eglMakeCurrent,
