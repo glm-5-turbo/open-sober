@@ -1,5 +1,43 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH26) — the engine's OWN geometry wrapper now renders a REAL TEXTURED triangle: a 2x2 RGBA checkerboard sampled by a textured fragment shader, with every texture/uniform/shader call (glGenTextures/glBindTexture/glActiveTexture/glTexImage2D/glTexParameteri/glGetUniformLocation/glUniform1i) dispatching through the JIT GLES bridge. Workspace 473/0; HEAD (this commit).
+
+Follows SH25's solid-red triangle. New `--renderframe-tex` lever: textured FS
+(`precision mediump float;` — REQUIRED in GLSL ES 1.00 for a local `vec2`, else
+Mesa errors "No precision specified ... for type 'vec2'") samples a 2x2 RGBA
+checkerboard (RED/GREEN/BLUE/WHITE) via a UV derived from `gl_FragCoord` (so the
+single-attrib coherent renderer stays unchanged). Verified THREE on-triangle
+quadrant probes read back three DIFFERENT colors — impossible for a constant
+shader, i.e. the sampled texture definitively rendered:
+
+```
+compile_status vs=0x1 fs=0x1 link_status=0x1 ; uTex loc=0x0<-unit0
+readback centroid(WHITE)  @(640,360) = RGBA(255,255,255,255)
+readback quad-(1,0)(GREEN)@(900,150) = RGBA(0,255,0,255)
+readback quad-(0,0)(RED)  @(300,150) = RGBA(255,0,0,255)
+geometry wrapper Ok(0x0) ; post-draw swap Ok(0x1) ; exit 124
+```
+
+Captured frame (runs/sh26-tex.{rgb,png}): clear-blue bg + the triangle interior
+4-colored (RED=155,909 / GREEN=155,899 / WHITE=52,001 / BLUE=51,947 ≈ 45.1% of
+the frame — the SH25 footprint now textured). glTexImage2D is a 9-arg form
+(pixels rides the guest stack at [sp+0]); the PLT stub is a leaf (adrp/ldr/add/br,
+never pushes sp), so a fake sp whose [0] holds the pixels ptr is read correctly by
+the bridge's gs_stack. Reproducible: runs/capture_tex.sh; run-log runs/sh26-tex.txt.
+
+New debug aid: failing shaders now dump their info log via the int bridge
+(glGetShaderInfoLog/glGetProgramInfoLog resolve through resolve_gles_int) — this
+surfaced the missing precision declaration.
+
+**Next (closest unblocked):** pin the real engine's GLES dispatch-table slot 11+
+mapping for texture/uniform/shader (disasm the engine's texture-binding path so a
+textured engine-driven draw routes through the slots rather than the harness's
+harness-made @plt calls), then scale the coherent-renderer rotation onto a
+two-attrib (pos+UV) real mesh. Compressed-texture (ETC2/ASTC) interception is
+already implemented in the bridge/texture-codec and only needs a live-path prove.
+Baselines unchanged: --jni exit 0 (0x10006); stable idle exit 124; untextured
+triangle still solid-red. Workspace 473/0.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH25) — the coherent renderer RENDERS a REAL VISIBLE triangle, and the engine's OWN geometry wrapper does it. Workspace 473/0; HEAD 035ff6a.
 
 Follows SH24's draw-probe (empty prim list → proved dispatch only). SH25 feeds

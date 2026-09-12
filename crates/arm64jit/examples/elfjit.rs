@@ -2212,6 +2212,15 @@ fn main() {
                                 let plt_shadersource = 0x1062d7890u64;
                                 let plt_compileshader = 0x1062d78a0u64;
                                 let plt_getshaderiv = 0x1062d78b0u64;
+                                // Texture/uniform GLES PLT stubs (verified against the real binary
+                                // .plt: guest = file vaddr + 0x100000000).
+                                let plt_active_texture = 0x1062d75e0u64;
+                                let plt_bind_texture = 0x1062d75f0u64;
+                                let plt_get_uniform_location = 0x1062d7900u64;
+                                let plt_uniform_1i = 0x1062d7910u64;
+                                let plt_tex_parameteri = 0x1062d7960u64;
+                                let plt_gen_textures = 0x1062d7980u64;
+                                let plt_tex_image_2d = 0x1062d79a0u64;
                                     let plt_getprogramiv = 0x1062d77f0u64;
                                     let plt_readpixels = 0x1062d7940u64;
                                     let plt_attachshader = 0x1062d78d0u64;
@@ -2273,8 +2282,25 @@ fn main() {
                                     // Vertex shader: pass clip-space position straight
                                     // through (data is already in NDC).
                                     let vs_src = b"attribute vec4 aPos;\nvoid main(){ gl_Position = aPos; }\n\0";
-                                    // Fragment shader: solid red.
-                                    let fs_src = b"void main(){ gl_FragColor = vec4(1.0,0.0,0.0,1.0); }\n\0";
+                                    // --renderframe-tex: prove the GLES texture/uniform/shader
+                                    // bridge path renders a TEXTURED draw through the engine's
+                                    // own geometry wrapper. The fragment shader samples a 2x2 RGBA
+                                    // checkerboard via a UV computed from gl_FragCoord (so the
+                                    // single-attrib coherent renderer stays unchanged — no second
+                                    // UV vertex attrib). floor/texture2D/gl_FragCoord are all GLSL
+                                    // ES 1.00. Three interior probes then read back three DIFFERENT
+                                    // texel colors, which no constant/solid shader can produce.
+                                    let tex_mode = renderframe_args.iter().any(|a| a == "--renderframe-tex");
+                                    let fs_src: &[u8] = if tex_mode {
+                                        // 2x2 texels RED,GREEN,BLUE,WHITE. UV = floor(frag/640,360)
+                                        // picks a quadrant, (uv+0.5)*0.5 samples its texel center
+                                        // under NEAREST. centroid(640,360)->(1,1)->WHITE; (900,150)
+                                        // ->(1,0)->GREEN; (300,150)->(0,0)->RED.
+                                        b"precision mediump float;\nuniform sampler2D uTex;\nvoid main(){ vec2 uv = floor(gl_FragCoord.xy / vec2(640.0,360.0)); uv = (uv + 0.5) * 0.5; gl_FragColor = texture2D(uTex, uv); }\n\0"
+                                    } else {
+                                        // Fragment shader: solid red.
+                                        b"void main(){ gl_FragColor = vec4(1.0,0.0,0.0,1.0); }\n\0"
+                                    };
                                     let vs_ptr = objs.as_ptr() as u64 + 0x400;
                                     let fs_ptr = objs.as_ptr() as u64 + 0x800;
                                     std::ptr::copy_nonoverlapping(
@@ -2349,6 +2375,102 @@ fn main() {
                                     eprintln!(
                                         "[elfjit:renderframe-triangle] linked program={program:#x} current"
                                     );
+                                    // --renderframe-tex: create + upload a 2x2 RGBA checkerboard
+                                    // texture and assign it to the program's uTex sampler (unit 0),
+                                    // all through the GLES bridge (@plt). Every call here exercises
+                                    // the texture/uniform/shader bridge surface the engine's real
+                                    // textured draws will need. glTexImage2D has 9 args (pixels on
+                                    // the guest stack), so drive it with a dedicated CpuState whose
+                                    // sp=tex_sp points at a slot holding the pixels pointer.
+                                    if tex_mode {
+                                        const GL_TEXTURE0: u64 = 0x84c0;
+                                        const GL_TEXTURE_2D: u64 = 0x0de1;
+                                        const GL_RGBA: u64 = 0x1908;
+                                        const GL_UNSIGNED_BYTE: u64 = 0x1401;
+                                        const GL_NEAREST: u64 = 0x2600;
+                                        const GL_TEXTURE_MIN_FILTER: u64 = 0x2801;
+                                        const GL_TEXTURE_MAG_FILTER: u64 = 0x2800;
+                                        const GL_TEXTURE_2D_FAKE_SP: u64 = 0xf80;
+                                        const GL_TEX_DATA: u64 = 0xf60;
+                                        // 2x2 RGBA. int glTexImage2D uploads row-major; GL treats the
+                                        // first element as lower-left texel. Colors deliberately
+                                        // all distinct + none the base red:
+                                        //   texel(0,0)=RED, texel(1,0)=GREEN, texel(0,1)=BLUE,
+                                        //   texel(1,1)=WHITE (each @ (255,..) so readback is exact).
+                                        const TEX: [u8; 16] = [
+                                            255, 0, 0, 255, // texel(0,0) RED
+                                            0, 255, 0, 255, // texel(1,0) GREEN
+                                            0, 0, 255, 255, // texel(0,1) BLUE
+                                            255, 255, 255, 255, // texel(1,1) WHITE
+                                        ];
+                                        std::ptr::copy_nonoverlapping(
+                                            TEX.as_ptr(),
+                                            (base + GL_TEX_DATA) as *mut u8,
+                                            16,
+                                        );
+                                        // tex_id out slot (glGenTextures), uTex-loc slot.
+                                        let tex_id_slot = base + 0xfd0;
+                                        let _ = gcall(plt_gen_textures, 1, tex_id_slot, 0, 0, 0, 0);
+                                        let tex_id = *(tex_id_slot as *const u32) as u64;
+                                        let _ = gcall(plt_active_texture, GL_TEXTURE0, 0, 0, 0, 0, 0);
+                                        let _ = gcall(plt_bind_texture, GL_TEXTURE_2D, tex_id, 0, 0, 0, 0);
+                                        // NEAREST filtering so no mipmap is required and a probed
+                                        // quadrant yields one exact texel color.
+                                        let _ = gcall(
+                                            plt_tex_parameteri,
+                                            GL_TEXTURE_2D,
+                                            GL_TEXTURE_MIN_FILTER,
+                                            GL_NEAREST,
+                                            0,
+                                            0,
+                                            0,
+                                        );
+                                        let _ = gcall(
+                                            plt_tex_parameteri,
+                                            GL_TEXTURE_2D,
+                                            GL_TEXTURE_MAG_FILTER,
+                                            GL_NEAREST,
+                                            0,
+                                            0,
+                                            0,
+                                        );
+                                        // 9-arg glTexImage2D: x0-x7 in regs, 9th (pixels) at [sp+0].
+                                        // The PLT stub only does adrp/ldr/add/br (no push), so a fake
+                                        // sp whose [0] holds the pixels ptr is read correctly by the
+                                        // bridge's gs_stack.
+                                        let tex_sp = base + GL_TEXTURE_2D_FAKE_SP;
+                                        *(tex_sp as *mut u64) = base + GL_TEX_DATA;
+                                        let mut stex = arm64jit::jit::CpuState::new();
+                                        stex.tpidr = tpidr;
+                                        stex.x[31] = tex_sp;
+                                        stex.x[0] = GL_TEXTURE_2D;
+                                        stex.x[1] = 0; // level
+                                        stex.x[2] = GL_RGBA; // internalformat
+                                        stex.x[3] = 2; // width
+                                        stex.x[4] = 2; // height
+                                        stex.x[5] = 0; // border
+                                        stex.x[6] = GL_RGBA; // format
+                                        stex.x[7] = GL_UNSIGNED_BYTE; // type
+                                        let _ = arm64jit::jit::jit_run(
+                                            iimg,
+                                            ibase,
+                                            plt_tex_image_2d,
+                                            &mut stex as *mut CpuState,
+                                        );
+                                        // uTex = texture unit 0.
+                                        let uni = objs.as_ptr() as u64 + 0xe20;
+                                        std::ptr::copy_nonoverlapping(
+                                            b"uTex\0".as_ptr(),
+                                            uni as *mut u8,
+                                            5,
+                                        );
+                                        let ploc = gcall(plt_get_uniform_location, program, uni, 0, 0, 0, 0)
+                                            .unwrap_or(0) & 0xffff_ffff;
+                                        let _ = gcall(plt_uniform_1i, ploc, 0, 0, 0, 0, 0);
+                                        eprintln!(
+                                            "[elfjit:renderframe-tex] texture tex_id={tex_id:#x} bound+uploaded (2x2 RGBA RED/GREEN/BLUE/WHITE) uTex loc={ploc:#x}<-unit0"
+                                        );
+                                    }
                                     // Diagnostics: real compile/link status. Reading a
                                     // GL int from a shifted-out 32-bit slot requires a
                                     // predictable result location — use glGetShaderiv/
@@ -2393,6 +2515,46 @@ fn main() {
                                             *(int_slot1 as *const u32),
                                             *(int_slot2 as *const u32)
                                         );
+                                    }
+                                    // Debug: if a shader/program failed, dump its info log (via the
+                                    // int bridge — glGetShaderInfoLog / glGetProgramInfoLog resolve
+                                    // through the same resolve_gles_int the seedgles uses).
+                                    {
+                                        let logbuf = objs.as_ptr() as u64 + 0xfb0;
+                                        let logslot: Option<u64> = arm64jit::resolver::resolve_gles_int(b"glGetShaderInfoLog\0");
+                                        let plogslot: Option<u64> = arm64jit::resolver::resolve_gles_int(b"glGetProgramInfoLog\0");
+                                        unsafe {
+                                            let bad_fs = *(int_slot1 as *const u32) == 0;
+                                            let bad_vs = *(int_slot0 as *const u32) == 0;
+                                            let bad_link = *(int_slot2 as *const u32) == 0;
+                                            if (bad_fs || bad_vs) && let Some(slot) = logslot {
+                                                for (what, sh) in [("fs", fs_shader), ("vs", vs_shader)] {
+                                                    if !(if what == "fs" { bad_fs } else { bad_vs }) { continue; }
+                                                    let mut ls = arm64jit::jit::CpuState::new();
+                                                    ls.tpidr = tpidr;
+                                                    ls.x[31] = isp;
+                                                    ls.x[0] = sh as u64;
+                                                    ls.x[1] = 2048;
+                                                    ls.x[2] = 0;
+                                                    ls.x[3] = logbuf;
+                                                    let _ = arm64jit::jit::jit_run(iimg, ibase, slot, &mut ls as *mut CpuState);
+                                                    let cstr = std::ffi::CStr::from_ptr(logbuf as *const libc::c_char);
+                                                    eprintln!("[elfjit:renderframe-triangle] {what} info-log: {cstr:?}");
+                                                }
+                                            }
+                                            if bad_link && let Some(slot) = plogslot {
+                                                let mut ls = arm64jit::jit::CpuState::new();
+                                                ls.tpidr = tpidr;
+                                                ls.x[31] = isp;
+                                                ls.x[0] = program as u64;
+                                                ls.x[1] = 2048;
+                                                ls.x[2] = 0;
+                                                ls.x[3] = logbuf;
+                                                let _ = arm64jit::jit::jit_run(iimg, ibase, slot, &mut ls as *mut CpuState);
+                                                let cstr = std::ffi::CStr::from_ptr(logbuf as *const libc::c_char);
+                                                eprintln!("[elfjit:renderframe-triangle] program info-log: {cstr:?}");
+                                            }
+                                        }
                                     }
                                     // Create + fill the VBO (ARRAY_BUFFER) with verts.
                                     // glGenBuffers writes the generated id to its out
@@ -2625,6 +2787,48 @@ fn main() {
                                             c(pc2),
                                             c(pb.x[6])
                                         );
+                                    }
+                                    // --renderframe-tex readback: 3 on-triangle quadrant probes
+                                    // must yield three DIFFERENT texel colors (WHITE/GREEN/RED),
+                                    // which a constant shader cannot produce -> proves the sampled
+                                    // texture actually rendered.
+                                    if tex_mode {
+                                        let probes: [(u32, u32, &str, u64); 3] = [
+                                            (640, 360, "centroid(WHITE)", 0xf50),
+                                            (900, 150, "quad-(1,0)(GREEN)", 0xf54),
+                                            (300, 150, "quad-(0,0)(RED)", 0xf58),
+                                        ];
+                                        for (px, py, label, slot) in probes {
+                                            let mut pp = arm64jit::jit::CpuState::new();
+                                            pp.tpidr = tpidr;
+                                            pp.x[31] = isp;
+                                            pp.x[0] = px as u64;
+                                            pp.x[1] = py as u64;
+                                            pp.x[2] = 1;
+                                            pp.x[3] = 1;
+                                            pp.x[4] = 0x1908; // GL_RGBA
+                                            pp.x[5] = 0x1401; // GL_UNSIGNED_BYTE
+                                            pp.x[6] = objs.as_ptr() as u64 + slot;
+                                            let _ = arm64jit::jit::jit_run(
+                                                iimg,
+                                                ibase,
+                                                plt_readpixels,
+                                                &mut pp as *mut CpuState,
+                                            );
+                                            unsafe {
+                                                let p = objs.as_ptr() as u64 + slot;
+                                                let c_ = format!(
+                                                    "RGBA({},{},{},{})",
+                                                    *(p as *const u8),
+                                                    *(p as *const u8).add(1),
+                                                    *(p as *const u8).add(2),
+                                                    *(p as *const u8).add(3)
+                                                );
+                                                eprintln!(
+                                                    "[elfjit:renderframe-tex] readback {label} @({px},{py}) = {c_}"
+                                                );
+                                            }
+                                        }
                                     }
                                     // --renderframe-triangle-loop <N>: SUSTAINABLE real-
                                     // geometry rendering. Re-run clear (cycling the clear
