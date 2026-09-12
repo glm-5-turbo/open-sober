@@ -1793,6 +1793,29 @@ fn main() {
             // the thunk re-drive shifts the parent/window args). Same host thread
             // so the EGL context stays current.
             if renderframe_args.iter().any(|a| a == "--renderframe") {
+                // --renderbind (opt-in): drive the engine's OWN make-current method
+                // (ctx vtable [vt+16] = 0x105b3b358) before presenting, instead of
+                // relying on the render-init having left the context current. This
+                // is the exact code the engine's frame-render callers dispatch
+                // (0x5b2b214 -> [vt+16] -> blr) when they (re)bind the GL context
+                // before a swap/draw: it reads eglGetCurrentContext, and when not
+                // already == [ctx+48] calls eglMakeCurrent([+32]display,
+                // [+40]surface, [+40]surface, [+48]context). Driving it proves the
+                // engine's own rebind path executes on the recovered ctx (the same
+                // host thread keeps the context current afterwards so the following
+                // swap/draw land on it).
+                if renderframe_args.iter().any(|a| a == "--renderbind") {
+                    let mut sb = arm64jit::jit::CpuState::new();
+                    sb.tpidr = tpidr;
+                    sb.x[31] = isp;
+                    sb.x[0] = real_ctx; // method: this = ctx
+                    match arm64jit::jit::jit_run(iimg, ibase, 0x105b3b358, &mut sb as *mut CpuState) {
+                        Err(e) => eprintln!("[elfjit:renderbind] stopped: {e}"),
+                        Ok(ok) => eprintln!(
+                            "[elfjit:renderbind] engine make-current method returned Ok({ok:#x}) on ctx {real_ctx:#x} (eglMakeCurrent)"
+                        ),
+                    }
+                }
                 let swap_thunk = renderframe_args
                     .iter()
                     .position(|a| a == "--renderframe")
