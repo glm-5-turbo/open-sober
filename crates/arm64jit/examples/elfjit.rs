@@ -1173,10 +1173,16 @@ fn main() {
                         let cur = unsafe { *(hc as *const u64) };
                         let popped = cur != np;
                         if popped {
+                            static POPS: AtomicU64 = AtomicU64::new(0);
+                            let p = POPS.fetch_add(1, Ordering::Relaxed) + 1;
                             eprintln!(
-                                "[elfjit:deque-node-live] NODE 0x{np:x} POPPED by live drainer (headcell now 0x{cur:x}) — deque crossed the barrier"
+                                "[elfjit:deque-node-live] NODE 0x{np:x} POPPED by live drainer (headcell now 0x{cur:x}) — dispatch #{}; re-injecting a fresh node to sustain the type-4 dispatch loop", p
                             );
-                            return;
+                            // Reset so the next iteration places a NEW node at head
+                            // (the drain consumed this one and its head is empty).
+                            PLACED.store(0, Ordering::Relaxed);
+                            HEADCELL.store(0, Ordering::Relaxed);
+                            continue;
                         }
                         if it % 20 == 0 {
                             eprintln!("[elfjit:deque-node-live] node 0x{np:x} still head (headcell=0x{cur:x})");
