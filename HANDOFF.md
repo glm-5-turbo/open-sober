@@ -1,5 +1,40 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH3b) — GLOB_DAT *function* slots now resolve through the full GLES chain; workspace 467/0; HEAD 80940e6.
+
+Follow-on to SH3's eglGetProcAddress bridge. Found another real gap in the
+boot log: `[plt:glob_dat] unresolved sym=glGetShaderInfoLog / glGetProgramInfoLog`
+— GLOB_DAT **function-pointer** slots (function tables, `STT_FUNC`/notype) only
+tried plain `resolve()` (dlsym), which cannot see GLES names (libGLESv2 is
+RTLD_LOCAL and lazily loaded), so these table entries bound to the **benign NULL
+stub** instead of real Mesa. On a real shader-compile path a
+glGetShaderInfoLog/glGetProgramInfoLog call through such a table would return
+garbage (or the stub's 0).
+
+**Fix (commit 80940e6):** `bind_glob_dat`'s function branch now mirrors the
+JUMP_SLOT resolution chain — `resolve -> float -> float32 -> egl -> gles_int ->
+gles_mixed` (scope_resolve already tried in the outer branch). Verified against
+the real binary: the two GLES GLOB_DAT entries are gone from the unresolved
+list; the remainder are AMedia*/video-codec data-object keys (bionic-only,
+benign) + the cosmetic `__sF`. New hermetic regression
+`glob_dat_function_chain_resolves_gles_names_to_real_slots` pins the chain
+returns a real host-thunk slot (>= HOST_THUNK_BASE) for glGetShaderInfoLog /
+glGetProgramInfoLog / glGetString / glCompileShader. Workspace **467/0**
+was 466/0; boot unchanged (stable idle main loop, exit 124).
+
+**Where this leaves the frontier (unchanged hard wall):** the engine's own
+producer never enqueues a real work/task item onto its per-thread idle futex
+(lr=0x10284d134; queue head [x19]=0, latch x19+4). Re-confirmed this cycle:
+`--futex-kick 2 --futex-set 0xf4240` wakes all 3 threads (block-cache **hits**
+grow) but **compiles stay flat at 1668** — the latch is a signal, not the work;
+with no queue element the consumer re-arms and re-parks. GLES dynamic-loader
+(eglGetProcAddress) + GLOB_DAT GLES chain are now complete so that once the
+barrier is crossed the ES functions resolve through our bridges (float,
+texture-interception, int). Partial reconstruction of the scheduler wait path:
+callers at 0x284eb80 / 0x2856f44 pass the queue obj x19; after wait, read
+[x19+104] -> vtable, dispatch `blr` a callback at [vt+40] — an opaque
+scheduler/vtable dispatch, the last lever documented across many cycles.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH3) — eglGetProcAddress routed through a GLES bridge (dynamic GLES loader no longer returns raw Mesa pointers); workspace 465/0; HEAD 3a30b3a.
 
 Decoder 100% (0 Unsupported / 0 PANIC on .text) unchanged. The boot frontier
