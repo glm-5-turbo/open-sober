@@ -1978,6 +1978,23 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
                 .unwrap_or(8192)
         };
         let block = cached_block(image, base, pc, state, block_budget)?;
+        // JIT_DUMP_PC=<guest-hex>: on entering a block at exactly this guest PC,
+        // dump the full x-register file (and a couple of key host-side facts) so
+        // a miscompiled straight-line guest function can be pinned to the exact
+        // register carrying a stale value (e.g. a W-width write that failed to
+        // zero the upper 32 bits, leaking the translation base into an index).
+        if let Ok(dump_pc) = std::env::var("JIT_DUMP_PC") {
+            if let Ok(target) = u64::from_str_radix(dump_pc.trim_start_matches("0x"), 16) {
+                if pc == target {
+                    let s = unsafe { &*state };
+                    let mut line = format!("DUMPPC pc={pc:#x}");
+                    for (i, x) in s.x.iter().enumerate() {
+                        line.push_str(&format!(" x{i}={x:#x}"));
+                    }
+                    println!("{line}");
+                }
+            }
+        }
         #[cfg(debug_assertions)]
         if std::env::var_os("JIT_DUMP").is_some() {
             let raw = block.dump();
