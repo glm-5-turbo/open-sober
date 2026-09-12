@@ -3180,6 +3180,49 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdAbd { rd, rn, rm, signed: _signed, esize, q } => {
+            // uabd/sabd Vd.T, Vn.T, Vm.T: per-lane |Vn - Vm|. Both uabd and sabd
+            // compute the magnitude of the two's-complement (esize) difference,
+            // so one path serves both: diff = (Vn - Vm) mod 2^esize; if the
+            // esize sign bit is SET, diff = -diff. Per-lane on the GP registers
+            // (tiny element counts: 8/16/8/4/4/2 lanes).
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let e = esize as i32; // 1, 2, or 4 bytes per element
+            for lane in 0..lanes {
+                let off = lane * e;
+                let (sb, hb): (i32, i32) = match e {
+                    1 => (8, 7),
+                    2 => (16, 15),
+                    _ => (32, 31),
+                };
+                // RAX = Vn[lane], RCX = Vm[lane] (zero-extended in the reg)
+                match e {
+                    1 => { buf.mov_load16(RAX, RBX, f(rn) + off); buf.mov_load16(RCX, RBX, f(rm) + off); }
+                    2 => { buf.mov_load16(RAX, RBX, f(rn) + off); buf.mov_load16(RCX, RBX, f(rm) + off); }
+                    _ => { buf.mov_load32(RAX, RBX, f(rn) + off); buf.mov_load32(RCX, RBX, f(rm) + off); }
+                }
+                buf.sub_rr64(RAX, RCX); // RAX = diff (low esize bits correct)
+                // If the esize sign bit (e*8-1) of the diff is SET, RAX = -RAX.
+                let signbit = (e * 8 - 1) as u8;
+                buf.bytes.extend_from_slice(&[0x48, 0x0f, 0xba, 0xe0, signbit]); // bt RAX, signbit (CF=bit)
+                let jcc = buf.jcc_rel32(0x83); // JNB: jump if CF=0 (diff non-negative)
+                // negate: RAX = 0 - RAX
+                buf.mov_ri64(RCX, 0);
+                buf.sub_rr64(RCX, RAX);
+                buf.mov_rr64(RAX, RCX);
+                let end = buf.len();
+                let disp = (end as i64 - (jcc as i64 + 4)) as i32;
+                buf.bytes[jcc..jcc + 4].copy_from_slice(&disp.to_le_bytes());
+                // store the esize-low bits
+                match e {
+                    1 => buf.mov_store8(RBX, f(rd) + off, RAX),
+                    2 => buf.mov_store16(RBX, f(rd) + off, RAX),
+                    _ => buf.mov_store32(RBX, f(rd) + off, RAX),
+                }
+            }
+            Ok(())
+        }
         Inst::InsD1D0 { rd, rn } => {
             // mov v{rd}.d[1], v{rn}.d[0] : copy the low 64 (D[0]) of Rn into
             // the high 64 (D[1]) of Rd.

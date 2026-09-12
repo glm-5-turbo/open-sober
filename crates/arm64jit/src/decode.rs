@@ -327,6 +327,8 @@ pub enum Inst {
     SimdAddw { rd: u8, rn: u8, rm: u8, sign: bool, esrc: u8, upper: bool, sub: bool },
     // ---- SIMD vector bitwise AND/ORR/EOR/BIC (128b lanes) ----
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
+    // ---- SIMD abs diff: uabd/sabd ----
+    SimdAbd { rd: u8, rn: u8, rm: u8, signed: bool, esize: u8, q: bool },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise NOT (two-input mvn alias, single-source): mvn Vd.16B/8B, Vn ----
@@ -2144,6 +2146,26 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             rn: ((insn >> 5) & 0x1f) as u8,
             rm: ((insn >> 16) & 0x1f) as u8,
             op: 1, // EOR
+        };
+    }
+
+    // ---- SIMD absolute difference: uabd/sabd Vd.T, Vn.T, Vm.T ----
+    // Per-lane |Vn - Vm| (unsigned sees pure bit difference; signed adjusts for
+    // the sign). Elem sizes 8B/4H/2S (size bits[23:22]); U=bit29 (uabd);
+    // q=bit30 (.16b/.8h/.4s vs .8b/.4h/.2s). Gate (insn & 0x9f00_fc00) ==
+    // 0x0e00_7400 (byte1 0x74 is the abd opcode; byte0 0x..e prefix with
+    // U/Q free; disjoint from uqadd 0x2e220c20 / shadd 0x0e220420 / aba 0x22 /
+    // real uabd/frecpe as verified via scan).
+    if (insn & 0x9f00_fc00) == 0x0e00_7400 {
+        let q = (insn >> 30) & 1 == 1;
+        let esize = 1u8 << ((insn >> 22) & 3);
+        return Inst::SimdAbd {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            signed: (insn & 0x2000_0000) == 0,
+            esize,
+            q,
         };
     }
 
@@ -7244,6 +7266,25 @@ mod fp16_scalar_and_gate_regressions {
             Inst::SimdFp16As { rd: 0, rn: 1, rm: 2, op: 6, q: false })); // fmaxnm .4h
         assert!(matches!(decode_op(0x4ec20c20),
             Inst::SimdFp16As { rd: 0, rn: 1, rm: 2, op: 9, q: true })); // fmls .8h
+        // SIMD abs-diff: uabd v0.16b = 0x6e227420, sabd v0.4s = 0x4ea27420.
+        assert!(matches!(decode_op(0x6e227420),
+            Inst::SimdAbd { rd: 0, rn: 1, rm: 2, signed: false, esize: 1, q: true }),
+            "got {:?}", decode_op(0x6e227420));
+        assert!(matches!(decode_op(0x2e627420),
+            Inst::SimdAbd { rd: 0, rn: 1, rm: 2, signed: false, esize: 2, q: false }));
+        assert!(matches!(decode_op(0x6ea27420),
+            Inst::SimdAbd { rd: 0, rn: 1, rm: 2, signed: false, esize: 4, q: true }));
+        assert!(matches!(decode_op(0x4ea27420),
+            Inst::SimdAbd { rd: 0, rn: 1, rm: 2, signed: true, esize: 4, q: true }),
+            "got {:?}", decode_op(0x4ea27420));
+        // real uabd v1.16b,v0,v2 = 0x6e217401 (rn=0) and v1,v2,v1 = 0x6e217441 (rn=2).
+        assert!(matches!(decode_op(0x6e217401),
+            Inst::SimdAbd { rd: 1, rn: 0, rm: 1, esize: 1, q: true, .. }),
+            "got {:?}", decode_op(0x6e217401));
+        // negatives must NOT match: uqadd (0x2e220c20), shadd (0x0e220420), frecpe.
+        assert!(!matches!(decode_op(0x2e220c20), Inst::SimdAbd { .. }));
+        assert!(!matches!(decode_op(0x0e220420), Inst::SimdAbd { .. }));
+        assert!(!matches!(decode_op(0x4ea1d801), Inst::SimdAbd { .. }));
     }
 
     #[test]

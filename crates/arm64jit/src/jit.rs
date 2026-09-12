@@ -7533,4 +7533,28 @@ mod fp16_and_fabd_fccmp_exec {
         assert_eq!(half3(&st3, 2), hp(7.0), "minnm(7,9)");
         assert_eq!(half3(&st3, 3), hp(-1.0), "minnm(-1,6)");
     }
+
+    #[test]
+    fn uabd_sabd_exec() {
+        // uabd v0.16b, v1.16b, v2.16b = 0x6e227420: |V1-V2| per byte.
+        // Clear-cut values: V1=all 10, V2=all 4 -> |10-4|=6 for every byte.
+        let mut st = CpuState::new();
+        for i in 0..2 { st.v[2 + i] = 0x0a0a0a0a0a0a0a0au64; } // v1 (reg1) all 0x0a
+        for i in 0..2 { st.v[4 + i] = 0x0404040404040404u64; } // v2 (reg2) all 0x04
+        exec_bytes(&mut st, &[0x20, 0x74, 0x22, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        for i in 0..2 {
+            assert_eq!(st.v[i], 0x0606060606060606u64, "uabd byte lane block {i}");
+        }
+        // uabd v0.4h, v1.4h, v2.4h = 0x2e627420: V1={10,20,30,40}, V2={4,5,6,7},
+        // => {6,15,24,33}.
+        let mut st2 = CpuState::new();
+        st2.v[2] = 0x0028_001e_0014_000au64; // v1.4h
+        st2.v[4] = 0x0007_0006_0005_0004u64; // v2.4h
+        exec_bytes(&mut st2, &[0x20, 0x74, 0x62, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let half_at = |off: usize| -> u16 { ((st2.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(half_at(0), 6, "10-4");
+        assert_eq!(half_at(1), 15, "20-5");
+        assert_eq!(half_at(2), 24, "30-6");
+        assert_eq!(half_at(3), 33, "40-7");
+    }
 }
