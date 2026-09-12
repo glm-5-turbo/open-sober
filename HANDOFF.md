@@ -42,13 +42,21 @@ Achieved on this VPS: **libroblox.so loads, JNI_OnLoad returns 0x10006, StartApp
 drives the engine, all guest threads reach a stable running main loop headlessly.**
 That is the boot-stabilization milestone. Remaining to the full gate: get that
 running main loop to dispatch a real frame (route through the wired Mesa
-llvmpipe egl/gl so an early EGL/GLES call resolves) — the loop currently churns
-with ZERO hostcalls, i.e. it never reaches ALooper_pollOnce or any egl*/gl*
-import; the cycle-G app-command feed is inert until it does. Next levers:
-(a) find the memory flag the main loop awaits (it busy-spins, no syscall) and
-seed it like the F–H gate kickers, so it proceeds into the ALooper/EGL path;
-(b) then a first headless llvmpipe frame. A GPU host is only needed for the
-final frame-perf proof.
+llvmpipe egl/gl so an early EGL/GLES call resolves).
+
+The main-loop wait, precisely (JIT_TRACE): it busily polls a task/event futex —
+`syscall 0x62` (aarch64 futex=98) with op 0x89 = FUTEX_WAIT_BITSET_PRIVATE at
+call-site 0x10284d134, plus heavy `pthread_getspecific` (TLS getter 0x102b9df10)
+and `clock_gettime` (timeout tracking). `guest_svc` only forwards FUTEX_WAIT(0)/
+FUTEX_WAKE(1); FUTEX_WAIT_BITSET (0x89) returns 0 immediately, so the engine
+never blocks — it re-issues the futex in a tight loop (flat ~1873 compiles, no
+new init blocks). It never reaches ALooper_pollOnce or any egl*/gl* import, so
+the cycle-G app-command feed is inert until then. Next lever (concrete):
+identify the guest futex uaddr (x1 of the 0x62 syscall) and the "expected" value
+that would let it pass, and POST a winning value + FUTEX_WAKE from a host kicker
+(the F–H gate-kicker pattern) — or drive the awaited task-queue event — so the
+main loop proceeds into the ALooper/EGL path and a first headless llvmpipe frame.
+A GPU host is only needed for the final frame-perf proof.
 
 ## Session (Sep 12, 2026, hermes-worker, cycle H) — ROOT-CAUSED + FIXED the recursive-mutex rendezvous: `sanitize_mutex` was destroying glibc's `__owner`, so the owner deadlocked on its OWN recursive re-lock; boot now CROSSES the wall that parked every run since cycle C (workspace 398/0)
 
