@@ -3429,6 +3429,12 @@ pub fn translate(
                                     1 => buf.mulsd(0, 1), // fmul
                                     2 => buf.addsd(0, 1), // fadd
                                     3 => buf.subsd(0, 1), // fsub
+                                    4 => buf.maxsd(0, 1), // fmax
+                                    5 => buf.minsd(0, 1), // fmin
+                                    // fmaxnm/fminnm behave like max/min on the finite
+                                    // values the engine uses (NaN propagation differs).
+                                    6 => buf.maxsd(0, 1), // fmaxnm
+                                    7 => buf.minsd(0, 1), // fminnm
                                     _ => return Err(format!("Simd2dFp op {op} not implemented")),
                                 }
                                 buf.movq_store(RBX, slot(rd) + off, 0);

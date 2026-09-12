@@ -6192,6 +6192,29 @@ mod tests {
     }
 
     #[test]
+    fn vector_2d_fmax_fmin_exec() {
+        // fmax v0.2d, v0.2d, v1.2d = 0x4e61f400 (real Roblox): per-lane max.
+        // v0 double = {3.0, -1.0}; v1 double = {2.0, 5.0} => {3.0, 5.0}.
+        let mut st = CpuState::new();
+        st.v[0] = 3.0f64.to_bits();
+        st.v[1] = (-1.0f64).to_bits();
+        st.v[2] = 2.0f64.to_bits();
+        st.v[3] = 5.0f64.to_bits();
+        exec_bytes(&mut st, &0x4e61f400u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(st.v[0], 3.0f64.to_bits(), "fmax .2d lane0 = max(3,2)");
+        assert_eq!(st.v[1], 5.0f64.to_bits(), "fmax .2d lane1 = max(-1,5)");
+        // fmin v0.2d, v0.2d, v1.2d = 0x4ee1f400 => {2.0, -1.0}.
+        let mut st2 = CpuState::new();
+        st2.v[0] = 3.0f64.to_bits();
+        st2.v[1] = (-1.0f64).to_bits();
+        st2.v[2] = 2.0f64.to_bits();
+        st2.v[3] = 5.0f64.to_bits();
+        exec_bytes(&mut st2, &0x4ee1f400u32.to_le_bytes(), 0).unwrap();
+        assert_eq!(st2.v[0], 2.0f64.to_bits(), "fmin .2d lane0 = min(3,2)");
+        assert_eq!(st2.v[1], (-1.0f64).to_bits(), "fmin .2d lane1 = min(-1,5)");
+    }
+
+    #[test]
     fn fmov_imm_high_mantissa_12_to_15_not_swallowed_as_fcvt() {
         // Session (Sep 11 2026): `fmov d,#imm` values with mantissa m>=8 (imm8 bit3 set,
         // instruction bit16) were swallowed by the coarse fcvt-to-int round gate

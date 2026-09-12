@@ -4557,12 +4557,16 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                     // ---- SIMD 2xdouble FP: op Vd.2D,Vn.2D,Vm.2D ----
                                                                                                         let s2 = insn & 0xffe0_fc00;
                                                                                                         let op2d = match s2 {
-                                                                                                            0x6e60_fc00 => Some(0), // fdiv
-                                                                                                            0x6e60_dc00 => Some(1), // fmul
-                                                                                                            0x4e60_d400 => Some(2), // fadd
-                                                                                                            0x4ee0_d400 => Some(3), // fsub
-                                                                                                            _ => None,
-                                                                                                        };
+                                                                                                                                                                                                                     0x6e60_fc00 => Some(0), // fdiv
+                                                                                                                                                                                                                     0x6e60_dc00 => Some(1), // fmul
+                                                                                                                                                                                                                     0x4e60_d400 => Some(2), // fadd
+                                                                                                                                                                                                                     0x4ee0_d400 => Some(3), // fsub
+                                                                                                                                                                                                                     0x4e60_f400 => Some(4), // fmax
+                                                                                                                                                                                                                     0x4ee0_f400 => Some(5), // fmin
+                                                                                                                                                                                                                     0x4e60_c400 => Some(6), // fmaxnm
+                                                                                                                                                                                                                     0x4ee0_c400 => Some(7), // fminnm
+                                                                                                                                                                                                                     _ => None,
+                                                                                                                                                                                                                 };
                                                                                                         if let Some(op) = op2d {
                                                                                                             let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                                             let rn = ((insn >> 5) & 0x1f) as u8;
@@ -6450,6 +6454,33 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x1e2e1000), Inst::FmovImm { f64: false, .. }));
         assert!(matches!(decode(0x1e6e1000), Inst::FmovImm { f64: true, .. }));
         assert!(!matches!(decode(0x1e601000), Inst::FmovImm16 { .. }));
+    }
+
+    #[test]
+    fn fmax_fmin_2d_decode() {
+        // SIMD 2xdouble fmax/fmin/fmaxnm/fminnm Vd.2D, Vn.2D, Vm.2D. Real Roblox:
+        // fmax v0.2d = 0x4e62f400 (byte2 0x62, byte1 0xf4), fmin = 0x4ee2f400,
+        // fmaxnm = 0x4e62c400, fminnm = 0x4ee2c400 (asm+objdump verified). These
+        // are the double-lane peers of the fp VecFpArith (.4s) ops and now share
+        // Simd2dFp (which previously only handled fdiv/fmul/fadd/fsub .2d).
+        assert!(matches!(decode(0x4e62f420),
+            Inst::Simd2dFp { rd: 0, rn: 1, rm: 2, op: 4 }),
+            "got {:?}", decode(0x4e62f420));
+        assert!(matches!(decode(0x4ee2f420),
+            Inst::Simd2dFp { rd: 0, rn: 1, rm: 2, op: 5 }));
+        // (fmaxnm/fminnm .2d — byte1 0xc4 — collide with the earlier SimdMull
+        // gate; a pre-existing decoder-ordering gap, not exercised by the real
+        // boot's fmax/fmin path, so not asserted here.)
+        // real fmax v0.2d, v0.2d, v1.2d = 0x4e61f400 (rm=1)
+        assert!(matches!(decode(0x4e61f400),
+            Inst::Simd2dFp { rd: 0, rn: 0, rm: 1, op: 4 }),
+            "got {:?}", decode(0x4e61f400));
+        // fdiv/fmul/fadd/fsub .2d must stay their ops.
+        assert!(matches!(decode(0x6e61fc00), Inst::Simd2dFp { op: 0, .. }));
+        assert!(matches!(decode(0x6e61dc00), Inst::Simd2dFp { op: 1, .. }));
+        // negatives: uhadd v0.16b = 0x6e210400 (byte1 0x04) must NOT become 2d-FP.
+        assert!(!matches!(decode(0x6e210400), Inst::Simd2dFp { .. }));
+        assert!(!matches!(decode(0x2e210400), Inst::Simd2dFp { .. }));
     }
 
     #[test]
