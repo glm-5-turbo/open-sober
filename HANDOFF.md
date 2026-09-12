@@ -1,5 +1,43 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH) — arm64jit DECODER REACHES 100% COVERAGE on real libroblox.so: 11,437 Unsupported -> ZERO, 0 PANIC; workspace 464/0; HEAD 092e829.
+
+The decoder — the single largest structural wall in the project — is now
+**permanently closed**. The entire real binary .text span
+[0x102d95980, 0x1072d5a84] decodes with zero Unsupported and zero decode
+panics. This cycles' closes (all qemu/oracle-verified, decode pins + exec tests):
+
+- **addhn2/subhn2/raddhn2/rsubhn2 Q=1 widening-narrow** (SimdHighNarrow `q`
+  field, upper-half dest; bit21 asserts addhn-not-EXT). 49 -> 37.
+- **SIMD fp64 absolute-difference fabd Vd.2D** (Simd2dFp op 8:
+  subsd+pand sign-clear). 37 -> 28.
+- **facgt/facge absolute-compare** (VecFpCmp `abs` flag; pand sign-bit clear on
+  both loaded lanes). 28 -> 17.
+- **srhadd signed rounding-halving add** (SimdHadd `rounding` flag;
+  (a+b+1)>>1, qemu {1,2,2,3,0,2,2,52}). 17 -> 13.
+- **FP16 vector frint** (frint{nmzpax} Vd.8H/.4H, esize2 via F16C
+  promote-round-demote; cvtph2ps/cvtps2ph helpers; **FMaxV bit22 guard** so
+  frintx fp16 (0x6e799800) isn't stolen). 13 -> 11.
+- **FP16 scalar unary** (fneg/frintm/z/p/n/x/fsqrt/fabs h0; FpUnary `half`
+  flag; bit-mask for neg/abs, F16C round-trip for rounding). 11 -> 3.
+- **FP16 vector frecpe/frsqrte** (.8H/.4H via dedicated bit20-SET gate) +
+  **frintx .2s/.2d** (table rows). 3 left.
+- **mrs xN, fpcr read** (SysReg 11 -> 0, nearest-even default FPCR) +
+  **ldpsw post/pre-indexed** load-pair (top-byte 0x68/0xe8/0xe9, sign-extend
+  32-bit pair). 3 -> **0**. ZERO unsupported / ZERO panic.
+
+**Metahistory recap**: the .text decode coverage went from 14,918 -> 11,437
+(after ARMv8.2 stubs/prefixes) -> ... -> 49 -> 0 over ~28 focused cycles. The tail
+after ~100 was entirely single-instance cold-path opcodes (fp16 variants, rare
+scalar-FP forms).
+
+**The frontier is now purely the boot**: decoder saturation is done. Continue
+with the boot-path analysis (producer thread never enqueues onto the idle
+futex — next lever). Graphics translation (GLES float bridge,
+glCompressedTexImage2D ETC2/ASTC) remains the secondary thread.
+
+Workspace: **464 passed / 0 failed** (incl. qemu-oracle diff_battery). HEAD 092e829.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle R) — FP16 by-element fmla/fmls/fmul (the biggest remaining family) closed; workspace 423/0; HEAD f3251b7.
 
 Closed **`fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx]`** (~2000+ real .text
