@@ -3384,6 +3384,28 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdI2Fp16 { rd, rn, unsigned, q } => {
+            // scvtf/ucvtf Vd.4H/.8H, Vn: per halfword lane, integer -> f16.
+            //   signed: load s16, cvtsi2ss (f32), demote f16; store 2 bytes.
+            //   unsigned: load u16 (zero-extend), cvtsi2ss (signed is fine since
+            //   u16 <= 65535 < i32::MAX), demote.
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 8 } else { 4 };
+            for l in 0..lanes {
+                let off = l * 2;
+                if unsigned {
+                    buf.mov_load16(RAX, RBX, f(rn) + off); // zero-extend u16
+                } else {
+                    buf.movsx_word_mem(RAX, RBX, f(rn) + off); // sign-extend s16
+                }
+                buf.cvtsi2ss(0, false, RAX); // xmm0 = (float)int32 -> low f32
+                // demote to 16-bit float (F16C imm 0 = round-nearest)
+                buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                buf.movd_r32_xmm(RAX, 0);
+                buf.mov_store16(RBX, f(rd) + off, RAX);
+            }
+            Ok(())
+        }
         Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
         Inst::SimdDupD { rd, rn, index } => {
             // dup Vd.2D, Vn.D[index]: broadcast the selected 64-bit lane of Vn

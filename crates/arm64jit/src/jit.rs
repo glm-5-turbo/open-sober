@@ -7712,6 +7712,30 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn scvtf_ucvtf_fp16_exec() {
+        // scvtf v0.4h, v1.4h = 0x0e79d820 (signed): {2,-3,1,0} -> f16 {2,-3,1,0}.
+        let mut st = CpuState::new();
+        st.v[2] = (0u16 as u64) << 48 | (1u64) << 32 | (-3i16 as u16 as u64) << 16 | 2u64;
+        exec_bytes(&mut st, &[0x20, 0xd8, 0x79, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        // f16 bits: 2.0 = 0x4000, -3.0 = 0xC000, 1.0 = 0x3C00, 0.0 = 0x0000
+        assert_eq!(h(&st, 0), 0x4000, "2");
+        assert_eq!(h(&st, 1), 0xc200, "-3.0"); // f16 -3 = 1 10000 1000000000 = 0xC200
+        assert_eq!(h(&st, 2), 0x3c00, "1");
+        assert_eq!(h(&st, 3), 0x0000, "0");
+        // ucvtf v0.4h, v1.4h = 0x2e79d820 (unsigned): {1, 60000, 2, 3} -> positive f16.
+        let mut st2 = CpuState::new();
+        st2.v[2] = (3u64) << 48 | (2u64) << 32 | (60000u64) << 16 | 1u64;
+        exec_bytes(&mut st2, &[0x20, 0xd8, 0x79, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h2 = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h2(&st2, 0), 0x3c00, "1");
+        // just check 60000 is finite positive (not neg/NaN): high bit 0.
+        assert_eq!(h2(&st2, 1) & 0x8000, 0, "u16 60000 positive");
+        assert_eq!(h2(&st2, 2), 0x4000, "2.0");
+        assert_eq!(h2(&st2, 3), 0x4200, "3.0");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

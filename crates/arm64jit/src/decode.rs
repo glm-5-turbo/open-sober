@@ -577,6 +577,12 @@ pub enum Inst {
     // scalar FcvtToInt handles Dn|Sn->Rd; this is the vector-lane (Vd.T<-Vn.T)
     // form. Gate (insn & 0xbfe0_fc00)=={0x0e20_c800 fcvtas, 0x2e20_c800 fcvtau}.
     SimdFpToInt { rd: u8, rn: u8, unsigned: bool, esize: u8, q: bool, mode: u8 },
+    // ---- SIMD FP16 integer->float: scvtf/ucvtf Vd.4H/.8H, Vn.4H/.8H ----
+    // Per halfword lane: (float)int16 (signed) or (float)u16 (unsigned), stored
+    // as the fp16 bits. Gate (insn&0x0f00_f800)==0x0e00_d800 && byte2==0x79
+    // (byte1 0xd8 + size bits; U=bit29, Q=bit30; distinct from frecpe 0xa1 and
+    // fcvtzs scalar). Real Roblox: scvtf v12.4h = 0x0e79d98c, v3.4h = 0x0e79d963.
+    SimdI2Fp16 { rd: u8, rn: u8, unsigned: bool, q: bool },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
            rd: u8,
@@ -2266,6 +2272,25 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         };
     }
 
+    // ---- SIMD FP16 integer->float convert: scvtf/ucvtf Vd.4H/.8H, Vn ----
+    // Per halfword lane: (float)s16 or (float)u16 -> fp16 bits. Gate: prefix
+    // 0x0e, size bits[23:22]==0b01 (half), bit20 SET (vs frecpe/frsqrte which
+    // clear it), byte1(bits15:8)&0xfc==0xd8 (the fp convert two-reg-misc opcode).
+    // U=bit29 (ucvtf), Q=bit30 (.8h vs .4h). Real: 0x0e79d98c/0x0e79d963.
+    // MUST be tried AFTER SimdFpToInt's fcvtuz/zu handling (byte2 0x21) but the
+    // byte1 0xd8 + bit20 SET + size 01 residue is disjoint from fcvtas(0xc8).
+    if (insn >> 24) & 0x0f == 0x0e
+        && (insn >> 22) & 3 == 1
+        && (insn & 0x10_0000) != 0
+        && ((insn >> 8) & 0xfc) == 0xd8
+    {
+        return Inst::SimdI2Fp16 {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            unsigned: (insn & 0x2000_0000) != 0,
+            q: (insn >> 30) & 1 == 1,
+        };
+    }
     // ---- SIMD FP->int convert (vector): fcvtas Vd.T, Vn.T ----
     // Gate (insn & 0xbf20_fc00) == 0x0e20_c800; q=bit30 (1=.4s/.2d, 0=.2s),
     // esize=8 iff bit22 (else 4), unsigned=bit29 (fcvtas only here: bit29=0;
@@ -5804,6 +5829,18 @@ mod tests {
         assert!(!matches!(decode(0x1e780020), Inst::SimdFpToInt { .. }));
         assert!(!matches!(decode(0x0ea0f800), Inst::SimdFpToInt { .. }));
         assert!(!matches!(decode(0x2e21c820), Inst::SimdFpToInt { .. })); // fcvtau
+        // FP16 integer->float: scvtf v12.4h = 0x0e79d98c (real), 0x0e79d963,
+        // ucvtf v11.8h = 0x6e79d8ab. fcvtl f32->f64 (0x4e61d800) stays VecFcvtl.
+        assert!(matches!(decode(0x0e79d98c),
+            Inst::SimdI2Fp16 { rd: 12, rn: 12, unsigned: false, q: false }),
+            "got {:?}", decode(0x0e79d98c));
+        assert!(matches!(decode(0x0e79d963),
+            Inst::SimdI2Fp16 { rd: 3, rn: 11, unsigned: false, q: false }));
+        assert!(matches!(decode(0x6e79d8ab),
+            Inst::SimdI2Fp16 { rd: 11, rn: 5, unsigned: true, q: true }));
+        assert!(!matches!(decode(0x4ea1d820), Inst::SimdI2Fp16 { .. })); // frecpe
+        assert!(!matches!(decode(0x4e21c863), Inst::SimdI2Fp16 { .. })); // fcvtas
+        assert!(!matches!(decode(0x4e61d800), Inst::SimdI2Fp16 { .. })); // fcvtl
     }
 
     #[test]
