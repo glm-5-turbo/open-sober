@@ -1,5 +1,7 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH28) — captured the real engine GLES dispatch-table content live: --renderframe-seedgles now dumps all 16 raw slot values (BSS 0x106d3b2f0+8*N) before seeding and dladdr-resolves each to a symbol. Reveals the engine's REAL renderer dispatch is a modern GLES3 pipeline (slots 4-8 = glUniformBlockBinding/glBindBufferBase/glBindBufferRange/glGetUniformBlockIndex/glGetActiveUniformBlockiv; 9/10 = glDrawElementsInstanced/glDrawArraysInstanced; 13-15 = program-binary), not the simple clear/draw map. Slots 0-2 read as our bridge slots (0x7f..) confirming SH3's eglGetProcAddress interception reaches the engine's own table. Diagnostic-only (harness seeding unchanged, renders correctly). Workspace 474/0; baselines unchanged. Doc docs/frontier-sh28-slotmap.md.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH27) — the engine's OWN geometry wrapper now renders a REAL COMPRESSED-ETC1 texture: `--renderframe-etc` uploads a hand-crafted 8x8 ETC1 texture (4 solid blocks) via glCompressedTexImage2D; the GLES bridge decompresses ETC1->RGBA (texture-codec) and re-uploads. Three on-triangle probes read back the distinct decoded colors. Workspace 474/0; HEAD (this commit).
 
 Follows SH26's RGBA-textured triangle. The compressed-texture interception path
