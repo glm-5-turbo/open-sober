@@ -4573,6 +4573,42 @@ mod tests {
     }
 
     #[test]
+    fn fcvtl_fp16_widen_exec() {
+        // fcvtl2 v1.4s, v0.8h = 0x4e217801: widen V0's HIGH 4 halves to f32s in V1.
+        // V0 = st.v[0],st.v[1] (8 halves); high 4 = st.v[1] = {5.5, -2.25, 8.0, 3.5}.
+        let mut st = CpuState::new();
+        let h = |f: f32| -> u16 {
+            let b = f.to_bits();
+            let s = (b >> 16) & 0x8000; let e = ((b >> 23) & 0xff) as i32 - 127 + 15;
+            if e <= 0 { s as u16 }
+            else if e >= 31 { (s | 0x7c00) as u16 }
+            else { (s | ((e as u32) << 10) | ((b >> 13) & 0x3ff)) as u16 }
+        };
+        st.v[1] = (h(3.5) as u64) << 48 | (h(8.0) as u64) << 32 | (h(-2.25) as u64) << 16 | h(5.5) as u64;
+        exec_bytes(&mut st, &[0x01, 0x78, 0x21, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let f = |off: usize| -> f32 {
+            let slot = if off < 2 { 2usize } else { 3usize };
+            f32::from_bits((st.v[slot] >> (32 * (off % 2))) as u32)
+        };
+        assert_eq!(f(0), 5.5, "lane0");
+        assert_eq!(f(1), -2.25, "lane1");
+        assert_eq!(f(2), 8.0, "lane2");
+        assert_eq!(f(3), 3.5, "lane3");
+        // fcvtl v0.4s, v1.4h = 0x0e217820 (low half): V1 st.v[2] = {1.5, -0.5, 2.0, 4.0}.
+        let mut st2 = CpuState::new();
+        st2.v[2] = (h(4.0) as u64) << 48 | (h(2.0) as u64) << 32 | (h(-0.5) as u64) << 16 | h(1.5) as u64;
+        exec_bytes(&mut st2, &[0x20, 0x78, 0x21, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let f2 = |off: usize| -> f32 {
+            let slot = if off < 2 { 0usize } else { 1usize };
+            f32::from_bits((st2.v[slot] >> (32 * (off % 2))) as u32)
+        };
+        assert_eq!(f2(0), 1.5, "lane0");
+        assert_eq!(f2(1), -0.5, "lane1");
+        assert_eq!(f2(2), 2.0, "lane2");
+        assert_eq!(f2(3), 4.0, "lane3");
+    }
+
+    #[test]
     fn simd_mull_widening_multiply_correct() {
         // smull/umull/smlal/umlal widen esrc-byte elements to res and multiply.
         // Decode regression: the old gate read res_esize from bit22 (missed

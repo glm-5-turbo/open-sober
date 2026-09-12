@@ -5434,20 +5434,34 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             }
             Ok(())
         }
-                Inst::VecFcvtl { rd, rn, upper } => {
-            // fcvtl Vd.2D, Vn.2S / fcvtl2 Vd.2D, Vn.4S: widen two single-precision
-            // float lanes of Vn to doubles in Vd. fcvtl reads Vn bytes 0..7,
-            // fcvtl2 (upper) reads Vn bytes 8..15. Both write all 16 bytes of Vd.
-            // In-place: fcvtl (lower) writing the 8-byte f64 lane0 at Vd byte 0
-            // would clobber Vn's f32 lane1 at byte 4 when rd==rn; snapshot Vn.
+                Inst::VecFcvtl { rd, rn, upper, half } => {
+            // fcvtl Vd.2D, Vn.2S (f32->f64) / fcvtl2 Vd.2D, Vn.4S — widen two f32
+            // lanes of Vn to doubles; OR the fp16 form (half): fcvtl Vd.4s, Vn.4h /
+            // fcvtl2 Vd.4s, Vn.8h — widen four f16 lanes to floats via F16C.
+            // fcvtl reads Vn bytes 0..7 (f32) / 0..8 (fp16); fcvtl2 (upper) reads
+            // Vn bytes 8..15 (f32) / 8..16 (fp16). Both write all of Vd.
+            // In-place: fcvtl (lower) writing would clobber Vn's upper lanes when
+            // rd==rn; snapshot Vn via permute_source.
             let dst = crate::jit::VECTOR_BASE + (rd as i32) * 16;
             let src = permute_source(buf, rd, rn, false);
-            let soff = if upper { 8i32 } else { 0i32 };
-            for lane in 0..2 {
-                buf.mov_load32(RAX, RBX, src + soff + lane * 4); // f32 lane
-                buf.movd_xmm_r32(0, RAX); // to xmm0 low 32
-                buf.cvtss2sd(0, 0); // widen f64
-                buf.movq_store(RBX, dst + lane * 8, 0); // store f64 lane
+            if half {
+                // fp16 -> f32 widen: 4 lanes, vcvtph2ps each promoted lane.
+                let soff = if upper { 8i32 } else { 0i32 };
+                for lane in 0..4 {
+                    buf.mov_load16(RAX, RBX, src + soff + lane * 2); // f16 lane
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, dst + lane * 4, RAX); // f32 lane
+                }
+            } else {
+                let soff = if upper { 8i32 } else { 0i32 };
+                for lane in 0..2 {
+                    buf.mov_load32(RAX, RBX, src + soff + lane * 4); // f32 lane
+                    buf.movd_xmm_r32(0, RAX); // to xmm0 low 32
+                    buf.cvtss2sd(0, 0); // widen f64
+                    buf.movq_store(RBX, dst + lane * 8, 0); // store f64 lane
+                }
             }
             Ok(())
         }

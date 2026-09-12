@@ -480,9 +480,9 @@ pub enum Inst {
     // (upper=true); fcvtn writes Vd low (upper=false) or high half
     // (upper=true). Gates (insn & 0xffff_fc00): fcvtl == 0x0e617800 /
     // 0x4e617800, fcvtn == 0x0e616800 / 0x4e616800 (asm+objdump verified).
-    // (Half-precision fcvtl Vd.4s,Vn.4h / fcvtn Vd.4h,Vn.4s are byte2 0x21
-    // and stay Unsupported -- the JIT has no fp16 yet.)
-    VecFcvtl { rd: u8, rn: u8, upper: bool },
+    // (Half-precision fcvtl Vd.4s,Vn.4h / fcvtl2 Vd.4s,Vn.8h are byte2 0x21 and
+    // now SUPPORTED as fp16 widening via F16C — see the half flag below.)
+    VecFcvtl { rd: u8, rn: u8, upper: bool, half: bool },
     VecFcvtn { rd: u8, rn: u8, upper: bool },
     // ---- variable shift by register (LSLV/LSRV/ASRV/RORV) ----
     VarShiftVar { rd: u8, rn: u8, rm: u8, op: u8, sf: bool },
@@ -1356,7 +1356,16 @@ pub fn decode(insn: u32) -> Inst {
         };
     }
 if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
-        return Inst::VecFcvtl { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1 };
+        return Inst::VecFcvtl { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1, half: false };
+    }
+    // Half-precision fcvtl Vd.4s, Vn.4h (0x0e217820) / fcvtl2 Vd.4s, Vn.8h
+    // (0x4e217862, byte2 0x21): 4-lane f16->f32 widen via F16C vcvtph2ps.
+    // Now that the JIT has fp16, these are supported (were left Unsupported).
+    // upper = bit30 (fcvtl2 reads Vn [1]:[0] high 8B). Disjoint from the f32
+    // fcvtl (byte2 0x61) and the scalar/fcvtzs (0x0ea1b8) & fcvtas-v (0x0e20c8)
+    // families, which differ in byte2 / byte1 residues.
+    if matches!(insn & 0xffff_fc00, 0x0e21_7800 | 0x4e21_7800) {
+        return Inst::VecFcvtl { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1, half: true };
     }
     if matches!(insn & 0xffff_fc00, 0x0e61_6800 | 0x4e61_6800) {
         return Inst::VecFcvtn { rd: (insn & 0x1f) as u8, rn: ((insn >> 5) & 0x1f) as u8, upper: (insn >> 30) & 1 == 1 };
@@ -5672,6 +5681,29 @@ mod tests {
         assert!(!matches!(decode(0x1e780020), Inst::SimdFpToInt { .. }));
         assert!(!matches!(decode(0x0ea0f800), Inst::SimdFpToInt { .. }));
         assert!(!matches!(decode(0x2e21c820), Inst::SimdFpToInt { .. })); // fcvtau
+    }
+
+    #[test]
+    fn fcvtl_fp16_widen_decode() {
+        // Half->single widen: fcvtl Vd.4s, Vn.4h = 0x0e217820 (upper=false),
+        // fcvtl2 Vd.4s, Vn.8h = 0x4e217862 (upper=true -> high 8B of Vn).
+        // Real Roblox: fcvtl2 v1.4s, v0.8h = 0x4e217801, v2.4s = 0x4e217802.
+        assert!(matches!(decode(0x0e217820),
+            Inst::VecFcvtl { rd: 0, rn: 1, upper: false, half: true }),
+            "got {:?}", decode(0x0e217820));
+        assert!(matches!(decode(0x4e217862),
+            Inst::VecFcvtl { rd: 2, rn: 3, upper: true, half: true }),
+            "got {:?}", decode(0x4e217862));
+        assert!(matches!(decode(0x4e217801),
+            Inst::VecFcvtl { rd: 1, rn: 0, upper: true, half: true }));
+        assert!(matches!(decode(0x4e217802),
+            Inst::VecFcvtl { rd: 2, rn: 0, upper: true, half: true }));
+        // f32->f64 fcvtl still half=false, and fcvtn fp16 stays separate.
+        assert!(matches!(decode(0x4e617820),
+            Inst::VecFcvtl { upper: true, half: false, .. }));
+        // fcvtzs-v / fcvtas-v / fabs must not become fcvtl-half.
+        assert!(!matches!(decode(0x0ea1b820), Inst::VecFcvtl { .. }));
+        assert!(!matches!(decode(0x0e21c820), Inst::VecFcvtl { .. }));
     }
 
     #[test]
