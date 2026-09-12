@@ -552,16 +552,32 @@ fn main() {
                             // (cd84 cbz-on-zero); 2 is the terminal "done" state.
                             let v = if it < 60 { 1u64 } else { 2u64 };
                             *((addr) as *mut u64) = v;
-                            if it % 25 == 0 {
+                            if it % 100 == 0 {
                                 eprintln!("[elfjit:kicker] t={it} guest_global 0x{addr:x}=%{:#x}", *((addr) as *const u64));
                             }
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             });
         }
-        match arm64jit::jit::jit_run(image, base, start_app, &mut s2 as *mut CpuState) {
+        // Disable the gate-2 re-arm store: the owner's cond-wait loop at
+    // 0x102b4cd50/0x102b4cd84 re-parks while *x19==1 and, on seeing that
+    // pred has become 0, RE-ARMS it back to 1 (`mov x8,#1; str x8,[x19]` at
+    // 0x102b4cdb0/0x102b4cdb4) so the terminal value driven from the host
+    // never sticks. NOP the re-arm store so our value persists. JIT_DRIVE_*
+    // mode only.
+    if std::env::var_os("JIT_DRIVE_LIFECYCLE").is_some() {
+        let rearm = el.guest_of(0x102b4cdb4);
+        let page = rearm & !0xfff;
+        if unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE) } == 0 {
+            unsafe { *(rearm as *mut u32) = 0xd503_201fu32 }; // NOP
+            unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC) };
+            eprintln!("[kernel:NOP re-arm store 0x{rearm:x} (gate-2) under JIT_DRIVE_LIFECYCLE");
+        }
+    }
+
+    match arm64jit::jit::jit_run(image, base, start_app, &mut s2 as *mut CpuState) {
             Err(e) => eprintln!("[elfjit] StartApp stopped: {e}"),
             Ok(r) => eprintln!("[elfjit] StartApp returned Ok({r:#x})"),
         }
