@@ -54,13 +54,19 @@ FPS=2 CAP_SECS=8 bash runs/capture_sustain_loop.sh
 
 ## Remaining frontier (unchanged shape)
 The render loop is still *harness-driven*: fabricated renderer/view/clear-state
-objects, and the frame is clear-only (the engine's real draw path
-`glDrawElements` is gated on a coherent renderer C++ object that hasn't been
-reversed). The engine's real main-loop producer still never enqueues a render
-task, so it does not yet call frame-fn by itself — we drive its own code on a
-time base. Next highest-value work: (1) drive the recipe from the engine's real
-thread once a looper/lifecycle producer exists, or (2) reverse the coherent
-renderer object so frame-fn reaches a real geometry draw. The GLES dispatch-slot
-map (slot0=glDrawBuffers, slot1=glClearBufferiv, slot2=glClearBufferfv,
-slot3=glClearBufferfi) and continuous render prove the engine's GL path is
-bridge-functional and sustainable.
+objects, and the frame is clear-only. The SH23 JIT_TRACE run
+(runs/sh23-trace-loop3.txt) pins exactly how far the engine's own frame-fn gets
+per iteration through the bridge — `glBindFramebuffer -> glViewport ->
+glScissor -> glDrawBuffers(1,{GL_BACK}) -> glColorMask -> glClearBufferfv x4
+(GL_COLOR drawbuffers) -> glGetError -> (no glDrawElements) -> swap` — i.e. the
+**complete clear state machine, and nothing past it**. Crucially, `glDrawElements`
+is already in `GLES_INT_NAME_LIST` (resolves through the bridge), so the draw
+pipeline is *ready*; the only blocker is the engine reaching it, which needs
+the coherent renderer C++ object reverse (the frame-fn's draw region
+`0x105b35334` reads renderer mesh/buffer/VAO state the fabricated object
+doesn't supply) or a looper/lifecycle producer that makes the engine self-drive.
+Next highest-value work: (1) reverse the coherent renderer so frame-fn reaches
+a real geometry draw, then (2) drive the recipe from the engine's real thread
+once a producer exists. The GLES dispatch-slot map is complete and the engine's
+GL path is proven bridge-functional AND sustainable, the two properties a real
+main-loop frame drive needs.
