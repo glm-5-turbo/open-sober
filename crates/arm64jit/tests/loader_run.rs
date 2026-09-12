@@ -1555,15 +1555,21 @@ int entry(void){
     while (g_ready == 0) {}
     long rr = my_tgkill(tid, 10);
 
-    // futex-join the child (CLONE_CHILD_CLEARTID wake on its exit).
-    int expect = (int)tid;
-    register long x8f asm("x8") = 98;
-    register long x0f asm("x0") = (long)&cctlid;
-    register long x1f asm("x1") = 0;  // FUTEX_WAIT
-    register long x2f asm("x2") = expect;
-    register long x3f asm("x3") = 0;
-    asm volatile("svc #0" : "+r"(x0f) : "r"(x8f), "r"(x1f), "r"(x2f), "r"(x3f) : "memory");
-    if (x0f != 0) return 7000;             // join failed
+    // futex-join the child the way pthread_join does: re-read the CTID (a 4-byte
+    // word the kernel sets to the child tid and clears to 0 on exit) and only
+    // FUTEX_WAIT while it still equals `tid`. A single-shot wait races a fast
+    // child (which clears the CTID to 0 on exit) into EAGAIN; the loop handles
+    // both the "already exited" and "exit races the wait" cases identically.
+    while ((*(volatile int *)&cctlid) == (int)tid) {
+        register long x8f asm("x8") = 98;
+        register long x0f asm("x0") = (long)&cctlid;
+        register long x1f asm("x1") = 0;  // FUTEX_WAIT
+        register long x2f asm("x2") = (long)(int)(*(volatile int *)&cctlid);
+        register long x3f asm("x3") = 0;
+        asm volatile("svc #0" : "+r"(x0f) : "r"(x8f), "r"(x1f), "r"(x2f), "r"(x3f) : "memory");
+        // x0f may be EAGAIN (CTID cleared mid-wait) — the loop re-checks; a
+        // spurious wake is harmless too. We only leave once cctlid != tid.
+    }
     if (rr != 0) return 6000;              // cross-thread tgkill failed
     if (g_result != 5) return g_result;    // child handler effect missing/wrong
     return 42;
