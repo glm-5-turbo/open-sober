@@ -1691,20 +1691,43 @@ fn main() {
             // -> NULL store -> SIGSEGV). Point x0 at a guest-writable leaked
             // buffer so the first store lands and we reach the EGL sequence.
             let scratch = Box::leak(vec![0u8; 4096].into_boxed_slice());
-            s3.x[0] = scratch.as_ptr() as u64;
+            // --renderthunk (opt-in, must accompany --renderinit): drive the render-init
+            // THUNK 0x105b3a280 instead of the inner fn, to recover the engine's REAL
+            // ctx object. SH17's record "DON'T drive the thunk (SIGSEGV)" is WRONG —
+            // the crash was from misplacing the harness args. Disasm of v2.738.1397:
+            //   thunk(x0, x1):  x21=x0; x20=x1; x19=alloc_big(0x48);
+            //                   inner(x19, x2?=x1=x21, x2=x20); ret x0=x19
+            // i.e. thunk(win, parent) -> inner(alloc_ctx, win, parent) and returns the
+            // real 0x48-byte guest ctx in x0 (engine's callers 0x5b2b214/0x5b2ea90 do
+            // `bl 0x105b3a280` then `ldr x8,[x0]; ldr x8,[x8,#16]; blr x8` vtable-
+            // dispatch). The engine's own frame-render path consumes THIS ctx, so
+            // recovering it is the bridge to frontier lever (2) (drive the engine's
+            // own frame-render machinery with a coherent renderer). The old harness
+            // passed scratch as x0 -> inner took win=scratch (not the XID) and the
+            // surface create rejected it. Correct drive: thunk(x0=win=XID, x1=parent=0).
+            let render_thunk = renderframe_args.iter().any(|a| a == "--renderthunk");
+            let xid = arm64jit::shims::anativewindow_xid();
+            // Scratch is still needed: render-init's prologue stores the resolved
+            // parent-global ptr through x0 only for the inner-fn path; the thunk's
+            // inner call gets its OWN freshly-allocated ctx as x0, so it never touches
+            // scratch — we keep it solely to pin guest-arena-visible RW backing and as
+            // the fallback driver buffer if --renderthunk isn't set.
+            s3.x[0] = if render_thunk { xid } else { scratch.as_ptr() as u64 };
             // Real caller (0x105b2ea98) passes x1 = the ANativeWindow (loaded from
             // [parent+352] into x22 -> stored to [ctx+24] -> eglCreateWindowSurface's
-            // native-window arg). Mesa's x11 EGL platform wants the X11 Window XID as
-            // its native window, so hand the wired XID (0 = none wired -> leave 0).
-            s3.x[1] = arm64jit::shims::anativewindow_xid();
+            // native-window arg). For the thunk, x1 is the (optional) share/ parent
+            // context (0 = fresh, no sharing) — the window rides in x0 for the thunk
+            // (it forwards x0 into inner's x1, i.e. the win). Mesa's x11 EGL platform
+            // wants the X11 Window XID as its native window.
+            s3.x[1] = if render_thunk { 0 } else { xid };
             let got = if ibase >= 0x100000000 && ibase >> 56 == 0 {
                 unsafe { *(0x1067d16f0u64 as *const u64) }
             } else {
                 0
             };
             eprintln!(
-                "[elfjit:renderinit] driving {render_init:#x} after {warmup_ms}ms warm-up (ctx 0x1067d16f0={got:#x}, x0=scratch {scratch:#p}, x1(win)={:#x})",
-                s3.x[1],
+                "[elfjit:renderinit] driving {}{render_init:#x} after {warmup_ms}ms warm-up (ctx 0x1067d16f0={got:#x}, x0={:#x}, x1={:#x})",
+                if render_thunk { "THUNK " } else { "" }, s3.x[0], s3.x[1],
             );
             let swap_result = arm64jit::jit::jit_run(iimg, ibase, render_init, &mut s3 as *mut CpuState);
             let rv = match swap_result {
@@ -1715,6 +1738,46 @@ fn main() {
                 Ok(r) => r,
             };
             eprintln!("[elfjit:renderinit] returned Ok({rv:#x})");
+            // When driving the THUNK, x0's return value IS the engine's real ctx
+            // (guest-addressable 0x48-byte object with its own vtable at [ctx+0] =
+            // 0x106731ae0). Range-check it (>= some guest base, < 2^48, mapped) and
+            // note that the engine's own frame callers deref it. Keep the swap/sclear
+            // levers operating on THIS ctx (its [ctx+32]/[+40]/[+48] hold the live
+            // EGL display/surface/context the inner fn stored).
+            let real_ctx = if render_thunk {
+                let c = rv;
+                if c >= 0x100000000 && c >> 56 == 0 {
+                    let vt = unsafe { *(c as *const u64) };
+                    eprintln!(
+                        "[elfjit:renderthunk] REAL ctx 0x{c:x} vtable=0x{vt:x} egl: display=0x{:x} surface=0x{:x} context=0x{:x}",
+                        unsafe { *(c as *const u64).add(4) },
+                        unsafe { *(c as *const u64).add(5) },
+                        unsafe { *(c as *const u64).add(6) },
+                    );
+                    // Dump the live vtable slots (engine-populated at runtime, no
+                    // static relocs). The engine's frame-render callers
+                    // (0x5b2b214/0x5b2ea90) do `ldr x8,[ctx]; ldr x8,[x8,#16]; blr
+                    // x8` — slot [vt+16] (index 2) is the method a real frame
+                    // dispatch reaches. Read the first 5 table entries live.
+                    if vt >= 0x100000000 && vt >> 56 == 0 {
+                        let slots: Vec<String> = (0..5)
+                            .map(|i| unsafe { *(vt as *const u64).add(i) })
+                            .map(|v| format!("{v:#x}"))
+                            .collect();
+                        eprintln!(
+                            "[elfjit:renderthunk] ctx vtable[0..5] = {} — [vt+16](idx2)=disp target",
+                            slots.join(" ")
+                        );
+                    }
+                    c
+                } else {
+                    eprintln!("[elfjit:renderthunk] thunk return 0x{c:x} not a guest ctx; falling back to scratch");
+                    scratch.as_ptr() as u64
+                }
+            } else {
+                scratch.as_ptr() as u64
+            };
+            let _ = &real_ctx;
             // --renderframe (opt-in, must accompany --renderinit): after the real
             // render-init ran, present a buffer through the engine's LIVE EGL
             // context. Reverse from the real binary (SH17 disasm): the direct
@@ -1738,17 +1801,17 @@ fn main() {
                     .unwrap_or(0x105b3b408);
                 unsafe {
                     eprintln!(
-                        "[elfjit:renderframe] scratch[+32]=display {:#x} [+40]=surface {:#x} [+48]=context {:#x}",
-                        *(scratch.as_ptr().offset(32) as *const u64),
-                        *(scratch.as_ptr().offset(40) as *const u64),
-                        *(scratch.as_ptr().offset(48) as *const u64),
+                        "[elfjit:renderframe] ctx={real_ctx:#x} [+32]=display {:#x} [+40]=surface {:#x} [+48]=context {:#x}",
+                        *(real_ctx as *const u64).add(4),
+                        *(real_ctx as *const u64).add(5),
+                        *(real_ctx as *const u64).add(6),
                     );
-                    *(scratch.as_ptr().offset(0) as *mut u64) = 0;
+                    *(real_ctx as *mut u64) = 0;
                 }
                 let mut s5 = arm64jit::jit::CpuState::new();
                 s5.tpidr = tpidr;
                 s5.x[31] = isp;
-                s5.x[0] = scratch.as_ptr() as u64; // swap fn reads [x0+32]/[x0+40]
+                s5.x[0] = real_ctx; // swap fn reads [x0+32]/[x0+40]
                 match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut s5 as *mut CpuState) {
                     Err(e) => eprintln!("[elfjit:renderframe] swap stopped: {e}"),
                     Ok(ok) => eprintln!("[elfjit:renderframe] swap returned Ok({ok:#x}) (eglSwapBuffers)"),
@@ -1801,7 +1864,7 @@ fn main() {
                     let mut s8 = arm64jit::jit::CpuState::new();
                     s8.tpidr = tpidr;
                     s8.x[31] = isp;
-                    s8.x[0] = scratch.as_ptr() as u64;
+                    s8.x[0] = real_ctx;
                     match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut s8 as *mut CpuState) {
                         Err(e) => eprintln!("[elfjit:renderclear] swap stopped: {e}"),
                         Ok(ok) => eprintln!("[elfjit:renderclear] swap returned Ok({ok:#x}) (eglSwapBuffers after clear)"),

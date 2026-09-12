@@ -1,5 +1,34 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH18) — corrected SH17's "don't drive the render-init THUNK" note; correct thunk drive recovers the engine's REAL ctx object (vtable 0x106731ae0) and presents a real colored frame through the engine's own path. Workspace 470/0.
+
+SH17 recorded the render-init THUNK 0x105b3a280 as undrivable (SIGSEGV, "shifts
+parent/win args"). That was a harness-arg bug. Disasm of v2.738.1397 shows the
+thunk is `thunk(win, parent) -> inner(alloc(0x48), win, parent)` returning the
+REAL guest ctx in x0 (callers 0x5b2b214/0x5b2ea90 `bl thunk; ldr x8,[x0]; ldr
+x8,[x8,#16]; blr x8`). Driving it with the correct args
+(`--renderthunk`: x0=win=XID, x1=parent=0) recovers the engine's coherent ctx:
+vtable 0x106731ae0 (engine-populated, live-dumped), [ctx+32]=EGLDisplay,
+[ctx+40]=surface, [ctx+48]=context — and its vtable methods [vt+16]=0x105b3b358
+(make-current-if-not-bound: eglGetCurrentContext->eglMakeCurrent), [vt+24]=
+0x105b3b408 (swap). Engine's own swap + GLES-bridge clear through the real ctx
+present a blue frame (PIL-decomposed RGB 51,76,229 = 0.2,0.3,0.9). New elfjit
+`--renderthunk` lever (+ vtable[0..5] live dump). This opens frontier lever (2):
+drive the engine's OWN render-loop recipe (vtable[16] bind -> frame-fn 0x105b32c00
+-> vtable[24] swap) instead of force-driving glClear. Doc:
+docs/frontier-sh18-renderthunk-ctx.md; run-logs: runs/sh18-renderthunk{,-2,}.txt,
+sh18-thunk-frame.txt; frame: runs/sh18-thunk-blue.png; script:
+runs/capture_thunk_frame.sh. Baselines unchanged (--jni exit 0; idle exit 124).
+
+**Frontier (lever 2 now opened):** drive the engine's own render-loop recipe on
+the recovered real ctx in natural order — vtable[16] bind (eglMakeCurrent) ->
+frame-render fn region 0x105b32c00 (glViewport/glScissor/glClearColor/glClear/
+glDrawElements, dispatched via [x0]->[vt+16]->blr) -> vtable[24] swap. Still need
+the coherent renderer C++ object that 0x105b32c00 takes as x0 (its +24/+40
+sub-objects carry clear/viewport state, +224/232/236/238 mask flags), and
+ultimately the ALooper/lifecycle producer (SH14-capped deque wall) to drive the
+loop from the engine's main thread.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH17) — REAL Roblox binary now RENDERS a real COLORED FRAME headlessly on this GPU-less VPS: live EGL context + engine's own eglSwapBuffers succeed, and glClearColor→glClear→eglSwapBuffers through the GLES bridge present a solid-green 1280x720 frame. Workspace 470/0. HEAD a629d9c.
 
 First real rendered pixels from the running engine's own render path, all through the JIT
