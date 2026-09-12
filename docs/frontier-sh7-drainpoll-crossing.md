@@ -71,19 +71,27 @@ this receives the deque's (sentinel/self) node, so it is a degenerate
 self-dispatch, NOT the render/EGL path — no egl*/gl* hostcall fires. But the
 consumer side is now provably live and will consume whatever real node is placed.
 
-## --deque-node node injection: NOT yet consumed (two remaining subtleties)
-- **Offset fix (this cycle):** the drain's pop reads the head node from
+## --deque-node node injection: NOT yet consumed — the DISPATCHING consumer is guest_tid 0 (its own deque)
+- **Which thread drains:** under --drain-poll the dispatching consumer is
+  **guest_tid 0** (live snapshot: `pc=0x10285371c lr=0x102856f38 x1=0x7f4b5486b280`,
+  i.e. in the drain about to re-call generic-wait, cycling the dispatch handler).
+  guest_tids 1 & 2 (whose recovered headcells are 0x10682a638 / 0x10682b338) stay
+  **futex-parked** (lr=0x10284d134, live x20=-1). So --deque-node, which only
+  enqueues for threads parked at lr==0x10284d134, has been injecting into the
+  *idle* consumers' deques — never into the one tid 0 actually drains. That is
+  why no external node is consumed.
+- **Offset fix (rolled in):** the drain's pop reads the head node from
   `[headcell + 0x0]` (x23=[x20]; x24=ldar([x23])). Prior `--deque-node` wrote to
-  headcell+0x10/0x18 (the ring's internal HEAD/TAIL cells) — the pop never reads
-  those, which is why nodes sat unconsumed. Now writes `[headcell]=node`.
-- **Remaining:** the drain's guard `cmp x9,[head +]>>48` / `b.ne ret` at
-  0x2856e74-78 requires the head node's high-16 tag to match the slot field, and
-  the pop uses low-48 bits as the node pointer — host-heap nodes and tag wiring
-  must match the real engine layout. A host-placed node at headcell+0 is still
-  observed unconsumed (`popped=false`), so the exact node/tag slot layout is the
-  next frontier, now against a LIVE (draining) consumer instead of a dead one.
+  headcell+0x10/0x18 (ring internals) — fixed to [headcell+0], plus a tag-round
+  write (this cycle).
+- **Remaining for real node injection:** (1) locate guest_tid 0's deque root
+  (its live drain frame — needs the [sp+0x50] vs [sp+0x58] layout confirmed at
+  dispatch time, not at park); (2) make the node survive the drain's tag guard
+  (0x2856e78 `cmp x9,[head]>>48`) and the low-48 pointer truncation; (3) point
+  `[node+112]` at a real render/tick vtable (not the sentinel's 0x106829f00) so
+  the dispatched handler reaches egl*/gl*.
 
-## Next levers (ordered), against the now-live consumer
+## Next levers (ordered), against the now-live consumer (guest_tid 0)
 1. Recover the true deque slot/node layout from the drain's own disasm
    (0x2856e68-0x2856ec4) and inject a real node that passes the tag guard and
    the low-48 pointer truncation — point `[node+112]` at a render/tick vtable

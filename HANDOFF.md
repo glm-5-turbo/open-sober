@@ -33,15 +33,18 @@ nodes sat unconsumed. Added JIT_STACKDUMP / JIT_DEQUE_PROBE2 diagnostics (frame
 resolution) and a `dump` region-disassembler example. Doc:
 docs/frontier-sh7-drainpoll-crossing.md.
 
-**Where this leaves the frontier:** the consumer side is provably live and
-drains continuously — but it is dispatching the deque's sentinel/self node, so
-0x10285371c is a degenerate self-dispatch (maintenance), not the render/EGL
-path (no egl*/gl* hostcall yet). **Next lever:** inject a REAL task node that
-passes the drain's tag guard (0x2856e78 `cmp x9,[head]>>48`) and low-48 pointer
-truncation, with `[node+112]` pointing at a render/tick vtable (not the
-sentinel's 0x106829f00), so the dispatched handler reaches egl*/gl*/frame.
-Because the consumer now drains continuously, a correctly-placed node is
-consumed immediately — no futex wake/version bookkeeping needed.
+**Where this leaves the frontier:** the consumer side is provably live — under
+--drain-poll **guest_tid 0** (its own deque/wait struct, snapshot x1=0x7f4b5486b280,
+pc=0x10285371c lr=0x102856f38) cycles the drain's pop-loop and dispatches the
+real engine handler 0x10285371c continuously (maintenance/self-dispatch, no
+egl*/gl* hostcall yet). guest_tids 1 & 2 (recovered headcells 0x10682a638 /
+0x10682b338) stay futex-parked — so the --deque-node node-injection lever
+(targeting only parked lr==IDLE threads) has been writing into idle consumers'
+deques, never the one tid 0 drains; that is why external nodes are unconsumed.
+**Next lever:** (1) locate guest_tid 0's deque root from its live drain frame at
+dispatch time; (2) pass the drain's tag guard (0x2856e78 `cmp x9,[head]>>48`)
+and low-48 pointer truncation; (3) point [node+112] at a render/tick vtable (not
+the sentinel's 0x106829f00) so the dispatched handler reaches egl*/gl*/frame.
 Baseline (no --drain-poll) unchanged: stable idle futex park.
 
 ## Session (Sep 12, 2026, hermes-worker, cycle SH6) — host enqueue into the task-deque PROVEN not-a-producer (two strategies); deque model corrected from full producer/drain disassembly; new `--deque-node` harness. Workspace 467/0; HEAD 6003441.
