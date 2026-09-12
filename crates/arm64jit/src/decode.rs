@@ -3768,14 +3768,24 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             (2, true) // fcvtau Wd,Dn double-source unsigned round-away (already wired below via unsigned flag)
         } else if b == 0x1e30_0000 || b == 0x9e30_0000 || b == 0x1e70_0000 || b == 0x9e70_0000 {
             (4, true) // fcvtms: round toward -inf / floor
-        } else if b == 0x1e28_0000 || b == 0x9e28_0000 || b == 0x1e68_0000 || b == 0x9e68_0000 {
-            (3, true) // fcvtps: round toward +inf / ceil
-        } else if b == 0x1e20_0000 || b == 0x9e20_0000 || b == 0x1e60_0000 || b == 0x9e60_0000 {
-            (2, true) // fcvtns: round to nearest (even) — closest via cvtsd2si
-        } else {
+        } else if b == 0x1e30_0000 || b == 0x9e30_0000 || b == 0x1e70_0000 || b == 0x9e70_0000
+                    || b == 0x1e31_0000 || b == 0x9e31_0000 || b == 0x1e71_0000 || b == 0x9e71_0000 {
+                    (4, true) // fcvtms/fcvtmu: round toward -inf / floor (0x1e70/0x1e71 d-src,
+                              // 0x1e30/0x1e31 s-src; unsigned via bit16 -> fcvtmu)
+                } else if b == 0x1e28_0000 || b == 0x9e28_0000 || b == 0x1e68_0000 || b == 0x9e68_0000
+                    || b == 0x1e29_0000 || b == 0x9e29_0000 || b == 0x1e69_0000 || b == 0x9e69_0000 {
+                    (3, true) // fcvtps/fcvtpu: round toward +inf / ceil
+                } else if b == 0x1e20_0000 || b == 0x9e20_0000 || b == 0x1e60_0000 || b == 0x9e60_0000
+                    || b == 0x1e21_0000 || b == 0x9e21_0000 || b == 0x1e61_0000 || b == 0x9e61_0000 {
+                    (2, true) // fcvtns/fcvtnu: round to nearest (even) — closest via cvtsd2si
+                } else {
             (0, false)
         };
-        if ok {
+        // Scalar FP->int conversions never set bits 15:8 (the reserved field between
+        // the 0x1e.. opcode and rn/rd); fccmp/fcmp/fcsel set bit10/11 there. Without
+        // this guard my new fcvtnu base 0x1e21_0000 aliased 0x1e210400 (fccmp).
+        let ok_guarded = ok && (insn & 0x0000_0c00) == 0;
+        if ok_guarded {
             let sf = (insn >> 31) & 1 == 1;
             let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
             // fcvtau/zu (unsigned) differ from fcvtas/zs (signed) by bit16 (byte1 LSB:
@@ -6521,6 +6531,21 @@ mod logical_imm_regressions {
             }
             other => panic!("fcvtzu w0,d0 -> {other:?}"),
         }
+        // fcvtmu w8,d0 = 0x1e710008 / fcvtmu w8,s0 = 0x1e310008 (real libroblox):
+        // UNSIGNED round-toward-minus-inf. fcvtms signed = 0x1e700008 / 0x1e300008.
+        // fcvtnu (nearest-even unsigned) = 0x1e610008 / 0x1e210008.
+        assert!(matches!(decode(0x1e710008),
+            Inst::FcvtToInt { rd: 8, rn: 0, mode: 4, sf: false, unsigned: true, src_sng: false, .. }),
+            "fcvtmu w8,d0 got {:?}", decode(0x1e710008));
+        assert!(matches!(decode(0x1e310008),
+            Inst::FcvtToInt { mode: 4, unsigned: true, src_sng: true, .. }));
+        assert!(matches!(decode(0x9e710008),
+            Inst::FcvtToInt { mode: 4, sf: true, unsigned: true, src_sng: false, .. }));
+        assert!(matches!(decode(0x1e700008),
+            Inst::FcvtToInt { mode: 4, unsigned: false, .. }));
+        assert!(matches!(decode(0x1e610008),
+            Inst::FcvtToInt { mode: 2, unsigned: true, src_sng: false, .. }),
+            "fcvtnu w8,d0 got {:?}", decode(0x1e610008));
         // signed fcvtzs must NOT be flagged unsigned: 0x1e7803e0 = fcvtzs w0,d0.
         match decode(0x1e7803e0) {
             Inst::FcvtToInt { unsigned, .. } => assert!(!unsigned),

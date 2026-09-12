@@ -7997,6 +7997,21 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fcvtmu_floor_exec() {
+        // fcvtmu w8, d0 = 0x1e710008 (real): UNSIGNED round-toward-minus-inf.
+        // d0=3.7 -> floor 3; d0=-3.7 -> unsigned saturates to 0 (ARM fcvtmu, like
+        // fcvtpu, yields 0 for any negative input per qemu ground truth).
+        let mut st = CpuState::new();
+        st.v[0] = 3.7f64.to_bits();
+        exec_bytes(&mut st, &[0x08, 0x00, 0x71, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.x[8] & 0xffff_ffff, 3, "fcvtmu(3.7) => 3");
+        // negative -> 0 (unsigned).
+        st.v[0] = (-3.7f64).to_bits();
+        exec_bytes(&mut st, &[0x08, 0x00, 0x71, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.x[8] & 0xffff_ffff, 0, "fcvtmu(-3.7) => 0 (unsigned saturate)");
+    }
+
+    #[test]
     fn srshl_rounding_exec() {
         // srshl v0.4s, v1.4s, v2.4s = 0x4ea154c4 (real): signed ROUNDING variable
         // right shift. Oracle (qemu): v1={5,-7,100,-101}, shifts {-1,-1,-2,-2}
