@@ -2011,6 +2011,29 @@ fn main() {
                             (10, "glDrawArrays"),
                         ];
                         if renderframe_args.iter().any(|a| a == "--renderframe-seedgles") {
+                            // Diagnostic: dump the 16 raw slot values the ENGINE left in the
+                            // dispatch table (before we overwrite) and dladdr-resolve each host
+                            // address to a symbol. Pins the real slot->function mapping
+                            // (0-7 clear, 9/10 draw, 11-15 texture/uniform/shader) without code
+                            // archaeology, IF the engine's GL-init has filled them.
+                            eprintln!("[elfjit:renderframe-seedgles] raw slot snapshot (before seed):");
+                            for (i, _n) in [(0usize, "x"), (1, "y"), (2, "z"), (3, "w"), (4, "q"), (5, "r"), (6, "s"), (7, "t"), (8, "a"), (9, "b"), (10, "c"), (11, "d"), (12, "e"), (13, "f"), (14, "g"), (15, "h")] {
+                                let sv = 0x106d3b2f0 + (i as u64) * 8;
+                                let raw = unsafe { *(sv as *const u64) };
+                                let sym = unsafe {
+                                    let mut dli = std::mem::zeroed::<libc::Dl_info>();
+                                    if libc::dladdr(raw as *const libc::c_void, &mut dli) != 0
+                                        && !dli.dli_sname.is_null()
+                                    {
+                                        std::ffi::CStr::from_ptr(dli.dli_sname)
+                                            .to_string_lossy()
+                                            .into_owned()
+                                    } else {
+                                        String::new()
+                                    }
+                                };
+                                eprintln!("[elfjit:renderframe-seedgles]   slot {i:2} = {raw:#018x}  {sym}");
+                            }
                             for (i, name) in seed_slots {
                                 let slot_v = 0x106d3b2f0u64 + (i as u64) * 8;
                                 // Mixed (float) ABI first; fall back to int ABI for
