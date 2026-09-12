@@ -1,6 +1,46 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle SH7) — IDLE TASK-DEQUE BARRIER CROSSED: the gate is the drain's INFINITE TIMEOUT; `--drain-poll` runs the engine's own pop-loop + dispatch handler (0x10285371c). Workspace 467/0; HEAD 22a32fb.
+## Session (Sep 12, 2026, hermes-worker, cycle SH7b) — CORRECTION to SH7: the finite wait-timeout NEVER reached the pop-loop (measured 0 entries / 128k branches); NEW `--drain-force-pop` makes the engine's task-deque pop-loop run + dispatch for the first time (faults on the sentinel = controlled crossing). Workspace 467/0; HEAD 7d0cd5c+.
+
+SH7 claimed `--drain-poll <ms>` (finite timeout) makes the drain's pop-loop run by
+letting generic-wait time out. **That is wrong.** Measured: under `--drain-poll 8`
+the drain's post-wait `tbz w24,#0` (0x102856f7c) fires ~128k times but the pop-loop
+0x102856f94 is entered **0 times**. Root cause pinned in generic-wait 0x284d014:
+`cmn x0,#1` (0x284d0a4) only maps an EXACT host-futex x0==-1 to "timed out"; the
+host futex returns -ETIMEDOUT(-110) on timeout, which falls to 0x284d0ec -> generic
+wait returns w0=0 ("woken"). The drain's tbz therefore always re-loops; the finite
+timeout only hot-loops the drain's MAINTENANCE heartbeat (0x10285371c with x4=2/3,
+i.e. the drain struct's own `[x19+104]`+112 vtable callback) — which SH7 misread as
+"pops + dispatches the deque". The real node-pop path (x4=4) is a separate code
+site.
+
+**New `--drain-force-pop`** patches `mov w24,w0` (0x102856f4c)->mov w24,#1 AND NOPs
+the tbz (0x102857f7c), so the drain ALWAYS falls through to the version-check
+(0x2856f80) -> pop-loop (0x2856f94). **Proven: the pop-loop now executes** — it
+CAS-pops the deque head (the sentinel during idle) and dispatches
+`[node+112]&~0x3f->[vt+40]` with `[node+40]`/`[node+32]`/w4=4, then faults walking
+the sentinel's garbage task content (SIGSEGV guestpc=0x7f0000002068, lr
+0x10222f330). This is the long-anticipated **controlled first crossing** — the
+engine's real task-deque pop+dispatch machinery now runs (SH5/SH6/STATUS's
+documented milestone). Run-log: `/home/hermes-worker/runs/drain-forcepop-crossing.txt`
+(exit 134). Opt-in, so plain `--drain-poll` stays stable (exit 124) and baseline
+`--jni` is unchanged (clean exit 0).
+
+**New `--deque-node-live <vt>`** implements the SH7 "locate tid 0's deque" lever: it
+targets the LIVE drainer (guest_tid 0, its root recovered from x20 while pc is in
+the drain body 0x102856e40..0x1028570a4) instead of the parked tids 1/2 that
+`--deque-node` aimed at. It recons the live deque (`[root]=headcell`,
+`[headcell]=packed head` low48=node high16=tag, `[root+8]=tag`, head-node
+`[node+112]/[vt+40]/[node+40]/[node+32]`) and swaps a task node over the live head.
+Note: because the drain re-enqueues every popped node, "node still at head" is not
+itself proof of non-consumption; the discriminating signal is a type-4 dispatch of
+our node. Under --drain-force-pop the run faults during the sentinel dispatch, so a
+real node's dispatch is not yet isolated.
+
+**Next lever:** supply a real task node content so the forced pop-loop's dispatched
+handler (0x10285371c) reaches a real render/tick callback instead of walking
+garbage — identify what 0x10285371c's `[adrp+0x528]` global `br` target dispatches to,
+and what node.type/args drive it. Doc: `docs/frontier-sh7b-drainforcepop.md`.
 
 The ~35-cycle "engine producer never enqueues / consumer never drains" wall is
 broken. Empirical stack dump of a parked consumer resolved the true frame and

@@ -1056,6 +1056,185 @@ fn main() {
                 }
             });
         }
+        // --deque-node-live <vt-hex>: inject a REAL task node into the LIVE
+        // drainer's deque (guest_tid 0 under --drain-poll), NOT the parked
+        // consumers' deques (tids 1/2) that --deque-node targets. This is the
+        // SH7 documented next lever: the drain (0x2856e40) pop-loop at
+        // 0x2856f94 reads the head node from [[root]] (x23=[x20]=[root],
+        // x24=ldar[x23]=packed head), CAS-pops it, and — when it is not the
+        // sentinel AND [node+40] != 0 AND [vt+40] != 0 — dispatches
+        // [vt+40]([vt+16], consumer, [node+32]&~1, node, 4, 0). The deque root
+        // for the live drainer is its x20, STABLE across the drain body and
+        // readable from the host snapshot. We capture it once and write the
+        // node into the head-cell it drains. Injection is gated on the deque
+        // head being empty (low48==0) / the sentinel to avoid stacking over a
+        // pending node, and we verify the node was popped (head-cell moved off
+        // our packed value).
+        if let Some(vt) = {
+            let args: Vec<String> = std::env::args().collect();
+            args.iter()
+                .position(|a| a == "--deque-node-live")
+                .and_then(|i| args.get(i + 1).cloned())
+                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).expect("--deque-node-live needs hex vtable"))
+        } {
+            // Drain body span (guest vaddrs) where the drain holds x20 = deque root.
+            const DRAIN_LO: u64 = 0x102856e40;
+            const DRAIN_HI: u64 = 0x1028570a4;
+            std::thread::spawn(move || {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static ROOT: AtomicU64 = AtomicU64::new(0);
+                static PLACED: AtomicU64 = AtomicU64::new(0);
+                static HEADCELL: AtomicU64 = AtomicU64::new(0);
+                eprintln!(
+                    "[elfjit:deque-node-live] inject into LIVE drainer's deque (vtable 0x{vt:x}); draining when pc in [0x{DRAIN_LO:x},0x{DRAIN_HI:x})"
+                );
+                for it in 0..400 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let is_ptr = |p: u64| p >= 0x100000000 && p >> 56 == 0 && p & 7 == 0;
+                    // Already placed a node?
+                    let np = PLACED.load(Ordering::Relaxed);
+                    if np != 0 {
+                        let hc = HEADCELL.load(Ordering::Relaxed);
+                        let cur = unsafe { *(hc as *const u64) };
+                        let popped = cur != np;
+                        if popped {
+                            eprintln!(
+                                "[elfjit:deque-node-live] NODE 0x{np:x} POPPED by live drainer (headcell now 0x{cur:x}) — deque crossed the barrier"
+                            );
+                            return;
+                        }
+                        if it % 20 == 0 {
+                            eprintln!("[elfjit:deque-node-live] node 0x{np:x} still head (headcell=0x{cur:x})");
+                        }
+                        continue; // keep polling until popped
+                    }
+                    // Recon for the first ~40 ticks: dump the deque struct and
+                    // the LIVE head node's internals (vt/[vt+40], +40, +32,
+                    // +112) so the true layout is reversed from live memory
+                    // before we inject.
+                    if it < 40 {
+                        let snaps = arm64jit::jit::snapshot_threads();
+                        let mut rr = 0u64;
+                        for t in &snaps {
+                            if t.pc >= DRAIN_LO && t.pc < DRAIN_HI && is_ptr(t.x20) {
+                                rr = t.x20;
+                                break;
+                            }
+                        }
+                        if rr != 0 && is_ptr(rr) {
+                            let cell = unsafe { *(rr as *const u64) };
+                            if is_ptr(cell) {
+                                let head = unsafe { *(cell as *const u64) };
+                                let headnode = head & 0xffff_ffff_ffff;
+                                eprintln!(
+                                    "[elfjit:deque-node-live][recon it={it}] root={rr:#x}[0]={cell:#x}[8]={:#x} headcell[0]=0x{head:x} low48={headnode:#x}",
+                                    unsafe { *(rr as *const u64).add(1) }
+                                );
+                                if is_ptr(headnode) {
+                                    let rd = |base: u64, o: usize| unsafe { *(base as *const u64).add(o / 8) };
+                                    let v112 = rd(headnode, 112);
+                                    let vt = v112 & !0x3f;
+                                    let vt40 = if is_ptr(vt) { rd(vt, 40) } else { 0 };
+                                    eprintln!(
+                                        "[elfjit:deque-node-live][recon] headnode={headnode:#x} +40={:#x} +112={v112:#x} vt={vt:#x} [vt+40]={vt40:#x}",
+                                        rd(headnode, 40)
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Capture the live drainer's deque root once.
+                    let root = ROOT.load(Ordering::Relaxed);
+                    let snaps = arm64jit::jit::snapshot_threads();
+                    let mut live_root = 0u64;
+                    for t in &snaps {
+                        // Drain body in progress -> x20 IS the deque root.
+                        if t.pc >= DRAIN_LO && t.pc < DRAIN_HI && is_ptr(t.x20) {
+                            live_root = t.x20;
+                            break;
+                        }
+                        // Just left the drain into the dispatch handler: x20
+                        // may already be clobbered, but guest_tid 0's lr is a
+                        // drain-body return address while the drain ran.
+                    }
+                    if root == 0 {
+                        if live_root == 0 {
+                            if it % 20 == 0 {
+                                eprintln!("[elfjit:deque-node-live] waiting for live drainer pc in drain body (it={it})");
+                            }
+                            continue;
+                        }
+                        ROOT.store(live_root, Ordering::Relaxed);
+                        eprintln!("[elfjit:deque-node-live] recovered live drainer deque root x20={live_root:#x}");
+                    }
+                    let root = ROOT.load(Ordering::Relaxed);
+                    // headcell = [root]; the pop reads the packed head from it.
+                    if !is_ptr(root) {
+                        continue;
+                    }
+                    let headcell = unsafe { *(root as *const u64) };
+                    if !is_ptr(headcell) {
+                        continue;
+                    }
+                    let old = unsafe { *(headcell as *const u64) };
+                    // Dump the deque struct neighborhood to reverse the exact
+                    // layout (root -> headcell -> packed head) from live memory.
+                    if it % 40 == 0 {
+                        let r0 = unsafe { *(root as *const u64).add(0) };
+                        let r1 = unsafe { *(root as *const u64).add(1) };
+                        let r2 = unsafe { *(root as *const u64).add(2) };
+                        let r3 = unsafe { *(root as *const u64).add(3) };
+                        let h0 = unsafe { *(headcell as *const u64).add(0) };
+                        let h1 = unsafe { *(headcell as *const u64).add(1) };
+                        eprintln!(
+                            "[elfjit:deque-node-live] root={root:#x}[0]={r0:#x}[8]={r1:#x}[+16]={r2:#x}[+24]={r3:#x} headcell={headcell:#x}[0]={h0:#x}(low48 {:#x})[8]={h1:#x}",
+                            h0 & 0xffff_ffff_ffff
+                        );
+                    }
+                    // The drain keeps the deque head non-empty (it
+                    // continuously pops + re-enqueues the self/sentinel node),
+                    // so there is no "empty" window to wait for. Inject by
+                    // SWAPPING our node over the live head: the drain's next
+                    // CAS-pop reads our packed value, truncates low-48 to our
+                    // node, and dispatches it (non-sentinel, [node+40]!=0).
+                    if it % 20 == 0 {
+                        eprintln!("[elfjit:deque-node-live] headcell 0x{headcell:x} head=0x{old:x} (replacing with task node)");
+                    }
+                    // The drain's entry tag guard (0x2856e74) requires the head
+                    // node's high-16 tag == [root+8]. Read that tag so the packed
+                    // value passes the guard and the low-48 truncation yields our
+                    // node on pop.
+                    let tag = unsafe { *(root as *const u64).add(1) }; // [root+8]
+                    // Bind the dispatch handler: [node+112]&~0x3f -> vt, [vt+40]=handler.
+                    let node = unsafe { libc::calloc(1, 256) as *mut u8 };
+                    if node.is_null() {
+                        continue;
+                    }
+                    let np = node as u64;
+                    unsafe {
+                        *((np as *mut u64)) = 0; // node.next = null tail
+                        // [node+40] != 0 so the drain DISPATCHES the handler on pop.
+                        (np as *mut u64).add(5).write_volatile(1);
+                        // [node+32] = arg (0 is fine; drain passes it &~1 as x2).
+                        (np as *mut u64).add(4).write_volatile(0);
+                        // [node+112] = vtable; [vt+40] must be a real handler fn.
+                        (np as *mut u64).add(14).write_volatile(vt);
+                        // Pack: low48 = node pointer (so pop truncates to it),
+                        // high16 = tag matching [root+8].
+                        let packed = np | ((tag & 0xffff) << 48);
+                        // Publish into the head-cell the drain pops from.
+                        (headcell as *mut u64).write_volatile(packed);
+                        HEADCELL.store(headcell, Ordering::Relaxed);
+                        PLACED.store(packed, Ordering::Relaxed);
+                        eprintln!(
+                            "[elfjit:deque-node-live] INJECTED node 0x{np:x} packed=0x{packed:x} into headcell 0x{headcell:x} (tag {tag:#x}) — awaiting pop by live drainer"
+                        );
+                    }
+                }
+                eprintln!("[elfjit:deque-node-live] gave up after 400 ticks");
+            });
+        }
         // Disable the gate-2 re-arm store: the owner's cond-wait loop at
     // 0x102b4cd50/0x102b4cd84 re-parks while *x19==1 and, on seeing that
     // pred has become 0, RE-ARMS it back to 1 (`mov x8,#1; str x8,[x19]` at
@@ -1107,6 +1286,42 @@ fn main() {
                 eprintln!("[elfjit:drain-poll] patched 0x{insn_addr:x} -> mov x2,#{ms}ms (0x{patch:08x})");
             } else {
                 eprintln!("[elfjit:drain-poll] WARN mprotect RW failed at 0x{page:x} errno={}", std::io::Error::last_os_error());
+            }
+            // SH7's --drain-poll claimed the finite timeout alone makes the
+            // pop-loop run, but that is WRONG (corrected here): generic-wait
+            // 0x284d014 maps the host futex's ETIMEDOUT (-110) return into w0=0
+            // ("woken"), because `cmn x0,#1` (0x284d0a4) only treats an EXACT
+            // x0==-1 as a timeout-under-deadline; -110 falls through to
+            // 0x284d0ec and returns 0. So the drain's `tbz w24,#0` (0x2856f7c)
+            // always re-loops and the pop-loop 0x2856f94 never runs (measured:
+            // 0 hits / 128k drain branches). Forcing the pop-loop itself (the
+            // real crossing) needs the drain's wait-result latch AND the tbz:
+            // `mov w24,w0` at 0x102856f4c -> mov w24,#1, and NOP the tbz
+            // 0x102856f7c so the drain falls through to the version-check and
+            // the pop-loop, which then CAS-pops and dispatches a placed node.
+            // This reaches previously-dead code and faults on dispatch of a
+            // non-real task node (the "controlled first crossing"), so it is
+            // opt-in via --drain-force-pop; plain --drain-poll keeps its
+            // documented stable (finite-timeout maintenance heartbeat) behavior.
+            let force = std::env::args().any(|a| a == "--drain-force-pop");
+            if force {
+            let latch_addr: u64 = 0x102856f4c; // mov w24,w0 (=0x2a0003f8)
+            let _latch_patch: u32 = 0x52800018; // mov w24,#1 (MOVZ W24,#1)
+            let tbz_addr: u64 = 0x102856f7c;
+            let tbz_page = tbz_addr & !0xfff;
+            for (a, name) in [(latch_addr, "w24"), (tbz_addr, "tbz")] {
+                let p = a & !0xfff;
+                if unsafe { libc::mprotect(p as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE) } != 0 {
+                    eprintln!("[elfjit:drain-poll] WARN mprotect RW failed at {name} 0x{p:x} errno={}", std::io::Error::last_os_error());
+                    continue;
+                }
+                let before = unsafe { *(a as *const u32) };
+                let patch_word: u32 = if a == tbz_addr { 0xd503_201f /* NOP */ } else { 0x5280_0018 /* mov w24,#1 */ };
+                unsafe { *(a as *mut u32) = patch_word };
+                let _ = unsafe { libc::mprotect(p as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC) };
+                eprintln!("[elfjit:drain-poll] FORCE pop-loop: patched {name} 0x{a:x} (was {before:08x}) -> {patch_word:08x}");
+            }
+            let _ = tbz_page;
             }
         }
     }
