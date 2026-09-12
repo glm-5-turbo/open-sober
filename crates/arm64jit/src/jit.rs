@@ -7980,6 +7980,23 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fmov_half_gpr_exec() {
+        // fmov h0, w13 = 0x1ee701a0: copy w13's low 16 bits (raw f16) into h0 lane.
+        // fmov w13, h0 = 0x1ee6000d: copy h0 lane's 16 bits back into w13.
+        let mut st = CpuState::new();
+        // f16 2.0 = 0x4000; put in x13 (low 16). Set h0 lane first too.
+        st.x[13] = 0x4000; // 2.0 as raw f16 bits in w13
+        st.v[0] = 0xC000;  // h0 = -2.0 as raw f16 (bits 0-15 of v[0])
+        // GP -> H: h0 = w13 -> 0x4000 (2.0)
+        exec_bytes(&mut st, &[0xa0, 0x01, 0xe7, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.v[0] & 0xffff, 0x4000, "h0 = w13 (0x4000)");
+        // H -> GP: set h0 = 0x4200 (3.0 raw), then w13 = h0
+        st.v[0] = 0x4200;
+        exec_bytes(&mut st, &[0x0d, 0x00, 0xe6, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.x[13] & 0xffff, 0x4200, "w13 = h0 (0x4200)");
+    }
+
+    #[test]
     fn smlsl_widen_exec() {
         // smlsl v0.4s, v1.4h, v2.4h = 0x0e62a020: Vd = Vd - widen(s16*s16) per lane.
         // v1s = {2,5,-3,7}, v2s = {3,-2,4,10} -> prods {6,-10,-12,70}.

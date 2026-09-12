@@ -2136,13 +2136,15 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::FmovGp { f, sz, rd, rn } => {
-            // FMOV core <-> scalar FP. Double(d/x) uses the low 64 of the slot;
-            // single(s/w) uses the low 32.
+        Inst::FmovGp { f, sz, half, rd, rn } => {
+            // FMOV core <-> scalar FP. Double(d/x) uses the low 64, single(s/w)
+            // the low 32, half (h/w) the low 16 of the vector slot.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             if f {
                             // FP -> GP
-                            if sz {
+                            if half {
+                                buf.mov_load16(RAX, RBX, vslot(rn));
+                            } else if sz {
                                 buf.mov_load64(RAX, RBX, vslot(rn));
                             } else {
                                 buf.mov_load32(RAX, RBX, vslot(rn));
@@ -2153,7 +2155,9 @@ pub fn translate(
             } else {
                 // GP -> FP
                 ldg(buf, RAX, rn as u32);
-                if sz {
+                if half {
+                    buf.mov_store16(RBX, vslot(rd), RAX);
+                } else if sz {
                     buf.mov_store64(RBX, vslot(rd), RAX);
                 } else {
                     buf.mov_store32(RBX, vslot(rd), RAX);

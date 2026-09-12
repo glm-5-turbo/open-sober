@@ -630,6 +630,7 @@ pub enum Inst {
        FmovGp {
                f: bool,  // false = GP->FP (X/Sd <- X/Wn), true = FP->GP (Xd/Wd <- D/Sn)
                sz: bool, // true = double (d/x), false = single (s/w)
+               half: bool, // true = half (h/w) fp16 lane, base 0x1ee7 (GP->H) / 0x1ee6 (H->GP)
                rd: u8,
                rn: u8,
            },
@@ -4154,13 +4155,17 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     let fmov = match base {
                         0x9e66_0000 | 0x1e26_0000 => Some(true), // FP -> GP
                         0x9e67_0000 | 0x1e27_0000 => Some(false), // GP -> FP
+                        // fp16 FP<->GP: byte1(bits15:8)=0xe6/e7 (half), vs s's 0x26/0x27.
+                        0x1ee6_0000 => Some(true),  // FMOV Hd,Wn? no: h{fp}->x reads -> 0x1ee6
+                        0x1ee7_0000 => Some(false), // GP -> H
                         _ => None,
                     };
                     if let Some(f) = fmov {
                             let sz = matches!(base, 0x9e66_0000 | 0x9e67_0000); // d/x double
+                            let half = matches!(base, 0x1ee6_0000 | 0x1ee7_0000);
                             let rn = ((insn >> 5) & 0x1f) as u8;
                             let rd = (insn & 0x1f) as u8;
-                            return Inst::FmovGp { f, sz, rd, rn };
+                            return Inst::FmovGp { f, sz, half, rd, rn };
                         }
 
                         // ---- NEON bit-popcount idiom: cnt Vd.8b,Vn.8b and uaddlv hD,Vn.8b ----
@@ -6276,6 +6281,19 @@ mod tests {
                 assert!(matches!(decode(0xd53b0029),
                     Inst::SysReg { sysreg: 10, rt: 9, read: true }),
                     "mrs ctr_el0 got {:?}", decode(0xd53b0029));
+                // fp16 FMOV GP<->H: fmov h0,w13 = 0x1ee701a0 (GP->H), fmov w13,h0 =
+                // 0x1ee6000d (H->GP). Real libroblox hits.
+                assert!(matches!(decode(0x1ee701a0),
+                    Inst::FmovGp { f: false, sz: false, half: true, rd: 0, rn: 13 }),
+                    "fmov h0,w13 got {:?}", decode(0x1ee701a0));
+                assert!(matches!(decode(0x1ee6000d),
+                    Inst::FmovGp { f: true, sz: false, half: true, rd: 13, rn: 0 }),
+                    "fmov w13,h0 got {:?}", decode(0x1ee6000d));
+                // single/double FMOV must NOT get half flag: fmov s0,w13=0x1e2701a0,
+                // fmov w0,s13=0x1e2601a0, fmov d0,x13=0x9e6701a0.
+                assert!(matches!(decode(0x1e2701a0), Inst::FmovGp { half: false, .. }));
+                assert!(matches!(decode(0x1e2601a0), Inst::FmovGp { half: false, .. }));
+                assert!(matches!(decode(0x9e6701a0), Inst::FmovGp { sz: true, half: false, .. }));
             }
 
             #[test]
