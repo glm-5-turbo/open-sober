@@ -7810,6 +7810,28 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fp16_cmp2_exec() {
+        // fcmgt v0.8h, v1.8h, v2.8h = 0x6ec22420: per-lane (Vn > Vm) -> 0xffff/0.
+        // v1 halves = {2.5, 0.0, -1.0, 3.0}; v2 halves = {1.0, 5.0, -2.0, 3.0}.
+        // f16: 2.5=0x4100, 0.0=0x0000, -1.0=0xBC00, 3.0=0x4200, 1.0=0x3C00,
+        //      5.0=0x4500, -2.0=0xC000.
+        let mut st = CpuState::new();
+        st.v[2] = (0x4200u64 << 48) | (0xBC00u64 << 32) | (0x0000u64 << 16) | 0x4100u64; // v1
+        st.v[4] = (0x4200u64 << 48) | (0xC000u64 << 32) | (0x4500u64 << 16) | 0x3C00u64; // v2
+        exec_bytes(&mut st, &[0x20, 0x24, 0xc2, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h(&st, 0), 0xffff, "2.5>1.0");
+        assert_eq!(h(&st, 1), 0x0000, "0.0>5.0");
+        assert_eq!(h(&st, 2), 0xffff, "-1.0>-2.0");
+        assert_eq!(h(&st, 3), 0x0000, "3.0>3.0 strict");
+        // fcmeq v0.4h=v1,v2 (0x4e422420): 3.0==3.0 true
+        let mut st2 = CpuState::new();
+        st2.v[2] = 0x4100; st2.v[4] = 0x4100;
+        exec_bytes(&mut st2, &[0x20, 0x24, 0x42, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(((st2.v[0] & 0xffff) as u16), 0xffff, "2.5==2.5");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

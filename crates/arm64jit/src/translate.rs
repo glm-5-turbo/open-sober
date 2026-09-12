@@ -3454,7 +3454,32 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
+        Inst::SimdFp16Cmp { rd, rn, rm, op, q } => {
+            // fcmeq/fcmge/fcmgt Vd.4H/.8H, Vn, Vm : per-lane cond(Vn,Vm) -> all-ones
+            // or 0. Promote both halves to f32 (F16C), comiss, setcc, neg.
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 8 } else { 4 };
+            for l in 0..lanes {
+                let off = l * 2;
+                buf.mov_load16(RAX, RBX, f(rn) + off);
+                buf.movd_xmm_r32(0, RAX);
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0
+                buf.mov_load16(RAX, RBX, f(rm) + off);
+                buf.movd_xmm_r32(1, RAX);
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc9]); // vcvtph2ps xmm1,xmm1 (F16C)
+                buf.comiss(0, 1); // sets flags for xmm0 vs xmm1
+                let cc: u8 = match op {
+                    0 => 0x04, // fcmeq: ZF -> E
+                    1 => 0x03, // fcmge: CF clear -> AE
+                    _ => 0x07, // fcmgt: CF&ZF clear -> A
+                };
+                buf.setcc_rm8(cc, 0);
+                buf.movzx_r32_r8(RAX, RAX);
+                buf.neg_r64(RAX);
+                buf.mov_store16(RBX, f(rd) + off, RAX);
+            }
+            Ok(())
+        }
         Inst::SimdDupD { rd, rn, index } => {
             // dup Vd.2D, Vn.D[index]: broadcast the selected 64-bit lane of Vn
             // into both 64-bit lanes of Vd. index 0 => low 64, 1 => high 64.

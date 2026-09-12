@@ -578,6 +578,12 @@ pub enum Inst {
     // op: 0=fadd, 1=fsub, 2=fmul. Gate (insn & 0x9f60_f400) == 0x0e40_1400;
     // q=bit30 (1=.8h 8 lanes, 0=.4h 4 lanes); fmul sets bit29, fsub bit23.
     SimdFp16As { rd: u8, rn: u8, rm: u8, op: u8, q: bool },
+    // ---- SIMD FP16 2-source compare mask: fcmeq/fcmge/fcmgt Vd.8h/.4h, Vn, Vm ----
+    // Per halfword lane, all-ones if lane(cond) else 0. byte2(bits15:8)&0xfc==0x24,
+    // byte1(bits23:16)&0xfc in {0x40 fcmeq/fcmge, 0xc0 fcmgt}; bit29(U) turns
+    // fcmeq->fcmge (byte1 0x40). op: 0=eq 1=ge 2=gt. The mov Vd.S[idx] insert
+    // (0x6e1424a3, byte1 0x14) is excluded by byte1 top-nibble 0x1 vs 0x4/0xc.
+    SimdFp16Cmp { rd: u8, rn: u8, rm: u8, op: u8, q: bool },
     // ---- FP16 by-element fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx] ----
     // Half-precision indexed multiply-accumulate. byte0 nibble 0xf (0x4f/0x0f),
     // bit29 CLEAR, bit23 CLEAR (the fp16-vs-f32 discriminator: the f32 FmlaEl
@@ -2310,6 +2316,30 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         return Inst::SimdFp16As { rd, rn, rm, op, q };
     }
 
+    // SIMD FP16 2-source compare: fcmeq/fcmge/fcmgt Vd.8h/.4h, Vn, Vm.
+    // byte2(bits15:8)&0xfc==0x24; byte1(bits23:16)&0xfc in {0x40,0xc0}; prefix
+    // byte0 0x0e/2e/4e/6e. bit29(U) + byte1 0x40 => fcmge vs fcmeq; byte1 0xc0
+    // => fcmgt. Guarded so mov Vd.S[idx] (byte1 0x14, top-nibble 0x1) falls through.
+    if (insn & 0x0000_fc00) == 0x0000_2400 && (insn & 0x0f00_0000) == 0x0e00_0000 {
+        let b1 = ((insn >> 16) & 0xfc) as u8;
+        let op = match b1 {
+            0x40 => Some(if insn & 0x2000_0000 != 0 { 1 } else { 0 }), // fcmge / fcmeq
+            0xc0 => Some(2),                                           // fcmgt
+            _ => None, // NOT a compare (mov/ins element, fp16 arith) -> keep decoding
+        };
+        if let Some(op) = op {
+            let rm = ((insn >> 16) & 0x1f) as u8;
+            let rn = ((insn >> 5) & 0x1f) as u8;
+            let rd = (insn & 0x1f) as u8;
+            return Inst::SimdFp16Cmp {
+                rd,
+                rn,
+                rm,
+                op,
+                q: (insn >> 30) & 1 == 1,
+            };
+        }
+    }
     // ---- SIMD halving add: uhadd/shadd Vd.T, Vn.T, Vm.T ----
     // (a+b)>>1 per lane (no rounding), 8B/4H/2S. Gate (insn&0x1f20_fc00)==
     // 0x0e20_0400 (byte1 0x04; bits28:24=0x0e SIMD three-same, bit28 CLEAR
@@ -7583,6 +7613,20 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x4ea1d820), Inst::SimdFp16Cmpz { .. }));
         assert!(!matches!(decode_op(0x4e21c863), Inst::SimdFp16Cmpz { .. }));
         assert!(!matches!(decode_op(0x4ee1dc00), Inst::SimdFp16Cmpz { .. }));
+        // SIMD FP16 2-source compare: fcmeq v0.8h = 0x4e422420 (op0), fcmge =
+        // 0x6e422420 (op1), fcmgt = 0x6ec22420 (op2); fcmgt real 0x2ec22462 (op2,q0).
+        assert!(matches!(decode_op(0x4e422420),
+            Inst::SimdFp16Cmp { rd: 0, rn: 1, rm: 2, op: 0, q: true }),
+            "got {:?}", decode_op(0x4e422420));
+        assert!(matches!(decode_op(0x6e422420),
+            Inst::SimdFp16Cmp { rd: 0, rn: 1, rm: 2, op: 1, q: true }));
+        assert!(matches!(decode_op(0x6ec22420),
+            Inst::SimdFp16Cmp { rd: 0, rn: 1, rm: 2, op: 2, q: true }));
+        assert!(matches!(decode_op(0x2ec22462),
+            Inst::SimdFp16Cmp { rd: 2, rn: 3, rm: 2, op: 2, q: false }),
+            "got {:?}", decode_op(0x2ec22462));
+        // negatives must NOT match: mov v3.s[2] insert (0x6e1424a3, byte1 0x14).
+        assert!(!matches!(decode_op(0x6e1424a3), Inst::SimdFp16Cmp { .. }), "mov .S[idx] stays SimdInsD");
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),
