@@ -2010,6 +2010,20 @@ fn main() {
                         eprintln!(
                             "[elfjit:renderframe-drive] fabricated renderer 0x{renderer:x} (+16=1,+24->0x{objA:x}[+552]=1,+40->0x{objB:x}[+140]=1) view 0x{view:x} ([+128]=1280 [+132]=720 [+140]=0)"
                         );
+                        // --renderframe-loop <N>: repeat the engine's OWN recipe
+                        // (bind already done by renderbind -> the real frame-fn
+                        // 0x105b32c00 -> post-frame swap via real ctx) N times to
+                        // prove the render path is reentrant/sustainable — the
+                        // property the engine needs to drive frames from its own main
+                        // loop. Default 1.
+                        let loop_n: usize = renderframe_args
+                            .iter()
+                            .position(|a| a == "--renderframe-loop")
+                            .and_then(|i| renderframe_args.get(i + 1))
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1);
+                        for iter in 0..loop_n {
+                            eprintln!("[elfjit:renderframe-drive] === frame iteration {iter} ===");
                         let mut sd = arm64jit::jit::CpuState::new();
                         sd.tpidr = tpidr;
                         sd.x[31] = isp;
@@ -2036,6 +2050,7 @@ fn main() {
                             Ok(ok) => eprintln!(
                                 "[elfjit:renderframe-drive] post-frame swap returned Ok({ok:#x})"
                             ),
+                        }
                         }
                     }
                 }
