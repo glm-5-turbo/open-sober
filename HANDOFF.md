@@ -1,5 +1,44 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH8) — dispatch ABI fully reversed + pinned; `--deque-probe` live-repoints sentinel vtable (works) but sentinel-as-task still faults (honest failure). Workspace 468/0; HEAD 415e384+.
+
+Reversed the engine task-deque consumer's POP-LOOP dispatch ABI from live disasm
+(libroblox 0x2856fd4..0x2857008, qemu/objdump-verified) and pinned it as a new
+regression `deque_dispatch_node_layout_matches_engine_abi` so any render-task
+injector builds nodes the running drain understands:
+
+```
+node = low48([headcell]); vt = [node+112]&~0x3f; handler = [vt+40];
+guard [node+40]!=0 && handler!=0;
+handler([vt+16], consumer, [node+32]&~1, node, w4=4, x5=0)
+```
+(the `[node+112]&~0x3f -> [vt+40]` model prior cycles stated is confirmed
+exactly, plus the precise arg order/types and the `[node+40]`/handler guards.)
+
+New elfjit `--deque-probe <ctx-qw>` (opt-in, only engages with `--drain-force-
+pop`): live-repoints the ROOT consumer's sentinel `[node+112]` -> a host-heap
+fake vtable whose `[vt+40]` is a registered host-thunk probe, so the engine's
+own pop-loop dispatches a NODE through OUR handler with the real ABI args.
+VERIFIED: both sentinels repointed (headcells 0x10682b338/0x10682a638, logs
+`REPOINTED sentinel ... [node+112]: 0x106829f00->0x...`). HONEST GAP: the probe
+handler never fires (count 0) — under forced-pop the engine dispatches the
+SENTINEL-AS-TASK and faults in an UNTRACKED host thread (guestpc 0, reading host
+slot addr 0x7f0000000090 as a pointer) before our handle runs. The vtable repoint
+alone can't detour the engine's own dispatcher walking the sentinel's other
+garbage payload. Exit 134. Doc: docs/frontier-sh8-dequeprobe-abi.md.
+
+Baselines UNAFFECTED and re-verified: `--jni` clean exit 0; stable idle
+(StartApp main loop) exit 124, zero SIGSEGV; workspace green **468/0** (was 467).
+run-logs: /home/hermes-worker/runs/boot-probe-{1..5,final}.txt.
+
+**Frontier (unchanged shape, ABI now pinned):** the still-hard wall is the
+engine's producer never enqueues a REAL render task; forcing the consumer makes
+it pop+dispatch the sentinel-as-task -> fault. Next levers per SH7b, now with
+the exact node layout: (1) invoke the REAL producer 0x285682c as a guest call
+with a valid task node, or (2) fabricate a full task node (vt+40 -> a real
+render/tick vtable we must locate, coherent payload) and cross before force-pop.
+Neither is crossed this cycle; the ABI + control-plane (repoint) are.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH7b) — CORRECTION to SH7: the finite wait-timeout NEVER reached the pop-loop (measured 0 entries / 128k branches); NEW `--drain-force-pop` makes the engine's task-deque pop-loop run + dispatch for the first time (faults on the sentinel = controlled crossing). Workspace 467/0; HEAD 7d0cd5c+.
 
 SH7 claimed `--drain-poll <ms>` (finite timeout) makes the drain's pop-loop run by

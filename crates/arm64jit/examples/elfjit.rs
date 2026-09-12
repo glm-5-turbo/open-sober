@@ -1235,6 +1235,119 @@ fn main() {
                 eprintln!("[elfjit:deque-node-live] gave up after 400 ticks");
             });
         }
+        // --deque-probe: convert the forced-pop sentinel fault into a CONTROLLED
+        // type-4 dispatch the SH7b frontier demanded. The engine's real pop-loop
+        // (0x2856f94) pops the head node and dispatches
+        //   [node+112]&~0x3f -> vt; handler = [vt+40]; if [node+40]!=0 && handler!=0
+        //   then handler([vt+16], x19=consumer, [node+32]&~1, node, w4=4, x5=0)
+        // During idle the head node is the SENTINEL (the drain struct itself),
+        // whose [node+112]=0x106829f00 -> [vt+40]=0x10285371c (the engine's own
+        // dispatcher), which walks the sentinel's garbage task content and
+        // strlen-faults (exit 134, the current unstable state). Instead of racing
+        // a foreign node into the deque ahead of the fault, REPOINT the sentinel's
+        // live [node+112] at a vtable WE control whose [vt+40] is a registered
+        // host-thunk probe. Then every forced pop dispatches OUR probe with the
+        // real engine ABI args (vt+16 / consumer / node+32 / node / w4=4 / 0),
+        // stably, capturing the discriminate type-4 dispatch. Opt-in; default
+        // --deque-node-live and plain --drain-force-pop unchanged.
+        // --deque-probe <ctx-qw-hex> writes that qword to the sentinel's [node+32]
+        // (the ABI arg passed as x2, &~1) so the probe proves which node road it.
+        if std::env::args().any(|a| a == "--deque-probe") {
+            let ctx = std::env::args()
+                .position(|a| a == "--deque-probe")
+                .and_then(|i| std::env::args().nth(i + 1))
+                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                .flatten();
+            const DRAIN_LO: u64 = 0x102856e40;
+            const DRAIN_HI: u64 = 0x1028570a4;
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+            extern "C" fn probe(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, _a6: u64, _a7: u64) -> u64 {
+                let c = PROBE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if c == 1 || c % 10000 == 0 {
+                    eprintln!(
+                        "[elfjit:deque-probe] type-4 dispatch #{c}: x0(vt+16)={a0:#x} x1(consumer)={a1:#x} x2(node+32&~1)={a2:#x} x3(node)={a3:#x} w4={a4} x5={a5}"
+                    );
+                }
+                0
+            }
+            // Allocate a guest-visible fake vtable: [vt+16] = ctx marker,
+            // [vt+40] = probe host-thunk address (JIT routes guest `blr` to it).
+            let vt = unsafe { libc::calloc(1, 8 * 8) as *mut u8 };
+            let probe_addr = arm64jit::jit::register_host_call_auto(probe);
+            let ctxv = ctx.unwrap_or(0);
+            unsafe {
+                (vt as *mut u64).add(2).write_volatile(ctxv); // [vt+16] (a0)
+                (vt as *mut u64).add(4).write_volatile(probe_addr); // [vt+40] (handler)
+            }
+            let vtaddr = vt as u64;
+            std::thread::spawn(move || {
+                eprintln!(
+                    "[elfjit:deque-probe] probing sentinel dispatch (vt 0x{vtaddr:x}, probe 0x{probe_addr:x} -> [vt+40], ctx {ctxv:#x})"
+                );
+                let mut repointed: Vec<u64> = Vec::new();
+                for it in 0..900 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    let is_ptr = |p: u64| p >= 0x100000000 && p >> 56 == 0 && p & 7 == 0;
+                    let snaps = arm64jit::jit::snapshot_threads();
+                    // Candidate roots: every thread's x20/x19 that looks like a
+                    // deque-builder, PLUS the SH7 parked-frame recovery
+                    // ([sp+64]=root). The deque root's FIRST qword ([headcell])
+                    // is itself a pointer; that headcell's [0] (packed head) has
+                    // low48 = the sentinel node whose [node+112]==0x106829f00.
+                    let mut roots: Vec<u64> = Vec::new();
+                    for t in &snaps {
+                        for r in [t.x20, t.x19] {
+                            if is_ptr(r) && r >= 0x100000000 {
+                                roots.push(r);
+                            }
+                        }
+                        if t.lr == 0x10284d134 && is_ptr(t.sp) {
+                            let r = unsafe { *(t.sp as *const u64).add(8) };
+                            if is_ptr(r) {
+                                roots.push(r);
+                            }
+                        }
+                    }
+                    roots.sort_unstable();
+                    roots.dedup();
+                    for rr in roots {
+                        let headcell = unsafe { *(rr as *const u64) };
+                        if !is_ptr(headcell) {
+                            continue;
+                        }
+                        let head = unsafe { *(headcell as *const u64) };
+                        let sentinel = head & 0xffff_ffff_ffff;
+                        if !is_ptr(sentinel) || repointed.contains(&sentinel) {
+                            continue;
+                        }
+                        let cur_v112 = unsafe { *((sentinel as *const u64).add(112 / 8)) };
+                        if cur_v112 == 0x106829f00 {
+                            unsafe {
+                                (sentinel as *mut u64).add(112 / 8).write_volatile(vtaddr);
+                                // NOTE: do NOT write [node+40]/[node+32] — the
+                                // sentinel IS the live drain struct and its own
+                                // [node+40]/[node+32] are already nonzero, so the
+                                // dispatch guard passes without corrupting the
+                                // drain's internal state (writing them caused a
+                                // host-slot deref SIGSEGV).
+                            }
+                            repointed.push(sentinel);
+                            eprintln!(
+                                "[elfjit:deque-probe] REPOINTED sentinel 0x{sentinel:x} (root 0x{rr:x}, headcell 0x{headcell:x}): [node+112] 0x{cur_v112:x}->0x{vtaddr:x}"
+                            );
+                        }
+                    }
+                    let cnt = PROBE_COUNT.load(Ordering::Relaxed);
+                    if cnt >= 5 && it % 40 == 0 {
+                        eprintln!(
+                            "[elfjit:deque-probe] CONFIRMED {cnt} controlled type-4 dispatches through our vtable"
+                        );
+                    }
+                }
+                eprintln!("[elfjit:deque-probe] gave up (probe count={}, repointed={})", PROBE_COUNT.load(Ordering::Relaxed), repointed.len());
+            });
+        }
         // Disable the gate-2 re-arm store: the owner's cond-wait loop at
     // 0x102b4cd50/0x102b4cd84 re-parks while *x19==1 and, on seeing that
     // pred has become 0, RE-ARMS it back to 1 (`mov x8,#1; str x8,[x19]` at

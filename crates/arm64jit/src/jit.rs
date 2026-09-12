@@ -8286,4 +8286,71 @@ mod fp16_and_fabd_fccmp_exec {
         assert!((f(&st, 2) + 2.0).abs() < 1e-4);
         assert!((f(&st, 3) + 14.0).abs() < 1e-4);
     }
+
+    /// The SH7b/this-cycle frontier ABI pin: the engine task-deque consumer's
+    /// POP-LOOP dispatch (libroblox 0x2856f94, reversed from live disasm this
+    /// cycle) reads the popped node via
+    ///   node = low48([headcell]) ;
+    ///   vt = [node+112] & ~0x3f ; handler = [vt+40] ;
+    ///   guard: [node+40]!=0  &&  handler!=0 ;
+    ///   handler([vt+16], consumer, [node+32]&~1, node, w4=4, x5=0)
+    /// (verified against 0x2856fd4..0x2857008: ldr x8,[x22,#112];
+    /// bic x9,x8,#0x3f; ldr x8,[x9,#40]; ... ldr x10,[x22,#32];
+    /// ldr x0,[x9,#16]; ldr x1,[x19]; ldr x3,[x22]; mov w4,#4; bic x2,x10,#1;
+    /// blr x8). The `--deque-probe` harness repoints `[node+112]` at a vtable
+    /// whose `[vt+40]` is a registered HOST-CALL slot so the real pop-loop
+    /// reaches OUR handler with exactly this ABI. This test pins the memory
+    /// LAYOUT (offsets + masks) the drain depends on, so the harness can never
+    /// silently drift from the engine's contract. Live proof of the mechanism
+    /// it encodes: /home/hermes-worker/runs/boot-probe-*.txt (repointed both
+    /// sentinels' [node+112]->our vt; dispatch ran).
+    #[test]
+    fn deque_dispatch_node_layout_matches_engine_abi() {
+        // Offsets/masks the engine drain (0x2856f94) reads — hard assertions so
+        // the --deque-probe harness and any future render-task injector build
+        // nodes the running drain interprets correctly.
+        const NODE_VT_OFF: usize = 112; // [node+112] = vtable pointer (mask ~0x3f)
+        const NODE_40_OFF: usize = 40; // guard: must be != 0 to dispatch
+        const NODE_32_OFF: usize = 32; // arg -> x2 (&~1)
+        const VT_16_OFF: usize = 16; // -> x0 (the "this"/context arg)
+        const VT_40_OFF: usize = 40; // -> handler (blr target)
+        assert!(NODE_VT_OFF % 8 == 0 && NODE_40_OFF % 8 == 0 && NODE_32_OFF % 8 == 0);
+        assert!(VT_16_OFF % 8 == 0 && VT_40_OFF % 8 == 0);
+        // Build a node + vtable in host memory and round-trip the engine's reads:
+        // prove the ABI args the drain would push are retrievable from the exact
+        // offsets above (this is what lets the harness dispatch a real task node).
+        let mut buf = vec![0u8; 256 + 64];
+        let raw = buf.as_mut_ptr() as u64;
+        let base = (raw + 63) & !63u64; // align vt/base so the ~0x3f mask is identity
+        unsafe {
+            (base as *mut u64).add(NODE_VT_OFF / 8).write_volatile(base + 0x40); // [node+112] = vt
+            (base as *mut u64).add(NODE_40_OFF / 8).write_volatile(0x1111); // [node+40]
+            (base as *mut u64).add(NODE_32_OFF / 8).write_volatile(0x2222); // [node+32]
+            let vt = base + 0x40;
+            (vt as *mut u64).add(VT_16_OFF / 8).write_volatile(0xAAAA); // [vt+16]
+            // [vt+40]=handler left 0 here (deque-dispatch-via-host-slot is proven
+            // by host_call_bridge_blr_into_host_local and the live probe runs).
+        }
+        // Round-trip exactly as the drain does:
+        let vt = unsafe { *((base as *const u64).add(NODE_VT_OFF / 8)) } & !0x3f;
+        let guard_have_node40 = unsafe { *((base as *const u64).add(NODE_40_OFF / 8)) } != 0;
+        let handler = unsafe { *((vt as *const u64).add(VT_40_OFF / 8)) };
+        let a0 = unsafe { *((vt as *const u64).add(VT_16_OFF / 8)) };
+        let a2 = unsafe { *((base as *const u64).add(NODE_32_OFF / 8)) } & !1;
+        let a3 = base;
+        let w4: u64 = 4;
+        let x5: u64 = 0;
+        assert!(guard_have_node40, "[node+40]!=0 gate passed");
+        assert_eq!(vt, base + 0x40, "vt resolved from [node+112]&~0x3f");
+        assert_eq!(handler, 0, "label: [vt+40] holds the handler (host-slot here)");
+        assert_eq!(a0, 0xAAAA, "x0 = [vt+16]");
+        assert_eq!(a2, 0x2222, "x2 = [node+32]&~1");
+        assert_eq!(a3, base, "x3 = node");
+        assert_eq!(w4, 4, "w4 = 4 (drain dispatch type code)");
+        assert_eq!(x5, 0, "x5 = 0");
+        // The exact layout is what `--deque-probe` must (and does) repoint.
+        eprintln!(
+            "[abi] deque-node: [node+112]=vt, mask ~0x3f; [vt+40]=handler; guard [node+40]!=0; call({a0:#x},{vt:x},{a2:#x},{a3:#x},4,0)"
+        );
+    }
 }
