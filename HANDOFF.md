@@ -1,5 +1,46 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle Q) — decoder FP16/NEON coverage -3,481; workspace 421/0; HEAD d284c2d.
+
+Closed the FP16 decoder gaps that will block-tracker-break a real frame/audio path
+(14,918 -> 11,437 Unsupported .text, distinct 7,743 -> 6,281, 0 PANIC invariant).
+Boot unchanged (JNI_OnLoad 0x10006, stable idle main loop, exit 124/no crash).
+
+Two commits:
+- `4dd5e3d` — scalar FP16 + gate fixes: new **`FcvtHalf`** (fcvt s,h/h,s/d,h/h,d via
+  F16C vcvtph2ps/vcvtps2ph$0 RN, raw VEX bytes; host confirmed f16c — the JIT's first
+  F16C use, the reusable pattern), **`FpScalar.half`** (fadd/fmul/fsub/fdiv h),
+  **`fccmp s/d` decode gate FIXED** (old 0xfff0_fc03==0x1e20_c400 never matched any
+  real fccmp; new 0xffe0_0c10=={0x1e200400 s,0x1e600400 d}, must decode before the
+  FMOV-imm gates because a cond≥8 sets bit12 that the FMOV-imm lane-anchor misread as
+  an immediate), `fabd s` (single form 0x7ea0_d400 + sz field), `urhadd v.16b/.8b`.
+- `d284c2d` — SIMD FP16 3-same **`SimdFp16As`** (fadd/fsub/fmul v.4h/.8h) per-lane
+  promote->op->demote via F16C. Gate `(insn&0x9f60_f400)==0x0e40_1400`. MUST decode
+  BEFORE the SIMD-select (bsl) gate: FP16 `fmul v.8h` (byte1 0x1c, 0x6e451c82) aliases
+  bsl's byte1-0x1c mask and was silently decoded as a bitwise select until a
+  regression caught it.
+
+Ground truth: synthesized with `aarch64-linux-gnu-gcc -O0 -march=armv8.2-a+fp16` and
+objdump; real encodings pinned (fccmp s0,s1,#0,eq=0x1e210400; fabd s2,s2,s3=0x7ea3d442;
+fadd v1.8h=0x4e401421). Tests: decode pins + `exec_bytes` runtime tests (fcvt h<->s,
+fabd s, urhadd bytes, fadd h scalar + fadd v2.4h vector) — workspace 421/0.
+
+### Next lever (the single biggest remaining family)
+**`fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx]`** — the 0x4f0x_1x2x/1x9x opcodes, ~2000+.
+Ground-truth matrix captured in docs/fp16-decode-gap.md:
+- index = (bit11<<2) | (bit21<<1) | bit20 for .8h; .4h uses (bit21<<1)|bit20.
+- vm in bits[19:16] (v0-v15 only, bit20 is index[0]); fp16 fmla bit23 CLEAR (vs
+  f32 FmlaEl requiring bit23 SET — the discriminator); fmul=bit29 SET, fmls=bit14+bit12
+  (same-operand ground truth 0x4f321020 / 0x4f325020 / 0x4f329020).
+- Translate: hoist-splat Vm.h[idx] -> xmm2 (promote once) BEFORE the lane loop
+  (rd==rm clobbers the element), per-lane promote Vn.h[i]->f32, fma in f32, demote.
+Then: SIMD-immediate orr/bic v.2s/.4s (~200), vector fcvtas v.4s (~150), fabs v.2s.
+
+The real HARD wall is unchanged and independent of this work: the engine's own
+producer never enqueues work onto its per-thread idle futex, so the main loop re-parks
+(no render/EGL path). The decoder coverage is what lets a real frame/audio path run
+instead of block-tracker-breaking when that wall is crossed.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle P) — ALooper poll-source contract corrected (the glue-looper prerequisite); workspace 411/0, HEAD e8e08cf.
 
 The real binary imports `ALooper_pollOnce`/`ALooper_addFd` (via libandroid.so,
