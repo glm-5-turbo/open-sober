@@ -7892,6 +7892,30 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn smlsl_widen_exec() {
+        // smlsl v0.4s, v1.4h, v2.4h = 0x0e62a020: Vd = Vd - widen(s16*s16) per lane.
+        // v1s = {2,5,-3,7}, v2s = {3,-2,4,10} -> prods {6,-10,-12,70}.
+        // v0 (init low 4 words) = {100, 20, 200, 0}. Result {94, 30, 212, -70}.
+        let mut st = CpuState::new();
+        st.v[2] = 0x0007_FFFD_0005_0002; // v1 {2,5,-3,7}
+        st.v[4] = 0x000A_0004_FFFE_0003; // v2 {3,-2,4,10}
+        // v0 word0=70, word1 (bytes 4-7)=0, word2 (v1)=int word 2000, word3=0
+        st.v[0] = 100;           // lane0 init
+        // lane1 shall be 20 -> but put in a u32 slot: lane1 is bits 32-63 of st.v[0]
+        st.v[0] = 0x0000_0014_0000_0064; // {100, 20}
+        st.v[1] = 200;           // lane2 init (word2 = st.v[1] low 32)
+        exec_bytes(&mut st, &[0x20, 0xa0, 0x62, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let w = |s: &CpuState, off: usize| -> i32 {
+            let slot = s.v[if off < 2 { 0 } else { 1 }];
+            ((slot >> (32 * (off % 2))) & 0xffff_ffff) as u32 as i32
+        };
+        assert_eq!(w(&st, 0), 94, "100 - 6");
+        assert_eq!(w(&st, 1), 30, "20 - (-10)");
+        assert_eq!(w(&st, 2), 212, "200 - (-12)");
+        assert_eq!(w(&st, 3), -70, "0 - 70");
+    }
+
+    #[test]
     fn mul_halfword_exec() {
         // mul v0.8h, v1.8h, v2.8h = 0x4e629c20: per halfword lane low-16 product.
         // v1={5, 1000, -3, 300, 7, -2, 99, 50}; v2={4, 3, -7, 2, 11, 8, -1, 20}.

@@ -3728,7 +3728,7 @@ pub fn translate(
                                                                                         }
                                                                                         Ok(())
                                                                                                                     }
-                                                                                                                    Inst::SimdMull { rd, rn, rm, res_esize, unsigned, q, acc } => {
+                                                                                                                    Inst::SimdMull { rd, rn, rm, res_esize, unsigned, q, acc, sub } => {
                                                                                                         // smull/umull/smlal/umlal: widen each src element to res_esize and
                                                                                                         // multiply (or add to the existing result if acc).
                                                                                                         // src_es = res_esize/2; lanes = (8 source bytes)/src_es = 16/res_esize
@@ -3761,12 +3761,16 @@ pub fn translate(
                                                                                                             buf.imul_rr64(RAX, RCX);
                                                                                                             let doff = (i as i32) * (res_esize as i32);
                                                                                                             if acc {
-                                                                                                                match res_esize {
-                                                                                                                    8 => buf.mov_load64(RDX, RBX, slot(rd)+doff),
-                                                                                                                    4 => buf.mov_load32(RDX, RBX, slot(rd)+doff),
-                                                                                                                    _ => buf.movzx_word_mem(RDX, RBX, slot(rd)+doff),
-                                                                                                                }
-                                                                                                                buf.add_rr64(RDX, RAX);
+                                                                                                                                                            match res_esize {
+                                                                                                                                                                8 => buf.mov_load64(RDX, RBX, slot(rd)+doff),
+                                                                                                                                                                4 => buf.mov_load32(RDX, RBX, slot(rd)+doff),
+                                                                                                                                                                _ => buf.movzx_word_mem(RDX, RBX, slot(rd)+doff),
+                                                                                                                                                            }
+                                                                                                                                                            if sub {
+                                                                                                                                                                buf.sub_rr64(RDX, RAX); // smlsl/umlsl: Vd = Vd - prod
+                                                                                                                                                            } else {
+                                                                                                                                                                buf.add_rr64(RDX, RAX);
+                                                                                                                                                            }
                                                                                                                 match res_esize {
                                                                                                                     8 => buf.mov_store64(RBX, slot(rd)+doff, RDX),
                                                                                                                     4 => buf.mov_store32(RBX, slot(rd)+doff, RDX),
