@@ -3851,11 +3851,21 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                         if (insn & 0xff00_fc00) == 0x0e00_0c00 || (insn & 0xff00_fc00) == 0x4e00_0c00 {
                                                                                                                                                                                                                 let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                                 let rd = (insn & 0x1f) as u8;
-                                                                                                                                                                                                                let esize = 1u8 << ((insn >> 16) & 0x1f).trailing_zeros();
+                                                                                                                                                                                                                // imm5 (bits[20:16]) marks the element size: for a genuine
+                                                                                                                                                                                                                // dup-from-GPR it is a power of two {1,2,4,8} => esize {1,2,4,8}.
+                                                                                                                                                                                                                // Guard BEFORE any shift: imm5==0 makes u32::trailing_zeros
+                                                                                                                                                                                                                // return 32 and `1u8 << 32` PANICS, aborting the JIT. The decoder
+                                                                                                                                                                                                                // must never panic on arbitrary guest bytes, so non-canonical
+                                                                                                                                                                                                                // imm5 emits Unsupported (invalid dup) like every other bad encoding.
                                                                                                                                                                                                                 let q = (insn >> 30) & 1 == 1;
-                                                                                                                                                                                                                return Inst::SimdDupGp { rd, rn, esize, q };
+                                                                                                                                                                                                                match (insn >> 16) & 0x1f {
+                                                                                                                                                                                                                    0b00001 => return Inst::SimdDupGp { rd, rn, esize: 1, q },
+                                                                                                                                                                                                                    0b00010 => return Inst::SimdDupGp { rd, rn, esize: 2, q },
+                                                                                                                                                                                                                    0b00100 => return Inst::SimdDupGp { rd, rn, esize: 4, q },
+                                                                                                                                                                                                                    0b01000 => return Inst::SimdDupGp { rd, rn, esize: 8, q },
+                                                                                                                                                                                                                    _ => return Inst::Unsupported(insn),
+                                                                                                                                                                                                                }
                                                                                                                                                                                                                     }
-                                                                                                            // ---- SIMD 16-byte logical OR: orr Vd.16B, Vn.16B, Vm.16B ----
                                                                                                             // (insn & 0xffe0_fc00)==0x4ea01c00 catches both real `mov v2.16b` (0x4ea01c02,
                                                                                                                 // rm==rn copy) and `orr v3.16b` (0x4ea41c63). Q=1 => 0x4ea0 (bit30). OR all 16B.
                                                                                                                 if (insn & 0xffe0_fc00) == 0x4ea0_1c00 {
@@ -6328,6 +6338,45 @@ mod logical_imm_regressions {
         // plain byte add v1.8b,v2,v3 (0x0e23a441 is MAXP; real add 0x0ea28421-ish) must not be captured:
         // 0x0e218421 add v1.8b,v2,v3 ... verify still SimdAddB
         assert!(matches!(decode(0x0e218421), Inst::SimdAddB { .. }), "got {:?}", decode(0x0e218421));
+    }
+
+    #[test]
+    fn dup_from_gpr_invalid_imm5_does_not_panic() {
+        use crate::decode::{decode, Inst};
+        // SimdDupGp gate: (insn & 0xff00_fc00)==0x0e00_0c00 | 0x4e00_0c00.
+        // Valid dup-from-GPR has imm5 (bits[20:16]) a power of two {1,2,4,8}
+        // => esize {1,2,4,8}. imm5==0 (and any non-power-of-two) is an invalid
+        // encoding: the old `1u8 << (insn>>16&0x1f).trailing_zeros()` PANICS on
+        // imm5==0 (trailing_zeros of 0 == 32, shift overflows u8) and would
+        // abort the whole JIT on arbitrary guest bytes. decode() must never panic.
+        let valid_cases = [
+            (0x0e010d09u32, 1u8), // dup v9.8b, w0 (imm5=1 -> esize 1) [real libroblox insn]
+            (0x0e040c00u32, 4u8), // dup v0.4s, w0 (imm5=4 -> esize 4, Q=0)
+            (0x4e080d00u32, 8u8), // dup v0.2d, x0 (imm5=8 -> esize 8, Q=1)
+        ];
+        for (w, esize) in valid_cases {
+            assert!(
+                matches!(decode(w), Inst::SimdDupGp { esize: e, .. } if e == esize),
+                "0x{w:08x} should decode SimdDupGp esize={esize}, got {:?}",
+                decode(w)
+            );
+        }
+        // imm5==0 is invalid: must return Unsupported, NOT panic.
+        for w in [0x0e000c00u32, 0x0e000c20, 0x4e000c00, 0x0e800d8c] {
+            let d = decode(w);
+            assert!(
+                matches!(d, Inst::Unsupported(_)),
+                "0x{w:08x} (imm5==0) must return Unsupported, got {d:?}"
+            );
+        }
+        // Non-power-of-two imm5 (e.g. 3, 5, 31) is likewise invalid -> Unsupported.
+        for w in [0x0e030c00u32, 0x4e050d00, 0x0e1f0c00] {
+            assert!(
+                matches!(decode(w), Inst::Unsupported(_)),
+                "0x{w:08x} (imm5 non-power-of-two) must return Unsupported, got {:?}",
+                decode(w)
+            );
+        }
     }
 
     #[test]
