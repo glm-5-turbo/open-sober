@@ -1,5 +1,32 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH4) — idle barrier re-characterized: it's a per-CPU task-deque CONSUMER, version+latch is NOT a producer; `--futex-bump` negative result; producer-enqueue doc. Workspace 467/0; HEAD c6c82e5+.
+
+From-first-principles disasm this cycle, the ~30-cycle "producer never enqueues
+work" wall is now pinned to its exact contract (correcting the "awaiting
+0xF4240 go-token" reading of prior cycles):
+
+- The parked threads are **consumers** inside the generic futex wait-with-timeout
+  at 0x10284d018 (reached via `blr` — vtable-dispatched, ZERO static callers).
+  It's `wait(obj=Q, expected_seq, timeout_ns)`: atomic_add(&Q.refcount,+1),
+  proceed if `(expected>>32) != (old>>32)` else futex(Q+4, WAIT_BITSET,
+  low32(expected)); on timeout a clock_gettime deadline loop; atomic_add -1.
+  So `Q>>32` is a **self-syncing version counter**, Q+4 is the futex latch.
+- The consumer is a **per-CPU lock-free task-deque drain** (fns 0x285682c /
+  0x2856f44): `loop { head=ldar[[x20]]; if low48(head)==0 goto wait; process }`,
+  with `x20` a per-CPU slot base (`umaddl` from `sched_getcpu() & 0xf`). Head is
+  0 because the framework render/looper producer is absent here.
+- **New `--futex-bump` (elfjit):** prior kick/set only poked the latch (Q+4);
+  bump also increments the version word `[Q]>>32` — the real produce shape
+  (bump version + set latch + wake). Empirically it **re-parks** (compiles flat
+  1668, JIT_STATS heartbeat stops, exit 124); the consumer re-reads `[Q]>>32`
+  each iteration so the host's bumped value becomes the new expected — a moving
+  epoch, not a discrete "go". **Version+latch is NOT a producer.** The only
+  lever is a real task node in the deque head, framework-owned.
+
+Run-log: `/home/hermes-worker/runs/futex-bump2.txt`.
+Doc: `docs/frontier-2026-09-12-producer-enqueue.md`.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH3b) — GLOB_DAT *function* slots now resolve through the full GLES chain; workspace 467/0; HEAD 80940e6.
 
 Follow-on to SH3's eglGetProcAddress bridge. Found another real gap in the

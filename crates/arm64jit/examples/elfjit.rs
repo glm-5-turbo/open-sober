@@ -719,9 +719,24 @@ fn main() {
                     .map(|v| i32::from_str_radix(v.trim_start_matches("0x"), 16).expect("--futex-set needs hex i32"))
             };
             const IDLE_FUTEX_CALLSITE: u64 = 0x10284d134; // guest lr when parked in the idle barrier
+            // --futex-bump: the engine idle barrier is a wait on a VERSIONED
+            // object. The parked consumer (wait-with-timeout 0x10284d018,
+            // reached via blr — vtable-dispatched) gates on
+            //   ldar x8,[Q]; cmp x21, x8 lsr#32   (0x2856ef4/efc)
+            // where Q = t.x19 (arg0), and [Q+4] (== t.x1) is the futex latch.
+            // It only PROCEEDS past the park when the version word [Q] high-32
+            // CHANGES — a bare latch poke (--futex-kick/--futex-set) is not a
+            // producer. --futex-bump also increments [Q] high-32 (version) so
+            // the consumer's proceed-gate opens.
+            let bump = {
+                let args: Vec<String> = std::env::args().collect();
+                args.iter().any(|a| a == "--futex-bump")
+            };
             std::thread::spawn(move || {
                 if let Some(v) = set_val {
                     eprintln!("[elfjit:futexkick] driving idle futex latch every {period_ms} ms, WRITING FIXED {v:#x} (awaited-token test)");
+                } else if bump {
+                    eprintln!("[elfjit:futexkick] driving idle barrier every {period_ms} ms, BUMPING version [Q]>>32 + latch (real producer shape)");
                 } else {
                     eprintln!("[elfjit:futexkick] driving per-thread idle futex latch every {period_ms} ms");
                 }
@@ -747,6 +762,21 @@ fn main() {
                         // re-blocks; a fixed write is a self-defeating one-off).
                         // Gate is the exact idle call-site.
                         let nv = set_val.unwrap_or_else(|| old.wrapping_add(1));
+                        // --futex-bump: also increment the VERSION word [Q]
+                        // high-32 so the consumer's proceed-gate
+                        // (cmp x21, [Q]>>32 at 0x2856efc) opens. Q = t.x19
+                        // is a HOST-heap address (0x7f...), writable like the
+                        // latch (t.x1 = Q+4); NOT a guest-image address.
+                        if bump && t.x19 >= 0x100000000 && (t.x19 >> 56) == 0 && t.x19 & 7 == 0 {
+                            let q = t.x19 as *mut u64;
+                            let cur = unsafe { *q };
+                            let nv_q = cur.wrapping_add(0x1_0000_0000);
+                            unsafe { *q = nv_q };
+                            if it % 50 == 0 {
+                                eprintln!("[elfjit:futexkick] it={it} BUMP [Q]={:#x} ver {:#x}->{:#x}",
+                                    q as usize, (cur >> 32), (nv_q >> 32));
+                            }
+                        }
                         unsafe { *(latch as *mut libc::c_int) = nv };
                         unsafe {
                             libc::syscall(
