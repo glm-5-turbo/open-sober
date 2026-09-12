@@ -218,10 +218,20 @@ extern "C" fn alooper_pollonce(
 }
 
 // ---- ANativeWindow ----
+/// A stable, process-lifetime, non-null native-window handle. The engine's
+/// window-surface path (GRAPHICS_RECOMMENDATION §5.3) maps an Android
+/// `ANativeWindow` to a desktop window; until the looper reaches a real EGL
+/// window surface we hand out a single stable sentinel so the window layer is
+/// *coherent* — `ANativeWindow_fromSurface` returns a non-null handle that
+/// `ANativeWindow_getWidth/Height` answer (1280x720), instead of a NULL window
+/// that pretends to have a size. When the looper/EGL path is reached, this
+/// sentinel must be replaced by a real X11 Window XID so Mesa's
+/// `eglCreateWindowSurface(dpy, config, win, ...)` accepts it (same pattern as
+/// the `egl_window_present` gate).
 extern "C" fn anativewindow_fromsurface(
     _env: u64, _surf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
-    0
+    crate::jit::HOST_THUNK_BASE | 0x2000 // stable non-null sentinel ANativeWindow*
 }
 extern "C" fn anativewindow_release(
     _win: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
@@ -568,6 +578,22 @@ mod tests {
     #[test]
     fn bionic_errno_returns_valid_pointer() {
         assert!(crate::shims::bionic_errno(0, 0, 0, 0, 0, 0, 0, 0) != 0);
+    }
+
+    /// The native-window layer is coherent: ANativeWindow_fromSurface hands out a
+    /// stable non-null handle that getWidth/getHeight answer (GRAPHICS_-
+    /// RECOMMENDATION §5.3). A NULL window with a size was internally
+    /// inconsistent and guaranteed eglCreateWindowSurface would never be reached.
+    #[test]
+    fn anativewindow_fromsurface_returns_stable_nonnull_handle_with_size() {
+        let win = anativewindow_fromsurface(0, 0, 0, 0, 0, 0, 0, 0);
+        assert_ne!(win, 0, "ANativeWindow_fromSurface must not return NULL");
+        // Stable across calls (same sentinel each time) so a guest that holds the
+        // handle and re-queries it sees a consistent address.
+        assert_eq!(win, anativewindow_fromsurface(0, 0, 0, 0, 0, 0, 0, 0));
+        let w = anativewindow_getwidth(win, 0, 0, 0, 0, 0, 0, 0);
+        let h = anativewindow_getheight(win, 0, 0, 0, 0, 0, 0, 0);
+        assert_eq!((w, h), (1280, 720), "non-null window reports a sane framebuffer");
     }
 
     #[test]
