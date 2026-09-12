@@ -1,6 +1,6 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle SH6) — host enqueue into the task-deque PROVEN not-a-producer (two strategies); deque model corrected from full producer/drain disassembly; new `--deque-node` harness. Workspace 467/0; HEAD <COMMIT>.
+## Session (Sep 12, 2026, hermes-worker, cycle SH6) — host enqueue into the task-deque PROVEN not-a-producer (two strategies); deque model corrected from full producer/drain disassembly; new `--deque-node` harness. Workspace 467/0; HEAD 6003441.
 
 Implemented the documented SH5b next-experiment (host side enqueue into the
 engine's idle task-deque) as a real elfjit host producer and ran it against the
