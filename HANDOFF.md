@@ -1,5 +1,32 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH19b) — the engine's OWN frame-fn 0x105b32c00 now RETURNS Ok THROUGH the GLES bridge. Workspace 470/0; HEAD 5c72e22.
+
+SH19 pinned the frame-fn wall: it dispatches through 8 GL function-pointer slots
+(guest BSS 0x106d3b2f0..0x106d3b328, loaded by `adrp x8,6d3b000; ldr xN,[x8,#752+8k]`)
+that hold **raw Mesa host addresses** — not host-thunk slots (0x7f00 0000 0000) —
+so a guest `br` through the 0x5b3a1c0-family stubs jumped out-of-image
+(`run_loop: pc 0x7fa7… outside image`). Same SH3/SH3b bug class (raw Mesa vs
+bridge slot) but for the engine's RUNTIME-built frame-dispatch table. (An early
+wrong read used 0x1067d12f0 = the stack-canary region / DER bytes; the real slots
+are the adrp-6d3b000 family.)
+
+**SH19b fix:** new elfjit `--renderframe-seedgles` overwrites those 8 slots with
+host-thunk GLES bridge slots (`resolve_gles_mixed`, fallback `resolve_gles_int`).
+Seeding slot0 (glClearColor) + slot2 (glClearDepthf) — the float-bridge slots the
+clear-state sub-fn 0x5b32e08 dispatches through — makes frame-fn return cleanly:
+`engine frame-fn 0x105b32c00 returned Ok(...)` + post-frame swap Ok(0x1), exit 124
+stable, NO heap abort. Also fixed the `free(): invalid next size` shutdown heap
+corruption by growing the fabricated renderer scratch 512B -> 8KiB.
+
+**Frontier (next spread):** the engine's own clear/frame code now dispatches through
+our GLES bridge and completes; the remaining wall is the coherent renderer/view C++
+object reverse for the full frame (draw path), plus the ALooper/lifecycle producer
+(START cmd) that would drive the loop from the engine's main thread (SH14-capped).
+Baselines: --jni exit 0; stable idle exit 124. Doc:
+docs/frontier-sh19-framedrive-glesdispatch.md; run-log runs/sh19-frame-seeded-ok.txt,
+runs/sh19-slotdump*.txt.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH18) — corrected SH17's "don't drive the render-init THUNK" note; correct thunk drive recovers the engine's REAL ctx object (vtable 0x106731ae0) and presents a real colored frame through the engine's own path. Workspace 470/0.
 
 SH17 recorded the render-init THUNK 0x105b3a280 as undrivable (SIGSEGV, "shifts
