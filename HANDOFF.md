@@ -1,5 +1,36 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH15) — CORRECTION: SH14's "render-init framework-gated, not drivable" is WRONG at runtime. The REAL render-init (0x105b3a2d8) now drives its real EGL chain headlessly (ANativeWindow_acquire→eglGetDisplay→eglInitialize→eglGetError) through the JIT bridges before a libc++ abort. Workspace 469/0.
+
+This cycle reopened the rendering path SH14 declared a dead-end. Found that
+**StartApp populates the render-init context global 0x1067d16f0 at runtime**
+(new `JIT_FRAMEWORK_DUMP` reads it live: `0x562a..`, not the statically-0 SH14
+pinned) — and the deque-maintenance forward edges 0x1068262e8/300/308 are
+populated too (real .text addrs). Built `--renderinit` and drove the real
+render-init fn directly after StartApp warm-up:
+
+- **Real EGL chain executes from the real binary** (JIT_TRACE, x30=call sites):
+  `ANativeWindow_acquire`(0x105b3a34c) → `eglGetDisplay`(0x105b3a3b4) →
+  `eglInitialize`(0x105b3a3c8) → `eglGetError`(0x105b3aec8), then
+  `libc++abi:` terminate-abort (engine hits a fatal missing-framework condition
+  of the synthetic drive) — that abort used to crash silently (a SIGILL in
+  `dl_iterate_phdr` guest-callback and a SIGSEGV in `fwrite` on a bionic
+  `FILE*`), both now fixed with shims.
+- **`dl_iterate_phdr` shim**: routes the guest callback back through
+  `jit::run_guest_callback` (host glibc was executing guest AArch64 → SIGILL).
+- **`fwrite` shim**: diverts guest/bionic-`FILE*` (stderr as low as `0x130`) to
+  host fd 2 so the abort reason surfaces instead of SIGSEGV.
+- **`--renderinit` harness** + `JIT_FRAMEWORK_DUMP` diagnostic in elfjit.
+  Runs the render-init as a fresh guest thread CONCURRENT with StartApp's parked
+  main thread (block cache leaks, safe). Address must be passed as a GUEST addr.
+
+**Next wall: the engine aborts in render-init after its EGL chain** — needs
+either a coherent ANativeWindow/framework context (the SH14/SH7/N/P ALooper-
+lifecycle emulation) so the abort becomes a real llvmpipe frame. Doc:
+`docs/frontier-sh15-renderinit-driving.md`; run-log:
+`/home/hermes-worker/runs/sh15-renderinit-eglchain-runlog.txt`. Baselines
+unchanged (`--jni` exit 0; stable idle exit 124); workspace green.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH14) — deque-injection path proven STRUCTURALLY capped (disasm-verified); located the real render-init fn 0x105b3a2d8 (full eglGetDisplay→init→CreateContext→CreateWindowSurface→MakeCurrent) and proved it is framework-gated. New JIT_REGION_WATCH diagnostic. Workspace 469/0.
 
 This cycle answered the ~13-cycle open question definitively: WHY does no

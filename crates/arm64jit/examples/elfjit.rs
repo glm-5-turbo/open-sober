@@ -1615,6 +1615,95 @@ fn main() {
         }
     }
 
+    // JIT_FRAMEWORK_DUMP: StartApp's jit_run below parks the main thread in the
+    // engine main loop and never returns, so a post-run sampler would never
+    // run. Instead spawn a detached host thread that samples the framework-built
+    // globals (guest==host addressing) every ~500 ms while StartApp initializes
+    // and parks, so we learn whether the render-init context (0x1067d16f0) or
+    // the deque-maintenance forward-edges (0x1068262e8/300/308) get POPULATED
+    // at runtime — i.e. whether driving the real render-init after warm-up runs.
+    if std::env::var_os("JIT_FRAMEWORK_DUMP").is_some() {
+        std::thread::spawn(|| {
+            let dw = |a: u64| -> u64 {
+                if a >= 0x100000000 && a >> 56 == 0 && a & 7 == 0 {
+                    unsafe { *(a as *const u64) }
+                } else {
+                    0
+                }
+            };
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let ctx = dw(0x1067d16f0);
+                eprintln!(
+                    "[elfjit:fw] render-ctx 0x1067d16f0={:#x} | deque-fwd 0x1068262e8={:#x} 0x106826300={:#x} 0x106826308={:#x} | [*ctx]={:#x}",
+                    ctx,
+                    dw(0x1068262e8),
+                    dw(0x106826300),
+                    dw(0x106826308),
+                    if ctx != 0 && ctx >> 56 == 0 { dw(ctx) } else { 0 },
+                );
+            }
+        });
+    }
+
+    // --renderinit <link-addr>: after StartApp's init has populated the framework/
+    // render context global 0x1067d16f0 (verified live 0x562a.. — SH14's
+    // "statically 0, framework-gated, not drivable" is WRONG at runtime),
+    // drive the engine's REAL EGL render-init (SH14 pinned eglGetDisplay->
+    // eglInitialize->eglCreateContext->eglCreateWindowSurface->eglMakeCurrent at
+    // fn 0x105b3a2d8 / thunk 0x105b3a280) directly. Runs on a DETACHED host
+    // thread because StartApp's main-thread jit_run parks in the idle futex and
+    // never returns; it sleeps `warmup` ms first so StartApp populates the
+    // context. clear_block_cache on its top-level entry is SAFE (JitBlocks leak,
+    // never munmap), so StartApp's parked threads just recompile on wake.
+    let renderinit_args: Vec<String> = std::env::args().collect();
+    if let Some(i) = renderinit_args.iter().position(|a| a == "--renderinit") {
+        let rhex = renderinit_args
+            .get(i + 1)
+            .cloned()
+            .expect("--renderinit needs a link-addr hex");
+        let link = u64::from_str_radix(rhex.trim_start_matches("0x"), 16)
+            .unwrap_or_else(|_| panic!("bad --renderinit hex"));
+        // NOTE: like the `disasm` example, the render-init addresses in the SH14
+        // records are GUEST addresses (0x105b3a2d8 already includes the segment
+        // base 0x100000000). Pass through directly — DO NOT `el.guest_of()` (that
+        // would double-map to 0x205b3a2d8, outside the image, and jit_run would
+        // reject it).
+        let render_init = link;
+        let warmup_ms = std::env::var("RENDERINIT_WARMUP_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5000);
+        let (ibase, ilen, isp) = (base, len, st.x[31]);
+        let tpidr = arm64jit::jit::current_guest_tp();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(warmup_ms));
+            let iimg: &[u8] =
+                unsafe { std::slice::from_raw_parts(ibase as *const u8, ilen) };
+            let mut s3 = arm64jit::jit::CpuState::new();
+            s3.tpidr = tpidr;
+            s3.x[31] = isp;
+            // render-init's prologue writes a resolved global ptr through its x0
+            // param (real caller passes `[parent+344]`; a fresh call leaves x0=0
+            // -> NULL store -> SIGSEGV). Point x0 at a guest-writable leaked
+            // buffer so the first store lands and we reach the EGL sequence.
+            let scratch = Box::leak(vec![0u8; 4096].into_boxed_slice());
+            s3.x[0] = scratch.as_ptr() as u64;
+            let got = if ibase >= 0x100000000 && ibase >> 56 == 0 {
+                unsafe { *(0x1067d16f0u64 as *const u64) }
+            } else {
+                0
+            };
+            eprintln!(
+                "[elfjit:renderinit] driving {render_init:#x} after {warmup_ms}ms warm-up (ctx 0x1067d16f0={got:#x}, x0=scratch {scratch:#p})"
+            );
+            match arm64jit::jit::jit_run(iimg, ibase, render_init, &mut s3 as *mut CpuState) {
+                Err(e) => eprintln!("[elfjit:renderinit] stopped: {e}"),
+                Ok(r) => eprintln!("[elfjit:renderinit] returned Ok({r:#x})"),
+            }
+        });
+    }
+
     match arm64jit::jit::jit_run(image, base, start_app, &mut s2 as *mut CpuState) {
             Err(e) => eprintln!("[elfjit] StartApp stopped: {e}"),
             Ok(r) => eprintln!("[elfjit] StartApp returned Ok({r:#x})"),
@@ -1634,6 +1723,32 @@ fn main() {
             // thread's live registers — its hostcall slot (pc), the guest call
             // site (lr = x30), and the wait-object args (x0..x2) — so the
             // boot wall is pinned to a precise guest function & release path.
+            // JIT_FRAMEWORK_DUMP: read the framework-built globals the render
+            // path and the task-deque maintenance forward-edges rely on, live
+            // from this process (guest==host addressing, so a guest bss/heaplow
+            // address is a valid host pointer). Tells us whether StartApp's
+            // initialization actually POPULATED the render-init context
+            // (0x1067d16f0 = [render-init+0x3a300] ldr x25,[x25,#222*8]) or the
+            // deque maintenance dispatch globals before the main loop parks —
+            // i.e. whether driving the real render-init after warm-up is viable.
+            if std::env::var_os("JIT_FRAMEWORK_DUMP").is_some() {
+                let dw = |a: u64| -> u64 {
+                    if a >= 0x100000000 && a >> 56 == 0 && a & 7 == 0 {
+                        unsafe { *(a as *const u64) }
+                    } else {
+                        0
+                    }
+                };
+                let ctx = dw(0x1067d16f0);
+                eprintln!(
+                    "[elfjit:fw] render-ctx 0x1067d16f0={:#x} | deque-fwd 0x1068262e8={:#x} 0x106826300={:#x} 0x106826308={:#x} | render-ctx+0 [*ctx]={:#x}",
+                    ctx,
+                    dw(0x1068262e8),
+                    dw(0x106826300),
+                    dw(0x106826308),
+                    if ctx != 0 && ctx >> 56 == 0 { dw(ctx) } else { 0 },
+                );
+            }
             if std::env::var_os("JIT_THREADS").is_some() {
                 let snaps = arm64jit::jit::snapshot_threads();
                 let mut lines = format!("[elfjit] guest threads {}", snaps.len());

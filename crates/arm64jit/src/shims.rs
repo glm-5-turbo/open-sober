@@ -480,8 +480,102 @@ extern "C" fn bionic_pthread_once(
     0
 }
 
-/// pthread_create(thread*, attr, start_routine, arg).
-///
+// ---- dl_iterate_phdr (host callback into guest) ----
+// The guest imports glibc `dl_iterate_phdr` and passes it a GUEST AArch64
+// callback pointer. Host glibc invokes that pointer as host x86 code -> SIGILL
+// at the guest prologue. Interpose: call the REAL dl_iterate_phdr with a HOST
+// trampoline that routes each `dl_phdr_info*` back through the JIT dispatcher
+// (run_guest_callback) so the guest callback runs translated.
+//
+// dl_iterate_phdr is synchronous on the calling thread, so a per-thread slot
+// for the active guest callback is race-free; a guest callback re-entering
+// dl_iterate_phdr (same thread, nested) is genuinely nested and would need a
+// stack, but the render-init use is a flat query, so a single slot suffices.
+thread_local! {
+    static DL_ITERATE_GUEST_CB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+/// Host trampoline handed to the real dl_iterate_phdr: re-enter the guest
+/// callback at the recorded address with (info, size, data).
+extern "C" fn dl_phdr_trampoline(info: *mut libc::c_void, size: usize, data: *mut libc::c_void) -> libc::c_int {
+    let guest_cb = DL_ITERATE_GUEST_CB.with(|c| c.get());
+    if guest_cb == 0 {
+        return 0;
+    }
+    let tp = crate::jit::current_guest_tp();
+    let args = [info as u64, size as u64, data as u64, 0, 0, 0, 0, 0];
+    match crate::jit::run_guest_callback(guest_cb, args, tp) {
+        Ok(v) => v as libc::c_int,
+        Err(e) => {
+            eprintln!("[shim] dl_iterate_phdr callback {guest_cb:#x} failed: {e}");
+            0
+        }
+    }
+}
+/// HostCall glue for the guest's `dl_iterate_phdr(callback=x0, data=x1)`.
+extern "C" fn bionic_dl_iterate_phdr(
+    callback: u64, data: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    if callback == 0 {
+        return 0;
+    }
+    DL_ITERATE_GUEST_CB.with(|c| c.set(callback));
+    // Resolve the REAL host dl_iterate_phdr and drive it with our trampoline.
+    let sym = unsafe { libc::dlsym(libc::RTLD_NEXT, b"dl_iterate_phdr\0".as_ptr() as *const libc::c_char) };
+    type RealDl = unsafe extern "C" fn(
+        Option<unsafe extern "C" fn(*mut libc::c_void, usize, *mut libc::c_void) -> libc::c_int>,
+        *mut libc::c_void,
+    ) -> libc::c_int;
+    if sym.is_null() {
+        eprintln!("[shim] dl_iterate_phdr: real symbol not found");
+        return 0;
+    }
+    let real: RealDl = unsafe { std::mem::transmute(sym) };
+    let ret = unsafe { real(Some(dl_phdr_trampoline), data as *mut libc::c_void) };
+    DL_ITERATE_GUEST_CB.with(|c| c.set(0));
+    ret as u64
+}
+
+// ---- fwrite (guest bionic FILE* -> host carriage) ----
+// The guest's stdio is bionic: `FILE*` values it passes to fwrite are bionic
+// FILE structs (guest-allocated), NOT glibc `FILE_`. When libc++ aborts, its
+// abort message handler does `fwrite("libc++abi: ...", n, 1, stderr)` where
+// stderr is the bionic FILE* -> host glibc fwrite derefs it as a `FILE_`
+// (reads garbage `_flags`/pointers) and SEGFAULTs, masking the abort reason.
+// Interpose: if the stream doesn't look like a real glibc FILE_ (its `_flags`
+// field at offset 0 is an implausible value), divert the bytes to host stderr
+// (fd 2) so the abort/terminate reason actually surfaces; otherwise call real
+// fwrite unchanged.
+extern "C" fn bionic_fwrite(
+    ptr: u64, size: u64, nmemb: u64, stream: u64,
+    _a4: u64, _a5: u64, _a6: u64, _a7: u64,
+) -> u64 {
+    let total = size.saturating_mul(nmemb);
+    // Plausible host FILE*: a high, 16-aligned pointer in host space (glibc/
+    // Mesa FILE_ live at 0x55.. / 0x7f..). Guest-region streams (bionic FILE*)
+    // and low/garbage values (the guest's unset stderr can be 304) are NOT host
+    // FILE_ — divert those bytes to host stderr (fd 2) so a libc++ terminate
+    // reason surfaces instead of real-fwrite SIGSEGV on a bogus `stream`.
+    let host_file = stream >= 0x100000000 && stream >= 0x300000000 && (stream & 0xf) == 0;
+    let to_fd2 = |n: u64| {
+        let buf = unsafe { std::slice::from_raw_parts(ptr as *const u8, total as usize) };
+        let _ = unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, total as usize) };
+        if std::env::var_os("JIT_TRACE").is_some() {
+            eprintln!("[shim] fwrite({total}B, stream={stream:#x}) -> fd2: {:?}", String::from_utf8_lossy(buf));
+        }
+        n
+    };
+    if !host_file {
+        return to_fd2(nmemb);
+    }
+    // Looks like a real host FILE_: call glibc fwrite unchanged.
+    type F = unsafe extern "C" fn(*const libc::c_void, usize, usize, *mut libc::c_void) -> usize;
+    let sym = unsafe { libc::dlsym(libc::RTLD_NEXT, b"fwrite\0".as_ptr() as *const libc::c_char) };
+    if sym.is_null() {
+        return to_fd2(nmemb);
+    }
+    let f: F = unsafe { std::mem::transmute(sym) };
+    unsafe { f(ptr as *const libc::c_void, size as usize, nmemb as usize, stream as *mut libc::c_void) as u64 }
+}
 /// Real glibc pthread_create calls the guest start_routine natively (SIGILL).
 /// Interpose: spawn a fresh host thread running the guest start routine through
 /// `jit_run` (per-thread guest stack + TLS), and write its guest tid as the
@@ -557,6 +651,12 @@ pub fn register_shims() -> usize {
         (b"__strlen_chk\0", bionic_strlen_chk),
         (b"__strncpy_chk2\0", bionic_strncpy_chk2),
         (b"__android_log_print\0", bionic_android_log),
+        // glibc dl_iterate_phdr drives a GUEST callback pointer; route it back
+        // through the JIT dispatcher instead of letting host libc SIGILL.
+        (b"dl_iterate_phdr\0", bionic_dl_iterate_phdr),
+        // guest bionic FILE* isn't a host glibc FILE_; divert abort-message
+        // writes to fd 2 so a libc++ terminate reason surfaces instead of SIGSEGV
+        (b"fwrite\0", bionic_fwrite),
         // Android asset manager
         (b"AAssetManager_fromJava\0", aassetmanager_fromjava),
         (b"AAssetManager_open\0", aassetmanager_open),
