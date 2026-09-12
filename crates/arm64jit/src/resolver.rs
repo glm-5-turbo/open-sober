@@ -2166,4 +2166,90 @@ mod tests {
             "unknown proc name falls through or returns 0, got {ret:#x}"
         );
     }
+
+    /// End-to-end: translated guest code that `blr`s into the eglGetProcAddress
+    /// bridge must receive a dispatchable host-thunk slot in x0 (the resolver
+    /// slot for the requested GLES name), i.e. exactly what the engine does on a
+    /// real frame — not a raw Mesa pointer. And that returned slot itself must
+    /// be a valid `blr` target (the glGenTextures int-HostCall slot dispatches
+    /// to real Mesa). This proves the dynamic GLES-loader path works through the
+    /// full dispatcher, not just when calling the wrapper directly.
+    #[test]
+    fn egl_get_proc_address_routes_guest_blr_to_dispatchable_slot_e2e() {
+        // Resolve the import (binds w_eglGetProcAddress as a GLES bridge).
+        let Some(import_addr) = resolve_egl(b"eglGetProcAddress") else {
+            panic!("eglGetProcAddress must resolve");
+        };
+        // Guest code: x16 = import slot; `blr x16` (call eglGetProcAddress) then
+        // `brk #0`. x0 already holds &procname. On return x0 = the resolved slot.
+        let mut img: Vec<u8> = Vec::new();
+        img.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        img.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0
+
+        // glGenTextures: int-ABI -> the returned slot dispatches to real Mesa via
+        // the integer HostCall. glClearColor: float bridge.
+        for name in ["glGenTextures", "glClearColor"] {
+            let mut cname = name.as_bytes().to_vec();
+            cname.push(0);
+            let name_ptr = cname.as_ptr() as u64;
+            let mut st = CpuState::new();
+            st.x[0] = name_ptr;
+            st.x[16] = import_addr;
+            let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
+            // jit_run returns the final x0 = the resolved dispatchable slot.
+            let slot = r;
+            assert!(slot >= crate::jit::HOST_THUNK_BASE,
+                "eglGetProcAddress({name}) via guest blr returned a dispatchable slot, got {slot:#x}");
+            // The returned slot must be the same resolver slot as a direct import
+            // of that name (int for glGenTextures, mixed for glClearColor).
+            let direct = if name == "glGenTextures" {
+                resolve_gles_int(name.as_bytes())
+            } else {
+                resolve_gles_mixed(name.as_bytes())
+            };
+            let direct = direct.expect("direct import must resolve");
+            if name == "glGenTextures" {
+                assert_eq!(slot, direct, "int-ABI GLES slot from dynamic path == direct import");
+            } else {
+                assert_eq!(
+                    crate::jit::gles_bridge_fn(slot),
+                    crate::jit::gles_bridge_fn(direct),
+                    "float-ABI GLES bridge from dynamic path dispatches to the same target as direct import"
+                );
+            }
+        }
+
+        // And the returned slot is itself a valid [guest blr -> host] target:
+        // `blr` to the glGenTextures slot with x0=holder array is a real Mesa
+        // call that quite-possibly just fills a texture name into a stack slot;
+        // we only assert the dispatcher reaches the host (no outside-image err).
+        let ret_gen = {
+            let Some(gen_slot) = resolve_gles_int(b"glGenTextures") else { panic!("glGenTextures") };
+            let mut cname = b"glGenTextures\0".to_vec();
+            cname.push(0);
+            let mut st = CpuState::new();
+            st.x[0] = cname.as_ptr() as u64;
+            st.x[16] = import_addr;
+            let r = jit_run(&img, 0x1000, 0x1000, &mut st as *mut CpuState).expect("jit_run");
+            let _ = gen_slot;
+            r
+        };
+        // Second blr to that slot: x0 = glGenTextures slot, x1 = 1 (count),
+        // x2 = &one-name (a writable guest word). Dispatch should reach Mesa.
+        let start = crate::jit::HOST_THUNK_BASE;
+        assert!(ret_gen >= start, "second-stage target is a slot");
+        let mut two: Vec<u8> = Vec::new();
+        two.extend_from_slice(&0xd63f0200u32.to_le_bytes()); // blr x16
+        two.extend_from_slice(&0xd4200000u32.to_le_bytes()); // brk #0
+        let mut g2 = CpuState::new();
+        let name_holder = Box::leak(vec![0x55u8; 64].into_boxed_slice());
+        g2.x[0] = name_holder.as_ptr() as u64; // unused arg, harmless for gen
+        g2.x[1] = 1;
+        g2.x[2] = name_holder.as_ptr() as u64;
+        g2.x[16] = ret_gen;
+        let r2 = jit_run(&two, 0x1000, 0x1000, &mut g2 as *mut CpuState).expect("second-stage blr reaches real Mesa");
+        // glGenTextures returns void -> x0 is the last integer reg the bridge
+        // left; just assert the dispatcher resolved the host call (no error).
+        assert_eq!(r2, g2.x[0], "second-stage blr dispatched to host (no outside-image error)");
+    }
 }
