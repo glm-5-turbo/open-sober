@@ -20,6 +20,17 @@ use tracing::{info, warn};
 pub fn run_elf_entry(path: &Path, entry: u64) -> Result<u64> {
     let el = unsafe { libloader::elf::load_elf_image(path) }
         .with_context(|| format!("load_elf_image({})", path.display()))?;
+
+    // Fold the import resolver + host shims into the boot path: every PLT
+    // JUMP_SLOT GOT slot must bind to a host thunk, else a translated Roblox
+    // `blr` (or the entry prologue's own imports) stalls / the first PLT call
+    // jumps into garbage. This mirrors the `elfjit` example's boot — without
+    // it the product cannot execute any import-bearing guest code.
+    let (nbound, nunres) = arm64jit::plt::bind_image_plt(&el, None);
+    info!(
+        "PLT imports bound: {nbound} to host thunks ({} unbound)",
+        nunres
+    );
     // If the caller didn't pick a specific function, use the ELF's own entry.
     // `entry` is a link-time address; translate to guest/runtime space (== host,
     // since load_elf_image maps guest==host).
