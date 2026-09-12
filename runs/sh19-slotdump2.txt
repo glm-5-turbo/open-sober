@@ -1,0 +1,51 @@
+[plt] patched __stack_chk_guard GOT 0x631aa30 (0x0) -> 0x556dc4e24fa8
+[plt] bound 534 JUMP_SLOT + 67 GLOB_DAT/ABS64 (0 unresolved), 11 unresolved
+PLT imports bound: 534 to host thunks (0 unbound)
+[mempool] big-alloc 0x1d9801c routed to host calloc (thunk @ 0x1062d9000)
+[mempool] thunk bytes: e0 03 01 aa 11 0a 40 f9 20 02 1f d6 00 00 00 00 08 00 00 00 (JIT-readable via guest image)
+loaded '/home/hermes-worker/.cache/open-sober/robbox/libroblox.so': is_pie=true base_load_vaddr=0x0 e_entry=0x100000000
+  segment guest=[0x100000000,0x1062d8190) host=same prot=r-x
+  segment guest=[0x1062dc1c0,0x1067d3000) host=same prot=rw-
+  segment guest=[0x1067d67c0,0x107333c3c) host=same prot=rw-
+[tail] reserved 402653184B guest RW tail @0x107334000
+[lsm-map] allocator 0x1d97744 routed to host calloc(x0) (thunk @ 0x1062d9800)
+[lsm-map] NOP'd LSM init store at 0x101d975f8 (guest 0x1d975f8) to keep seeded empty map
+[lsm-map] seeded static empty LocalStorageManager map: global 0x10726f8c0 -> bucket array 0x7fa7c0a45010 (4194304 buckets, shared zero sub @0x7fa7c2a45010)
+[JNICall-singleton] seeded ptr 0x107333948 -> object 0x107333950 (zeroed bss ~ PTHREAD_MUTEX_INITIALIZER at +8)
+[lsm-map] readback global 0x10726f8c0 = 0x7fa7c0a45010 (must be non-zero)
+running entry guest=0x102173ff4 host=0x102173ff4 (segment base guest=0x100000000 size=0x7333c3c)
+guest sp=0x556dda3333c0 tls(tpidr)=0x556dda3334d0
+JNI boot: x0 = JavaVM* 0x556dd9f1e860
+[roblox:JNIMain] TelemetryProtocol::setProcessTimeOverride: %ld
+[roblox:JNIMain] DeviceStaticParams is null.
+[elfjit] jit_run returned Ok(0x10006) — entering post-run phase
+JIT(no-QEMU) entry() -> 65542 (0x10006)
+[elfjit] driving StartApp @ guest 0x10258b144 after JNI_OnLoad (env=0x556dd9f1e830 jobject=0x556dda46d860 params=0x556dda91d960)
+[elfjit:kicker] host thread drives 0x106863af8 (pulse 1->2)
+[elfjit:kicker] t=0 guest_global 0x106863af8=%0x1
+[elfjit:appcmd] posting APP_CMD_0 (1)
+[elfjit:anativewindow] wired real X11 window XID=0x200000 on :230 as the guest ANativeWindow
+[elfjit:appcmd] posting APP_CMD_1 (2)
+[elfjit:appcmd] posting APP_CMD_2 (11)
+[elfjit:kicker] t=100 guest_global 0x106863af8=%0x2
+[elfjit:kicker] t=200 guest_global 0x106863af8=%0x2
+[elfjit:kicker] t=300 guest_global 0x106863af8=%0x2
+[elfjit:renderinit] driving THUNK 0x105b3a280 after 800ms warm-up (ctx 0x1067d16f0=0x556dc4e24fa0, x0=0x200000, x1=0x0)
+[elfjit:renderinit] returned Ok(0x7fa7a4001d90)
+[elfjit:renderthunk] REAL ctx 0x7fa7a4001d90 vtable=0x106731ae0 egl: display=0x7fa7a408b5e0 surface=0x7fa7a400bde0 context=0x7fa7a40a92e0
+[elfjit:renderthunk] ctx vtable[0..5] = 0x105b3b288 0x105b3b334 0x105b3b358 0x105b3b408 0x101dc7428 — [vt+16](idx2)=disp target
+[elfjit:renderframe] ctx=0x7fa7a4001d90 [+32]=display 0x7fa7a408b5e0 [+40]=surface 0x7fa7a400bde0 [+48]=context 0x7fa7a40a92e0
+[elfjit:renderframe] swap returned Ok(0x1) (eglSwapBuffers)
+[elfjit:renderframe-drive] gles-dispatch slot 0 guest 0x106d3b2f0 = 0x7fa7c2b2ea80
+[elfjit:renderframe-drive] gles-dispatch slot 1 guest 0x106d3b2f8 = 0x7fa7c2b2e460
+[elfjit:renderframe-drive] gles-dispatch slot 2 guest 0x106d3b300 = 0x7fa7c2b2e440
+[elfjit:renderframe-drive] gles-dispatch slot 3 guest 0x106d3b308 = 0x7fa7c2b2e420
+[elfjit:renderframe-drive] gles-dispatch slot 4 guest 0x106d3b310 = 0x7fa7c2b30840
+[elfjit:renderframe-drive] gles-dispatch slot 5 guest 0x106d3b318 = 0x7fa7c2b2e0e0
+[elfjit:renderframe-drive] gles-dispatch slot 6 guest 0x106d3b320 = 0x7fa7c2b2e100
+[elfjit:renderframe-drive] gles-dispatch slot 7 guest 0x106d3b328 = 0x7fa7c2b2f600
+[elfjit:renderframe-drive] gles-dispatch values = [140358502771328, 140358502769760, 140358502769728, 140358502769696, 140358502778944, 140358502768864, 140358502768896, 140358502774272]
+[elfjit:renderframe-drive] fabricated renderer 0x7fa7a5d80170 (+16=1,+24->0x7fa7a5d80270[+552]=1,+40->0x7fa7a5d80370[+140]=1) view 0x7fa7a5d80470 ([+128]=1280 [+132]=720 [+140]=0)
+[elfjit:renderframe-drive] frame-fn stopped: run_loop: pc 0x7fa7c2b2ea80 outside image [0x100000000, 0x107333c3c)
+[elfjit:renderframe-drive] post-frame swap returned Ok(0x1)
+free(): invalid next size (fast)

@@ -1888,6 +1888,26 @@ fn main() {
                         *(view.wrapping_add(128) as *mut u32) = 1280;
                         *(view.wrapping_add(132) as *mut u32) = 720;
                         *(view.wrapping_add(140) as *mut u32) = 0;
+                        // SH19 diagnostic: dump the 8 engine-GLES dispatch slots the
+                        // frame's clear path `br`-stubs read. The stubs 0x5b3a1c0..
+                        // (with a 0x10 stride) do `adrp x8, 6d3b000; ldr x2,[x8,#752]`
+                        // + 8*N, i.e. slot N at guest 0x106d3b2f0 + 8*N. Each holds a
+                        // function pointer the engine's own GLES-table init is
+                        // supposed to populate (it never does under our headless
+                        // drive), so an unset slot makes the clear path `br` into
+                        // garbage. Since guest==host these vaddrs are dereferenceable.
+                        let mut vals = [0u64; 8];
+                        for i in 0..8 {
+                            let slot_v = 0x106d3b2f0u64 + i * 8;
+                            let val = unsafe { *(slot_v as *const u64) };
+                            vals[i as usize] = val;
+                            eprintln!(
+                                "[elfjit:renderframe-drive] gles-dispatch slot {i} guest {slot_v:#x} = {val:#x}"
+                            );
+                        }
+                        eprintln!(
+                            "[elfjit:renderframe-drive] gles-dispatch values = {vals:?}"
+                        );
                         eprintln!(
                             "[elfjit:renderframe-drive] fabricated renderer 0x{renderer:x} (+16=1,+24->0x{objA:x}[+552]=1,+40->0x{objB:x}[+140]=1) view 0x{view:x} ([+128]=1280 [+132]=720 [+140]=0)"
                         );
