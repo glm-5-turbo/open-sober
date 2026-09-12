@@ -2626,6 +2626,84 @@ fn main() {
                                             c(pb.x[6])
                                         );
                                     }
+                                    // --renderframe-triangle-loop <N>: SUSTAINABLE real-
+                                    // geometry rendering. Re-run clear (cycling the clear
+                                    // color through a palette so a recording proves a
+                                    // fresh frame each iteration) -> re-drive the engine's
+                                    // own geometry wrapper (same coherent renderer) ->
+                                    // swap. Geometry analog of SH23's --rendersustain.
+                                    let tri_loop_n: usize = renderframe_args
+                                        .iter()
+                                        .position(|a| a == "--renderframe-triangle-loop")
+                                        .and_then(|i| renderframe_args.get(i + 1))
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(0);
+                                    if tri_loop_n > 1 {
+                                        let palette: [[f32; 3]; 5] = [
+                                            [0.05, 0.05, 0.05],
+                                            [0.20, 0.05, 0.05],
+                                            [0.05, 0.20, 0.05],
+                                            [0.05, 0.05, 0.20],
+                                            [0.18, 0.10, 0.04],
+                                        ];
+                                        let mut iter: u64 = 0;
+                                        while iter < tri_loop_n as u64 {
+                                            let bg = palette[(iter as usize) % palette.len()];
+                                            let mut scn = arm64jit::jit::CpuState::new();
+                                            scn.tpidr = tpidr;
+                                            scn.x[31] = isp;
+                                            scn.v[0] = bg[0].to_bits() as u64;
+                                            scn.v[2] = bg[1].to_bits() as u64;
+                                            scn.v[4] = bg[2].to_bits() as u64;
+                                            scn.v[6] = (1.0f32).to_bits() as u64;
+                                            let _ = arm64jit::jit::jit_run(
+                                                iimg,
+                                                ibase,
+                                                plt_clearcolor,
+                                                &mut scn as *mut CpuState,
+                                            );
+                                            let _ = gcall(plt_clear, GL_COLOR_BUFFER_BIT, 0, 0, 0, 0, 0);
+                                            let mut swn = arm64jit::jit::CpuState::new();
+                                            swn.tpidr = tpidr;
+                                            swn.x[31] = isp;
+                                            swn.x[0] = renderer;
+                                            swn.x[1] = 0;
+                                            swn.x[2] = 0;
+                                            swn.x[3] = 0;
+                                            swn.x[4] = 3;
+                                            swn.x[5] = 3;
+                                            match arm64jit::jit::jit_run(
+                                                iimg,
+                                                ibase,
+                                                0x105b35288,
+                                                &mut swn as *mut CpuState,
+                                            ) {
+                                                Err(e) => eprintln!(
+                                                    "[elfjit:renderframe-triangle-loop] iter {iter} wrapper stopped: {e}"
+                                                ),
+                                                Ok(_) => (),
+                                            }
+                                            let mut sen = arm64jit::jit::CpuState::new();
+                                            sen.tpidr = tpidr;
+                                            sen.x[31] = isp;
+                                            sen.x[0] = real_ctx;
+                                            match arm64jit::jit::jit_run(
+                                                iimg,
+                                                ibase,
+                                                swap_thunk,
+                                                &mut sen as *mut CpuState,
+                                            ) {
+                                                Err(e) => eprintln!(
+                                                    "[elfjit:renderframe-triangle-loop] iter {iter} swap stopped: {e}"
+                                                ),
+                                                Ok(ok) => eprintln!(
+                                                    "[elfjit:renderframe-triangle-loop] iter {iter} drew+swap Ok({ok:#x}) bg={bg:?} (fresh real-geometry frame)"
+                                                ),
+                                            }
+                                            iter += 1;
+                                            std::thread::sleep(std::time::Duration::from_millis(350));
+                                        }
+                                    }
                                 }
                                 // Present the drawn frame.
                                 let mut se = arm64jit::jit::CpuState::new();
