@@ -1,6 +1,34 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle O) — decode() hardened to never panic on ANY guest byte; whole-executable scan's 5260 latent JIT-abort sites → 0, `.text` stays 0-gap (workspace 409/0, HEAD 8fdf763).
+## Session (Sep 12, 2026, hermes-worker, cycle P) — ALooper poll-source contract corrected (the glue-looper prerequisite); workspace 411/0, HEAD e8e08cf.
+
+The real binary imports `ALooper_pollOnce`/`ALooper_addFd` (via libandroid.so,
+confirmed in dynsym) and the app-glue main loop (guest 0x102bcd5d0) derefs
+`ALooper_pollOnce`'s outData as `struct android_poll_source*` and `blr`s
+`source->process` (fn at +0x10). The old shim wrote a **raw APP_CMD int** into
+outData — which would crash a glue loop following the real layout. Fixed:
+
+1. `ALooper_addFd(..., data)` records `data` (the `android_poll_source*`, i.e.
+   `&app->cmd_source` in real glue) keyed by fd.
+2. `ALooper_pollOnce` emits the registered poll-source pointer via outData only
+   when one exists for the command fd; otherwise the raw-APP_CMD fallback for the
+   existing host-feed lifecycle path is unchanged.
+
+Regression tests pin both behaviors + the +0x10 process-fn layout. Also fixed a
+real test-race: the ALooper tests share the process-wide queue/registry and run
+under the parallel harness, so they need a shared serializing Mutex (the naive
+`let _g = lock()` bound `&Mutex`, not a guard — passed at --test-threads=1 while
+racing in parallel; now `.lock()`). Workspace 411/0; real boot unchanged (stable
+idle main loop, exit 124, real X11 window wired). Run-log:
+`/home/hermes-worker/runs/` (status in STATUS.md).
+
+### Next lever (unchanged wall, now contract-ready for the looper)
+Nobody runs the app-glue looper, so `ALooper_pollOnce` is never called and the
+queued APP_CMDs never drain into `eglCreateWindowSurface`. Now that the shim
+honors the real poll-source contract, the missing piece is a guest thread started
+at 0x102bcd5d0 with a fabricated `android_app` (looper handle, flags at +8/+9/+10,
+app ptr at +24, poll_source at +0x10) OR enqueuing a real work item onto the
+per-thread idle futex (0x10284d134). Posting APP_CMDs is already wired.
 
 Prior cycles claimed "decode() never panics" but verified it only against `.text`.
 The **whole-executable** scandecode scan (all PF_X segments — including the
