@@ -3673,6 +3673,10 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             (2, true) // fcvtas Wd/Xd, Sn single-source (objdump-confirmed 0x1e24000b)
         } else if b == 0x1e64_0000 || b == 0x9e64_0000 {
             (2, true) // fcvtas Wd,Dn / Xd,Dn double-source (objdump-confirmed 0x1e640013)
+        } else if b == 0x1e25_0000 || b == 0x9e25_0000 {
+            (2, true) // fcvtau Wd,Sn single-source unsigned round-away (real 0x1e250008)
+        } else if b == 0x1e65_0000 || b == 0x9e65_0000 {
+            (2, true) // fcvtau Wd,Dn double-source unsigned round-away (already wired below via unsigned flag)
         } else if b == 0x1e30_0000 || b == 0x9e30_0000 || b == 0x1e70_0000 || b == 0x9e70_0000 {
             (4, true) // fcvtms: round toward -inf / floor
         } else if b == 0x1e28_0000 || b == 0x9e28_0000 || b == 0x1e68_0000 || b == 0x9e68_0000 {
@@ -3685,6 +3689,9 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         if ok {
             let sf = (insn >> 31) & 1 == 1;
             let sz = (insn >> 22) & 1 == 1; // 1 => source is double (d)
+            // fcvtau/zu (unsigned) differ from fcvtas/zs (signed) by bit16 (byte1 LSB:
+            // fcvtas d=0x1e64 vs fcvtau d=0x1e65; fcvtas s=0x1e24 vs fcvtau s=0x1e25).
+            let unsigned = (insn & 0x0001_0000) != 0;
             if sz {
                 let rn = ((insn >> 5) & 0x1f) as u8;
                 let rd = (insn & 0x1f) as u8;
@@ -3693,7 +3700,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     rn,
                     mode,
                     sf,
-                    unsigned: false,
+                    unsigned,
                     src_sng: false,
                     fbits: 0,
                 };
@@ -3705,7 +3712,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                 rn,
                 mode,
                 sf,
-                unsigned: false,
+                unsigned,
                 src_sng: true, // single (S) source
                 fbits: 0,
             };

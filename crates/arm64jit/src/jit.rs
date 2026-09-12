@@ -7883,6 +7883,15 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fcvtau_single_exec() {
+        // fcvtau w8, s0 = 0x1e250008 (real libroblox): round s0 (nearest) to unsigned w8.
+        let mut st = CpuState::new();
+        st.v[0] = 5.7f32.to_bits() as u64; // reg0 low32
+        exec_bytes(&mut st, &[0x08, 0x00, 0x25, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.x[8] & 0xffff_ffff, 6, "fcvtau w8,s4 rounds 5.7->6");
+    }
+
+    #[test]
     fn mul_halfword_exec() {
         // mul v0.8h, v1.8h, v2.8h = 0x4e629c20: per halfword lane low-16 product.
         // v1={5, 1000, -3, 300, 7, -2, 99, 50}; v2={4, 3, -7, 2, 11, 8, -1, 20}.

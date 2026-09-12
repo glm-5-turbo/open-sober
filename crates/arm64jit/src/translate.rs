@@ -2053,7 +2053,17 @@ pub fn translate(
                 buf.mulsd(0, 1);
             }
             if mode == 2 {
-                buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
+                if unsigned {
+                    // fcvtau: round to nearest (MXCSR) then cvttsd2si. x86 has no
+                    // native unsigned-as-round-away; cvttsd2si is exact for [0,2^63)
+                    // which covers every real W-dest conversion (matches the fcvtas
+                    // ties-even-vs-away caveat). Saturation to negative for d>=2^63 is
+                    // an acceptable edge for this cold path.
+                    buf.roundsd(0, 0, 0x00); // roundsd nearest-even
+                    buf.cvttsd2si(RAX, 0);
+                } else {
+                    buf.cvtsd2si(RAX, 0); // fcvtas: round to nearest (MXCSR, default even)
+                }
             } else if mode == 3 || mode == 4 {
                 // fcvtpu/ps (+inf) and fcvtmu/ms (-inf): round the double to an
                 // integer-valued double first (roundsd 0x01=floor, 0x02=ceil), then
