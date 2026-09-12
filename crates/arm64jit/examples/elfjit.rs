@@ -1657,6 +1657,9 @@ fn main() {
     // context. clear_block_cache on its top-level entry is SAFE (JitBlocks leak,
     // never munmap), so StartApp's parked threads just recompile on wake.
     let renderinit_args: Vec<String> = std::env::args().collect();
+    // Clone the full arg list again for the opt-in --renderframe sub-mode (drives
+    // the render-init THUNK then the swap fn to actually present a buffer).
+    let renderframe_args: Vec<String> = std::env::args().collect();
     if let Some(i) = renderinit_args.iter().position(|a| a == "--renderinit") {
         let rhex = renderinit_args
             .get(i + 1)
@@ -1703,9 +1706,107 @@ fn main() {
                 "[elfjit:renderinit] driving {render_init:#x} after {warmup_ms}ms warm-up (ctx 0x1067d16f0={got:#x}, x0=scratch {scratch:#p}, x1(win)={:#x})",
                 s3.x[1],
             );
-            match arm64jit::jit::jit_run(iimg, ibase, render_init, &mut s3 as *mut CpuState) {
-                Err(e) => eprintln!("[elfjit:renderinit] stopped: {e}"),
-                Ok(r) => eprintln!("[elfjit:renderinit] returned Ok({r:#x})"),
+            let swap_result = arm64jit::jit::jit_run(iimg, ibase, render_init, &mut s3 as *mut CpuState);
+            let rv = match swap_result {
+                Err(e) => {
+                    eprintln!("[elfjit:renderinit] stopped: {e}");
+                    return;
+                }
+                Ok(r) => r,
+            };
+            eprintln!("[elfjit:renderinit] returned Ok({rv:#x})");
+            // --renderframe (opt-in, must accompany --renderinit): after the real
+            // render-init ran, present a buffer through the engine's LIVE EGL
+            // context. Reverse from the real binary (SH17 disasm): the direct
+            // drive of the render-init inner fn (0x105b3a2d8) wrote the live EGL
+            // handles into our `scratch` buffer — [scratch+32]=eglDisplay,
+            // [scratch+40]=surface, [scratch+48]=context (str x0,[x19,#32] /
+            // str x1,[x19,#40] / str x0,[x19,#48], x19=ctx=the fn's x0 param).
+            // The swap fn 0x105b3b408 is a tail thunk `ldp x8,x1,[x0,#32]; mov
+            // x0,x8; b eglSwapBuffers` — i.e. eglSwapBuffers([x0+32],[x0+40]).
+            // Passing x0=scratch (the SAME buffer render-init wrote) makes the
+            // engine's own swap path present the current surface headlessly
+            // (llvmpipe+Xvfb), WITHOUT re-running the init (which crashes because
+            // the thunk re-drive shifts the parent/window args). Same host thread
+            // so the EGL context stays current.
+            if renderframe_args.iter().any(|a| a == "--renderframe") {
+                let swap_thunk = renderframe_args
+                    .iter()
+                    .position(|a| a == "--renderframe")
+                    .and_then(|i| renderframe_args.get(i + 1).cloned())
+                    .and_then(|h| u64::from_str_radix(h.trim_start_matches("0x"), 16).ok())
+                    .unwrap_or(0x105b3b408);
+                unsafe {
+                    eprintln!(
+                        "[elfjit:renderframe] scratch[+32]=display {:#x} [+40]=surface {:#x} [+48]=context {:#x}",
+                        *(scratch.as_ptr().offset(32) as *const u64),
+                        *(scratch.as_ptr().offset(40) as *const u64),
+                        *(scratch.as_ptr().offset(48) as *const u64),
+                    );
+                    *(scratch.as_ptr().offset(0) as *mut u64) = 0;
+                }
+                let mut s5 = arm64jit::jit::CpuState::new();
+                s5.tpidr = tpidr;
+                s5.x[31] = isp;
+                s5.x[0] = scratch.as_ptr() as u64; // swap fn reads [x0+32]/[x0+40]
+                match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut s5 as *mut CpuState) {
+                    Err(e) => eprintln!("[elfjit:renderframe] swap stopped: {e}"),
+                    Ok(ok) => eprintln!("[elfjit:renderframe] swap returned Ok({ok:#x}) (eglSwapBuffers)"),
+                }
+                // --renderclear <r,g,b,a>: draw an actual colored clear through the
+                // JIT's GLES float bridge on this live context, then swap again, so
+                // the presented frame is non-black (the idle main loop never issues
+                // glClearColor itself). We drive the guest PLT entries directly:
+                // glClearColor@plt 0x1062d7710 (float args in s0..s3, i.e. v[0..6]
+                // low lanes) then glClear@plt 0x1062d7740 (GL_COLOR_BUFFER_BIT=0x4000
+                // in x0), each through jit_run -> plt stub `br`s to the host GLES
+                // bridge -> real Mesa on the already-current context.
+                if renderframe_args.iter().any(|a| a == "--renderclear") {
+                    let cc: Vec<f32> = renderframe_args
+                        .iter()
+                        .position(|a| a == "--renderclear")
+                        .and_then(|i| renderframe_args.get(i + 1).cloned())
+                        .map(|h| {
+                            h.split(',')
+                                .filter_map(|x| x.parse::<f32>().ok())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec![0.2, 0.6, 1.0, 1.0]);
+                    let (mut cr, mut cg, mut cb, mut ca) = (0.2f32, 0.6f32, 1.0f32, 1.0f32);
+                    if cc.len() >= 4 {
+                        cr = cc[0];
+                        cg = cc[1];
+                        cb = cc[2];
+                        ca = cc[3];
+                    }
+                    let mut s6 = arm64jit::jit::CpuState::new();
+                    s6.tpidr = tpidr;
+                    s6.x[31] = isp;
+                    s6.v[0] = cr.to_bits() as u64;
+                    s6.v[2] = cg.to_bits() as u64;
+                    s6.v[4] = cb.to_bits() as u64;
+                    s6.v[6] = ca.to_bits() as u64;
+                    match arm64jit::jit::jit_run(iimg, ibase, 0x1062d7710, &mut s6 as *mut CpuState) {
+                        Err(e) => eprintln!("[elfjit:renderclear] glClearColor stopped: {e}"),
+                        Ok(_) => eprintln!("[elfjit:renderclear] glClearColor via bridge Ok"),
+                    }
+                    let mut s7 = arm64jit::jit::CpuState::new();
+                    s7.tpidr = tpidr;
+                    s7.x[31] = isp;
+                    s7.x[0] = 0x4000; // GL_COLOR_BUFFER_BIT
+                    match arm64jit::jit::jit_run(iimg, ibase, 0x1062d7740, &mut s7 as *mut CpuState) {
+                        Err(e) => eprintln!("[elfjit:renderclear] glClear stopped: {e}"),
+                        Ok(_) => eprintln!("[elfjit:renderclear] glClear via bridge Ok"),
+                    }
+                    let mut s8 = arm64jit::jit::CpuState::new();
+                    s8.tpidr = tpidr;
+                    s8.x[31] = isp;
+                    s8.x[0] = scratch.as_ptr() as u64;
+                    match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut s8 as *mut CpuState) {
+                        Err(e) => eprintln!("[elfjit:renderclear] swap stopped: {e}"),
+                        Ok(ok) => eprintln!("[elfjit:renderclear] swap returned Ok({ok:#x}) (eglSwapBuffers after clear)"),
+                    }
+                }
             }
         });
     }
