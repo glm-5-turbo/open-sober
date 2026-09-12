@@ -9,7 +9,7 @@
 //! subset worth materializing immediately.
 
 use crate::jit::HostCall;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 
@@ -178,14 +178,49 @@ pub fn post_app_command(cmd: i32) {
     app_cmd_queue().lock().unwrap().push_back(cmd);
 }
 
+/// The real Android `struct android_poll_source` layout, as the app-glue main
+/// loop (guest 0x102bcd5d0) derefs it:
+///   +0x00  int32 id
+///   +0x08  struct android_app* app
+///   +0x10  void (*process)(struct android_app*, struct android_poll_source*)
+/// (disasm: `ldr x8,[x1,#16]; ldr x0,[x19,#24]; blr x8` — it loads
+/// `source->process` at +16 and calls `process(app, source)`). The loop passes
+/// `app` from its own android_app struct field +24, so the two call args are
+/// (app_ptr, source_ptr). Referenced by the regression test that asserts the
+/// emitted source's `process` sits at +0x10.
+#[allow(dead_code)] // documented ABI constant; exercised by a #[cfg(test)]
+const POLL_SOURCE_PROCESS_OFF: usize = 0x10;
+
+/// Process-wide registry of `ALooper_addFd` poll-source registrations, keyed by
+/// the fd the guest registered. The real glue call is
+/// `ALooper_addFd(looper, msgread, LOOPER_ID_MAIN, ALOOPER_EVENT_INPUT,
+/// callback, &app->cmd_source)` with `data` = the `android_poll_source*` whose
+/// `process` the glue main loop `blr`s. We record `data` so `pollOnce` can hand
+/// that exact source back through outData, matching the real contract (a guest
+/// that derefs outData as `android_poll_source*` gets a real one, not a raw int).
+fn poll_source_registry() -> &'static Mutex<HashMap<i32, u64>> {
+    static R: OnceLock<Mutex<HashMap<i32, u64>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// ALooper_pollOnce(timeoutMillis, outFd*, outEvents*, outData*).
 ///
-/// Drains one pending app command into the guest's out slots and returns the
-/// command's synthetic looper ident (a small non-negative fd-like value), so the
-/// guest's `while ((ident = ALooper_pollOnce(...)) >= 0)` loop dispatches it.
-/// When the queue is empty it returns ALOOPER_POLL_TIMEOUT immediately (never
-/// blocks/hangs the guest on an fd we never signal). Under JIT_DRIVE_LIFECYCLE a
-/// host feed drives the queue concurrently.
+/// Real android_native_app_glue recall: after `ALooper_addFd` registered a
+/// poll source (cmd_source with its `process` fn), the main loop calls
+/// `ALooper_pollOnce(app->looper, -1, NULL, &events, (struct android_poll_source**)&outData)`
+/// and, for a non-negative result, does `if (source != NULL)
+/// (source->process)(app, source)` — i.e. **outData receives a pointer to an
+/// `android_poll_source` whose `+0x10` is the guest's own process fn**, and the
+/// guest calls through that function pointer itself. Writing the raw APP_CMD int
+/// into outData is therefore only a *fallback*: a guest glue loop that follows
+/// the real contract would deref the int as a poll_source (crash). So:
+///   * when an `ALooper_addFd` poll-source registration exists for the queued
+///     command's `cmd` ident, we return the *registered* `data` pointer (the
+///     guest's own `android_poll_source`), so its `bl process` is real;
+///   * otherwise (no addFd happened; host-driven lifecycle without a glue loop)
+///     we keep the historic raw-int-in-outData fallback so the existing
+///     GameActivity host-feed path still works.
+/// Empty queue -> ALOOPER_POLL_TIMEOUT (never blocks on an fd we don't signal).
 extern "C" fn alooper_pollonce(
     _timeout: u64, outfd: u64, outevents: u64, outdata: u64, _a4: u64, _a5: u64, _a6: u64,
     _a7: u64,
@@ -198,22 +233,31 @@ extern "C" fn alooper_pollonce(
         // destroyRequested/lifecycle and re-polls rather than erroring out.
         return ALOOPER_POLL_TIMEOUT as u32 as u64;
     };
-    // Android app-glue convention: outFd = the command pipe's read end (a small
-    // fd-like token), outEvents = ALOOPER_EVENT_INPUT (1) meaning readable, and
-    // outData = a pointer-sized app-command token the guest decodes. We encode
-    // the APP_CMD_* value in outData so a guest that reads it (android_app_read_cmd)
-    // sees the lifecycle event even though we don't host a real pipe.
+    // outFd/outEvents: the command pipe's read end (a small fd-like token) +
+    // ALOOPER_EVENT_INPUT (readable), same as the historical host-feed shim.
     if outfd != 0 {
         unsafe { std::ptr::write(outfd as *mut i32, 0x23 /* synthetic readable fd */) };
     }
     if outevents != 0 {
         unsafe { std::ptr::write(outevents as *mut i32, 1 /* ALOOPER_EVENT_INPUT */) };
     }
+    // outData: the real glue-contract poll_source, if the guest registered one
+    // via ALooper_addFd under this fd; otherwise fall back to the raw APP_CMD.
+    let registered_source = poll_source_registry()
+        .lock()
+        .unwrap()
+        .get(&0x23_i32) // the command-pipe synthetic fd the glue registers
+        .copied()
+        .filter(|p| *p != 0);
+    let emit = registered_source.unwrap_or(cmd as u64);
     if outdata != 0 {
-        unsafe { std::ptr::write(outdata as *mut u64, cmd as u64) };
+        unsafe { std::ptr::write(outdata as *mut u64, emit) };
     }
     if std::env::var_os("JIT_TRACE").is_some() {
-        eprintln!("[alooper] ALooper_pollOnce -> app_cmd={cmd} (APP_CMD dispatch)");
+        eprintln!(
+            "[alooper] ALooper_pollOnce -> cmd={cmd} outData=0x{emit:x} ({} source)",
+            if registered_source.is_some() { "registered poll" } else { "raw app_cmd" }
+        );
     }
     cmd as u64
 }
@@ -291,9 +335,21 @@ extern "C" fn alooper_forthread(
 // for callbacks). We register nothing but still indicate success; pollOnce uses
 // the queue, so the fd is never actually polled.
 extern "C" fn alooper_addfd(
-    _looper: u64, _fd: u64, _iden: u64, _events: u64, _cb: u64, _data: u64,
+    _looper: u64, fd: u64, _iden: u64, _events: u64, _cb: u64, data: u64,
     _a6: u64, _a7: u64,
 ) -> u64 {
+    // Record the guest's `data` argument — in real android_native_app_glue this
+    // is `&app->cmd_source`, an `android_poll_source*` whose `process` fn the glue
+    // loop `blr`s. Storing it lets `pollOnce` hand that exact source back through
+    // outData (the real contract) instead of a raw APP_CMD int, so a guest glue
+    // loop that follows the real `source->process(app, source)` dispatch works.
+    if data != 0 {
+        let key = if fd == 0 { 0x23_i32 } else { fd as i32 };
+        poll_source_registry().lock().unwrap().insert(key, data);
+        if std::env::var_os("JIT_TRACE").is_some() {
+            eprintln!("[alooper] ALooper_addFd(fd={key} data=0x{data:x}) -> poll_source registered");
+        }
+    }
     1
 }
 extern "C" fn alooper_removefd(
@@ -595,6 +651,14 @@ pub fn register_graphics_stubs(names: &[&[u8]]) -> usize {
 mod tests {
     use super::*;
 
+    /// Serialize the ALooper tests: they mutate the process-wide app-command
+    /// queue + poll-source registry, and the test harness runs tests in
+    /// parallel by default, so un-serialized they'd race each other's state.
+    fn looper_test_lock() -> &'static Mutex<()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn bionic_errno_returns_valid_pointer() {
         assert!(crate::shims::bionic_errno(0, 0, 0, 0, 0, 0, 0, 0) != 0);
@@ -699,6 +763,9 @@ mod tests {
     /// a posted command is returned exactly once and written to outData.
     #[test]
     fn alooper_pollonce_dispatches_host_fed_app_commands() {
+        let _g = looper_test_lock().lock().unwrap();
+        poll_source_registry().lock().unwrap().clear();
+        app_cmd_queue().lock().unwrap().clear();
         // Empty queue -> timeout (-3), nothing written.
         let mut fd = 0i32;
         let mut ev = 0i32;
@@ -734,5 +801,69 @@ mod tests {
             &mut data as *mut u64 as u64, 0, 0, 0, 0,
         );
         assert_eq!(r3, ALOOPER_POLL_TIMEOUT as u32 as u64);
+    }
+
+    /// The app-glue main loop (guest 0x102bcd5d0) derefs ALooper_pollOnce's
+    /// outData as `struct android_poll_source*` and `blr`s `source->process`
+    /// (the fn at +0x10) with (app, source) as args — NOT as a raw APP_CMD int.
+    /// So a guest that first calls `ALooper_addFd(..., &app->cmd_source)` must
+    /// get its *registered* poll_source back through outData, and the shim must
+    /// lay it out with `process` at +0x10 (the exact offset the loop's
+    /// `ldr x8,[x1,#16]; blr x8` reads). Regression: the old shim wrote a raw
+    /// int into outData, which a glue loop would deref as a poll_source and
+    /// crash.
+    #[test]
+    fn alooper_pollonce_emits_registered_poll_source_not_raw_int() {
+        let _g = looper_test_lock().lock().unwrap();
+        // Reset registry state so prior tests' addFd entries don't leak in.
+        poll_source_registry().lock().unwrap().clear();
+        app_cmd_queue().lock().unwrap().clear();
+
+        // Fabricate a guest android_poll_source at a readable host address with
+        // a sentinel `process` fn pointer at +0x10 (POLL_SOURCE_PROCESS_OFF).
+        let mut src = [0u64; 8]; // 64 bytes: id@0, app@8, process@16
+        let process_fn = 0x102bcd6bc_u64; // any guest-ish fn ptr the loop would blr
+        let src_ptr = src.as_mut_ptr() as u64;
+        unsafe {
+            std::ptr::write((src_ptr as *mut u64).add(POLL_SOURCE_PROCESS_OFF / 8), process_fn);
+        }
+
+        // Guest-side: ALooper_addFd(looper, fd=0, ident, events, cb, data=&src).
+        let ret = alooper_addfd(0, 0, 1, 1, 0, src_ptr, 0, 0);
+        assert_eq!(ret, 1, "addFd registers the command source");
+
+        // Post a command and consume it via pollOnce; outData must carry the
+        // REGISTERED poll_source pointer (0x10 = our process_fn), not the raw int.
+        post_app_command(APP_CMD_START);
+        let mut outfd = 0i32;
+        let mut events = 0i32;
+        let mut outdata = 0u64;
+        let r = alooper_pollonce(
+            0, &mut outfd as *mut i32 as u64, &mut events as *mut i32 as u64,
+            &mut outdata as *mut u64 as u64, 0, 0, 0, 0,
+        );
+        assert_eq!(r, APP_CMD_START as u64, "ident still the posted command");
+        assert_eq!(outdata, src_ptr, "outData is the registered android_poll_source*");
+        // The emitted poll_source's +0x10 is the process fn the glue loop blr's.
+        let emitted_process = unsafe {
+            std::ptr::read((outdata as *const u64).add(POLL_SOURCE_PROCESS_OFF / 8))
+        };
+        assert_eq!(emitted_process, process_fn, "source->process sits at +0x10");
+        poll_source_registry().lock().unwrap().clear();
+    }
+
+    /// Without an ALooper_addFd registration (pure host-driven lifecycle, no glue
+    /// loop in play), pollOnce falls back to the historic raw-APP_CMD-in-outData
+    /// so the GameActivity host-feed path stays intact.
+    #[test]
+    fn alooper_pollonce_falls_back_to_raw_cmd_without_registration() {
+        let _g = looper_test_lock().lock().unwrap();
+        poll_source_registry().lock().unwrap().clear();
+        app_cmd_queue().lock().unwrap().clear();
+        post_app_command(APP_CMD_RESUME);
+        let mut outdata = 0u64;
+        alooper_pollonce(0, 0, 0, &mut outdata as *mut u64 as u64, 0, 0, 0, 0);
+        assert_eq!(outdata, APP_CMD_RESUME as u64, "no registration -> raw app_cmd fallback");
+        poll_source_registry().lock().unwrap().clear();
     }
 }
