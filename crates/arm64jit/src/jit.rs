@@ -7294,4 +7294,65 @@ mod fp16_and_fabd_fccmp_exec {
         assert_eq!(half(2), h(0.0), "-1.0+1.0");
         assert_eq!(half(3), h(2.0), "0.5+1.5");
     }
+
+    #[test]
+    fn fp16_byelem_fmla_fmls_fmul_exec() {
+        // fmla v2.4h, v4.4h, v1.h[0] = 0x0f011082: Vd[l] += Vn[l] * V1.h[0].
+        // XMM splat/accumulate in f32; exact for the small values used.
+        let mut st = CpuState::new();
+        let pk = |vals: &[u16]| -> u64 {
+            let mut acc: u64 = 0;
+            for (i, v) in vals.iter().enumerate() { acc |= (*v as u64) << (16 * i); }
+            acc
+        };
+        // vd=2 -> v[4], vn=4 -> v[8], vm=1 -> v[2].
+        st.v[4] = pk(&[h(1.0), h(2.0), h(3.0), h(4.0)]);   // Vd
+        st.v[8] = pk(&[h(2.0), h(0.5), h(-1.0), h(1.5)]);  // Vn
+        st.v[2] = pk(&[h(10.0), 0, 0, 0]);                  // V1.h[0] = 10.0
+        let code = [0x82u8, 0x10, 0x01, 0x0f, 0xc0, 0x03, 0x5f, 0xd6];
+        exec_bytes(&mut st, &code, 0).unwrap();
+        let half = |s: &CpuState, off: usize| -> u16 { ((s.v[4] >> (16 * off)) & 0xffff) as u16 };
+        // Vd[l] + Vn[l]*10
+        assert_eq!(half(&st,0), h(21.0), "1+2*10");
+        assert_eq!(half(&st,1), h(7.0), "2+0.5*10");
+        assert_eq!(half(&st,2), h(-7.0), "3-1*10");
+        assert_eq!(half(&st,3), h(19.0), "4+1.5*10");
+
+        // fmls v2.4h, v4.4h, v1.h[2] = 0x0f215082: Vd[l] -= Vn[l] * V1.h[2].
+        let mut st = CpuState::new();
+        st.v[4] = pk(&[h(10.0), h(20.0), h(30.0), h(40.0)]);
+        st.v[8] = pk(&[h(2.0), h(0.5), h(-1.0), h(1.5)]);
+        st.v[2] = pk(&[0, 0, h(4.0), 0]); // V1.h[2] = 4.0
+        let code = [0x82u8, 0x50, 0x21, 0x0f, 0xc0, 0x03, 0x5f, 0xd6];
+        exec_bytes(&mut st, &code, 0).unwrap();
+        assert_eq!(half(&st,0), h(2.0), "10-2*4");
+        assert_eq!(half(&st,1), h(18.0), "20-0.5*4");
+        assert_eq!(half(&st,2), h(34.0), "30+1*4");
+        assert_eq!(half(&st,3), h(34.0), "40-1.5*4");
+
+        // fmul v2.8h, v4.8h, v1.h[6] = 0x4f219882: Vd = Vn * splat(V1.h[6]) (8 lanes).
+        let mut st = CpuState::new();
+        let pk8 = |vals: &[u16]| -> (u64, u64) {
+            let mut lo: u64 = 0; let mut hi: u64 = 0;
+            for (i, v) in vals.iter().enumerate() {
+                if i < 4 { lo |= (*v as u64) << (16 * i); } else { hi |= (*v as u64) << (16 * (i - 4)); }
+            }
+            (lo, hi)
+        };
+        let (vnl, vnh) = pk8(&[h(1.0), h(2.0), h(3.0), h(4.0), h(0.5), h(0.25), h(-2.0), h(1.5)]);
+        st.v[8] = vnl; st.v[9] = vnh; // vn=4
+        let (vml, vmh) = pk8(&[0, 0, 0, 0, 0, 0, h(8.0), 0]);
+        st.v[2] = vml; st.v[3] = vmh; // vm=1, V1.h[6]=8.0
+        // fmul v2.8h, v4.8h, v1.h[6] = 0x4f219882: LE [0x82,0x98,0x21,0x4f]
+        let code = [0x82u8, 0x98, 0x21, 0x4f, 0xc0, 0x03, 0x5f, 0xd6];
+        exec_bytes(&mut st, &code, 0).unwrap();
+        let half = |reg: usize, off: usize| -> u16 { ((st.v[reg] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(half(4, 0), h(8.0), "1*8");
+        assert_eq!(half(4, 1), h(16.0), "2*8");
+        assert_eq!(half(4, 2), h(24.0), "3*8");
+        assert_eq!(half(4, 3), h(32.0), "4*8");
+        assert_eq!(half(5, 1), h(2.0), "0.25*8");   // lane 5 -> v[5][1]
+        assert_eq!(half(5, 2), h(-16.0), "-2*8");   // lane 6 -> v[5][2]
+        assert_eq!(half(5, 3), h(12.0), "1.5*8");   // lane 7 -> v[5][3]
+    }
 }

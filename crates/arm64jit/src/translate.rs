@@ -3103,6 +3103,46 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdFp16BEl { rd, rn, vlm, idx, op, q } => {
+            // fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx]: per-lane
+            //   Vd[l] = (fmla/fmls) Vd[l] ± Vn[l]·splat(Vm.h[idx])  (in f32),
+            //   fmul = splat(Vm.h[idx])·Vn[l]  (no accumulate).
+            // Splat Vm.h[idx] into xmm2 ONCE (hoisted: rd==rm would clobber the
+            // element inside the lane loop), then promote->op->demote per lane
+            // via F16C. Uses the same raw-VEX f16 pattern as SimdFp16As.
+            let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+            let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
+            let mb = crate::jit::VECTOR_BASE + (vlm as i32) * 16;
+            let lanes: i32 = if q { 8 } else { 4 };
+            // splat Vm.h[idx] -> xmm2 (as f32)
+            buf.mov_load16(RAX, RBX, mb + (idx as i32) * 2);
+            buf.movd_xmm_r32(2, RAX);
+            buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xd2]); // vcvtph2ps xmm2,xmm2
+            for l in 0..lanes {
+                let off = l * 2;
+                buf.mov_load32(RAX, RBX, db + off);
+                buf.movd_xmm_r32(0, RAX); // Vd[l] (f16 in low16; may be garbage for fmul)
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0 (promote Vd)
+                buf.mov_load32(RAX, RBX, nb + off);
+                buf.movd_xmm_r32(1, RAX);
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc9]); // vcvtph2ps xmm1,xmm1 (Vn[l])
+                buf.mulss(1, 2); // xmm1 = Vn[l] * splat
+                match op {
+                    0 => buf.addss(0, 1), // fmla: Vd[l] + term
+                    1 => buf.subss(0, 1), // fmls: Vd[l] - term
+                    _ => {
+                        // fmul: result = term in xmm1; copy to xmm0 so the demote
+                        // below is the same xmm0->xmm0 vcvtps2ph for ALL ops.
+                        buf.bytes.extend_from_slice(&[0x0f, 0x28, 0xc1]); // movaps xmm0,xmm1
+                    }
+                }
+                // demote result xmm0 -> f16, store 2 bytes
+                buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                buf.movd_r32_xmm(RAX, 0);
+                buf.mov_store16(RBX, db + off, RAX);
+            }
+            Ok(())
+        }
         Inst::InsD1D0 { rd, rn } => {
             // mov v{rd}.d[1], v{rn}.d[0] : copy the low 64 (D[0]) of Rn into
             // the high 64 (D[1]) of Rd.

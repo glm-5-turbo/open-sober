@@ -559,6 +559,12 @@ pub enum Inst {
     // op: 0=fadd, 1=fsub, 2=fmul. Gate (insn & 0x9f60_f400) == 0x0e40_1400;
     // q=bit30 (1=.8h 8 lanes, 0=.4h 4 lanes); fmul sets bit29, fsub bit23.
     SimdFp16As { rd: u8, rn: u8, rm: u8, op: u8, q: bool },
+    // ---- FP16 by-element fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx] ----
+    // Half-precision indexed multiply-accumulate. byte0 nibble 0xf (0x4f/0x0f),
+    // bit29 CLEAR, bit23 CLEAR (the fp16-vs-f32 discriminator: the f32 FmlaEl
+    // requires bit23 SET). op: 0=fmla, 1=fmls, 2=fmul (fmul=bit15, fmls=bit14).
+    // idx (3-bit .8h) = (bit11<<2)|(bit21<<1)|bit20; vm = bits[19:16] (v0-v15).
+    SimdFp16BEl { rd: u8, rn: u8, vlm: u8, idx: u8, op: u8, q: bool },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
            rd: u8,
@@ -2139,6 +2145,41 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdFp16As { rd, rn, rm, op, q };
+    }
+
+    // ---- FP16 by-element fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx] ----
+    // Half-precision indexed multiply-accumulate. Prefix byte0 nibble 0xf
+    // (0x4f/0x0f), bit29 CLEAR, bit23 CLEAR (vs the f32 FmlaEl gate below which
+    // requires bit23 SET). CRITICAL: bit10 MUST be 0 — the shift-by-immediate
+    // family (shl/ushr/sshr/usra/ssra/srshr/srsra/sqshl...) shares the SAME
+    // byte0 prefix AND bit23=0, and the FMUL/FMLA/FMLS opcode bits[15:12] alias
+    // the shift's [14:12] marker (fmul=bit15, fmls=bit14, fmla=bit12 == usra's
+    // 0b001). The real discriminator is bit10: shift-by-imm fixes it to 1, FP16
+    // indexed leaves it 0 (verified over 30+ both-family encodings). MUST
+    // precede the shift gates below. idx (3-bit .8h) = (bit11<<2)|(bit21<<1)|bit20;
+    // .4h uses (bit21<<1)|bit20. vm = bits[19:16] (v0-v15 only). op: bit15=fmul,
+    // bit14=fmls, else fmla. Ground truth (aarch64 objdump): fmul
+    // v2.8h,v4.8h,v1.h[6] = 0x4f219882, fmla v31.8h,v30.8h,v15.h[7]=0x4f3f1bdf,
+    // fmls v2.4h,v4.4h,v1.h[2]=0x0f215082.
+    if ((insn >> 24) & 0x0f) == 0x0f
+        && (insn & 0x2000_0000) == 0
+        && (insn & 0x0080_0000) == 0
+        && (insn & 0x0400) == 0 // bit10 clear: disjoint from shift-by-immediate
+        && (insn & 0x2000) == 0 // bit13 clear: widening mul-el (SimdMullEl) sets it
+    {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let vlm = ((insn >> 16) & 0x0f) as u8; // v0-v15
+        let q = (insn & 0x4000_0000) != 0;
+        let idx_bits = if q {
+            ((((insn >> 11) & 1) << 2) | (((insn >> 21) & 1) << 1) | ((insn >> 20) & 1)) as u8
+        } else {
+            ((((insn >> 21) & 1) << 1) | ((insn >> 20) & 1)) as u8
+        };
+        let bit15 = insn & 0x8000 != 0;
+        let bit14 = insn & 0x4000 != 0;
+        let op = if bit15 { 2 } else if bit14 { 1 } else { 0 };
+        return Inst::SimdFp16BEl { rd, rn, vlm, idx: idx_bits, op, q };
     }
 
     // ---- SIMD bitwise select BSL only (Vd = (Vd&Vn)|(~Vd&Vm)); bit/bif handled by SimdBit ----
@@ -7023,5 +7064,48 @@ mod fp16_scalar_and_gate_regressions {
         // real Roblox fadd v1.8h,v1.8h,v0.8h = 0x4e401421
         assert!(matches!(decode_op(0x4e401421),
             Inst::SimdFp16As { rd: 1, rn: 1, rm: 0, op: 0, q: true }));
+    }
+
+    #[test]
+    fn fp16_byelem_fmla_fmls_fmul_decode() {
+        // fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx] ground truth (cross-compiler,
+        // armv8.2-a+fp16). The f32 FmlaEl forms MUST stay FmlaEl (bit23 SET) —
+        // these verify the bit23 CLEAR discriminator.
+        // fmul v2.8h, v4.8h, v1.h[6] = 0x4f219882
+        assert!(matches!(decode_op(0x4f219882),
+            Inst::SimdFp16BEl { rd: 2, rn: 4, vlm: 1, idx: 6, op: 2, q: true }));
+        // fmul v2.4h, v4.4h, v1.h[0] = 0x0f019082 (q=0, .4h)
+        assert!(matches!(decode_op(0x0f019082),
+            Inst::SimdFp16BEl { rd: 2, rn: 4, vlm: 1, idx: 0, op: 2, q: false }));
+        assert!(matches!(decode_op(0x0f019082), Inst::SimdFp16BEl { vlm: 1, .. }));
+        // fmla v31.8h, v30.8h, v15.h[7] = 0x4f3f1bdf (max regs, idx 7)
+        assert!(matches!(decode_op(0x4f3f1bdf),
+            Inst::SimdFp16BEl { rd: 31, rn: 30, vlm: 15, idx: 7, op: 0, q: true }));
+        // fmls v2.4h, v4.4h, v1.h[2] = 0x0f215082 (fmls, .4h, idx 2)
+        assert!(matches!(decode_op(0x0f215082),
+            Inst::SimdFp16BEl { rd: 2, rn: 4, vlm: 1, idx: 2, op: 1, q: false }));
+        // fmla v2.8h, v4.8h, v1.h[3] = 0x4f311082
+        assert!(matches!(decode_op(0x4f311082),
+            Inst::SimdFp16BEl { rd: 2, rn: 4, vlm: 1, idx: 3, op: 0, q: true }));
+        // fmla v10.8h, v12.8h, v9.h[5] = 0x4f19198a (vlm=9, idx 5)
+        assert!(matches!(decode_op(0x4f19198a),
+            Inst::SimdFp16BEl { rd: 10, rn: 12, vlm: 9, idx: 5, op: 0, q: true }));
+
+        // .8h idx uses the 3-bit form (bit11<<2 | bit21<<1 | bit20). Verify idx 4
+        // (bit11 set only): fmul v2.8h, v4.8h, v1.h[4] = 0x4f019882.
+        assert!(matches!(decode_op(0x4f019882),
+            Inst::SimdFp16BEl { rd: 2, rn: 4, vlm: 1, idx: 4, op: 2, q: true }));
+
+        // REGRESSION: the f32 by-element forms stay on their existing decoders
+        // (bit23 SET — untouched by the new FP16 gate). fmla .4s/.2d stay
+        // FmlaEl; fmul by-element goes to SimdFmulEl (a separate decoder, also
+        // bit23 SET). None may be swallowed by SimdFp16BEl.
+        // fmla v2.4s,v4.4s,v1.s[1] = 0x4fa11082
+        assert!(matches!(decode_op(0x4fa11082), Inst::FmlaEl { rd: 2, rn: 4, .. }));
+        // fmla v2.2d,v4.2d,v1.d[0] = 0x4fc11082 -> FmlaEl el64
+        assert!(matches!(decode_op(0x4fc11082), Inst::FmlaEl { rd: 2, rn: 4, el64: true, .. }));
+        // fmul v2.4s,v4.4s,v1.s[1] = 0x4fa19082, fmul v2.2d = 0x4fc19082 -> SimdFmulEl
+        assert!(matches!(decode_op(0x4fa19082), Inst::SimdFmulEl { rd: 2, rn: 4, .. }));
+        assert!(matches!(decode_op(0x4fc19082), Inst::SimdFmulEl { rd: 2, rn: 4, esize: 8, .. }));
     }
 }
