@@ -1943,6 +1943,7 @@ pub fn translate(
                         buf.roundsd(0, 0, 0x01);               // floor
                         buf.pxor_xmm(0, 2);                    // sign
                     }
+                    8 | 9 => buf.roundsd(0, 0, 0x00), // frintn/frintx s: nearest, ties-even
                     _ => return Err(format!("FpUnary single ilp-{op} not implemented")),
                 }
                 buf.cvtsd2ss(0, 0);              // back to single (xmm0 low 32)
@@ -1991,6 +1992,7 @@ pub fn translate(
                     buf.roundsd(0, 0, 0x01);               // floor(|x|+0.5)
                     buf.pxor_xmm(0, 2);                    // reapply sign bit
                 }
+                8 | 9 => buf.roundsd(0, 0, 0x00), // frintn/frintx d: round to nearest, ties-even
                 _ => return Err(format!("FpUnary op {op} not implemented")),
             }
             buf.movq_store(RBX, vslot(rd), 0);

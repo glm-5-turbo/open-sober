@@ -7736,6 +7736,29 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn frintn_frintx_exec() {
+        // frintn d0,d1 = 0x1e644020: round-to-nearest ties-even. v1 = {3.7, 2.5,
+        // -3.7, -2.5} doubles -> {4, 2, -4, -2}. d1 = vreg1 low 8B = st.v[2].
+        let mut st = CpuState::new();
+        st.v[2] = 3.7f64.to_bits();
+        exec_bytes(&mut st, &[0x20, 0x40, 0x64, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let f = |s: &CpuState, reg: usize| f64::from_bits(s.v[reg]);
+        assert_eq!(f(&st, 0), 4.0, "frintn 3.7->4");
+        // frintx d0,d1 = 0x1e674020: round current-mode (=nearest). 2.5 ties-even->2.
+        let mut st2 = CpuState::new();
+        st2.v[2] = 2.5f64.to_bits();
+        exec_bytes(&mut st2, &[0x20, 0x40, 0x67, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let f2 = |s: &CpuState, reg: usize| f64::from_bits(s.v[reg]);
+        assert_eq!(f2(&st2, 0), 2.0, "frintx 2.5 ties-even->2");
+        // frintn s0,s1 = 0x1e244020: single. v1.s low32 = 7.2 -> 7.
+        let mut st3 = CpuState::new();
+        st3.v[2] = 7.2f32.to_bits() as u64;
+        exec_bytes(&mut st3, &[0x20, 0x40, 0x24, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let f3 = |s: &CpuState, reg: usize| f32::from_bits((s.v[reg] & 0xffff_ffff) as u32);
+        assert_eq!(f3(&st3, 0), 7.0, "frintn s 7.2->7");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

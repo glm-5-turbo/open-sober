@@ -3468,6 +3468,10 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             0x1e21_4000 => Some(6), // fneg s{rd}, s{rn} (flip sign)
             0x1e66_4000 => Some(7), // frinta d (round half-away; residue keeps bit14)
             0x1e26_4000 => Some(7), // frinta s
+            0x1e64_4000 => Some(8), // frintn d (round to nearest, ties-even)
+            0x1e24_4000 => Some(8), // frintn s
+            0x1e67_4000 => Some(9), // frintx d (round, current mode = nearest)
+            0x1e27_4000 => Some(9), // frintx s
             _ => None,
         };
         if let Some(op) = unary {
@@ -6375,6 +6379,10 @@ mod logical_imm_regressions {
                         }
                         other => panic!("frintm d3,d3 -> {other:?}"),
                     }
+                    // frintx d0,d1 = 0x1e674020 (real libroblox: 0x1e674000) => op 9.
+                    assert!(matches!(decode(0x1e674020), Inst::FpUnary { rd: 0, rn: 1, op: 9, sz: true }), "got {:?}", decode(0x1e674020));
+                    // frintn s0,s1 = 0x1e244020 => op 8, single.
+                    assert!(matches!(decode(0x1e244020), Inst::FpUnary { rd: 0, rn: 1, op: 8, sz: false }), "got {:?}", decode(0x1e244020));
                     // fmov d6,d0 = 0x1e604006 must still be FmovFp (NOT FpUnary/frintm).
                             assert!(matches!(decode(0x1e604006), Inst::FmovFp { rd: 6, rn: 0, .. }));
                             // ucvtf v2.2d, v2.2d = 0x6e61d842 (real libroblox audio mix) => Ucvtf2d.
