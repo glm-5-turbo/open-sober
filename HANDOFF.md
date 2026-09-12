@@ -1,5 +1,55 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle D) — boot wall re-characterized; JIT_TRACE reverse-name registry (workspace 394/0)
+
+Commit `b99c3df` (dev). This cycle re-confirmed the real-boot wall exactly as
+last documented — all three guest threads genuinely futex-park (0% CPU) on the
+glibc-RECURSIVE mutex `0x6edae60` (owner thread 3188327 does real init through
+the atomic CAS once-guard `0x2b9e1d0`, then the main/StartApp threads re-lock
+the recursive mutex and park awaiting Java-side app-command/lifecycle state;
+`cond_wait/timedwait` never reached; no new block compiles after StartApp fires
+— flat 767 compiles). Graphics (Mesa llvmpipe through the JIT bridges) is fully
+wired and passing (`egl_window_present` Xvfb gate + resolver unit gates). The
+wall is a genuine Android-lifecycle-emulation gap, not a decoder/loader gap.
+
+### What landed (readable real-boot run-log)
+The real libroblox.so boot's JIT_TRACE dumped anonymous `hostcall@slotN` for
+every auto-allocated GLES/float/JNI host-call slot, hiding which engine import
+the GameActivity init dispatches while parked. Added a reverse-name registry:
+- `jit.rs`: `HOST_CALL_NAMES` (addr->name) + `name_host_call_slot()`;
+  `name_of_call_addr()` consults it after the resolver name map.
+- `jni.rs`: `JNI_METHOD_NAMES` table names every filled JNIEnv/JavaVM slot by
+  its function-table const.
+- `resolver.rs`: `resolve_gles_mixed`/`resolve_float`/`resolve_float32` record
+  the symbol name on the returned slot.
+- `jit.rs`: boot `mempool_calloc(x1=size)` and `lsm_map_calloc(x0=size)` thunks
+  named.
+Result: the real StartApp boot now prints `JNIEnv.GetStaticMethodID`,
+`FindClass`, `NewGlobalRef`, `ExceptionCheck`, `JavaVM.GetEnv`, float/GLES
+names, `boot.mempool_calloc` instead of `slotN`. New regression
+`name_of_call_addr_resolves_auto_allocated_gles_and_float_slots`.
+
+### Repro (unchanged behavior)
+```
+cd /home/hermes-worker/runs/open-sober
+cargo build -p arm64jit --example elfjit
+# idle boot (clean exit 0):
+timeout 40 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni
+# StartApp main loop (stable idle, exit 124, no crash):
+timeout 30 ./target/debug/examples/elfjit ... --jni --startapp 0x258b144
+JIT_TRACE=1 timeout 12 ... --jni --startapp 0x258b144 2>&1 | grep -oE 'hostcall@[A-Za-z0-9_.()]+' | sort | uniq -c | sort -rn
+```
+
+### Next lever (unchanged — this is the hard remaining wall)
+Cross the GameActivity lifecycle-await so the engine proceeds to the looper and
+the already-wired Mesa llvmpipe egl/gl path produces a first real frame. This
+requires emulating the Android app-command / JNICallProtocol / looper state the
+real Java layer drives (HANDOFF #1/#3): identify what releases `0x6edae60`
+(which thread posts the app-command) and seed it, or drive the awaited looper
+state from a host side feeding ALooper_pollOnce with synthetic app commands
+(APP_CMD_START/RESUME/INIT_WINDOW). The relevant EGL/GLES imports already route
+to Mesa. Multiple prior sessions hit this same wall — it is the frontier.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle C) — DIAGNOSIS CORRECTED; bionic bridge + glibc-recursive routing hardened (workspace 393/0)
 
 Commits `f0f352a` + `c4faa0a` (dev). This cycle implemented byte-exact bionic
