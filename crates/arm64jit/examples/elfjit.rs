@@ -571,6 +571,33 @@ fn main() {
                             if t.x19 >= 0x100000000 && t.x19 >> 56 == 0 && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
                             t.x20, t.x21, t.x29, t.sp
                         );
+                        // JIT_DEQUE_PROBE=1: recover the parked consumer's
+                        // deque-root from the waiter's SAVED frame and read the
+                        // live deque head. The generic wait-with-timeout at
+                        // 0x10284d018 leaves the caller's (drain fn 0x2856e40)
+                        // callee-saved regs on its stack: stp x20,x19,[sp,#64]
+                        // stored the DRAIN's x20 (= deque root, awk the waiter's
+                        // own x20 is -1 = the infinite-timeout arg) and x19 (=
+                        // consumer struct) at [sp+64] / [sp+72]. Read-only — the
+                        // prerequisite to a host-side producer enqueue (push onto
+                        // the deque the parked consumer drains).
+                        if std::env::var_os("JIT_DEQUE_PROBE").is_some()
+                            && t.lr == 0x10284d134
+                        {
+                            let sp = t.sp;
+                            if sp >= 0x100000000 && sp >> 56 == 0 {
+                                let root = unsafe { *(sp as *const u64).add(8) }; // [sp+64]
+                                let cstruct = unsafe { *(sp as *const u64).add(9) }; // [sp+72]
+                                let is_ptr = |p: u64| p >= 0x100000000 && p >> 56 == 0 && p & 7 == 0;
+                                let q = if is_ptr(cstruct) { unsafe { *(cstruct as *const u64).add(13) } } else { 0 }; // [struct+104]
+                                let headcell = if is_ptr(root) { unsafe { *(root as *const u64) } } else { 0 };
+                                let head = if is_ptr(headcell) { unsafe { *(headcell as *const u64) } } else { 0 };
+                                eprintln!(
+                                    "  [deque] waiter_sp={sp:#x} drain_root=[sp+64]={root:#x} drain_struct={cstruct:#x} Q=[struct+104]={q:#x} headcell=[root]={headcell:#x} head={head:#x} (node={:#x} tag={:#x})",
+                                    head & 0xffffffffffff, head >> 48
+                                );
+                            }
+                        }
                     }
                 }
             });

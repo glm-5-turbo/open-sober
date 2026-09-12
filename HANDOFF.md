@@ -1,5 +1,40 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH5) — producer/enqueue contract pinned from disassembly; `JIT_DEQUE_PROBE` locates each parked consumer's live deque head-cell from the host. Workspace 467/0; HEAD bfa63d1+.
+
+This cycle converted the ~30-cycle "producer never enqueues / version+latch
+isn't a producer" wall into a concrete, host-side-pokeable mechanism with a
+full disassembly of the scheduler (file vaddr = guest − 0x100000000):
+
+- **Producer/enqueue = 0x285682c**: per-CPU slot base = `[this+8] +
+  sched_getcpu()*0x4a140`; tagged-CAS push onto that slot's per-CPU MPSC queue
+  (pop 0x2b9e6e0 / push 0x2b9e720 / refcnt 0x2b9e760); head atomic at
+  `slot+0x10` (low48=node, high16=tag), tail at `slot+0x18`, node link `[node]`.
+- **Consumer drain = 0x2856e40** (`root`=x0): `head=ldar[[root]]`; empty iff
+  `low48==0`; dispatches popped node via `[node+112]&~0x3f → [vt+40]` +
+  `[node+32]`; wakes `futex(node+0xc, WAKE_BITSET|PRIVATE, 1)`.
+- **Generic wait = 0x284d014** (`Q`,`epoch`,`timeout`): refcount `[Q]`; early
+  out on `epoch != [Q]>>32`; else `futex([Q]+4, WAIT_BITSET, low32(epoch))`.
+- **Waiter-frame recovery (the enqueue prerequisite, confirmed live):** at park
+  the waiter's PROLOGUE saved the drain's callee-saved regs — `[sp+64]`=drain
+  x20=deque root, `[sp+72]`=drain x19=consumer struct, `[sp+32]`=drain saved
+  x30. New `JIT_DEQUE_PROBE=1` (elfjit) reads these and shows each parked
+  consumer's `[root]` is a **stable guest-bss head-cell**
+  (0x10682a6x38 / 0x10682b338) — the exact address a host producer must CAS
+  onto. Also corrected a long-standing misreading: `lr=0x10284d134` is the
+  *in-wait return-into-fn* after the `bl syscall` (per 284d134 `mov w20,wzr;
+  b 284d0f0`), NOT the drain call-site.
+
+**Next experiment (feasible now):** CAS a node onto the recovered per-CPU
+head-cell + bump `[Q]` epoch + FUTEX_WAKE. A fully-zeroed node drains (proving
+the host producer crossed the barrier) then faults deref'ing `[0x28]` in the
+`[vt+40]` dispatch — a controlled, capturable first crossing; the follow-on is
+supplying a real engine frame/render node (`[node+112]→[vt+40]` callback +
+`[node+32]` arg). Boot unchanged (stable idle main loop, exit 124, no crash).
+
+Run-log: /home/hermes-worker/runs/deque-probe.txt (118 samples, compiles
+1420→flat, exit 124). Doc: docs/frontier-2026-09-12-producer-enqueue.md.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH4) — idle barrier re-characterized: it's a per-CPU task-deque CONSUMER, version+latch is NOT a producer; `--futex-bump` negative result; producer-enqueue doc. Workspace 467/0; HEAD c6c82e5+.
 
 From-first-principles disasm this cycle, the ~30-cycle "producer never enqueues

@@ -76,3 +76,43 @@ The single remaining barrier is the framework task-producer enqueue.
         --futex-kick 5 --futex-bump
     # expect: BUMP lines (version increment), compiles flat 1668, exit 124.
     # Run-log: /home/hermes-worker/runs/futex-bump2.txt
+
+## Precise producer/consumer contract (cycle SH5, from full disassembly)
+
+A full disassembly of the scheduler (producer 0x285682c, consumer drain
+0x2856e40, generic wait 0x284d014) + a live host-side deque probe replaced the
+vaguer "x19/Q+4" notes. file vaddr = guest − 0x100000000.
+
+- **Producer / enqueue = 0x285682c** (`this`=x0, task=x1, mode=w2, cbarb=x3):
+  optional callback at `[this+24]` runs first when non-null (returns bit0 ⇒
+  done). Else it computes the **per-CPU slot base** `[this+8] +
+  sched_getcpu()*0x4a140` and pushes the task onto that slot's lock-free
+  tapered queue via tagged-CAS helpers (pop 0x2b9e6e0, push 0x2b9e720, refcnt
+  0x2b9e760). The deque is **per-CPU MPSC**: head atomic at `slot+0x10`
+  (packed low48=node ptr, high16=tag), tail at `slot+0x18`. Node link = `[node]`.
+- **Consumer drain = 0x2856e40** (`root`=x0): recovers per-CPU head from
+  `ldar [[root]]`. The steady pop loop (0x2856f94): `x24=ldar[[root]]`;
+  empty iff `low48(x24)==0`; else CAS-pop node and process it via
+  `[node+112]&~0x3f → [vt+40]` (and `[node+40]`), then the callback at
+  `[node+32]`. After processing it wakes `futex(node+0xc, 0x8a=WAKE_BITSET|PRIVATE, 1)`.
+- **Generic wait-with-timeout = 0x284d014**(`Q`, `epoch`, `timeout_ns`): saves
+  caller callee-saved regs at `stp x20,x19,[sp,#64]`; refcount `atomic([Q],+1)`
+  via 0x2b9e9b0 (x0=1); returns early if `epoch != [Q]>>32`; else
+  `futex([Q]+4, 0x89=WAIT_BITSET|PRIVATE, val=low32(epoch))`; on EAGAIN a
+  `clock_gettime` deadline loop; then `atomic([Q],-1)`.
+- **Waiter-frame recovery (the enqueue prerequisite):** at park (inside the
+  futex `bl syscall`, x30=0x10284d134 is the *in-wait return-into-fn*, not the
+  caller), the DRAIN's callee-saved regs live on the waiter stack:
+  `[sp+64]` = drain `x20` = deque root, `[sp+72]` = drain `x19` = consumer
+  struct; the drain's saved `x30` is at `[sp+32]`. Confirmed live with
+  `JIT_DEQUE_PROBE=1` (elfjit): each parked consumer's `[root]` resolves to a
+  **stable guest-bss head-cell** (0x10682a6x38, 0x10682b338 for two per-CPU
+  slots) — the exact address a host producer must push onto.
+- **Is a host enqueue now feasible?** Yes in mechanism (we can locate the
+  per-CPU head-cell from the host and CAS a node onto it + bump `[Q]` epoch +
+  FUTEX_WAKE), but the popped node's dispatch needs a **real engine task node**
+  (`[node+112]→[vt+40]` callback + `[node+32]` arg referencing initialized
+  render/job state). A fully-zeroed node will drain (proving the enqueue works)
+  then fault deref'ing `[0x28]` — a controlled, capturable first crossing; the
+  follow-on is supplying a valid vt/node matching the engine's real
+  frame/render task. This is the concrete next experiment.
