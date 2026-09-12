@@ -1,5 +1,55 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH6) — host enqueue into the task-deque PROVEN not-a-producer (two strategies); deque model corrected from full producer/drain disassembly; new `--deque-node` harness. Workspace 467/0; HEAD <COMMIT>.
+
+Implemented the documented SH5b next-experiment (host side enqueue into the
+engine's idle task-deque) as a real elfjit host producer and ran it against the
+parked consumers. **Result: a hard negative.** Two distinct enqueue strategies
+were tried and both are robustly NOT consumed (`popped=false` every check,
+compiles flat, no crash):
+
+1. write node into [headcell] = slot+0 (the SH5b "head cell"),
+2. write node into HEAD = slot+0x10 AND TAIL = slot+0x18 with [node]=0.
+
+In both, the deque head field keeps pointing at our node for the whole run —
+the parked consumers never CAS-pop it, despite the version-epoch bump + futex
+wake. This corrects SH5b's "self-referential sentinel at the drain struct"
+model, which located the enqueue point wrong.
+
+**Corrected deque model** (from producer 0x285682c + drain 0x2856e40 disasm):
+the deque is a per-consumer pointer-RING at a stable guest-bss base
+(0x10682a638 / 0x10682b338 for the two real slots; a 3rd consumer's headcell is
+a host-heap garbage-ASCII cell — ignore). HEAD field at base+0x10, TAIL at
++0x18; empty == both == slot+8 (the self-referential first node). Producer push
+= tagged-CAS walk `ldar[head]→[node]` to the tail then link (helpers 0x2b9e720 /
+0x2b9e760). Consumer pop = `ldar[head]`, `low48==0 → EMPTY→wait`, else CAS-pop
+then dispatch `[node+112]&~0x3f → [vt+40]` (+ `[node+40]`, `[node+32]` arg),
+**re-enqueue via `bl 0x285682c`** (2857020), wake `futex(node+0xc,0x8a,1)`.
+
+**Why node+bump is insufficient (the hard wall, now precise):** the drain is
+gated by the version-epoch wait (generic wait 0x284d014 parks in
+`futex(Q+4, WAIT_BITSET, low32(epoch))`). Wait returns w20=0 on futex-woken/
+version-changed, w20=1 ONLY on timeout. On wake the drain checks
+`cmp x21, [Q]>>32` (2856f80/90); a CHANGED version makes the drain RETURN (to
+28570a4) instead of entering the pop-loop at 2856f94 — which runs ONLY when the
+version STILL matches the caller's captured x21 AND the wait timed out. So a
+host bump makes the drain exit; the pop-loop is dead during idle (infinite
+timeout, never polls); and even a no-bump node placement is never drained.
+**Host writes to the ring are NOT sufficient — the deque is drained only by a
+real (framework) producer that re-enters the drain loop.** Three negatives:
+slot+0, slot+0x10/0x18±bump, slot+0x10/0x18 no-bump — all `popped=false`.
+
+**Next levers (ordered):** (1) invoke the REAL producer 0x285682c as a guest
+call with a valid task node (recover the scheduler `this` from drain_struct
+`[x1+104]`) so the framework's own push path runs; (2) synthesize the drain
+caller's re-entry with a fresh matching epoch + the node already in HEAD;
+(3) reverse the drain caller loop (0x284eb80) to find what re-enters the drain.
+
+Doc: docs/frontier-sh6-enqueue-negative.md. Run-logs:
+/home/hermes-worker/runs/deque-node-enqueue-vt.txt, deque-node-v2.txt,
+deque-node-v3.txt. elfjit `--deque-node <vtable>` is the faithful reusable
+harness (default-off; baseline boot unchanged).
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH5) — producer/enqueue contract pinned from disassembly; `JIT_DEQUE_PROBE` locates each parked consumer's live deque head-cell from the host. Workspace 467/0; HEAD bfa63d1+.
 
 This cycle converted the ~30-cycle "producer never enqueues / version+latch

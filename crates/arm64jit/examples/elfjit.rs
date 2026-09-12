@@ -600,7 +600,25 @@ fn main() {
                                 // pending task node from a sentinel/garbage cell:
                                 // next=[node], cb40=[node+40], vt=[node+112]&~0x3f
                                 // then dispatch-cb [vt+40]; and [root+8] tag.
+                                // Head node internals + the per-CPU slot layout.
+                                // SH5 disasm pinned the deque head ATOMIC at
+                                // slot+0x10 (packed low48=node, high16=tag) and
+                                // tail at slot+0x18; slot+0 is likely a separate
+                                // field (the sentinel/root ptr). Dump the whole
+                                // neighborhood to resolve which offset the parked
+                                // consumer actually drains.
                                 let node = head & 0xffffffffffff;
+                                // Dump the per-CPU slot neighborhood around the
+                                // head-CELL to resolve the real deque head offset.
+                                // The probe mislabeled slot+0 as the head; SH5
+                                // disasm says the head ATOMIC is at slot+0x10.
+                                if is_ptr(headcell) {
+                                    let off = |o: usize| unsafe { *(headcell as *const u64).add(o / 8) };
+                                    eprintln!(
+                                        "      slot[{headcell:#x}] +0x00={:#x} +0x08={:#x} +0x10(HEAD)={:#x} +0x18(TAIL)={:#x} +0x20={:#x}",
+                                        off(0), off(0x08), off(0x10), off(0x18), off(0x20)
+                                    );
+                                }
                                 let rt8 = if is_ptr(root) { unsafe { *(root as *const u64).add(1) } } else { 0 };
                                 if is_ptr(node) {
                                     let nxt = unsafe { *(node as *const u64) };
@@ -851,6 +869,137 @@ fn main() {
                                 t.guest_tid
                             );
                         }
+                    }
+                }
+            });
+        }
+        // Host-side task-deque PRODUCER (--deque-node <vtable-hex>). The cycle
+        // SH5 frontier is that the parked threads are CONSUMERS of a per-CPU
+        // lock-free task-deque (fns 0x285682c / 0x2856e40): each parks in the
+        // generic version-epoch futex wait 0x10284d018 on Q'=t.x19 (futex at
+        // Q'+4=t.x1) because the deque head-cell ([root]=0x10682a638 /
+        // 0x10682b338) points at the self-referential SENTINEL (the drain
+        // struct, [headcell].next==0). Version+latch bumping alone
+        // (--futex-bump) re-parks — there is no work in the deque. This flag
+        // makes a real PRODUCER: it CAS-es a freshly allocated task NODE into
+        // the deque head-cell, links it into the circular intrusive list
+        // (node.next = the old sentinel head), sets [node+112]=<vtable> so the
+        // drain's dispatch ([node+112]&~0x3f -> [vt+40]) reaches a real guest
+        // handler, then bumps [Q']>>32 (epoch) + FUTEX_WAKE on Q'+4. A zeroed
+        // node (vt=0) trips the drain at [vt+40]=[0x28]; supplying the sentinel
+        // vtable 0x106829f00 reaches the real engine handler 0x10285371c — the
+        // first controlled crossing, even if that handler then faults on the
+        // foreign node's task content.
+        if let Some(vt) = {
+            let args: Vec<String> = std::env::args().collect();
+            args.iter()
+                .position(|a| a == "--deque-node")
+                .and_then(|i| args.get(i + 1).cloned())
+                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).expect("--deque-node needs hex vtable"))
+        } {
+            // --deque-node-bump: also bump [Q']>>32 + FUTEX_WAKE. NOTE: this is
+            // SELF-DEFEATING per the drain's version gate (a changed version makes
+            // the drain return instead of pop on its timeout poll) — kept for the
+            // comparison data. Default (no bump) lets the consumer's natural
+            // timeout poll drain the node we placed.
+            let bump_version = std::env::args().any(|a| a == "--deque-node-bump");
+            const IDLE: u64 = 0x10284d134; // parked consumer call-site
+            std::thread::spawn(move || {
+                use std::collections::HashSet;
+                let mut enqueued: HashSet<u64> = HashSet::new();
+                let mut placed: Vec<(u64, u64, u64)> = Vec::new(); // (headcell+0x10, node, Q')
+                eprintln!("[elfjit:deque-producer] host enqueue on parked consumers (node vtable 0x{vt:x}, bump_version={bump_version})");
+                for it in 0..300 {
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    // Post-enqueue verification: did the parked consumer wake and
+                    // pop our node (head-cell back to the sentinel / off our node)?
+                    if !placed.is_empty() {
+                        let mut all_popped = true;
+                        for (hc, np, qp) in placed.iter() {
+                            let cur = unsafe { *(*hc as *const u64) };
+                            let popped = cur != *np;
+                            if !popped {
+                                all_popped = false;
+                            }
+                            if it % 25 == 0 || popped {
+                                eprintln!("[elfjit:deque-producer] check headcell={hc:#x} node={np:#x} now={cur:#x} popped={popped} Q'={qp:#x}");
+                            }
+                        }
+                        if all_popped {
+                            eprintln!("[elfjit:deque-producer] ALL placed nodes popped by consumers — deque crossed the barrier");
+                            break;
+                        }
+                    }
+                    for t in arm64jit::jit::snapshot_threads() {
+                        if t.lr != IDLE {
+                            continue;
+                        }
+                        if enqueued.contains(&t.guest_tid) {
+                            continue;
+                        }
+                        let is_ptr = |p: u64| p >= 0x100000000 && p >> 56 == 0 && p & 7 == 0;
+                        let sp = t.sp;
+                        if !is_ptr(sp) {
+                            continue;
+                        }
+                        // Parked drain saved its callee-saved registers at
+                        // stp x20,x19,[sp,#64]: [sp+64]=drain root (the deque
+                        // root ptr), [sp+72]=drain struct (the sentinel).
+                        let root = unsafe { *(sp as *const u64).add(8) };
+                        let sentinel = unsafe { *(sp as *const u64).add(9) };
+                        if !is_ptr(root) || !is_ptr(sentinel) {
+                            continue;
+                        }
+                        // The root points at a guest-bss head-CELL; its value is
+                        // the deque head (now = sentinel = empty).
+                        let headcell = unsafe { *(root as *const u64) };
+                        if !is_ptr(headcell) {
+                            continue;
+                        }
+                        let old = unsafe { *(headcell as *const u64) };
+                        // Only enqueue when the head is still the empty sentinel
+                        // (don't stack nodes over an already-pending one).
+                        if old != sentinel {
+                            continue;
+                        }
+                        // Allocate guest-visible task node (guest==host here).
+                        let node = unsafe { libc::calloc(1, 256) as *mut u8 };
+                        if node.is_null() {
+                            continue;
+                        }
+                        let np = node as u64;
+                        let qw = unsafe { *(t.x19 as *const u64) };
+                        unsafe {
+                            *(np as *mut u64) = 0; // node.next = null (this node becomes the tail)
+                            (np as *mut u64).add(14).write_volatile(vt); // [node+112] = vtable
+                            // The deque head/tail fields are at slot+0x10 / slot+0x18
+                            // (a pointer into the slot's ring arena; empty == both
+                            // point at the slot+8 sentinel). Set both to our node so
+                            // head=tail=node (single-element circular deque). The
+                            // consumer's pop does ldar[[x20]] then CAS-pop it via
+                            // node.next (0), restoring the head to empty.
+                            (headcell as *mut u64).add(2).write_volatile(np); // [slot+0x10] HEAD
+                            (headcell as *mut u64).add(3).write_volatile(np); // [slot+0x18] TAIL
+                            // Bump the wait object's version epoch so the parked
+                            // consumer's proceed-gate (cmp [Q']>>32) opens. NOTE:
+                            // self-defeating — see --deque-node-bump above.
+                            if bump_version {
+                                *(t.x19 as *mut u64) = qw.wrapping_add(0x1_0000_0000);
+                                libc::syscall(
+                                    libc::SYS_futex,
+                                    t.x1 as usize,
+                                    libc::FUTEX_WAKE as i64,
+                                    1i64,
+                                    0usize,
+                                );
+                            }
+                        }
+                        eprintln!(
+                            "[elfjit:deque-producer] enqueued node={:#x} into slot[{:#x}] HEAD(+0x10)={:#x} TAIL(+0x18)={:#x} Q'{:#x} epoch {:#x}->{:#x} futex={:#x} guest_tid={}",
+                            np, headcell, headcell + 0x10, headcell + 0x18, t.x19, qw >> 32, (qw >> 32) + 1, t.x1, t.guest_tid
+                        );
+                        enqueued.insert(t.guest_tid);
+                        placed.push((headcell + 0x10, np, t.x19));
                     }
                 }
             });
