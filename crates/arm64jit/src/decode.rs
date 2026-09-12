@@ -4003,7 +4003,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                 // scalar Sd. Residue (insn&0x3f20_0c00)==0x2e20_0800, disjoint
                 // from the 3-operand scalar FMaxMin (residue 0x1e20_0800). Bit23
                 // selects min (fminv) vs max (fmaxv).
-                if (insn & 0x3f20_0c00) == 0x2e20_0800 && (insn & 0x0010_0000) != 0 {
+                if (insn & 0x3f20_0c00) == 0x2e20_0800 && (insn & 0x0010_0000) != 0 && (insn & 0x0040_0000) == 0 {
                     let rd = (insn & 0x1f) as u8;
                     let rn = ((insn >> 5) & 0x1f) as u8;
                     let min = (insn & 0x0080_0000) != 0;
@@ -4518,6 +4518,14 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                 (0x4ee1_8800, 2, 8, false), (0x4ee1_9800, 3, 8, false), // 2d
                 (0x2e21_8800, 4, 4, true),  (0x6e21_8800, 4, 4, true),  // frinta 2s/4s
                 (0x6e61_8800, 4, 8, true),                             // frinta 2d
+                // ---- FP16 (esize 2) frint: byte0 0x4e/.8h 0x0e/.4h, byte1 0x79,
+                // esize bit in byte2 0xf9 vs 0x79 distinguishes z/x from m/n/a.
+                (0x0e79_9800, 1, 2, false), (0x4e79_9800, 1, 2, false), // frintm 4h/8h
+                (0x0ef9_9800, 3, 2, false), (0x4ef9_9800, 3, 2, false), // frintz 4h/8h
+                (0x0ef9_8800, 2, 2, false), (0x4ef9_8800, 2, 2, false), // frintp 4h/8h
+                (0x2e79_9800, 0, 2, false), (0x6e79_9800, 0, 2, false), // frintx 4h/8h (nearest)
+                (0x2e79_8800, 4, 2, true),  (0x6e79_8800, 4, 2, true),  // frinta 4h/8h
+                (0x0e79_8800, 0, 2, false), (0x4e79_8800, 0, 2, false), // frintn 4h/8h
             ];
             let res = insn & 0xffff_fc00;
             if let Some(&(_, mode, esize, _a)) = FRINT.iter().find(|&&(r, _, _, _)| r == res) {
@@ -7958,6 +7966,20 @@ mod fp16_scalar_and_gate_regressions {
         assert!(matches!(decode_op(0x6eb1ee51), Inst::VecFpCmp { q: true, abs: true, .. }));
         assert!(matches!(decode_op(0x6e71ec21), Inst::VecFpCmp { esize: 8, op: 2, abs: true, .. }),
             "facge .2d got {:?}", decode_op(0x6e71ec21));
+        // FP16 vector frint: frintm v0.8h=0x4e799800 (real), frintz=0x4ef99800,
+        // frintp=0x4ef98800, frintx=0x6e799800 (NEARLY decodes FMaxV — bit22 guard
+        // on FMaxV keeps it SimdFrint), frintn=0x4e798800, .4h=0x0e799801.
+        assert!(matches!(decode_op(0x4e799800),
+            Inst::SimdFrint { rd: 0, rn: 0, mode: 1, esize: 2, q: true }),
+            "frintm .8h got {:?}", decode_op(0x4e799800));
+        assert!(matches!(decode_op(0x4ef99800), Inst::SimdFrint { mode: 3, esize: 2, q: true, .. }));
+        assert!(matches!(decode_op(0x4ef98800), Inst::SimdFrint { mode: 2, esize: 2, q: true, .. }));
+        assert!(matches!(decode_op(0x4e798800), Inst::SimdFrint { mode: 0, esize: 2, q: true, .. }));
+        assert!(matches!(decode_op(0x6e799800), Inst::SimdFrint { mode: 0, esize: 2, .. }),
+            "frintx .8h must NOT be FMaxV: {:?}", decode_op(0x6e799800));
+        assert!(matches!(decode_op(0x0e799801), Inst::SimdFrint { q: false, esize: 2, .. }));
+        // fmaxv s0,v1.4s = 0x6e30f820 must stay FMaxV (bit22 clear now separates).
+        assert!(matches!(decode_op(0x6e30f820), Inst::FMaxV { .. }));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).

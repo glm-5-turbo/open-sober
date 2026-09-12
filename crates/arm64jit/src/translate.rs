@@ -5866,6 +5866,19 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.movq_load(0, RBX, src + off); // 64-bit double lane
                     emit_round(&mut *buf);
                     buf.movq_store(RBX, dst + off, 0);
+                } else if esize == 2 {
+                    // FP16 lane: promote to FP32 (vcvtph2ps), round, demote.
+                    buf.mov_load16(RAX, RBX, src + off);
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    buf.cvtss2sd(0, 0);
+                    emit_round(&mut *buf);
+                    buf.cvtsd2ss(0, 0);
+                    // frint modes other than a use the exact f32 rounding; demote RN
+                    // (frint results are integral so RN is exact).
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store16(RBX, dst + off, RAX);
                 } else {
                     buf.mov_load32(RAX, RBX, src + off); // 32-bit float lane
                     buf.movd_xmm_r32(0, RAX);

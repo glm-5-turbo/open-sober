@@ -737,6 +737,24 @@ impl CodeBuf {
         self.b(0x5A);
         self.b(modrm(3, dst & 7, src & 7));
     }
+    /// cvtph2ps xmm_dst, xmm_src (F3 0F 38 13 /r) — 4 packed FP16 -> 4 packed FP32 (F16C).
+    pub fn cvtph2ps(&mut self, dst: u8, src: u8) {
+        self.b(0xF3);
+        self.b(0x0F);
+        self.b(0x38);
+        self.b(0x13);
+        self.b(modrm(3, dst & 7, src & 7));
+    }
+    /// cvtps2ph xmm_dst, xmm_src, imm8 (66 0F 3A 1D /r ib) — 4 packed FP32 -> 4 packed
+    /// FP16 (F16C). imm8 low 2 bits = rounding: 0=nearest-even,1=floor,2=ceil,3=trunc.
+    pub fn cvtps2ph(&mut self, dst: u8, src: u8, rounding: u8) {
+        self.b(0x66);
+        self.b(0x0F);
+        self.b(0x3A);
+        self.b(0x1D);
+        self.b(modrm(3, dst & 7, src & 7));
+        self.b(rounding & 0x3);
+    }
     /// cvtss2sd xmm_dst, xmm_src (F3 0F 5A /r) — single -> double (widen)
     pub fn cvtss2sd(&mut self, dst: u8, src: u8) {
         self.b(0xF3);

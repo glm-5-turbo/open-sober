@@ -8012,6 +8012,47 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn frintm_8h_exec() {
+        // frintm v0.8h, v0.8h = 0x4e799800 (real): floor each fp16 lane.
+        let mut st = CpuState::new();
+        // rn=0 -> v[0]&[1]; rd=0 same. f32->f16 via F16C-compatible rounding:
+        // our translator promotes/deomotes so we encode input in real IEEE half.
+        fn f16(x: f32) -> u16 {
+            // round-to-nearest-even f32->f16 (Veltkamp-free direct formula for test)
+            let b = x.to_bits();
+            let sign = ((b >> 16) & 0x8000) as u16;
+            let exp = ((b >> 23) & 0xff) as i32;
+            let man = b & 0x7f_ffff;
+            if exp == 0 && man == 0 { return sign; }
+            if exp == 0xff { return sign | 0x7c00 | ((man >> 13) as u16); }
+            let e16 = exp - 127 + 15;
+            if e16 >= 0x1f { return sign | 0x7c00; } // overflow to inf
+            if e16 <= 0 {
+                // subnormal: man | 0x800000 normalized
+                let m = man | 0x80_0000;
+                let shift = (14 - e16) as i32; // e16 in [..0]
+                return sign | ((m >> shift) as u16);
+            }
+            let frag = if (man & 0x1fff) > 0x1000 { 1 } else { 0 };
+            let rounded_man = ((man >> 13) + frag) as u16;
+            sign | ((e16 as u16) << 10) | (rounded_man & 0x3ff)
+        }
+        // inputs: 3.5 (->floor 3 = 0x4200), -3.5 (-> -4 = 0xC400), 2.75(->2=0x4000),
+        // 100.5 (->100), 1.0(->1), 7.9(->7), -0.5(->-1=0xBC00), 4.2(->4)
+        let inputs = [3.5f32, -3.5, 2.75, 100.5, 1.0, 7.9, -0.5, 4.2];
+        let mut lo = 0u64; let mut hi = 0u64;
+        for i in 0..4 { lo |= (f16(inputs[i]) as u64) << (16*i); }
+        for i in 0..4 { hi |= (f16(inputs[4+i]) as u64) << (16*i); }
+        st.v[0]=lo; st.v[1]=hi;
+        exec_bytes(&mut st, &[0x00,0x98,0x79,0x4e,0xc0,0x03,0x5f,0xd6], 0).unwrap();
+        // expected f16: floor(3.5)=3.const? 3.0 f16 = 0x4200, -4=0xC400, 2=0x4000,
+        // 100=0x5640, 1=0x3C00, 7=0x4700, -1=0xBC00, 4=0x4400.
+        let expect = [0x4200u16, 0xC400, 0x4000, 0x5640, 0x3C00, 0x4700, 0xBC00, 0x4400];
+        let read = |s:&CpuState, i:usize| -> u16 { ((s.v[if i<4 {0} else {1}] >> (16*(i%4))) as u16) };
+        for (i,e) in expect.iter().enumerate() { assert_eq!(read(&st,i), *e, "lane {i}"); }
+    }
+
+    #[test]
     fn fabd_2d_exec() {
         // fabd v4.2d, v5.2d, v3.2d = 0x6ee3d4a4 (real): |dn - dm| per fp64 lane.
         let mut st = CpuState::new();
