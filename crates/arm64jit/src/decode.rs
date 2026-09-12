@@ -5117,8 +5117,13 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
         // msr fpcr, xN = 0xd51b4408: FP control/status write. The JIT performs all
         // FP rounding per-op with explicit modes (roundsd/cvt*), not a global FPCR,
         // so the write is a benign no-op. op1=3, CRn=4, CRm=4, op2=0, L=0 (write).
+        // mrs xN, fpcr = 0xd53b4408 (real libroblox 0xd53b4408, L=1): read returns
+        // 0 (nearest-even rounding, default FPCR) — the JIT rounds per-op.
         if op1 == 3 && crn == 4 && crm == 4 && op2 == 0 && !read {
             return Inst::SysReg { sysreg: 9, rt: (insn & 0x1f) as u8, read };
+        }
+        if op1 == 3 && crn == 4 && crm == 4 && op2 == 0 && read {
+            return Inst::SysReg { sysreg: 11, rt: (insn & 0x1f) as u8, read };
         }
         // mrs xN, ctr_el0 = 0xd53b0029: cache type register. DminLine/IminLine
         // (bits 19:16 / 15:0) = log2(line size in words); Cwg=0. Report 16-byte
@@ -5137,7 +5142,7 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
     }
 
     // ---- load/store pair (X: 0xa8/0xa9, W: 0x28/0x29, SIMD Q 128-bit: 0xAD, FP/vec d: 0x6d/0x2d) ----
-    if matches!(insn >> 24, 0x29 | 0x69 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d | 0x6c | 0x2c) {
+    if matches!(insn >> 24, 0x29 | 0x69 | 0x28 | 0xa9 | 0xa8 | 0xac | 0xad | 0x6d | 0x2d | 0x6c | 0x2c | 0x68 | 0xe8 | 0xe9) {
         let q128 = (insn >> 24) & 0xff == 0xad || (insn >> 24) & 0xff == 0xac; // 128-bit SIMD pair (ldp/stp q)
         // FP/vector pairs: bit30 == 1 => 64-bit d-pair (0x6d/0x6c), bit30 == 0
         // => 32-bit s-pair (0x2d/0x2c). BUGFIX (Session 99): 0x2c/0x2d were
@@ -5146,7 +5151,10 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
         // garbage. Splitting gives the 32-bit s-pair scale 4 / 4-byte transfer.
         let fp_d = (insn >> 24) & 0xff == 0x6d || (insn >> 24) & 0xff == 0x6c;
         let fp_s = (insn >> 24) & 0xff == 0x2d || (insn >> 24) & 0xff == 0x2c;
-        let sext_en = (insn >> 24) & 0xff == 0x69; // ldpsw: sign-ext the 32-bit pair to 64-bit
+        let sext_en = (insn >> 24) & 0xff == 0x69 || (insn >> 24) & 0xff == 0x68 || (insn >> 24) & 0xff == 0xe9 || (insn >> 24) & 0xff == 0xe8;
+        // ldpsw (sign-extend 32-bit loads to 64-bit X regs). 0x69 = offset,
+        // 0x68 = post-indexed (real libroblox ldpsw x14,x15,[x13],#8 = 0x68c13dae);
+        // 0xe9/0xe8 = pre-indexed (bit24 set within indexed class).
         let size_64 = insn >> 31 == 1; // sf  (Q pair ignores this for reg scale)
         let ld = (insn >> 22) & 1 == 1; // L: 1=ldp, 0=stp
         let indexed = (insn >> 23) & 1 == 1; // 0=offset, 1=indexed (pre/post)
@@ -8027,6 +8035,14 @@ mod fp16_scalar_and_gate_regressions {
         assert!(matches!(decode_op(0x0ef9d801), Inst::SimdFreFrsqrte { sqrt: false, esize: 2, q: false, .. }));
         // fmaxv s0,v1.4s = 0x6e30f820 must stay FMaxV (bit22 clear now separates).
         assert!(matches!(decode_op(0x6e30f820), Inst::FMaxV { .. }));
+        // mrs xN, fpcr read = 0xd53b4408 (real libroblox): op1=3 CRn=4 CRm=4 op2=0 L=1.
+        assert!(matches!(decode_op(0xd53b4408),
+            Inst::SysReg { sysreg: 11, rt: 8, read: true }),
+            "mrs fpcr got {:?}", decode_op(0xd53b4408));
+        // ldpsw post-indexed: x14,x15,[x13],#8 = 0x68c13dae (real libroblox).
+        assert!(matches!(decode_op(0x68c13dae),
+            Inst::LdStPair { rt: 14, rt2: 15, rn: 13, imm: 8, ld: true, writeback: true, preidx: false, size_64: false, sext: true, .. }),
+            "ldpsw got {:?}", decode_op(0x68c13dae));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).

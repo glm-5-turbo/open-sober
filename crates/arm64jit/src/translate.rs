@@ -1719,15 +1719,17 @@ pub fn translate(
                 }
                 return Ok(());
             }
-            if sysreg == 6 || sysreg == 7 || sysreg == 8 {
+            if sysreg == 6 || sysreg == 7 || sysreg == 8 || sysreg == 11 {
                 // GCS / SME-TLS / MIDR registers the JIT neither enables nor
                 // models: sysreg 6 = gcspr_el0 (armv9 GCS pointer; 0 when GCS
                 // disabled), sysreg 7 = tpidr2_el0 (SME second TLS pointer; 0
                 // without SME), sysreg 8 = midr_el1 (implementer/part; 0 =
                 // unknown core so glibc picks generic non-SME/SVE paths).
+                // sysreg 11 = fpcr read: 0 = nearest-even rounding, default FPCR
+                // (the JIT rounds per-op so no state to surface).
                 // Both read 0 on a fresh EL0 context that never enables the
                 // feature — matching what a real core reports at boot.
-                // (All three read 0; writes are no-ops.)
+                // (All read 0; writes are no-ops.)
                 if read && rt != 31 {
                     buf.mov_ri64(RAX, 0);
                     stg(buf, rt as u32, RAX);
