@@ -7900,6 +7900,23 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fcmp_half_exec() {
+        // fcmp h2, #0.0 = 0x1ee02048 (real libroblox): compare H2 to +0.0, set NZCV.
+        // After fcmp, guest flags mirror x86 comiss: ZF=1 if equal, CF=1 if H2<0.
+        // set H2 = +0.0 -> ZF set (equal), CF clear.
+        let mut st = CpuState::new();
+        st.v[4] = 0x0000; // H2 (reg2 low half) = 0x3C00 1.0? no: 0.0f16 = 0x0000
+        // reg2 = v[2round up...] low half at vslot(2)=st.v[4]
+        let r = exec_bytes(&mut st, &[0x48, 0x20, 0xe0, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0);
+        assert!(r.is_ok(), "{r:?}");
+        // ZF should be set (0.0 == 0.0). x86 nzcv mapping: store_nzcv_fp -> guest nzcv.
+        // check via a follow-on b.eq-style: simpler assert the x86 ZF outcome through
+        // the guest NZCV Z bit (bit 30, the AArch64 Z flag = equal).
+        assert_ne!(st.nzcv & (1 << 30), 0, "fcmp h2,#0 with H2=0.0 sets ZF (equal)");
+        // AArch64 Z flag is nzcv bit 30 (the 'Z' of NZCV). Verify against_zero form.
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

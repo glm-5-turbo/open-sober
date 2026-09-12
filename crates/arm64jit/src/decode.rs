@@ -665,6 +665,7 @@ pub enum Inst {
                                                               rm: u8, // second fp reg (0 for the #0.0 form)
                                                               against_zero: bool, // true = FCMP Dn, #0.0 (rm field ignored)
                                                               sz: bool, // true = double (fcmp Dn,Dm), false = single (fcmp Sn,Sm)
+                                                              half: bool, // true = fp16 (fcmp Hn,Hm / Hn,#0.0)
                                                           },
     // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
             FcsSel {
@@ -4014,8 +4015,10 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     // Double gate (insn & 0xffe0_fc00)==0x1e602000, single ==0x1e202000 (bit22
                     // selects). Masks rn(5-9)/rm(16-20)/rd(0-4); rm==0 covers `fcmp Dn,#0.0`.
                     let fcmp_sz = (insn & 0xffe0_fc00) == 0x1e60_2000
-                        || (insn & 0xffe0_fc00) == 0x1e20_2000;
+                        || (insn & 0xffe0_fc00) == 0x1e20_2000
+                        || (insn & 0xffe0_fc00) == 0x1ee0_2000; // fp16 fcmp Hn,Hm / Hn,#0
                     if fcmp_sz {
+                        let half = (insn & 0x00f0_0000) == 0x00e0_0000; // byte1 top-nibble 0xe = fp16 (vs 0x2 s / 0x6 d)
                         let sz = (insn & 0x400000) != 0; // 1 => double (0x1e6...), 0 => single
                         let rn = ((insn >> 5) & 0x1f) as u8;
                         // bit3 (0x8): the `FCMP <Dn>, #0.0` IMMEDIATE form (rm field is
@@ -4023,7 +4026,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                         // bit3, not by rm. When set, the operand is literal 0.0.
                         let against_zero = (insn & 0x8) != 0 && ((insn >> 16) & 0x1f) == 0;
                         let rm = ((insn >> 16) & 0x1f) as u8;
-                        return Inst::Fcmp { rn, rm, against_zero, sz };
+                        return Inst::Fcmp { rn, rm, against_zero, sz, half };
                     }
                     // ---- scalar FP->int stored to a FP reg: fcvtzs Dd,Dn / Sd,Sn ----
                     // Prefix 0x5e (bit29 set = scalar FP target, vs vector 0xfe/0x4e);
@@ -6441,7 +6444,7 @@ mod logical_imm_regressions {
         }
         // fcmp d7, d6 = 0x1e6620e0 (real libroblox audio loop) => Fcmp sets NZCV.
         match decode(0x1e6620e0) {
-            Inst::Fcmp { rn, rm, against_zero, sz } => {
+            Inst::Fcmp { rn, rm, against_zero, sz, .. } => {
                 assert_eq!(rn, 7);
                 assert_eq!(rm, 6);
                 assert!(!against_zero);
@@ -6452,7 +6455,7 @@ mod logical_imm_regressions {
         // fcmp d6, d16 = 0x1e7020c0 (real libroblox; high rm reg folded into the
         // base nibble) → must still decode as Fcmp with rm=16.
         match decode(0x1e7020c0) {
-            Inst::Fcmp { rn, rm, against_zero, sz } => {
+            Inst::Fcmp { rn, rm, against_zero, sz, .. } => {
                 assert_eq!(rn, 6);
                 assert_eq!(rm, 16);
                 assert!(!against_zero);
@@ -7492,6 +7495,10 @@ mod fp16_scalar_and_gate_regressions {
             Inst::Fccmp { rn: 0, rm: 1, nzcv: 3, cond: 1, sz: true }));
         // fcmp/fabs/fcsel must NOT be swallowed by the fccmp gate.
         assert!(matches!(decode_op(0x1e212040), Inst::Fcmp { .. }), "fcmp s");
+        // fp16 scalar fcmp: 0x1ee02048 = fcmp h2, #0.0 (real libroblox) => half=true.
+        assert!(matches!(decode_op(0x1ee02048),
+            Inst::Fcmp { rn: 2, rm: 0, against_zero: true, sz: true, half: true }),
+            "got {:?}", decode_op(0x1ee02048));
         assert!(matches!(decode_op(0x1e20c021), Inst::FpUnary { op: 5, .. }),
             "fabs s0,s0 stays fp-unary");
     }

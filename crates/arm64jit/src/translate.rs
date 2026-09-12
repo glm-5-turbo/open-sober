@@ -2823,7 +2823,7 @@ pub fn translate(
                                             }
                                             Ok(())
                                         }
-        Inst::Fcmp { rn, rm, against_zero, sz } => {
+        Inst::Fcmp { rn, rm, against_zero, sz, half } => {
             // fcmp d{rn}, d{rm} / fcmp d{rn}, #0.0 / fcmp s{rn}, s{rm}:
             // compare and set guest NZCV. Use comisd/comiss (CF=1 if a<b,
             // ZF=1/PF=1 if unordered); store_nzcv_fp maps to AArch64 NZCV.
@@ -2836,19 +2836,33 @@ pub fn translate(
                     buf.movq_load(1, RBX, vslot(rm));
                 }
             } else {
-                buf.mov_load32(RAX, RBX, vslot(rn));
-                buf.movd_xmm_r32(0, RAX);
-                if against_zero {
-                    buf.pxor_xmm(1, 1); // xmm1 = +0.0f
+                // half: load the low f16 half, promote to f32 (F16C), comiss.
+                if half {
+                    buf.mov_load16(RAX, RBX, vslot(rn));
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    if against_zero {
+                        buf.pxor_xmm(1, 1); // xmm1 = +0.0f
+                    } else {
+                        buf.mov_load16(RAX, RBX, vslot(rm));
+                        buf.movd_xmm_r32(1, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc9]); // vcvtph2ps xmm1,xmm1
+                    }
                 } else {
-                    buf.mov_load32(RAX, RBX, vslot(rm));
-                    buf.movd_xmm_r32(1, RAX);
+                    buf.mov_load32(RAX, RBX, vslot(rn));
+                    buf.movd_xmm_r32(0, RAX);
+                    if against_zero {
+                        buf.pxor_xmm(1, 1); // xmm1 = +0.0f
+                    } else {
+                        buf.mov_load32(RAX, RBX, vslot(rm));
+                        buf.movd_xmm_r32(1, RAX);
+                    }
                 }
             }
             if sz {
                 buf.comisd(0, 1);
             } else {
-                buf.comiss(0, 1);
+                buf.comiss(0, 1); // works for both promoted-half and single
             }
             store_nzcv_fp(buf);
             Ok(())
