@@ -1,5 +1,42 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH24) — the engine's OWN real GEOMETRY draw path now dispatches glDrawElements through the GLES bridge: complete 16-slot dispatch map (slots 9/10 = glDrawElements/glDrawArrays), new `--renderframe-drawprobe` that drives the engine's own geometry wrapper 0x5b35288 to a real indexed glDrawElements through the bridge (mode=GL_TRIANGLES, GL_UNSIGNED_INT, GL_ELEMENT_ARRAY_BUFFER bind), wrapper Ok(0x0) + post-draw swap Ok(0x1), exit 124 stable. Workspace 473/0; HEAD e358df0.
+
+Follows on SH23's sustained clear loop. The clear-only frame-fn (0x105b32c00)
+never touches geometry; the engine's real draw is wrapper 0x5b35288 →
+primitive-setup 0x5b353d0 (binds GL array buffers, enables attrib arrays, sets
+glVertexAttribPointer — all via direct @plt) then dispatches the indexed /
+array draw through GLES dispatch-table **slot 9 = glDrawElements** (0x5b352f4
+bl 0x5b3a22c) / **slot 10 = glDrawArrays** (0x5b35368 bl 0x5b3a238). Those
+extended slots (BSS 0x106d3b2f0 + 8*N, 16 total; stub 0x5b3a1c0+0xc*N) held
+raw-Mesa addresses — the SH19/SH3 bug class for the draw path.
+
+- Commits: (1) complete the map + seed slots 9/10 + regression. (2) correct
+  seed to explicit (slot,name) + add `--renderframe-drawprobe`.
+- `--renderframe-drawprobe`: fabricates a minimal renderer (empty primitive
+  list → 0x5b353d0 returns mask 0 fast; nonzero [renderer+120] index-buffer
+  obj + w5=3 count → INDEXED path). With slots 9/10 seeded the wrapper
+  dispatches a REAL glDrawElements through the bridge:
+  `hostcall@glDrawElements pc=0x7f0000002a38 x0=0x4 x1=0x0 x2=0x1405
+  x30=0x105b352f8` (mode=GL_TRIANGLES, type=GL_UNSIGNED_INT), plus
+  `glBindBuffer(GL_ELEMENT_ARRAY_BUFFER=0x8893) x30=0x105b35550`.
+- Reproducible artifact: runs/capture_drawprobe.sh; run-log runs/sh24-drawprobe.txt.
+  Doc: docs/frontier-sh24-draw-slots.md.
+- Regression `draw_slots_gl_draw_elements_arrays_resolve_via_int_bridge`
+  (both resolve via int bridge with trailing NUL, rejected by mixed).
+
+**Honest scope:** the fabricated renderer is EMPTY (no real mesh/buffer/VAO
+data), so this proves the DRAW DISPATCH is bridge-functional, not the render of
+real geometry. Baselines unchanged (--jni exit 0; stable idle exit 124).
+
+**Next wall (the multi-cycle renderer C++ reverse, now clearly scoped):** feed
+primitive-setup 0x5b353d0 a coherent primitive list + vertex buffers so the
+draw wrapper produces a real rendered triangle. Primitive list lives at
+[renderer+56]=container, [container+72]/[80] = begin/end (stride 0x18 per
+primitive); vertex buffers/id + VAO state in the renderer sub-objects
+(0x5b353fc [x25+96] buffer array, 0x5b3547c descriptor idx, 0x5b35488 attrib
+mask). Slots 11+ (texture/uniform/shader dispatch) still unseeded/reversed.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH23) — the engine's OWN render recipe now runs as a LIVE ANIMATED render loop: new elfjit `--rendersustain <fps>` drives bind -> frame-fn 0x105b32c00 -> post-frame swap CONTINUOUSLY on the detached host thread (concurrent with StartApp's idle main-loop jit_run), cycling a 5-color palette per frame. Workspace 472/0; HEAD b692077.
 
 SH22d proved the recipe reentrant (N=3, frozen color). SH23 makes it
