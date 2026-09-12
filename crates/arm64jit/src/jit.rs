@@ -7653,4 +7653,25 @@ mod fp16_and_fabd_fccmp_exec {
         assert!((f32::from_bits(fb2(&st2, 1, 0)) - (1.0f32 / 3.0)).abs() < 0.01, "1/sqrt(9)~1/3");
         assert!((f32::from_bits(fb2(&st2, 1, 1)) - 0.25).abs() < 0.001, "1/sqrt(16)");
     }
+
+    #[test]
+    fn frecps_frsqrts_exec() {
+        // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
+        // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.
+        let mut st = CpuState::new();
+        st.v[2] = (1.0f32.to_bits() as u64) << 32 | 0.5f32.to_bits() as u64;
+        st.v[3] = (4.0f32.to_bits() as u64) << 32 | 2.0f32.to_bits() as u64;
+        st.v[4] = (1.0f32.to_bits() as u64) << 32 | 0.5f32.to_bits() as u64;
+        st.v[5] = (4.0f32.to_bits() as u64) << 32 | 2.0f32.to_bits() as u64;
+        exec_bytes(&mut st, &[0x20, 0xfc, 0x22, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        // 2 - 0.5*0.5 = 1.75 ; 2 - 1*1 = 1 ; 2 - 2*2 = -2 ; 2 - 4*4 = -14
+        let f = |s: &CpuState, off: usize| -> f32 {
+            let slot = if off < 2 { 0usize } else { 1usize };
+            f32::from_bits((s.v[slot] >> (32 * (off % 2))) as u32)
+        };
+        assert!((f(&st, 0) - 1.75).abs() < 1e-4);
+        assert!((f(&st, 1) - 1.0).abs() < 1e-4);
+        assert!((f(&st, 2) + 2.0).abs() < 1e-4);
+        assert!((f(&st, 3) + 14.0).abs() < 1e-4);
+    }
 }

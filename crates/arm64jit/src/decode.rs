@@ -1415,6 +1415,8 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             (0x0ea0_f400, 5), (0x4ea0_f400, 5), // fmin
             (0x0e20_c400, 6), (0x4e20_c400, 6), // fmaxnm
             (0x0ea0_c400, 7), (0x4ea0_c400, 7), // fminnm
+            (0x0e20_fc00, 8), (0x4e20_fc00, 8), // frecps = 2 - Vn*Vm
+            (0x0ea0_fc00, 9), (0x4ea0_fc00, 9), // frsqrts = (3 - Vn*Vm)/2
         ];
         let m = insn & 0xffe0_fc00;
         if let Some(&(_, op)) = VFP.iter().find(|&&(r, _)| r == m) {
@@ -7431,6 +7433,18 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x4e22f420), Inst::SimdFreFrsqrte { .. }));
         assert!(!matches!(decode_op(0x4e217801), Inst::SimdFreFrsqrte { .. }));
         assert!(!matches!(decode_op(0x0ea1b820), Inst::SimdFreFrsqrte { .. }));
+        // FP reciprocal step (Newton refinement): frecps v0.4s,v1,v2 = 0x4e22fc20,
+        // frsqrts v0.4s = 0x4ea2fc20. Real Roblox 0x4e22fc00/0x4e21fc02 = frecps.
+        assert!(matches!(decode_op(0x4e22fc20),
+            Inst::VecFpArith { rd: 0, rn: 1, rm: 2, op: 8, q: true }),
+            "got {:?}", decode_op(0x4e22fc20));
+        assert!(matches!(decode_op(0x4ea2fc20),
+            Inst::VecFpArith { rd: 0, rn: 1, rm: 2, op: 9, q: true }),
+            "got {:?}", decode_op(0x4ea2fc20));
+        assert!(matches!(decode_op(0x6e22fc20),
+            Inst::VecFpArith { rd: 0, rn: 1, rm: 2, op: 3, q: true })); // fdiv still fdiv
+        assert!(matches!(decode_op(0x4e22f420),
+            Inst::VecFpArith { rd: 0, rn: 1, rm: 2, op: 4, q: true })); // fmax still fmax
         // halving add: uhadd v0.16b,v0,v1 = 0x6e210400; uhadd v0.8b = 0x2e210400;
         // shadd v0.8b = 0x0e220420. Real Roblox uses 0x6e210400/0x2e210400.
         assert!(matches!(decode_op(0x6e210400),
