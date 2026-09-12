@@ -1155,6 +1155,14 @@ fn main() {
             // Drain body span (guest vaddrs) where the drain holds x20 = deque root.
             const DRAIN_LO: u64 = 0x102856e40;
             const DRAIN_HI: u64 = 0x1028570a4;
+            // Optional --deque-arg2 <hex>: override [node+32] of the injected node
+            // (the drain passes it as dispatch arg2, x2 = [node+32]&~1). Default
+            // keeps the cloned sentinel's [node+32] (or 0). Sweeping this value is
+            // the controllable node-content selector into the real dispatcher.
+            let arg2_override: Option<u64> = std::env::args()
+                .position(|a| a == "--deque-arg2")
+                .and_then(|i| std::env::args().nth(i + 1))
+                .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).expect("--deque-arg2 needs hex"));
             std::thread::spawn(move || {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static ROOT: AtomicU64 = AtomicU64::new(0);
@@ -1349,9 +1357,12 @@ fn main() {
                         (np as *mut u64).add(5).write_volatile(
                             ((np as *const u64).add(5).read_volatile()) | 1,
                         );
-                        // [node+32] = arg; keep sentinel's (or 0 if none).
+                        // [node+32] = arg (dispatch arg2 = [node+32]&~1); keep
+                        // sentinel's (or 0) unless --deque-arg2 overrides it.
                         (np as *mut u64).add(4).write_volatile(
-                            (np as *const u64).add(4).read_volatile(),
+                            arg2_override.unwrap_or_else(|| {
+                                (np as *const u64).add(4).read_volatile()
+                            }),
                         );
                         // Pack: low48 = node pointer (so pop truncates to it),
                         // high16 = tag matching [root+8].
