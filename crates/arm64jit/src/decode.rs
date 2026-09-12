@@ -2243,13 +2243,13 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     }
 
     // ---- SIMD halving add: uhadd/shadd Vd.T, Vn.T, Vm.T ----
-    // (a+b)>>1 per lane (no rounding), 8B/4H/2S. Gate (insn&0x1f00_fc00)==
-    // 0x0e00_0400 (byte1 0x04; bits28:24=0x0e SIMD three-same, bit28 CLEAR
-    // excludes scalar fccmp 0x1e; U=bit29 = uhadd, Q=bit30). MUST be AFTER the FP16
-    // 3-same gate (byte1 top-0 fmaxnm 0x4e420420 / fmla also match byte1 0x04&0xf4;
-    // the FP16 gate's byte2-0xf400 residue separates them: fmaxnm/fmla hit the fp16
-    // gate first, uhadd's residue 0x0e20_0400 falls through here). Disjoint from
-    //     urhadd (byte1 0x14) / uqadd (0x0c) / shadd-SIMD-int-shift.
+    // (a+b)>>1 per lane (no rounding), 8B/4H/2S. Gate (insn&0x1f20_fc00)==
+    // 0x0e20_0400 (byte1 0x04; bits28:24=0x0e SIMD three-same, bit28 CLEAR
+    // excludes scalar fccmp 0x1e; byte2 bit21 SET excludes INS/dup-family and the
+    // FP16 3-same fmaxnm/fmla; U=bit29 = uhadd, Q=bit30). MUST be AFTER the FP16
+    // 3-same gate (byte1 top-0 fmaxnm 0x4e420420 / fmla also match byte1
+    // 0x04&0xf4; the FP16 gate's byte2-0xf400 residue separates them). Disjoint
+    // from urhadd (byte1 0x14) / uqadd (0x0c) / shadd-SIMD-int-shift.
     if (insn & 0x1f20_fc00) == 0x0e20_0400 {
         let esize = 1u8 << ((insn >> 22) & 3);
         return Inst::SimdHadd {
@@ -2263,7 +2263,6 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     }
 
     // ---- SIMD FP->int convert (vector): fcvtas Vd.T, Vn.T ----
-    // Round FP vector lanes to integer lanes, round-nearest-away (signed).
     // Gate (insn & 0xbf20_fc00) == 0x0e20_c800; q=bit30 (1=.4s/.2d, 0=.2s),
     // esize=8 iff bit22 (else 4), unsigned=bit29 (fcvtas only here: bit29=0;
     // fcvtau/zu shift to 0x2e.. and fall through to other handling). Disjoint
@@ -2903,7 +2902,11 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             // JIT computed a saturating add of Vn,Vm, silently corrupting every
             // gcc -O2 matrix-init loop that broadcasts an index into a vector.)
             let b2s = (insn >> 8) & 0xff;
-            if (b2s == 0x0c || b2s == 0x2c)
+            // byte2 low-2 bits (1:0) carry the upper rn bits (rn≥8 spills into bits
+            // 9:8 of the insn = byte2 1:0), so mask them: sqadd v16.8h (0x4e710e10)
+            // has byte2 0x0e = 0x0c|0x02, not 0x0c. Only the add/sub opcode bits
+            // (byte2 7:2 == 0b000011/0b001011 => 0x0c/0x2c) distinguish.
+            if ((b2s & 0xfc) == 0x0c || (b2s & 0xfc) == 0x2c)
                 && (insn & 0x200000) != 0
                 && matches!((insn >> 24) & 0xff, 0x0e | 0x2e | 0x4e | 0x6e)
             {
@@ -2914,7 +2917,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                     rn: ((insn >> 5) & 0x1f) as u8,
                     rm: ((insn >> 16) & 0x1f) as u8,
                     esize,
-                    sub: b2s == 0x2c,
+                    sub: (b2s & 0xfc) == 0x2c,
                     unsigned: ((insn >> 29) & 1) == 1, // 0x2e/0x6e
                     q: (insn >> 30) & 1 == 1,
                 };
@@ -7446,6 +7449,17 @@ mod fp16_scalar_and_gate_regressions {
         // urhadd (0x2e221420) and uqadd (0x2e220c20) must NOT match.
         assert!(!matches!(decode_op(0x2e221420), Inst::SimdHadd { .. }));
         assert!(!matches!(decode_op(0x2e220c20), Inst::SimdHadd { .. }));
+        // sat-add with high registers: sqadd v16.8h,v16,v17 = 0x4e710e10 has byte2
+        // 0x0e (rn=16 spills into bits 9:8). Was Unsupported before the byte2-0xfc
+        // mask. Must decode as SimdSatAdd, not Unsupported.
+        assert!(matches!(decode_op(0x4e710e10),
+            Inst::SimdSatAdd { rd: 16, rn: 16, rm: 17, unsigned: false, esize: 2, q: true, .. }),
+            "got {:?}", decode_op(0x4e710e10));
+        // sqsub v31.8h,v0,v31 = 0x4e7f2c1f (rm=31, sub). Must stay "sub".
+        assert!(matches!(decode_op(0x4e7f2c1f),
+            Inst::SimdSatAdd { rd: 31, rn: 0, rm: 31, unsigned: false, sub: true, esize: 2, q: true }),
+            "got {:?}", decode_op(0x4e7f2c1f));
+        assert!(!matches!(decode_op(0x4e040c3e), Inst::SimdSatAdd { .. })); // dup from GPR
     }
 
     #[test]
