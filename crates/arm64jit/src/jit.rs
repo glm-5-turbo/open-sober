@@ -7571,6 +7571,33 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn uhadd_shadd_exec() {
+        // uhadd v0.16b, v1.16b, v2.16b = 0x6e220420: floor((a+b)/2) per byte.
+        // v1 bytes all 0x09, v2 bytes all 0x05 => (9+5)/2 = 7 each.
+        let mut st = CpuState::new();
+        for i in 0..2 { st.v[2 + i] = 0x0909090909090909u64; }
+        for i in 0..2 { st.v[4 + i] = 0x0505050505050505u64; }
+        exec_bytes(&mut st, &[0x20, 0x04, 0x22, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        for i in 0..2 { assert_eq!(st.v[i], 0x0707070707070707u64, "uhadd byte block {i}"); }
+        // floor behavior: 0x09 + 0x02 => 11/2 = 5 (not 6). uhadd v0.8b,v1,v2 = 0x2e220420.
+        let mut st2 = CpuState::new();
+        st2.v[2] = 0x0909090909090909u64; // v1 = 9 each
+        st2.v[4] = 0x0202020202020202u64; // v2 = 2 each
+        exec_bytes(&mut st2, &[0x20, 0x04, 0x22, 0x2e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        // (9+2)/2 = 5 (floor, distinct from round-up). 8 bytes each == 5.
+        assert_eq!(st2.v[0], 0x0505050505050505u64, "uhadd floor (9+2)/2=5");
+        // shadd v0.8b, v1.8b, v2.8b = 0x0e220420: signed halving. v1 = {-1(0xff),...},
+        // v2 = {0x00,...}. (-1+0)/2 = 0 (floor(-0.5) = -1? no: -1>>1 arithmetic = -1).
+        // shadd is arithmetic-shift rounding: floor(-0.5) = -1, so -1.
+        let mut st3 = CpuState::new();
+        st3.v[2] = 0xfefefefefefefefeu64; // v1 = -2 each
+        st3.v[4] = 0x0101010101010101u64; // v2 = +1 each
+        exec_bytes(&mut st3, &[0x20, 0x04, 0x22, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        // floor((-2+1)/2) = floor(-0.5) = -1 = 0xff
+        assert_eq!(st3.v[0], 0xffffffffffffffffu64, "shadd floor(-1/2)=-1");
+    }
+
+    #[test]
     fn uabd_sabd_exec() {
         // uabd v0.16b, v1.16b, v2.16b = 0x6e227420: |V1-V2| per byte.
         // Clear-cut values: V1=all 10, V2=all 4 -> |10-4|=6 for every byte.

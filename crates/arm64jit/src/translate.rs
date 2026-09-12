@@ -3187,6 +3187,50 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdHadd { rd, rn, rm, unsigned, esize, q } => {
+            // uhadd/shadd: per-lane floor((a+b)/2) = (a>>1)+(b>>1)+((a&1)&(b&1)).
+            // For signed (shadd) use arithmetic shifts (sar) on sign-extended
+            // values so the floor rounds toward -inf, matching ARM. esize-stride.
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let e = esize as i32; // 1, 2, or 4 bytes
+            for lane in 0..lanes {
+                let off = lane * e;
+                if unsigned {
+                    // zero-extend loads, logical >>1
+                    match e {
+                        1 => { buf.movzx_byte_mem(RAX, RBX, f(rn) + off); buf.movzx_byte_mem(RCX, RBX, f(rm) + off); }
+                        2 => { buf.mov_load16(RAX, RBX, f(rn) + off); buf.mov_load16(RCX, RBX, f(rm) + off); }
+                        _ => { buf.mov_load32(RAX, RBX, f(rn) + off); buf.mov_load32(RCX, RBX, f(rm) + off); }
+                    }
+                } else {
+                    // sign-extended loads, arithmetic >>1
+                    match e {
+                        1 => { buf.movsx_byte_mem(RAX, RBX, f(rn) + off); buf.movsx_byte_mem(RCX, RBX, f(rm) + off); }
+                        2 => { buf.movsx_word_mem(RAX, RBX, f(rn) + off); buf.movsx_word_mem(RCX, RBX, f(rm) + off); }
+                        _ => { buf.mov_load32(RAX, RBX, f(rn) + off); buf.movsxd_r64_r32(RAX, RAX);
+                               buf.mov_load32(RCX, RBX, f(rm) + off); buf.movsxd_r64_r32(RCX, RCX); }
+                    }
+                }
+                // floor term: (a>>1)+(b>>1) then +((a&1)&(b&1)).
+                buf.mov_rr64(RDX, RAX); // RDX = a (save for carry)
+                if unsigned { buf.shr_ri8(RAX, 1); } else { buf.sar_ri8(RAX, 1); }
+                if unsigned { buf.shr_ri8(RCX, 1); } else { buf.sar_ri8(RCX, 1); }
+                buf.add_rr64(RAX, RCX);
+                // carry = (a&1)&(b&1): RDX &= b (reload b low), &= 1
+                buf.mov_load16(RCX, RBX, f(rm) + off); // RCX = b (bit0)
+                buf.and_rr64(RDX, RCX);
+                buf.and_ri64(RDX, 1);
+                buf.add_rr64(RAX, RDX);
+                // store esize-low
+                match e {
+                    1 => buf.mov_store8(RBX, f(rd) + off, RAX),
+                    2 => buf.mov_store16(RBX, f(rd) + off, RAX),
+                    _ => buf.mov_store32(RBX, f(rd) + off, RAX),
+                }
+            }
+            Ok(())
+        }
         Inst::SimdFreFrsqrte { rd, rn, sqrt, esize, q } => {
             // frecpe/frsqrte Vd.T, Vn.T: per-lane approximate reciprocal or
             // 1/sqrt. esize 4 -> rcpss/rsqrtss on the promoted 32-bit; esize 8

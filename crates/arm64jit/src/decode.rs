@@ -331,6 +331,8 @@ pub enum Inst {
     SimdAbd { rd: u8, rn: u8, rm: u8, signed: bool, esize: u8, q: bool },
     // ---- SIMD FP reciprocal/rsqrt estimate: frecpe/frsqrte Vd.T, Vn.T ----
     SimdFreFrsqrte { rd: u8, rn: u8, sqrt: bool, esize: u8, q: bool },
+    // ---- SIMD halving add: uhadd/shadd Vd.T, Vn.T, Vm.T (floor((a+b)/2)) ----
+    SimdHadd { rd: u8, rn: u8, rm: u8, unsigned: bool, esize: u8, q: bool },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise NOT (two-input mvn alias, single-source): mvn Vd.16B/8B, Vn ----
@@ -2238,6 +2240,26 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdFp16As { rd, rn, rm, op, q };
+    }
+
+    // ---- SIMD halving add: uhadd/shadd Vd.T, Vn.T, Vm.T ----
+    // (a+b)>>1 per lane (no rounding), 8B/4H/2S. Gate (insn&0x1f00_fc00)==
+    // 0x0e00_0400 (byte1 0x04; bits28:24=0x0e SIMD three-same, bit28 CLEAR
+    // excludes scalar fccmp 0x1e; U=bit29 = uhadd, Q=bit30). MUST be AFTER the FP16
+    // 3-same gate (byte1 top-0 fmaxnm 0x4e420420 / fmla also match byte1 0x04&0xf4;
+    // the FP16 gate's byte2-0xf400 residue separates them: fmaxnm/fmla hit the fp16
+    // gate first, uhadd's residue 0x0e20_0400 falls through here). Disjoint from
+    //     urhadd (byte1 0x14) / uqadd (0x0c) / shadd-SIMD-int-shift.
+    if (insn & 0x1f20_fc00) == 0x0e20_0400 {
+        let esize = 1u8 << ((insn >> 22) & 3);
+        return Inst::SimdHadd {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            unsigned: (insn & 0x2000_0000) != 0,
+            esize,
+            q: (insn >> 30) & 1 == 1,
+        };
     }
 
     // ---- SIMD FP->int convert (vector): fcvtas Vd.T, Vn.T ----
@@ -7406,6 +7428,24 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x4e22f420), Inst::SimdFreFrsqrte { .. }));
         assert!(!matches!(decode_op(0x4e217801), Inst::SimdFreFrsqrte { .. }));
         assert!(!matches!(decode_op(0x0ea1b820), Inst::SimdFreFrsqrte { .. }));
+        // halving add: uhadd v0.16b,v0,v1 = 0x6e210400; uhadd v0.8b = 0x2e210400;
+        // shadd v0.8b = 0x0e220420. Real Roblox uses 0x6e210400/0x2e210400.
+        assert!(matches!(decode_op(0x6e210400),
+            Inst::SimdHadd { rd: 0, rn: 0, rm: 1, unsigned: true, esize: 1, q: true }),
+            "got {:?}", decode_op(0x6e210400));
+        assert!(matches!(decode_op(0x2e210400),
+            Inst::SimdHadd { rd: 0, rn: 0, rm: 1, unsigned: true, esize: 1, q: false }));
+        assert!(matches!(decode_op(0x0e220420),
+            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: false, esize: 1, q: false }),
+            "got {:?}", decode_op(0x0e220420));
+        assert!(matches!(decode_op(0x2e620420),
+            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: true, esize: 2, q: false }));
+        // uhadd v0.16b,v1,v2 = 0x6e220420 (rm=2)
+        assert!(matches!(decode_op(0x6e220420),
+            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: true, esize: 1, q: true }));
+        // urhadd (0x2e221420) and uqadd (0x2e220c20) must NOT match.
+        assert!(!matches!(decode_op(0x2e221420), Inst::SimdHadd { .. }));
+        assert!(!matches!(decode_op(0x2e220c20), Inst::SimdHadd { .. }));
     }
 
     #[test]
