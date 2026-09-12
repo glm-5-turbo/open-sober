@@ -1,6 +1,52 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle M) — the cycle-L idle-futex barrier is now HOST-DRIVABLE: `--futex-kick` releases the per-thread latch, the boot's init advances 1515→1670 blocks and reaches the native-window layer (ANativeWindow) for the first time (workspace 405/0, HEAD df5d0a4).
+## Session (Sep 12, 2026, hermes-worker, cycle N) — the ANativeWindow layer now maps to a REAL desktop X11 window, wired race-free before StartApp; `ANativeWindow_fromSurface` hands the guest a genuine 0x200000 XID on Xvfb (workspace 408/0, HEAD 6adcd84).
+
+Cycle M's `ANativeWindow_fromSurface` returned a `HOST_THUNK_BASE|0x2000`
+sentinel — a fake address Mesa's x11-EGL platform would reject in
+`eglCreateWindowSurface(win, ...)`. This cycle mapped the window layer to a real
+desktop window and fixed the wiring race:
+
+1. `input_wrapper::x11::open_window_sized(...,w,h)` — the runtime opens a
+   1280x720 Xvfb window matching the `ANativeWindow_getWidth/Height` framebuffer.
+2. `shims::set_anativewindow_xid()` + an `ANATIVE_WINDOW_XID` atomic —
+   `anativewindow_fromsurface` returns the registered real XID (sentinel
+   fallback otherwise, so headless stays coherent).
+3. **Race fix**: the first window wiring (commit `5fdd7a6`) ran in a spawned
+   thread that lost to the boot — StartApp's `ANativeWindow_fromSurface` fired at
+   ~3.9s while the XID registered later, so the guest still saw the sentinel.
+   Now `wire_real_window()` runs **synchronously** inside the `--startapp` block
+   before the StartApp `jit_run`: Xvfb up → 1280x720 window → XID registered →
+   DISPLAY/EGL_PLATFORM=x11 set (X connection leaked to keep the window alive).
+4. New integration gate `anativewindow_x11_surface`: the XID the guest's
+   `ANativeWindow_fromSurface` yields builds a real EGL window surface and
+   presents a frame (llvmpipe + Xvfb) — the exact value the window-surface path
+   will consume.
+
+**Verified:** log ordering proves the fix — `wired real X11 window
+XID=0x200000` precedes `hostcall@ANativeWindow_fromSurface`, and the shim returns
+`xid=0x200000`. Boot unchanged (stable idle main loop, exit 124, no crash).
+
+Run (reproducible):
+```
+cargo build -p arm64jit --example elfjit
+JIT_DRIVE_LIFECYCLE=1 timeout 20 ./target/debug/examples/elfjit \
+  ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144 \
+  --kicker 0x106863af8 --futex-kick 2
+# expect: [elfjit:anativewindow] wired real X11 window XID=0x200000 on :22x,
+# then exit 124 (stable engine main loop; no egl/looper hostcalls yet).
+```
+Run-log: `/home/hermes-worker/runs/anatg-sync.txt`.
+
+### Next lever (unchanged hard wall — the looper/producer)
+The engine's main loop is reached and the window layer is real, but no egl*/gl*
+hostcall fires (0) and `ALooper_pollOnce` is never called: the render/EGL path
+only opens after a producer enqueues a real render/task the idle futex
+(lr=0x10284d134) awaits. Identify which guest thread should run the looper and
+ensure it is spawned/woken (or enqueue the work item directly). A real
+egl*/gl* frame from the running engine is the next targeted milestone.
+
+---
 
 Cycle L pinned the engine main-loop idle barrier as a REAL per-thread futex:
 each guest thread parks in `guest_svc`'s FUTEX_WAIT_BITSET on its OWN latch
