@@ -1976,10 +1976,27 @@ fn main() {
                         // The SH19-21 "glClearColor"+"glClearDepthf" guesses mis-routed
                         // those dispatches (glClearDepthf bridge ignored the int/ptr args
                         // and cleared nothing -> black window).
+                        // The engine's GLES dispatch table is 16 slots at BSS
+                        // 0x106d3b2f0 (stub 0x5b3a1c0+0xc*N does adrp 6d3b000; ldr
+                        // xK,[x8,#752+8*N]; br xK). Slots 0-7 are the clear path
+                        // (SH22-corrected names below). Slots 8-15 are the GEOMETRY
+                        // draw path: the draw wrapper 0x5b35288 dispatches slot 9 as
+                        // glDrawElements (indexed draw, 0x5b352f4 bl 0x5b3a22c) and
+                        // slot 10 as glDrawArrays (array draw, 0x5b35368 bl 0x5b3a238)
+                        // after the primitive-setup fn 0x5b353d0 binds buffers +
+                        // sets up vertex attrib pointers (glBindBuffer/
+                        // glEnableVertexAttribArray/glVertexAttribPointer direct @plt).
+                        // Seeding slots 9/10 too means a real geometry draw (reaching
+                        // the RENDERER C++ object reverse) dispatches through the
+                        // bridge instead of jumping to a raw Mesa addr (SH19 class).
                         let seed_names = [
                             "glDrawBuffers", "glClearBufferiv", "glClearBufferfv",
                             "glClearStencil", "glColorMask", "glDepthMask",
                             "glStencilMask", "glViewport",
+                            "glDrawElements", "glDrawArrays", // slots 8-9 (draw)
+                            // slots 10+ are texture/uniform/shader dispatch (see
+                            // docs/frontier-sh24-draw-slots.md); leave unseeded
+                            // until the wrapper needs them.
                         ];
                         if renderframe_args.iter().any(|a| a == "--renderframe-seedgles") {
                             for (i, name) in seed_names.iter().enumerate() {

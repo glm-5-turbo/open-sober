@@ -1806,6 +1806,29 @@ mod tests {
     }
 
     #[test]
+    fn draw_slots_gl_draw_elements_arrays_resolve_via_int_bridge() {
+        // Regression (SH24): the engine's real geometry draw path —
+        // wrapper 0x5b35288 dispatching the GLES dispatch-table slots 9/10
+        // (0x5b352f4 bl 0x5b3a22c / 0x5b35368 bl 0x5b3a238) — was left
+        // UNSEEDED by --renderframe-seedgles (it only covered the clear
+        // slots 0-7), so slot 9/10 held raw-Mesa addresses (the same
+        // SH19/SH3 bug class) and a driven real draw would `br` out-of-image.
+        // glDrawElements/glDrawArrays are pure integer-ABI GLES, so they must
+        // resolve through the integer bridge WITH a trailing NUL (the way
+        // elfjit's seedgles passes them).
+        for n in ["glDrawElements", "glDrawArrays"] {
+            let nm = format!("{n}\0");
+            resolve_gles_int(nm.as_bytes())
+                .unwrap_or_else(|| panic!("{n} NOT resolvable via int bridge (draw slot)"));
+            eprintln!("resolve_gles_int({n}\\0) -> int bridge OK (slot draw)");
+            assert!(
+                resolve_gles_mixed(nm.as_bytes()).is_none(),
+                "{n} should not be mixed-wrapped"
+            );
+        }
+    }
+
+    #[test]
     fn resolve_gles_int_clear_buffer_fv_and_draw_buffers() {
         // Regression (SH22): the engine's frame clear path dispatches slot2 as
         // glClearBufferfv (per-buffer clear loop with GL_COLOR=0x1800/GL_DEPTH=
