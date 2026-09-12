@@ -1,8 +1,5 @@
-use arm64jit::jit::{CpuState, exec_bytes};
 fn main() {
-    let mut st = CpuState::new();
-    st.v[2] = 5; st.v[4] = 3;
-    let code = [0x20,0xe0,0xe2,0x0e, 0xc0,0x03,0x5f,0xd6];
-    let r = exec_bytes(&mut st, &code, 0);
-    println!("res={:?} v0={:016x} v1={:016x}", r, st.v[0], st.v[1]);
+    for (w,l) in [(0x4ef8e843u32,"fcmlt8h real"),(0x0ef8d820,"fcmeq4h"),(0x0ef8c820,"fcmgt4h"),(0x2ef8c820,"fcmge4h"),(0x0ef8e820,"fcmlt4h"),(0x2ef8d820,"fcmle4h"),(0x0ef8f820,"fabs4h must-not")] {
+        println!("{l}: {:?}", arm64jit::decode::decode(w));
+    }
 }

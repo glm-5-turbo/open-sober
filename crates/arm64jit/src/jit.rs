@@ -7780,6 +7780,36 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fp16_cmpz_exec() {
+        // fcmeq v0.4h, v1.4h, #0.0 = 0x0ef8d820: per-lane eq against 0.
+        // v1 halves = {2.5=0x4100, 0.0=0x0000, -1.0=0xBC00, 3.0=0x4200}.
+        // eq => lane1 only -> stores 0xffff at lane1, 0 elsewhere.
+        let mut st = CpuState::new();
+        st.v[2] = (0x4200u64 << 48) | (0xBC00u64 << 32) | (0x0000u64 << 16) | 0x4100u64;
+        exec_bytes(&mut st, &[0x20, 0xd8, 0xf8, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h(&st, 0), 0x0000, "eq 2.5 -> 0");
+        assert_eq!(h(&st, 1), 0xffff, "eq 0.0 -> all-ones");
+        assert_eq!(h(&st, 2), 0x0000, "eq -1.0 -> 0");
+        // fcmgt v0.4h, v1.4h, #0.0 = 0x0ef8c820
+        let mut st2 = CpuState::new();
+        st2.v[2] = (0x4200u64 << 48) | (0xBC00u64 << 32) | (0x0000u64 << 16) | 0x4100u64;
+        exec_bytes(&mut st2, &[0x20, 0xc8, 0xf8, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h2 = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h2(&st2, 0), 0xffff, "gt 2.5 -> ones");
+        assert_eq!(h2(&st2, 1), 0x0000, "gt 0.0 -> 0");
+        assert_eq!(h2(&st2, 2), 0x0000, "gt -1.0 -> 0");
+        assert_eq!(h2(&st2, 3), 0xffff, "gt 3.0 -> ones");
+        // fcmlt v0.4h, v1.4h, #0.0 = 0x0ef8e820 : only -1.0 (lane2) true.
+        let mut st3 = CpuState::new();
+        st3.v[2] = (0x4200u64 << 48) | (0xBC00u64 << 32) | (0x0000u64 << 16) | 0x4100u64;
+        exec_bytes(&mut st3, &[0x20, 0xe8, 0xf8, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h3 = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h3(&st3, 0), 0x0000, "lt 2.5");
+        assert_eq!(h3(&st3, 2), 0xffff, "lt -1.0 -> ones");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

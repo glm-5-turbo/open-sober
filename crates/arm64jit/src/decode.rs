@@ -500,6 +500,13 @@ pub enum Inst {
     VarShiftVar { rd: u8, rn: u8, rm: u8, op: u8, sf: bool },
     // ---- SIMD FP unary: fneg/fabs/fsqrt Vd.T, Vn.T - op 0=neg 1=abs 2=sqrt ----
     SimdFpUnary { rd: u8, rn: u8, op: u8, esize: u8, q: bool },
+    // ---- SIMD FP16 compare-to-zero mask: fcmeq/fcmgt/fcmge/fcmle/fcmlt Vd.4H/.8H, Vn, #0 ----
+    // Per halfword lane, produce all-ones if the lane satisfies the compare to
+    // (+/-)0.0, else 0. Two-reg-misc: byte1(bits15:8)==0xf8, byte2(bits23:16) in
+    // {0xd8 fcmeq, 0xc8 fcmgt/fcmge, 0xe8 fcmlt/fcmle}, U=bit29 (fcmeq/flt vs
+    // ge/le), bit21 (0xc8 vs 0xe8 discriminates > from <) — see decode gate.
+    // Q=bit30 (.8h vs .4h). op: 0=eq 1=gt 2=ge 3=lt 4=le.
+    SimdFp16Cmpz { rd: u8, rn: u8, op: u8, q: bool },
     // ---- SIMD FP rounding: frint{n,m,p,z,a} Vd.T, Vn.T ----
     // mode 0=n(nearest-even) 1=m(toward -inf/floor) 2=p(+inf/ceil) 3=z(toward zero)
     // 4=a(nearest, ties away). esize = element size bytes (4=s, 8=d).
@@ -2209,6 +2216,37 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             hi: (insn & 0x4000_0000) != 0,
         };
     }
+
+    // ---- SIMD FP16 compare-to-zero mask: fcmeq/fcmgt/fcmge/fcmle/fcmlt Vd.4H/.8H, Vn, #0 ----
+    // (bits15:8)==0xf8; byte2 (bits23:16) & 0xfc in
+    // {0xc8, 0xd8, 0xe8} (0xd8=fcmeq, 0xc8=fcmgt, 0xe8=fcmlt; U=bit29 turns
+    // eq->le, gt->ge). Distinct from fabs/fneg (0xf820 has byte2 0xf8, not here),
+    // from fminnm (bits15:8 0xc4/0xc6, not 0xc8/d8/e8) and the int cmp families.
+    // Q=bit30 -> .8h. op: 0=eq 1=gt 2=ge 3=lt 4=le.
+    {
+        let b2r = ((insn >> 8) & 0xfc) as u8;
+        let u = (insn >> 29) & 1 == 1;
+        let op = match (b2r, u) {
+            (0xc8, false) => Some(1), // fcmgt
+            (0xc8, true) => Some(2),  // fcmge
+            (0xd8, false) => Some(0), // fcmeq
+            (0xd8, true) => Some(4),  // fcmle
+            (0xe8, false) => Some(3), // fcmlt
+            (0xe8, true) => Some(1),  // fcmgt (.8h alternate)
+            _ => None,                // e.g. fminnm bits15:8 0xc6 -> keep decoding
+        };
+        if let Some(op) = op {
+            if (insn & 0x0f00_0000) == 0x0e00_0000 && (insn & 0x00ff_0000) == 0x00f8_0000 {
+                return Inst::SimdFp16Cmpz {
+                    rd: (insn & 0x1f) as u8,
+                    rn: ((insn >> 5) & 0x1f) as u8,
+                    op,
+                    q: (insn >> 30) & 1 == 1,
+                };
+            }
+        }
+    }
+
     // Per-lane approximate reciprocal (frecpe) or 1/sqrt (frsqrte), two-reg-misc.
     // Gate: byte3 low-nibble 0x0e (0x..e prefix), byte1 == 0xd8 family (0xfc mask
     // clears the rn-spill bits 1:0), byte2 bit23 SET (0x0080_0000; disjoint from
@@ -7524,6 +7562,27 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x4e629400), Inst::Pmull1q { .. }));
         assert!(!matches!(decode_op(0x0e209c00), Inst::Pmull1q { .. }));
         assert!(!matches!(decode_op(0x4ee1dc00), Inst::Pmull1q { .. }));
+        // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
+        // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
+        // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).
+        assert!(matches!(decode_op(0x0ef8d820),
+            Inst::SimdFp16Cmpz { rd: 0, rn: 1, op: 0, q: false }),
+            "got {:?}", decode_op(0x0ef8d820));
+        assert!(matches!(decode_op(0x0ef8c820),
+            Inst::SimdFp16Cmpz { rd: 0, rn: 1, op: 1, q: false }));
+        assert!(matches!(decode_op(0x2ef8c820),
+            Inst::SimdFp16Cmpz { rd: 0, rn: 1, op: 2, q: false }));
+        assert!(matches!(decode_op(0x4ef8e843),
+            Inst::SimdFp16Cmpz { rd: 3, rn: 2, op: 3, q: true }),
+            "got {:?}", decode_op(0x4ef8e843));
+        assert!(matches!(decode_op(0x2ef8d820),
+            Inst::SimdFp16Cmpz { rd: 0, rn: 1, op: 4, q: false }));
+        // negatives must NOT match: fp16 fabs v.4h (0x0ef8f820, byte2 0xf8 not here),
+        // frecpe .4s (0x4ea1d820), fcvtas (0x4e21c863), fmul 2d (0x4ee1dc00).
+        assert!(!matches!(decode_op(0x0ef8f820), Inst::SimdFp16Cmpz { .. }), "fabs .4h must stay seperate");
+        assert!(!matches!(decode_op(0x4ea1d820), Inst::SimdFp16Cmpz { .. }));
+        assert!(!matches!(decode_op(0x4e21c863), Inst::SimdFp16Cmpz { .. }));
+        assert!(!matches!(decode_op(0x4ee1dc00), Inst::SimdFp16Cmpz { .. }));
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),
