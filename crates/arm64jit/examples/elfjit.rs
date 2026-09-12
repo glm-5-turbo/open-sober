@@ -480,6 +480,33 @@ fn main() {
         s2.x[0] = env_ptr;
         s2.x[1] = activity;
         s2.x[2] = params;
+        // Concurrent guest-thread state sampler (JIT_THREADS=1). StartApp's
+        // `jit_run` parks the main thread forever (the engine main-loop
+        // lifecycle-await), so a post-run sampler would never run. Instead
+        // spawn a detached host sampler that polls `snapshot_threads()`
+        // every ~200 ms for a bounded window, dumping each parked thread's
+        // hostcall slot (pc), guest call-site (x30/lr) and wait-object args
+        // (x0..x2). This pins the boot wall to the exact guest function that
+        // blocks and what it awaits. Runs concurrently with the jit_run.
+        if std::env::var_os("JIT_THREADS").is_some() {
+            std::thread::spawn(|| {
+                for _ in 0..50 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let snaps = arm64jit::jit::snapshot_threads();
+                    let mut lines =
+                        format!("[elfjit:sampler] guest threads {}", snaps.len());
+                    for t in &snaps {
+                        let at = arm64jit::resolver::name_of_call_addr(t.pc)
+                            .unwrap_or_else(|| format!("{:#x}", t.pc));
+                        lines.push_str(&format!(
+                            "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x29={:#x} sp={:#x}",
+                            t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x29, t.sp
+                        ));
+                    }
+                    eprintln!("{lines}");
+                }
+            });
+        }
         match arm64jit::jit::jit_run(image, base, start_app, &mut s2 as *mut CpuState) {
             Err(e) => eprintln!("[elfjit] StartApp stopped: {e}"),
             Ok(r) => eprintln!("[elfjit] StartApp returned Ok({r:#x})"),
@@ -493,6 +520,24 @@ fn main() {
                 // Compiles growing = StartApp is advancing through new init code;
                 // flat compiles + rising hits = it is recycling cached hot blocks.
                 eprintln!("[elfjit] stats: compiles={c} hits={h}");
+            }
+            // Periodic guest-thread state sampler (JIT_THREADS=1): while the
+            // engine parks in the lifecycle-await, dump each registered guest
+            // thread's live registers — its hostcall slot (pc), the guest call
+            // site (lr = x30), and the wait-object args (x0..x2) — so the
+            // boot wall is pinned to a precise guest function & release path.
+            if std::env::var_os("JIT_THREADS").is_some() {
+                let snaps = arm64jit::jit::snapshot_threads();
+                let mut lines = format!("[elfjit] guest threads {}", snaps.len());
+                for t in &snaps {
+                    let at = arm64jit::resolver::name_of_call_addr(t.pc)
+                        .unwrap_or_else(|| format!("{:#x}", t.pc));
+                    lines.push_str(&format!(
+                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x29={:#x} sp={:#x}",
+                        t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x29, t.sp
+                    ));
+                }
+                eprintln!("{lines}");
             }
             if std::env::var_os("ELFJIT_EXIT_WHEN_IDLE").is_some()
                 && arm64jit::jit::active_guest_threads() <= baseline

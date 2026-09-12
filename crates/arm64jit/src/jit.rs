@@ -1238,6 +1238,57 @@ pub fn dump_guest_threads() -> Vec<(i64, u64, u64)> {
     v.iter().map(|r| (r.host_tid as i64, r.guest_tid, r.state as u64)).collect()
 }
 
+/// Snapshot one guest thread's live register file for the shutdown sampler.
+///
+/// When a guest thread parks inside a *blocking* hostcall (e.g. the engine
+/// main loop's `pthread_mutex_lock` of the lifecycle-await mutex `0x6edae60`),
+/// its dispatcher is stuck inside the host function, so `CpuState.pc` still
+/// points at the host thunk slot and `x30` (LR) still holds the guest caller's
+/// return address — i.e. exactly the guest call site that initiated the block.
+/// Reading x30 (the "who called host call X" return addr) + x0..x2 (the wait
+/// object args) lets the boot wall be pinned to a precise guest function.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ThreadSnapshot {
+    pub host_tid: i64,
+    pub guest_tid: u64,
+    /// CpuState.pc — the host-thunk slot if the thread is mid-hostcall.
+    pub pc: u64,
+    /// Guest return address (x30) — the guest call site of the blocking call.
+    pub lr: u64,
+    pub x0: u64,
+    pub x1: u64,
+    pub x2: u64,
+    pub x29: u64,
+    pub sp: u64,
+}
+
+/// Read the live register file of every registered guest thread. Safe to call
+/// from any host thread (e.g. the run harness while the main `jit_run` is
+/// parked) because a parked thread's CpuState is stable (its dispatcher is
+/// blocked inside a hostcall and not mutating registers).
+pub fn snapshot_threads() -> Vec<ThreadSnapshot> {
+    let v = GUEST_THREADS.lock().unwrap();
+    v.iter()
+        .map(|r| {
+            // SAFETY: `r.state` is the CpuState of a live guest thread; a parked
+            // thread's registers are quiescent. We only read the integer regs.
+            let s = unsafe { &*r.state };
+            ThreadSnapshot {
+                host_tid: r.host_tid as i64,
+                guest_tid: r.guest_tid,
+                pc: s.pc,
+                lr: s.x[30],
+                x0: s.x[0],
+                x1: s.x[1],
+                x2: s.x[2],
+                x29: s.x[29],
+                sp: s.x[31],
+            }
+        })
+        .collect()
+}
+
 /// Is the `tgkill` target the current guest thread (`s`)? The guest's
 /// gettid() returns the REAL host tid (mirroring kernel behavior), and a clone
 /// child also has an internal guest tid; match either so pthread_kill(self)
@@ -6981,5 +7032,32 @@ mod isa_regress_tests {
         // v0[i] = [10-1,20-2,30-3,40-4] = [9,18,27,36]
         assert_eq!(st.v[0], (18u64 << 32) | 9, "ssubw lanes 0-1");
         assert_eq!(st.v[1], (36u64 << 32) | 27, "ssubw lanes 2-3 (subtract, not add)");
+    }
+}
+
+#[cfg(test)]
+mod thread_snapshot_tests {
+    use crate::jit::{CpuState, register_guest_thread, snapshot_threads};
+
+    /// snapshot_threads() reflects the live register file of each registered
+    /// guest thread — specifically the guest call-site (x30/lr) that sits in a
+    /// blocking hostcall. This is what pins the boot wall to a guest function.
+    #[test]
+    fn snapshot_reflects_parked_thread_call_site() {
+        let mut st = CpuState::new();
+        st.tid = 7;
+        st.pc = 0x7f000000_2000; // a host thunk slot (parked mid-hostcall)
+        st.x[30] = 0x102b53bb0; // guest call-site of the blocking pthread_mutex_lock
+        st.x[0] = 0x106edae60; // the lifecycle-await mutex
+        st.x[29] = 0x1111;
+        st.x[31] = 0x2222;
+        register_guest_thread(&mut st as *mut CpuState);
+
+        let snaps = snapshot_threads();
+        let mine = snaps.iter().find(|t| t.guest_tid == 7).expect("our thread");
+        assert_eq!(mine.pc, 0x7f000000_2000, "pc still at the host thunk slot");
+        assert_eq!(mine.lr, 0x102b53bb0, "x30 = guest call-site of the blocking call");
+        assert_eq!(mine.x0, 0x106edae60, "x0 = the wait object (mutex)");
+        assert_eq!(mine.sp, 0x2222);
     }
 }
