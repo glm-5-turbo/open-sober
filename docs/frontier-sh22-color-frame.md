@@ -68,7 +68,9 @@ are fabricated and the engine's frame-fn is invoked once from the host before a
 manual swap. The engine's real main-loop producer still never enqueues a render
 task, so it does not yet drive frames natively. The mechanical reverse of slot0
 (glDrawBuffers) and slot2 (glClearBufferfv) removes the last guess-blocker in
-the engine's own clear path. Baselines unchanged: `--jni` exit 0; stable idle
+the engine's own clear path. Full dispatch-slot map (SH22c): slot0=glDrawBuffers, slot1=glClearBufferiv
+(0x5b32f68, GL_STENCIL=0x1802), slot2=glClearBufferfv, slot3=glClearBufferfi
+(0x84F9=GL_DEPTH_STENCIL). Baselines unchanged: `--jni` exit 0; stable idle
 main loop exit 124. Next: drive the engine's own render-loop recipe
 (vtable[16] bind -> frame-fn -> vtable[24] swap) in natural order from the
 engine's real thread, or reverse the second clear-source object at the main-fn

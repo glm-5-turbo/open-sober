@@ -32,7 +32,11 @@ Honest framing: the frame is still *harness-driven* (fabricated renderer/view/
 clear-state objects, one frame-fn invocation + manual swap). The engine's real
 main-loop producer still never enqueues a render task, so it doesn't drive
 frames natively yet. But the mechanical reverse of slot0/slot2 removes the last
-guess-blocker in the engine's own clear path. Baselines unchanged: --jni exit 0;
+guess-blocker in the engine's own clear path. Full dispatch-slot map pinned from
+disassembly (SH22c): slot0=glDrawBuffers, slot1=glClearBufferiv (0x5b32f68,
+GL_STENCIL=0x1802), slot2=glClearBufferfv (GL_COLOR=0x1800/GL_DEPTH=0x1801),
+slot3=glClearBufferfi (0x84F9=GL_DEPTH_STENCIL); glClearBufferiv added to
+GLES_INT_NAME_LIST + seed slot1 corrected. Baselines unchanged: --jni exit 0;
 stable idle exit 124.
 
 ## Session (Sep 12, 2026, hermes-worker, cycle SH21) — reverse: the frame-fn 0x105b32c00's clear-color object is its 5th arg **x4** (not x2 as SH20 guessed). Fabricating a clear-state x4 object makes the engine's OWN clear-state sub-fn 0x105b32e08 run glColorMask(all-1) + a per-buffer clear-dispatch loop + glGetError THROUGH the bridge. Workspace 471/0 (was 471).
