@@ -13,7 +13,12 @@ vtable 0x106731ae0 (engine-populated, live-dumped), [ctx+32]=EGLDisplay,
 (make-current-if-not-bound: eglGetCurrentContext->eglMakeCurrent), [vt+24]=
 0x105b3b408 (swap). Engine's own swap + GLES-bridge clear through the real ctx
 present a blue frame (PIL-decomposed RGB 51,76,229 = 0.2,0.3,0.9). New elfjit
-`--renderthunk` lever (+ vtable[0..5] live dump). This opens frontier lever (2):
+`--renderthunk` lever (+ vtable[0..5] live dump). SH18b added `--renderbind` (drive
+the engine's OWN make-current method vtable[16]=0x105b3b358 on the real ctx, then
+swap -> EGL_TRUE). SH18c added `--renderframe-drive` (probe the engine's own frame-fn
+0x105b32c00 with fabricated renderer/view; gets past the renderer list-find 0x5b2e98c
+into glBindFramebuffer/viewport setup, then needs coherent renderer internals).
+This opens frontier lever (2):
 drive the engine's OWN render-loop recipe (vtable[16] bind -> frame-fn 0x105b32c00
 -> vtable[24] swap) instead of force-driving glClear. Doc:
 docs/frontier-sh18-renderthunk-ctx.md; run-logs: runs/sh18-renderthunk{,-2,}.txt,
