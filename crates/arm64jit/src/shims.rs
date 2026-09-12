@@ -245,6 +245,9 @@ extern "C" fn anativewindow_fromsurface(
     _env: u64, _surf: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64, _a7: u64,
 ) -> u64 {
     let xid = ANATIVE_WINDOW_XID.load(AtomicOrdering::Relaxed);
+    if std::env::var_os("JIT_TRACE").is_some() {
+        eprintln!("[anativewindow] fromSurface(env=0x{_env:x} surf=0x{_surf:x}) -> xid=0x{xid:x}");
+    }
     if xid != 0 {
         return xid; // the real X11 Window XID backing the window surface path
     }

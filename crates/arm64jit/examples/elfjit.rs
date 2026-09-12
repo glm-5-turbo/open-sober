@@ -154,6 +154,58 @@ enum KickerMode {
     Pulse,
 }
 
+/// Bring up an Xvfb X server + a 1280x720 window and register its XID as the
+/// guest's ANativeWindow handle (GRAPHICS_RECOMMENDATION §5.3). Runs
+/// SYNCHRONOUSLY so the real window is wired before StartApp reaches the
+/// window/EGL surface path — a racing spawned thread would lose and hand the
+/// guest the sentinel instead of a genuine window. The X connection is leaked
+/// (kept alive) so the window outlives this function. Returns the wired XID,
+/// or 0 if no window could be opened (caller keeps the sentinel fallback).
+fn wire_real_window() -> u64 {
+    let display_num = 220 + (std::process::id() % 50) as usize;
+    let display = format!(":{display_num}");
+    let mut xvfb = None;
+    for _ in 0..20 {
+        if std::path::Path::new(&format!("/tmp/.X11-unix/X{display_num}")).exists() {
+            break;
+        }
+        if xvfb.is_none() {
+            xvfb = std::process::Command::new("Xvfb")
+                .arg(&display)
+                .arg("-screen").arg("0").arg("1280x720x24")
+                .arg("-nolisten").arg("tcp")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for _ in 0..40 {
+        if let Ok((conn, win)) = x11::open_window_sized(Some(&display), 1280, 720) {
+            Box::leak(Box::new(conn)); // keep the window alive for the boot
+            unsafe {
+                std::env::set_var("DISPLAY", &display);
+                std::env::set_var("EGL_PLATFORM", "x11");
+            }
+            let xid = win as u64;
+            set_anativewindow_xid(xid);
+            eprintln!(
+                "[elfjit:anativewindow] wired real X11 window XID=0x{xid:x} on {display} as the guest ANativeWindow"
+            );
+            return xid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    eprintln!(
+        "[elfjit:anativewindow] could not open an X11 window (Xvfb absent?) — keeping the sentinel ANativeWindow"
+    );
+    if let Some(mut c) = xvfb {
+        let _ = c.kill();
+    }
+    0
+}
+
 fn main() {
     unsafe {
         install_fault_debug();
@@ -622,57 +674,15 @@ fn main() {
             });
         }
         // Real desktop X11 window for the ANativeWindow layer (GRAPHICS_-
-        // RECOMMENDATION §5.3). Under JIT_DRIVE_LIFECYCLE we bring up an Xvfb
-        // X server, open a 1280x720 window (the framebuffer
-        // ANativeWindow_getWidth/Height report), set the display env Mesa's x11
-        // EGL platform reads, and register the window XID as the guest's
-        // ANativeWindow handle. Then eglCreateWindowSurface(dpy, config, win,
-        // ...) builds on a genuine window, not the fallback sentinel. The
-        // connection is leaked so the window outlives the thread scope.
+        // RECOMMENDATION §5.3). Under JIT_DRIVE_LIFECYCLE bring up an Xvfb X
+        // server, open a 1280x720 window, and register its XID as the guest's
+        // ANativeWindow handle — SYNCHRONOUSLY before StartApp runs, so the
+        // window is wired before the boot reaches the window/EGL surface path
+        // (a racing spawned thread loses and hands the guest the sentinel).
+        // Then eglCreateWindowSurface(dpy, config, win, ...) builds on a real
+        // X11 window, not a fake address.
         if std::env::var_os("JIT_DRIVE_LIFECYCLE").is_some() {
-            std::thread::spawn(|| {
-                let display_num = 220 + (std::process::id() % 50) as usize;
-                let display = format!(":{display_num}");
-                let mut xvfb = None;
-                for _ in 0..20 {
-                    if std::path::Path::new(&format!("/tmp/.X11-unix/X{display_num}")).exists() {
-                        break;
-                    }
-                    if xvfb.is_none() {
-                        xvfb = std::process::Command::new("Xvfb")
-                            .arg(&display)
-                            .arg("-screen").arg("0").arg("1280x720x24")
-                            .arg("-nolisten").arg("tcp")
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .ok();
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                let mut xid = 0u64;
-                for _ in 0..40 {
-                    if let Ok((conn, win)) = x11::open_window_sized(Some(&display), 1280, 720) {
-                        Box::leak(Box::new(conn)); // keep the window alive for the boot
-                        xid = win as u64;
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if xid != 0 {
-                    unsafe {
-                        std::env::set_var("DISPLAY", &display);
-                        std::env::set_var("EGL_PLATFORM", "x11");
-                    }
-                    set_anativewindow_xid(xid);
-                    eprintln!("[elfjit:anativewindow] wired real X11 window XID=0x{xid:x} on {display} as the guest ANativeWindow");
-                } else {
-                    eprintln!("[elfjit:anativewindow] could not open an X11 window (Xvfb absent?) — keeping the sentinel ANativeWindow");
-                    if let Some(mut c) = xvfb {
-                        let _ = c.kill();
-                    }
-                }
-            });
+            wire_real_window();
         }
         // Per-thread futex latch kicker (--futex-kick <period-ms>). The engine
         // main-loop idle barrier (cycle L) is a REAL per-thread futex: each
