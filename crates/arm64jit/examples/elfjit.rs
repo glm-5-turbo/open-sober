@@ -564,11 +564,12 @@ fn main() {
                         let at = arm64jit::resolver::name_of_call_addr(t.pc)
                             .unwrap_or_else(|| format!("{:#x}", t.pc));
                         eprintln!(
-                            "  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x5={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                            "  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x5={:#x} x19={:#x}[*={:#x}] x20={:#x} x21={:#x} x29={:#x} sp={:#x}",
                             t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x3, t.x5, t.x19,
-                            // deref predicate pointer if it looks valid (guest rw segment)
-                            if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
-                            t.x29, t.sp
+                            // deref [x19]: the wait-fn arg0 Q (host-heap; its high-32
+                            // is the self-syncing version epoch, +4 the futex latch).
+                            if t.x19 >= 0x100000000 && t.x19 >> 56 == 0 && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
+                            t.x20, t.x21, t.x29, t.sp
                         );
                     }
                 }
@@ -839,10 +840,10 @@ fn main() {
                     let at = arm64jit::resolver::name_of_call_addr(t.pc)
                         .unwrap_or_else(|| format!("{:#x}", t.pc));
                     lines.push_str(&format!(
-                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x5={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x5={:#x} x19={:#x}[*={:#x}] x20={:#x} x21={:#x} x29={:#x} sp={:#x}",
                         t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x3, t.x5, t.x19,
-                        if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
-                        t.x29, t.sp
+                        if t.x19 >= 0x100000000 && t.x19 >> 56 == 0 && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
+                        t.x20, t.x21, t.x29, t.sp
                     ));
                 }
                 eprintln!("{lines}");
