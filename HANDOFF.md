@@ -1,5 +1,23 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH13) — REAL engine vtable dispatch: `--deque-node-live 0x106829f00` (the LIVE sentinel's real vtable → engine's own drain-node task-processor 0x10285371c) makes the engine's NATIVE dispatch machinery run our injected foreign nodes — ~124 pops in 16s, process stable to timeout (exit 124), zero crash, and the block-cache GROWS past the probe baseline (≈2147 compiles / 7,361,652 hits vs the probe's flat ≈434). No probe logging (dispatch goes through the real processor). Workspace 469/0.
+
+SH12 left the type-4 dispatch firing through OUR host-thunk PROBE, which only
+logged ABI args and never ran engine code for the node. SH13 substitutes the
+REAL sentinel vtable (`0x106829f00`, `[vt+40]=0x10285371c`), so the drain's pop
+dispatch routes to the engine's actual node-processor. Verified stable and
+mechanical (a faulting dispatcher would exit 134; we see 124, endless pops).
+The obfuscated dispatch table (`0x102853a04..9b4`) keeps compiling+running real
+regions the host-thunk probe never touched.
+
+**Not yet render:** the real processor type-dispatches on `w4` (injected nodes
+always get `w4=4`, task-maintenance) via an obfuscated hash table; hostcall
+histogram is still syscall + pthread/JNI/mem, **zero egl*/gl***. Next lever:
+construct a node whose `[node+32]`/dispatch-index reaches a render/tick handler
+in that table, or feed the maintenance path real framework state. Run-log:
+`/home/hermes-worker/runs/sh13-realvt-runlog.txt`. Doc:
+`docs/frontier-sh13-realvt-dispatch.md`.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH12) — type-4 dispatch CONFIRMED + SUSTAINED through the real engine idle drain: our injected foreign nodes are now continuously popped AND dispatched through our host-thunk handler (107 dispatches/104 pops across 105 node addrs in 14s, exit 124, zero crashes). Workspace 469/0; HEAD 3b37deb.
 
 SH11 left the injection popping the node but the probe handler never
