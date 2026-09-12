@@ -1,5 +1,55 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle I) — REAL BOOT REACHES A STABLE RUNNING ENGINE MAIN LOOP: crossed the cycle-H worker SIGSEGV (UXTW, not a W-write leak), the pthread_key_create destructor SIGILL, and the step-budget false abort. libroblox.so now loads + JNI inits + the main loop runs indefinitely headless (exit 124 on harness timeout). Workspace 400+/0.
+
+Commits `b7da1a9` + `9c9332b` (dev). Cycle-H's stated next wall (worker SIGSEGV
+guestpc 0x102173218, misattributed to a W-write zero-extension leak) was
+re-root-caused from first principles with objdump ground truth:
+
+1. **UXTW register-offset index (the real cycle-H bug).** The guest DELIBERATELY
+   returns x0 = 0x100000000|hash from its hash table as a not-found SENTINEL
+   (`mov x8,#0x100000000; orr x0,x8,x12` at 0x2173324/330 — verified vs
+   aarch64-linux-gnu-objdump), and the caller indexes with
+   `ldr w8,[x8, w0, uxtw #2]` at 0x2173218 — a UXTW (W) register offset that
+   zero-extends w0 and MASKS OUT the sentinel bit. The JIT decoded it as full
+   64-bit `[x8,x0,lsl#2]`, so x0=0x100000665 indexed 0x100000665<<2 OOB → SIGSEGV.
+   Fix: carry the option bits[14:13] as `index_ext` on LdStrReg/FpLdStrReg
+   (3=LSL full-64, 2=UXTW low-32, 1=UXTB) and zero-extend the index accordingly.
+   Regression tests pin decode(index_ext) and the sentinel-masking load.
+2. **pthread_key_create destructor SIGILL.** Worker's `pthread_key_create(dtor)`
+   resolved to real glibc, which ran the guest AArch64 dtor natively on thread
+   exit (SIGILL at 0x102b9e144, a `paciasp` prologue; gdb backtrace = libc
+   `__pthread_keys`). Shim now creates a REAL key with a NULL destructor (book
+   getspecific/setspecific still work; headless TLS dtors skipped — same as
+   `__cxa_thread_atexit_impl`).
+3. **Step-budget false abort on a reached main loop.** All 3 guest threads churn
+   in the engine main loop (flat 1873 compiles, zero hostcalls, 5MB stable RSS).
+   run_loop now only trips at the step budget if the block cache is still
+   GROWING (un-settled init expansion); a flat cache = reached main loop, keeps
+   running until the harness timeout.
+
+### Result (headless, reproducible)
+```
+cargo build -p arm64jit --example elfjit
+JIT_DRIVE_LIFECYCLE=1 timeout 30 ./target/debug/examples/elfjit \
+  ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144 \
+  --kicker 0x106863af8      # exit 124 = engine main loop ran until harness timeout
+```
+Run-log: `/home/hermes-worker/runs/mainloop-stable-runlog.txt`.
+
+### Where the boot stands (vs the HARD GATE)
+Achieved on this VPS: **libroblox.so loads, JNI_OnLoad returns 0x10006, StartApp
+drives the engine, all guest threads reach a stable running main loop headlessly.**
+That is the boot-stabilization milestone. Remaining to the full gate: get that
+running main loop to dispatch a real frame (route through the wired Mesa
+llvmpipe egl/gl so an early EGL/GLES call resolves) — the loop currently churns
+with ZERO hostcalls, i.e. it never reaches ALooper_pollOnce or any egl*/gl*
+import; the cycle-G app-command feed is inert until it does. Next levers:
+(a) find the memory flag the main loop awaits (it busy-spins, no syscall) and
+seed it like the F–H gate kickers, so it proceeds into the ALooper/EGL path;
+(b) then a first headless llvmpipe frame. A GPU host is only needed for the
+final frame-perf proof.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle H) — ROOT-CAUSED + FIXED the recursive-mutex rendezvous: `sanitize_mutex` was destroying glibc's `__owner`, so the owner deadlocked on its OWN recursive re-lock; boot now CROSSES the wall that parked every run since cycle C (workspace 398/0)
 
 Commit `9e8d3a9` (dev). After crossing the GameActivity gates (cycles C–G), both
