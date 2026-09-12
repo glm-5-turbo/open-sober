@@ -2203,6 +2203,13 @@ pub fn translate(
                         }
                         Ok(())
                     }
+                    Inst::FmovImm16 { rd, value_bits } => {
+                        // fmov Hd,#imm: write the f16 value into the low 2B of the slot.
+                        let slot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
+                        buf.mov_ri32(RAX, value_bits as u32);
+                        buf.mov_store16(RBX, slot, RAX);
+                        Ok(())
+                    }
         Inst::FmovFp { rd, rn, sz } => {
             // fmov Dd,Dn / fmov Sd,Sn: register-to-register FP copy (no conversion).
             let sslot = crate::jit::VECTOR_BASE + (rn as i32) * 16;

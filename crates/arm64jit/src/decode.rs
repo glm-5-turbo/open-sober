@@ -608,11 +608,16 @@ pub enum Inst {
            // Encodes an 8-bit vfp-immediate (imm3:imm5) into a concrete IEEE-754
            // value (`value_bits` already decoded by decode_fmov_imm). `f64` => Dd.
            FmovImm {
-               rd: u8,          // destination 64-bit (d) or 32-bit (s) FP reg
-               f64: bool,       // true => double (8B) result, false => single (4B)
-               value_bits: u64, // IEEE-754 bits (f64 `value` for f64, low 32 for f32)
-       },
-       // ---- scalar FP register-to-register move (fmov Dd,Dn / fmov Sd,Sn) ----
+                         rd: u8,          // destination 64-bit (d) or 32-bit (s) FP reg
+                         f64: bool,       // true => double (8B) result, false => single (4B)
+                         value_bits: u64, // IEEE-754 bits (f64 `value` for f64, low 32 for f32)
+                 },
+                 // ---- FMOV scalar immediate half (fmov Hd, #imm) ----
+                 // Same vfp-immediate (imm3:imm5) as FmovImm but producing an f16 in the
+                 // low 16 bits of the Hd vector slot. Gate 0x1ee00000 (fp16 variant of the
+                 // 0x1e20/0x1e60 single/double encodings).
+                 FmovImm16 { rd: u8, value_bits: u16 },
+                 // ---- scalar FP register-to-register move (fmov Dd,Dn / fmov Sd,Sn) ----
        FmovFp {
            rd: u8,          // destination FP reg
            rn: u8,          // source FP reg
@@ -3815,6 +3820,24 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                         value_bits: v.to_bits() as u64,
                     };
                 }
+                // ---- FMOV scalar immediate half (fmov Hd, #imm) ----
+                // fp16 variant: byte2 & 0xe0 == 0xe0 (real 0x1eee1001 fmov h1,#1.0,
+                // 0x1ee01000 #2.0, 0x1eec1007 #0.5), distinct from single (0x20) /
+                // double (0x60). imm8 same vfp-immediate; produce f16 bits.
+                if (insn & 0xffe0_0000) == 0x1ee0_0000 && (insn & 0x1000) != 0 {
+                    let rd = (insn & 0x1f) as u8;
+                    let imm8 = ((insn >> 13) & 0xff) as u32;
+                    let f64bits = decode_fmov_imm(imm8, true);
+                    let v = f64::from_bits(f64bits) as f32;   // f16 imm lanes come from the f32 value
+                    let b = v.to_bits();
+                    // f32 -> f16 (round-to-nearest-even; small constants exact).
+                    let s = (b >> 16) & 0x8000;
+                    let e = ((b >> 23) & 0xff) as i32 - 127 + 15;
+                    let h = if e <= 0 { s as u16 }
+                        else if e >= 31 { (s | 0x7c00) as u16 }
+                        else { (s | ((e as u32) << 10) | ((b >> 13) & 0x3ff)) as u16 };
+                    return Inst::FmovImm16 { rd, value_bits: h };
+                }
                 // ---- scalar FP register-to-register move: fmov Dd,Dn / fmov Sd,Sn ----
                     // Double form = 0x1e60_4000, single form = 0x1e20_4000 (sz bit22 selects).
                     if (insn & 0xffff_f000) == 0x1e60_4000 || (insn & 0xffff_f000) == 0x1e20_4000 {
@@ -6408,6 +6431,25 @@ mod logical_imm_regressions {
             }
             other => panic!("fmla v29.4s,v21,v2.s[0] -> {other:?}"),
         }
+    }
+
+    #[test]
+    fn fmov_imm16_half_decode() {
+        // FP16 scalar immediate: fmov h1,#1.0 = 0x1eee1001, #2.0 = 0x1ee01000,
+        // #0.5 = 0x1eec1007 (real Roblox boot, e.g. normalization constants).
+        assert!(matches!(decode(0x1eee1001),
+            Inst::FmovImm16 { rd: 1, value_bits: 0x3c00 }),  // 1.0 half
+            "got {:?}", decode(0x1eee1001));
+        assert!(matches!(decode(0x1ee01000),
+            Inst::FmovImm16 { rd: 0, value_bits: 0x4000 }),  // 2.0 half
+            "got {:?}", decode(0x1ee01000));
+        assert!(matches!(decode(0x1eec1007),
+            Inst::FmovImm16 { rd: 7, value_bits: 0x3800 }),  // 0.5 half
+            "got {:?}", decode(0x1eec1007));
+        // single/double fmov imm stay FmovImm, not FmovImm16.
+        assert!(matches!(decode(0x1e2e1000), Inst::FmovImm { f64: false, .. }));
+        assert!(matches!(decode(0x1e6e1000), Inst::FmovImm { f64: true, .. }));
+        assert!(!matches!(decode(0x1e601000), Inst::FmovImm16 { .. }));
     }
 
     #[test]

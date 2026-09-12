@@ -7331,6 +7331,19 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fmov_imm16_half_exec() {
+        // fmov h1, #1.0 = 0x1eee1001: write 1.0 (half 0x3c00) to reg1 low 2B.
+        let mut st = CpuState::new();
+        st.v[2] = 0xdead_beef_dead_beefu64;
+        exec_bytes(&mut st, &[0x01, 0x10, 0xee, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st.v[2] & 0xffff, 0x3c00, "fmov h1,#1.0 low16 = 0x3c00");
+        // fmov h0, #2.0 = 0x1ee01000 -> reg0 low16 = 0x4000.
+        let mut st2 = CpuState::new();
+        exec_bytes(&mut st2, &[0x00, 0x10, 0xe0, 0x1e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(st2.v[0] & 0xffff, 0x4000, "fmov h0,#2.0 low16 = 0x4000");
+    }
+
+    #[test]
     fn urhadd_bytes_exec() {
         // urhadd v0.16b,v1,v2 = 0x6e221420: per-byte (a+b+1)>>1.
         let code = [0x20u8, 0x14, 0x22, 0x6e, 0xc0, 0x03, 0x5f, 0xd6];
