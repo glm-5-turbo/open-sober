@@ -1790,10 +1790,37 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
     // Publish this thread's guest TP for the general-dynamic TLS resolver.
     set_current_guest_tp(unsafe { (*state).tpidr });
     let mut guard: u64 = 0;
-    const MAX_STEPS: u64 = 20_000_000; // safety net against an infinite guest loop
+    // Safety net against an infinite *init* loop. A reached steady-state engine
+    // main loop legitimately runs forever (flat compiles, recycling cached
+    // blocks, no forward motion) — aborting it on a raw step count turns a
+    // successful boot into a spurious "infinite guest loop?" error. So only
+    // trip the budget if the translation-block cache is STILL COMPILING new
+    // code (compiles advancing = an expanding init/recursion loop that never
+    // settles); a flat cache over the window means the guest reached a running
+    // main loop and may keep spinning until the harness timeout / host wait.
+    const MAX_STEPS: u64 = 20_000_000;
+    // (last_sample_step, compiles_at_that_step) — init to (0, current compiles].
+    let mut sample_compiles: (u64, u64) = (0, block_cache_stats().0);
     loop {
         if guard >= MAX_STEPS {
-            return Err("run_loop: step budget exceeded (infinite guest loop?)".into());
+            let (c, _h) = block_cache_stats();
+            if c > sample_compiles.1 {
+                // The cache still grew: genuine un-settled init expansion.
+                return Err("run_loop: step budget exceeded (infinite guest loop?)".into());
+            }
+            // Steady-state: the engine main loop is running. Keep going; the
+            // harness `timeout` is what ends a boot that reaches the main loop.
+            sample_compiles = (guard, c);
+        }
+        // Re-baseline the code-growth sample every 5M steps so a slow init that
+        // compiles a trickle keeps OSCILLATING (budget continues) rather than
+        // tripping prematurely on a stale low sample.
+        if guard - sample_compiles.0 >= 5_000_000 {
+            let (c, _h) = block_cache_stats();
+            sample_compiles.0 = guard;
+            if sample_compiles.1 < c {
+                sample_compiles.1 = c;
+            }
         }
         guard += 1;
         // Optional time-based progress heartbeat from inside the dispatcher: report
