@@ -54,6 +54,21 @@ the requested blue 0.2,0.3,0.9 — see /home/hermes-worker/runs/sh18-thunk-blue.
   — this is the method the engine's render callers dispatch to rebind the GL
   context before drawing. A correct entry for driving the engine's own render.
 - `[vt+24]` 0x105b3b408 = the swap thunk (eglSwapBuffers).
+- **SH18b:** new elfjit `--renderbind` drives the engine's OWN make-current method
+  (vtable [vt+16]=0x105b3b358) on the recovered real ctx before presenting:
+  `[elfjit:renderbind] engine make-current method returned Ok(0x…) (eglMakeCurrent)`,
+  then swap -> Ok(0x1)=EGL_TRUE. Proves the engine's own rebind path executes on its
+  own object (same host thread keeps context current for the following swap/draw).
+- **SH18c probe:** new elfjit `--renderframe-drive` drives the engine's OWN frame-fn
+  0x105b32c00 (vtable-dispatch target into the real render path) with fabricated
+  renderer/view objects: renderer(+16=1,+24->objA[+552]=1,+40->objB[+140]=1),
+  view([+128]=1280 [+132]=720 [+140]=default FB). The fn gets PAST its renderer
+  list-find 0x5b2e98c (fixed by seeding [objA+368]=view so the first cmp short-
+  circuits; the old empty-list walk faulted on a 0 head) and executes its
+  glBindFramebuffer/viewport setup region, then branches to a host-heap pointer
+  outside the image (needs a coherent renderer internals graph — the documented
+  multi-week reverse). Captured as a reproducible probe baseline (runs/sh18-framedrive2.txt);
+  opt-in, baselines unregressed (thunk+frame+clear still present a frame).
 
 ## Next lever (now genuinely reachable)
 Frontier lever (2) is opened: with the real engine ctx in hand (and its bind

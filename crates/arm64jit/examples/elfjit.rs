@@ -1839,6 +1839,85 @@ fn main() {
                     Err(e) => eprintln!("[elfjit:renderframe] swap stopped: {e}"),
                     Ok(ok) => eprintln!("[elfjit:renderframe] swap returned Ok({ok:#x}) (eglSwapBuffers)"),
                 }
+                // --renderframe-drive: probe how FAR the engine's OWN frame-render fn
+                // 0x105b32c00 gets when driven on the real ctx with fabricated
+                // renderer/view objects. This is frontier lever (2) — replacing the
+                // harness's force-driven glClearColor/glClear with the engine's real
+                // frame code. From SH18 disasm the fn is
+                //   frame(renderer=x0, view=x1, w2, w3, x4, x5):
+                //     [renderer+16]=1; x0=[renderer+24]; bl 0x5b2e98c   (find/dispatch)
+                //     glBindFramebuffer(0x8d40, [view+140])  -> glGetError (cmp 0x505)
+                //     glViewport(0,0,[view+128],[view+132])
+                //     [renderer+24]->[+552]: if 0 skip clear path
+                //     [renderer+40]->[+140]: if 0 skip clear path
+                //     clear via glClearColor/glColorMask/glClearDepthf/...
+                // We fabricate: renderer (with +16 set, +24->objA[+552]=1,
+                // +40->objB[+140]=1), view (+128,+132 = 1280x720, +140 framebuffer 0).
+                // Same host thread, context already current (renderbind/renderinit).
+                if renderframe_args.iter().any(|a| a == "--renderframe-drive") {
+                    // Guest-visible scratch for the objects (guest==host, low48).
+                    let objs = Box::leak(vec![0u8; 512].into_boxed_slice());
+                    let base = objs.as_ptr() as u64;
+                    // view: +128=w(1280) +132=h(720) +140=default framebuffer(0)
+                    unsafe {
+                        *(base as *mut u64) = 0; // renderer[+0] reserved (obj not vt)
+                        // renderer fields at +16,+24,+40
+                        let renderer = base;
+                        let objA = base + 0x100; // [renderer+24]->[+552]
+                        let objB = base + 0x200; // [renderer+40]->[+140]
+                        let view = base + 0x300;
+                        // [renderer+16]=1 (set by fn anyway), [renderer+24]=objA
+                        *(renderer.wrapping_add(16) as *mut u8) = 1;
+                        *(renderer.wrapping_add(24) as *mut u64) = objA;
+                        *(renderer.wrapping_add(40) as *mut u64) = objB;
+                        // objA[+552]=1 (nonzero -> clear path enabled)
+                        *(objA.wrapping_add(552) as *mut u8) = 1;
+                        // 0x5b2e98c is a list-find: it reads [objA+368] first and
+                        // returns immediately when [objA+368]==view(arg1), else walks
+                        // an intrusive list [objA+384]..[objA+392] (empty => returns at
+                        // the head==tail check). Set [objA+368]=view so it bails on the
+                        // first cmp (clean return, no list walk that could fault on a
+                        // 0 head). Also seed both list bounds to 0 = empty list.
+                        *(objA.wrapping_add(368) as *mut u64) = view;
+                        *(objA.wrapping_add(384) as *mut u64) = 0;
+                        *(objA.wrapping_add(392) as *mut u64) = 0;
+                        // objB[+140]=1, [+124]=1 (nonzero flags)
+                        *(objB.wrapping_add(140) as *mut u32) = 1;
+                        *(objB.wrapping_add(124) as *mut u32) = 1;
+                        // view: [+128]=w=[+132]=h, [+140]=framebuffer id 0
+                        *(view.wrapping_add(128) as *mut u32) = 1280;
+                        *(view.wrapping_add(132) as *mut u32) = 720;
+                        *(view.wrapping_add(140) as *mut u32) = 0;
+                        eprintln!(
+                            "[elfjit:renderframe-drive] fabricated renderer 0x{renderer:x} (+16=1,+24->0x{objA:x}[+552]=1,+40->0x{objB:x}[+140]=1) view 0x{view:x} ([+128]=1280 [+132]=720 [+140]=0)"
+                        );
+                        let mut sd = arm64jit::jit::CpuState::new();
+                        sd.tpidr = tpidr;
+                        sd.x[31] = isp;
+                        sd.x[0] = renderer;
+                        sd.x[1] = view;
+                        sd.x[2] = view; // clear-color struct ptr (unused if path short-circuits)
+                        match arm64jit::jit::jit_run(
+                            iimg, ibase, 0x105b32c00, &mut sd as *mut CpuState,
+                        ) {
+                            Err(e) => eprintln!("[elfjit:renderframe-drive] frame-fn stopped: {e}"),
+                            Ok(ok) => eprintln!(
+                                "[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok({ok:#x})"
+                            ),
+                        }
+                        // Then present whatever the frame-fn did on the real ctx.
+                        let mut se = arm64jit::jit::CpuState::new();
+                        se.tpidr = tpidr;
+                        se.x[31] = isp;
+                        se.x[0] = real_ctx;
+                        match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
+                            Err(e) => eprintln!("[elfjit:renderframe-drive] swap stopped: {e}"),
+                            Ok(ok) => eprintln!(
+                                "[elfjit:renderframe-drive] post-frame swap returned Ok({ok:#x})"
+                            ),
+                        }
+                    }
+                }
                 // --renderclear <r,g,b,a>: draw an actual colored clear through the
                 // JIT's GLES float bridge on this live context, then swap again, so
                 // the presented frame is non-black (the idle main loop never issues
