@@ -1,5 +1,37 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH12) — type-4 dispatch CONFIRMED + SUSTAINED through the real engine idle drain: our injected foreign nodes are now continuously popped AND dispatched through our host-thunk handler (107 dispatches/104 pops across 105 node addrs in 14s, exit 124, zero crashes). Workspace 469/0; HEAD 3b37deb.
+
+SH11 left the injection popping the node but the probe handler never
+dispatched (the "residual"). This cycle root-caused it and closed it:
+
+- **THE BUG: vtable handler offset off-by-one.** Both probe builders wrote the
+  handler at `(v as *mut u64).add(4)` = byte offset **0x20**, but the drain
+  dispatches via **`[vt+40]` = byte 40 = u64 index 5**. So `ldr [vt,#40]`
+  read 0 (calloc-zeroed), the drain's `handler != 0` guard failed, and the
+  node was consumed WITHOUT dispatch. Fix (`a2448fc`): `add(5)` in the
+  `--deque-node-live` and `--deque-probe` vtable builders.
+- **Verified:** the first type-4 dispatch fires with the exact engine ABI —
+  `x0(vt+16)=0xdeadbeef` (our ctx marker, read correctly from the guest-arena
+  vtable), `x3(node)=0x107334040`, `w4=4` — confirmed through the real idle
+  drain's pop-loop.
+- **Sustained (`3b37deb`):** the injector previously returned after the first
+  pop (drain went idle, head → empty). Now it re-injects a fresh guest-arena
+  node on every pop, so the drain runs a continuous type-4 dispatch stream.
+
+**Result (reproducible):** repeated `[elfjit:deque-probe] type-4 dispatch #N:
+x0=0xdeadbeef ... x3(node)=0x1073... w4=4 x5=0` interleaved with
+INJECTED/POPPED, process stable to timeout **exit 124**, zero SIGSEGV. Run-logs:
+`/home/hermes-worker/runs/sh12-probe-runlog.txt`,
+`/home/hermes-worker/runs/sh12-sustain-runlog.txt`. Doc:
+`docs/frontier-sh12-dispatch-confirmed.md`.
+
+**Next lever (unchanged shape, now that dispatch is live):** route the node's
+vtable at a REAL engine render/tick handler (instead of our probe) so a
+dispatch drives the engine's frame/render machinery to egl*/gl* — or feed the
+real producer 0x285682c a coherent render task node. Baselines unchanged:
+`--jni` clean exit 0; stable idle exit 124; workspace 469/0.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH11) — sequenced deque-node-live injection crosses the stable idle drain: node POPPED, exit 124, sentinel crash eliminated. Workspace 469/0; HEAD f4255fd.
 
 For ~10 cycles (SH7b/SH8/SH9) every `--deque-node-live` run died with an
