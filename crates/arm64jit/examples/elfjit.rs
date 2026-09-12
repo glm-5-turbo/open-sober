@@ -2322,7 +2322,14 @@ fn main() {
                                     // interception live: the bridge decodes ETC1->RGBA and
                                     // uploads via glTexImage2D. Same FS + readback as tex_mode.
                                     let etc_mode = renderframe_args.iter().any(|a| a == "--renderframe-etc");
-                                    let fs_src: &[u8] = if tex_mode || etc_mode {
+                                    // --renderframe-etc2: same compressed path but internalformat
+                                    // GL_COMPRESSED_RGB8_ETC2 (0x9274 — the actual Android Roblox
+                                    // ETC2 format). Modes 1/2 of ETC2 RGB are bit-identical to ETC1
+                                    // individual/differential, so the same crafted blocks are valid
+                                    // ETC2 blocks; decode_etc2_rgb must yield the same colors.
+                                    let etc2_mode = renderframe_args.iter().any(|a| a == "--renderframe-etc2");
+                                    let comp_mode = etc_mode || etc2_mode;
+                                    let fs_src: &[u8] = if tex_mode || comp_mode {
                                         // 2x2 texels RED,GREEN,BLUE,WHITE. UV = floor(frag/640,360)
                                         // picks a quadrant, (uv+0.5)*0.5 samples its texel center
                                         // under NEAREST. centroid(640,360)->(1,1)->WHITE; (900,150)
@@ -2413,7 +2420,7 @@ fn main() {
                                     // textured draws will need. glTexImage2D has 9 args (pixels on
                                     // the guest stack), so drive it with a dedicated CpuState whose
                                     // sp=tex_sp points at a slot holding the pixels pointer.
-                                    if tex_mode || etc_mode {
+                                    if tex_mode || comp_mode {
                                                                             const GL_TEXTURE0: u64 = 0x84c0;
                                                                             const GL_TEXTURE_2D: u64 = 0x0de1;
                                                                             const GL_RGBA: u64 = 0x1908;
@@ -2462,6 +2469,11 @@ fn main() {
                                                                                 // All 8 args fit x0-x7 (no stack arg). Each block: individual mode, table codeword
                                                                                 // 0, all selectors 0 -> decoded color = (c*0x11)+2 per channel, clamped.
                                                                                 const GL_ETC1_RGB8_OES: u64 = 0x8d64;
+                                                                                const GL_COMPRESSED_RGB8_ETC2: u64 = 0x9274;
+                                                                                // ETC2 mode 1/2 are bit-identical to ETC1 individual/differential, so the
+                                                                                // same blocks are valid ETC2-RGB; just relabel the internalformat to prove
+                                                                                // decode_etc2_rgb (the real Android Roblox path) handles them.
+                                                                                let comp_fmt = if etc2_mode { GL_COMPRESSED_RGB8_ETC2 } else { GL_ETC1_RGB8_OES };
                                                                                 let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
                                                                                 let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
                                                                                 // 8x8 ETC1: 4 blocks row-major top-first -> (255,2,2) red,(2,255,2) green,
@@ -2484,7 +2496,7 @@ fn main() {
                                                                                 sce.x[31] = isp;
                                                                                 sce.x[0] = GL_TEXTURE_2D;
                                                                                 sce.x[1] = 0; // level
-                                                                                sce.x[2] = GL_ETC1_RGB8_OES; // internalformat
+                                                                                sce.x[2] = comp_fmt; // internalformat
                                                                                 sce.x[3] = 8; // width
                                                                                 sce.x[4] = 8; // height
                                                                                 sce.x[5] = 0; // border
@@ -2820,7 +2832,7 @@ fn main() {
                                     // must yield three DIFFERENT texel colors (WHITE/GREEN/RED),
                                     // which a constant shader cannot produce -> proves the sampled
                                     // texture actually rendered.
-                                    if tex_mode || etc_mode {
+                                    if tex_mode || comp_mode {
                                         let probes: [(u32, u32, &str, u64); 3] = [
                                             (640, 360, "centroid(WHITE)", 0xf50),
                                             (900, 150, "quad-(1,0)(GREEN)", 0xf54),

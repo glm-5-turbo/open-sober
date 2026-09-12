@@ -280,6 +280,17 @@ mod tests {
         assert_eq!(col(4 * 8), [255, 2, 2, 255], "block2 bottom-left -> (2,2,255) blue");
         // block3 (bottom-right, row4 col4) -> white
         assert_eq!(col(4 * 8 + 4), [255, 255, 255, 255], "block3 -> white");
+
+        // The SAME blocks labeled GL_COMPRESSED_RGB8_ETC2 (0x9274) must decode identically
+        // via decode_etc2_rgb (ETC2 RGB modes 1/2 are bit-identical to ETC1
+        // individual/differential). Proves the real Android-Roblox ETC2 path.
+        let px2 = decompress(GL_COMPRESSED_RGB8_ETC2, 8, 8, &etc_data).expect("8x8 ETC2 decodes");
+        let col2 = |i: usize| px2[i].to_le_bytes();
+        assert_eq!(col2(0), [2, 2, 255, 255], "ETC2 block0 -> (255,2,2) red");
+        assert_eq!(col2(4), [2, 255, 2, 255], "ETC2 block1 -> (2,255,2) green");
+        assert_eq!(col2(4 * 8), [255, 2, 2, 255], "ETC2 block2 -> (2,2,255) blue");
+        assert_eq!(col2(4 * 8 + 4), [255, 255, 255, 255], "ETC2 block3 -> white");
+        assert_eq!(px2, px, "ETC2 and ETC1 decode the same blocks identically");
     }
 
     #[test]
