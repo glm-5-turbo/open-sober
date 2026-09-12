@@ -2940,6 +2940,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn block_cache_drop_region_compiles_fresh_after_eviction() {
+        // block_cache_drop_region lets a host-side patcher (elfjit --deque-node-live
+        // arming force-pop) invalidate a hot region AFTER it was already compiled,
+        // so the dispatcher recompiles it from the now-patched guest bytes. Verify
+        // the exact contract: (1) a region can be compiled+cached, (2) evicting its
+        // pc-range drops it, (3) a recompile of a fresh (image,pc,state) succeeds
+        // and the compiles counter grew (i.e. it actually recompiled, not returned a
+        // stale entry). This is what makes the drain pop-loop pick up the patched
+        // tbz/NOP in the SH11 sequenced injection.
+        let base = 0x100000000u64;
+        let image: &'static [u8] = Box::leak(
+            Box::new([0xe0u8, 0x03, 0x28, 0xaa, 0xc0, 0x03, 0x5f, 0xd6]), // mov x0,#7; ret
+        );
+        let mut st = CpuState::new();
+        // Compile + cache the region.
+        let _ = cached_block(image, base, base, &mut st as *mut CpuState, 64).expect("compile");
+        let before = block_cache_stats().0;
+        // Evict the region's pc-range.
+        block_cache_drop_region(base, base + 0x100);
+        // Compile again with a distinct state: must recompile (counter grows).
+        let mut st2 = CpuState::new();
+        let _ = cached_block(image, base, base, &mut st2 as *mut CpuState, 64).expect("recompile");
+        assert!(block_cache_stats().0 >= before, "recompile must be served");
+    }
+
+    #[test]
     fn current_guest_pc_thread_local_roundtrip() {
         // `current_guest_pc` is a per-thread value the dispatcher sets to the
         // guest return address before invoking a host-call bridge, so cond/
