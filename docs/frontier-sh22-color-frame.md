@@ -70,7 +70,17 @@ task, so it does not yet drive frames natively. The mechanical reverse of slot0
 (glDrawBuffers) and slot2 (glClearBufferfv) removes the last guess-blocker in
 the engine's own clear path. Full dispatch-slot map (SH22c): slot0=glDrawBuffers, slot1=glClearBufferiv
 (0x5b32f68, GL_STENCIL=0x1802), slot2=glClearBufferfv, slot3=glClearBufferfi
-(0x84F9=GL_DEPTH_STENCIL). Baselines unchanged: `--jni` exit 0; stable idle
+(0x84F9=GL_DEPTH_STENCIL).
+
+Reentrancy proof (SH22d, `--renderframe-loop <N>`): repeated the engine's real
+frame-fn 0x105b32c00 -> swap recipe N=3 times — each frame-fn returned Ok + each
+post-frame swap returned Ok(0x1), exit 124 stable. The engine's render path is
+sustainable (the property it needs to drive frames from its own main loop).
+The frame-fn has NO static callers (objdump) — it is reached only via a
+runtime-computed function pointer (a vtable method), so harness-driving it by its
+guest address is the correct approach.
+
+Baselines unchanged: `--jni` exit 0; stable idle
 main loop exit 124. Next: drive the engine's own render-loop recipe
 (vtable[16] bind -> frame-fn -> vtable[24] swap) in natural order from the
 engine's real thread, or reverse the second clear-source object at the main-fn
