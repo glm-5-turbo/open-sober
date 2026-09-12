@@ -2233,7 +2233,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // .1q + bit21 CLEAR; .8h uses byte1 0x22, excluded). q=bit30 picks pmull2.
     // U=bit29 must be CLEAR (0x0e/0x4e prefix both clear it); 0x6e (U set) excluded.
     if ((insn & 0xff00_fc00) == 0x0e00_e000 || (insn & 0xff00_fc00) == 0x4e00_e000)
-        && (insn >> 20 & 0xf) == 0xe
+        && (insn >> 21 & 0x7) == 0x7
     {
         return Inst::Pmull1q {
             rd: (insn & 0x1f) as u8,
@@ -7678,6 +7678,10 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x4e629400), Inst::Pmull1q { .. }));
         assert!(!matches!(decode_op(0x0e209c00), Inst::Pmull1q { .. }));
         assert!(!matches!(decode_op(0x4ee1dc00), Inst::Pmull1q { .. }));
+        // pmull2 with high rm (bit20 spills into byte1->0xf0): real 0x4ef0e0d0.
+        assert!(matches!(decode_op(0x4ef0e0d0),
+            Inst::Pmull1q { rd: 16, rn: 6, rm: 16, hi: true }),
+            "got {:?}", decode_op(0x4ef0e0d0));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).
