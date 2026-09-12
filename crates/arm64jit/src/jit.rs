@@ -7997,6 +7997,29 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn srshl_rounding_exec() {
+        // srshl v0.4s, v1.4s, v2.4s = 0x4ea154c4 (real): signed ROUNDING variable
+        // right shift. Oracle (qemu): v1={5,-7,100,-101}, shifts {-1,-1,-2,-2}
+        // -> {3,-3,25,-25}. Rounding adds 1<<(k-1) before the arithmetic >>k.
+        let mut st = CpuState::new();
+        // 0x4ea154c4: rd=4,rn=6,rm=1. slot(6)=st.v[12]&[13], slot(1)=st.v[2]&[3], slot(4)=v[8]&[9].
+        // .4s: 32-bit lanes. v1 {5,-7,100,-101}: lanes0,1 in v[12], lanes2,3 in v[13].
+        st.v[12] = 0xFFFF_FFF9_0000_0005; // lane0=5, lane1=-7
+        st.v[13] = 0xFFFF_FF9B_0000_0064; // lane2=100, lane3=-101
+        st.v[2] = 0xFFFF_FFFF_FFFF_FFFF;  // v2 lanes0,1 = -1,-1
+        st.v[3] = 0xFFFF_FFFE_FFFF_FFFE;  // v2 lanes2,3 = -2,-2
+        exec_bytes(&mut st, &[0xc4, 0x54, 0xa1, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let wi = |s: &CpuState, i: usize| -> i32 {
+            let r = s.v[if i < 2 { 8 } else { 9 }];
+            ((r >> (32 * (i % 2))) & 0xffff_ffff) as u32 as i32
+        };
+        assert_eq!(wi(&st,0), 3,   "srshl(5,-1)");
+        assert_eq!(wi(&st,1), -3,  "srshl(-7,-1)");
+        assert_eq!(wi(&st,2), 25,  "srshl(100,-2)");
+        assert_eq!(wi(&st,3), -25, "srshl(-101,-2)");
+    }
+
+    #[test]
     fn smlsl_widen_exec() {
         // smlsl v0.4s, v1.4h, v2.4h = 0x0e62a020: Vd = Vd - widen(s16*s16) per lane.
         // v1s = {2,5,-3,7}, v2s = {3,-2,4,10} -> prods {6,-10,-12,70}.

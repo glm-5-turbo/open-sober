@@ -5587,7 +5587,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
             stg(buf, rd as u32, RAX);        // quotient -> Rd
             Ok(())
         }
-        Inst::SimdVShift { rd, rn, rm, esize, signed_, q } => {
+        Inst::SimdVShift { rd, rn, rm, esize, signed_, q, rounding } => {
             // ushl/sshl Vd.T, Vn.T, Vm.T : per-lane variable shift.
             // Each count lane C is a SIGNED esize-bit value:
             //   C >= 0 -> result = V << C          (left)
@@ -5654,11 +5654,11 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     buf.shl_cl64(RAX);
                     done_jumps.push(buf.jmp_rel32()); // jdone
                 }
-                // ---- right path (C < 0): -C = -(RCX) ----
+                // ---- right path (C < 0): -C = -(RCX) = k ----
                 let right_at = buf.len();
-                buf.neg_r64(RCX); // RCX = -C = magnitude
+                buf.neg_r64(RCX); // RCX = -C = magnitude k
                 if signed_ {
-                    // sshl: arithmetic right shift, sign-extend the element's sign first
+                    // sshl/srshl: arithmetic right shift, sign-extend the element's sign first
                     match esize {
                         4 => buf.movsxd_r64_r32(RAX, RAX),
                         2 => {
@@ -5675,10 +5675,21 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                 if bbits < 64 {
                     buf.cmp_ri64(RCX, bbits as u32);
                     let jbigr = buf.jcc_rel32(0x83); // JAE: magnitude >= B
+                    // rounding (urshl/srshl): result = (V + (1 << (k-1))) >> k.
+                    // Add the in-range bias only when k < B; the out-of-range branch
+                    // below keeps RAX unbiased (ARM rounds only within-range right
+                    // shifts — a full shift-out returns sign-fill/0 regardless).
+                    if rounding {
+                        // RDX = 1 << (k-1): bits k..0 set then shift right 1.
+                        buf.mov_ri64(RDX, 1);
+                        buf.shl_cl64(RDX);      // RDX = 1 << k
+                        buf.shr_ri8(RDX, 1);    // RDX = 1 << (k-1)
+                        buf.add_rr64(RAX, RDX); // V += bias
+                    }
                     if signed_ {
-                        buf.sar_cl64(RAX); // sshl: arithmetic right shift
+                        buf.sar_cl64(RAX); // sshl/srshl: arithmetic right shift
                     } else {
-                        buf.shr_cl64(RAX); // ushl: logical right shift
+                        buf.shr_cl64(RAX); // ushl/urshl: logical right shift
                     }
                     if wmask != u64::MAX {
                         buf.mov_ri64(RDX, wmask);
@@ -5686,7 +5697,7 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     done_jumps.push(buf.jmp_rel32()); // jdoner
                     let sign_or_zero = buf.len();
-                    // out-of-range right shift: ushl -> 0; sshl -> sign-fill
+                    // out-of-range right shift: ushl/urshl -> 0; sshl/srshl -> sign-fill
                     if signed_ {
                         // result = (V < 0) ? wmask : 0 ... but V already sign-extended.
                         buf.test_rr64(RAX, RAX);
@@ -5701,7 +5712,16 @@ Inst::SimdMovEl { rd, rn, esize, index, signed, is_x } => {
                     }
                     fixed.push((jbigr, sign_or_zero));
                 } else {
-                    buf.sar_cl64(RAX); // 64-bit, C in [1,63] so sar is fine
+                    // 64-bit (bbits==64): for 64-bit esize, rounding (srshl/q) is
+                    // determined per-lane; here bbits<64 is false only for esize 8,
+                    // and srshl .2d lives in the bbits<64==false path. Bias then sar.
+                    if rounding {
+                        buf.mov_ri64(RDX, 1);
+                        buf.shl_cl64(RDX);
+                        buf.shr_ri8(RDX, 1);
+                        buf.add_rr64(RAX, RDX);
+                    }
+                    buf.sar_cl64(RAX); // 64-bit, C in [-63,-1] so sar is fine
                 }
                 // patch to final store
                 let done = buf.len();

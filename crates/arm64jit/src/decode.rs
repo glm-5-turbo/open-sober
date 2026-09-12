@@ -391,7 +391,7 @@ pub enum Inst {
     // ---- scalar udiv/sdiv Wd/Wd/Wm ----
     Div { rd: u8, rn: u8, rm: u8, signed: bool, is_x: bool },
     // ---- SIMD variable register shift: ushl/sshl Vd.T, Vn.T, Vm.T ----
-    SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool, q: bool },
+    SimdVShift { rd: u8, rn: u8, rm: u8, esize: u8, signed_: bool, q: bool, rounding: bool },
     // ---- scalar FP max/min (fmax/fmin/fmaxnm/fminnm) ----
     FMaxMin { rd: u8, rn: u8, rm: u8, sz: bool, op: u8 },
     // ---- FP horizontal reduction cross vector: fmaxv/fminv Sd, Vn.4s ----
@@ -3346,6 +3346,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                                        | 0x6ee0_4400 | 0x0e20_4400 | 0x0e60_4400
                                        | 0x0ea0_4400 | 0x4e20_4400 | 0x4e60_4400
                                        | 0x4ea0_4400 | 0x4ee0_4400) {
+                            // ushl/sshl: rounding bit (bit8) clear.
                             return Inst::SimdVShift {
                                 rd: (insn & 0x1f) as u8,
                                 rn: ((insn >> 5) & 0x1f) as u8,
@@ -3353,6 +3354,27 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                                 esize: (1u8 << ((insn >> 22) & 0x3)),
                                 signed_: (insn >> 29) & 1 == 0,
                                 q: (insn >> 30) & 1 == 1,
+                                rounding: false,
+                            };
+                        }
+                        // ---- SIMD variable register shift-rounded: urshl/srshl Vd.T, Vn.T, Vm.T ----
+                        // Same but bit8 SET (0x5400): for negative shift k = -C, the
+                        // result adds 1<<(k-1) before the arithmetic(/logical) right
+                        // shift — round-half-away-from-zero for signed, half-up unsigned.
+                        // Gates mirror ushl/sshl with 0x44->0x54.
+                        if matches!(vsh, 0x2e20_5400 | 0x2e60_5400 | 0x2ea0_5400
+                                       | 0x2ee0_5400 | 0x6e20_5400 | 0x6e60_5400
+                                       | 0x6ea0_5400 | 0x6ee0_5400 | 0x0e20_5400
+                                       | 0x0e60_5400 | 0x0ea0_5400 | 0x4e20_5400
+                                       | 0x4e60_5400 | 0x4ea0_5400 | 0x4ee0_5400) {
+                            return Inst::SimdVShift {
+                                rd: (insn & 0x1f) as u8,
+                                rn: ((insn >> 5) & 0x1f) as u8,
+                                rm: ((insn >> 16) & 0x1f) as u8,
+                                esize: (1u8 << ((insn >> 22) & 0x3)),
+                                signed_: (insn >> 29) & 1 == 0,
+                                q: (insn >> 30) & 1 == 1,
+                                rounding: true,
                             };
                         }
 
@@ -7836,6 +7858,19 @@ mod fp16_scalar_and_gate_regressions {
         // fmax v0.8h=0x4e413400 stays SimdFp16As.
         assert!(matches!(decode_op(0x4e413400), Inst::SimdFp16As { rd: 0, rn: 0, rm: 1, op: 4, .. }),
             "fmax .8h must stay Fp16As, got {:?}", decode_op(0x4e413400));
+        // SIMD variable rounding shift: srshl v4.4s=0x4ea154c4 (real), srshl v6.2d=
+        // 0x4ee354c6, urshl v5.4h=0x2e615485. The plain sshl .4s=0x4ea04400 must
+        // stay rounding:false.
+        assert!(matches!(decode_op(0x4ea154c4),
+            Inst::SimdVShift { rd: 4, rn: 6, rm: 1, esize: 4, signed_: true, q: true, rounding: true }),
+            "srshl .4s got {:?}", decode_op(0x4ea154c4));
+        assert!(matches!(decode_op(0x4ee354c6),
+            Inst::SimdVShift { rd: 6, rn: 6, rm: 3, esize: 8, signed_: true, q: true, rounding: true }));
+        assert!(matches!(decode_op(0x2e615485),
+            Inst::SimdVShift { esize: 2, signed_: false, rounding: true, .. }));
+        assert!(matches!(decode_op(0x4ea04400),
+            Inst::SimdVShift { esize: 4, signed_: true, rounding: false, .. }),
+            "sshl must be rounding:false, got {:?}", decode_op(0x4ea04400));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).
