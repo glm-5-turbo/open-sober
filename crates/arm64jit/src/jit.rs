@@ -311,6 +311,37 @@ pub type HostFloat32Call = extern "C" fn(f0: f32, f1: f32, f2: f32, f3: f32, f4:
 /// x/s-lanes its signature needs and calls the real Mesa symbol via gles-wrapper.
 pub type HostGlesCall = extern "C" fn(st: *mut CpuState) -> u64;
 
+/// Reverse-name registry for host-call slots. The resolver keeps a
+/// `name -> slot-addr` map for imports it allocates; but GLES mixed-ABI
+/// bridges (`register_gles_call`), the float/f32 bridges, and the JNI
+/// function slots are allocated by an *auto* index that carries no name. That
+/// makes JIT_TRACE print anonymous `hostcall@slotN` for exactly the engine
+/// imports the real libroblox boot dispatches (e.g. the GameActivity init
+/// path), hiding *which* function each dispatch is. This map lets any
+/// registration site record `slot-addr -> human name` so the JIT_TRACE dumper
+/// (via `name_of_call_addr`) can resolve it. Populated lazily.
+static HOST_CALL_NAMES: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
+
+fn host_call_names() -> &'static Mutex<HashMap<u64, String>> {
+    HOST_CALL_NAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a human-readable name for a host-call slot address, so the JIT_TRACE
+/// hostcall dumper can say *which* import/bridge a hot dispatch is (instead of
+/// an anonymous `slotN`). Idempotent; a duplicate keeps the first name.
+pub fn name_host_call_slot(addr: u64, name: &str) {
+    if addr == 0 {
+        return;
+    }
+    let mut m = host_call_names().lock().unwrap();
+    m.entry(addr).or_insert_with(|| name.to_string());
+}
+
+/// Look up a previously-recorded human name for a host-call slot address.
+pub fn host_call_slot_name(addr: u64) -> Option<String> {
+    host_call_names().lock().unwrap().get(&addr).cloned()
+}
+
 static HOST_CALLS: Mutex<[Option<HostCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_FLOAT_CALLS: Mutex<[Option<HostFloatCall>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
 static HOST_FLOAT32_CALLS: Mutex<[Option<HostFloat32Call>; HOST_THUNK_MAX]> = Mutex::new([None; HOST_THUNK_MAX]);
@@ -2001,6 +2032,7 @@ pub fn route_mempool_big_alloc_to_host(patch_site: u64, image_base: u64) -> Resu
     // proceed. (The LSM map allocator 0x1d97744 takes size in x0 — handled by
     // route_allocator_x0_to_calloc.)
     let host_thunk = register_host_call_auto(mempool_calloc);
+    crate::jit::name_host_call_slot(host_thunk, "boot.mempool_calloc(x1=size)");
     // Thunk (all instructions the JIT decodes — no literal-load):
     //   mov x0, x1            aa0103e0     @ +0   (size lives in x1 here)
     //   ldr x17, [x16, #16]   f9400a11     @ +4   (x16 == thunk page, set by
@@ -2033,6 +2065,7 @@ extern "C" fn mempool_calloc_x0(
 /// routing it lets the guest's own map init succeed and build a valid map.
 pub fn route_allocator_x0_to_calloc(patch_site: u64, image_base: u64) -> Result<u64, String> {
     let host_thunk = register_host_call_auto(mempool_calloc_x0);
+    crate::jit::name_host_call_slot(host_thunk, "boot.lsm_map_calloc(x0=size)");
     // Thunk: `ldr x17,[x16,#16]; br x17` (no size move — x0 already holds it),
     // then the host-thunk addr.
     let mut thunk: [u8; 24] = [0; 24];

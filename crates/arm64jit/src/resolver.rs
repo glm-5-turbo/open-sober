@@ -664,7 +664,9 @@ pub fn resolve_gles_mixed(name: &[u8]) -> Option<u64> {
     if ptr.is_null() {
         return None;
     }
-    Some(register_gles_call(wrapped))
+    let slot = register_gles_call(wrapped);
+    crate::jit::name_host_call_slot(slot, &ns);
+    Some(slot)
 }
 
 /// Give an import name a host call slot. If the host symbol is found via
@@ -742,11 +744,20 @@ fn alloc_slot(r: &mut Resolver, key: &CString, hostf: HostCall) -> Option<u64> {
 /// hostcall dumper to say *which* import a hot loop is dispatching, instead of
 /// an anonymous slot number.
 pub fn name_of_call_addr(addr: u64) -> Option<String> {
+    // 1) Named imports (resolver map).
     let r = resolver().lock().unwrap();
-    r.slots
+    let named = r
+        .slots
         .iter()
         .find(|(_, v)| **v == addr)
-        .map(|(k, _)| String::from_utf8_lossy(k.as_bytes()).into_owned())
+        .map(|(k, _)| String::from_utf8_lossy(k.as_bytes()).into_owned());
+    drop(r);
+    if named.is_some() {
+        return named;
+    }
+    // 2) Auto-allocated GLES/float/JNI bridges recorded in the JIT's
+    //    reverse-name registry (anonymous `slotN` otherwise).
+    crate::jit::host_call_slot_name(addr)
 }
 
 /// Name of an import as `&str`, tolerating a trailing NUL.
@@ -1121,7 +1132,10 @@ pub fn resolve_float(name: &[u8]) -> Option<u64> {
     }
     // Host f64 -> f64 via double (xmm0..) ABI = `HostFloatCall`.
     let hostf: HostFloatCall = unsafe { std::mem::transmute(ptr) };
-    Some(crate::jit::register_float_call(hostf))
+    let slot = crate::jit::register_float_call(hostf);
+    let ns = name_str(name);
+    crate::jit::name_host_call_slot(slot, &ns);
+    Some(slot)
 }
 
 /// Double-precision libm names whose f64 ABI matches our float bridge.
@@ -1155,7 +1169,10 @@ pub fn resolve_float32(name: &[u8]) -> Option<u64> {
         return None;
     }
     let hostf: HostFloat32Call = unsafe { std::mem::transmute(ptr) };
-    Some(crate::jit::register_float32_call(hostf))
+    let slot = crate::jit::register_float32_call(hostf);
+    let ns = name_str(name);
+    crate::jit::name_host_call_slot(slot, &ns);
+    Some(slot)
 }
 
 /// Regist directly known common imports: name -> host function. Returns a map
@@ -1774,5 +1791,41 @@ mod tests {
         assert!(resolve_gles_mixed(b"glTotallyFake\0").is_none());
         assert!(resolve_gles_mixed(b"strlen\0").is_none());
         assert!(resolve_gles_mixed(b"glGetError\0").is_none(), "int-ABI stays on the int resolver");
+    }
+
+    /// The auto-allocated GLES/float/JNI host-call slots (which the resolver's
+    /// `name -> slot-addr` map does NOT cover) must still be reversible back to
+    /// a readable name by `name_of_call_addr`, so the JIT_TRACE run-log of the
+    /// real boot prints *which* engine import a dispatch is instead of an
+    /// anonymous `slotN`. Regression for the reverse-name registry.
+    #[test]
+    fn name_of_call_addr_resolves_auto_allocated_gles_and_float_slots() {
+        // 1) GLES mixed bridge: resolve_gles_mixed `glClearColor` -> register_gles_call
+        //    slot, and the registry must name it back.
+        let Some(gles_slot) = resolve_gles_mixed(b"glClearColor\0") else {
+            eprintln!("skipping: Mesa GLES not present");
+            return;
+        };
+        let gles_name = name_of_call_addr(gles_slot);
+        assert_eq!(gles_name.as_deref(), Some("glClearColor"),
+            "gles auto-slot resolves by reverse-name, not slotN");
+
+        // 2) Float bridge: resolve_float `sin` -> register_float_call slot.
+        let Some(fl_slot) = resolve_float(b"sin\0") else {
+            eprintln!("skipping: libm sin not resolvable");
+            return;
+        };
+        let fl_name = name_of_call_addr(fl_slot);
+        assert_eq!(fl_name.as_deref(), Some("sin"),
+            "float auto-slot resolves by reverse-name, not slotN");
+
+        // 3) Single-precision float bridge.
+        let Some(fl32_slot) = resolve_float32(b"sinf\0") else {
+            eprintln!("skipping: libm sinf not resolvable");
+            return;
+        };
+        let fl32_name = name_of_call_addr(fl32_slot);
+        assert_eq!(fl32_name.as_deref(), Some("sinf"),
+            "f32 auto-slot resolves by reverse-name, not slotN");
     }
 }

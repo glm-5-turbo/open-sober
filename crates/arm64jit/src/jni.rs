@@ -118,6 +118,85 @@ const GET_DIRECT_BUFFER_CAPACITY: usize = 231;
 // `ldr x8,[vm] ; ldr x8,[x8,#48] ; blr x8` = byte 48 = word 6 = GetEnv).
 const VM_GET_ENV: usize = 6;
 
+/// Human names for each filled JNIEnv/JavaVM slot, keyed by the slot-const
+/// value it occupies in the JNIEnv function table. Used to give the JIT_TRACE
+/// hostcall dumper a readable name for every JNI function the engine reaches
+/// (instead of an anonymous `slotN`), which makes the real-boot run-log
+/// legible when GameActivity init churns JNI calls.
+const JNI_METHOD_NAMES: &[(&str, &usize)] = &[
+    ("JNIEnv.GetVersion", &GET_VERSION),
+    ("JNIEnv.FindClass", &FIND_CLASS),
+    ("JNIEnv.Throw", &THROW),
+    ("JNIEnv.ThrowNew", &THROW_NEW),
+    ("JNIEnv.NewGlobalRef", &NEW_GLOBAL_REF),
+    ("JNIEnv.DeleteGlobalRef", &DEL_GLOBAL_REF),
+    ("JNIEnv.DeleteLocalRef", &DEL_LOCAL_REF),
+    ("JNIEnv.GetMethodID", &GET_METHOD_ID),
+    ("JNIEnv.GetFieldID", &GET_FIELD_ID),
+    ("JNIEnv.GetObjectField", &GET_OBJ_FIELD),
+    ("JNIEnv.GetBooleanField", &GET_BOOLEAN_FIELD),
+    ("JNIEnv.GetIntField", &GET_INT_FIELD),
+    ("JNIEnv.SetObjectField", &SET_OBJ_FIELD),
+    ("JNIEnv.SetBooleanField", &SET_BOOLEAN_FIELD),
+    ("JNIEnv.GetStaticMethodID", &GET_STATIC_METHOD_ID),
+    ("JNIEnv.NewStringUTF", &NEW_STRING_UTF),
+    ("JNIEnv.GetStringUTFLength", &GET_STRING_UTF_LEN),
+    ("JNIEnv.GetStringUTFChars", &GET_STRING_UTF_CHARS),
+    ("JNIEnv.GetArrayLength", &GET_ARRAY_LEN),
+    ("JNIEnv.NewObjectArray", &NEW_OBJECT_ARRAY),
+    ("JNIEnv.GetObjectArrayElement", &GET_OBJ_ARR_ELEM),
+    ("JNIEnv.SetObjectArrayElement", &SET_OBJ_ARR_ELEM),
+    ("JNIEnv.NewByteArray", &NEW_BYTE_ARRAY),
+    ("JNIEnv.NewIntArray", &NEW_INT_ARRAY),
+    ("JNIEnv.GetByteArrayElements", &GET_BYTE_ARRAY_ELEMENTS),
+    ("JNIEnv.GetIntArrayElements", &GET_INT_ARRAY_ELEMENTS),
+    ("JNIEnv.ReleaseByteArrayElements", &RELEASE_BYTE_ARRAY_ELEMENTS),
+    ("JNIEnv.ReleaseIntArrayElements", &RELEASE_INT_ARRAY_ELEMENTS),
+    ("JNIEnv.GetByteArrayRegion", &GET_BYTE_ARRAY_REGION),
+    ("JNIEnv.GetIntArrayRegion", &GET_INT_ARRAY_REGION),
+    ("JNIEnv.SetByteArrayRegion", &SET_BYTE_ARRAY_REGION),
+    ("JNIEnv.SetIntArrayRegion", &SET_INT_ARRAY_REGION),
+    ("JNIEnv.RegisterNatives", &REGISTER_NATIVES),
+    ("JNIEnv.GetJavaVM", &GET_JAVA_VM),
+    ("JNIEnv.IsAssignableFrom", &IS_ASSIGNABLE_FROM),
+    ("JNIEnv.ExceptionOccurred", &EXCEPTION_OCCURRED),
+    ("JNIEnv.ExceptionDescribe", &EXCEPTION_DESCRIBE),
+    ("JNIEnv.ExceptionClear", &EXCEPTION_CLEAR),
+    ("JNIEnv.PushLocalFrame", &PUSH_LOCAL_FRAME),
+    ("JNIEnv.PopLocalFrame", &POP_LOCAL_FRAME),
+    ("JNIEnv.IsSameObject", &IS_SAME_OBJECT),
+    ("JNIEnv.NewLocalRef", &NEW_LOCAL_REF),
+    ("JNIEnv.EnsureLocalCapacity", &ENSURE_LOCAL_CAPACITY),
+    ("JNIEnv.AllocObject", &ALLOC_OBJECT),
+    ("JNIEnv.NewObject", &NEW_OBJECT),
+    ("JNIEnv.GetObjectClass", &GET_OBJECT_CLASS),
+    ("JNIEnv.IsInstanceOf", &IS_INSTANCE_OF),
+    ("JNIEnv.CallObjectMethod", &CALL_OBJECT_METHOD),
+    ("JNIEnv.CallBooleanMethod", &CALL_BOOLEAN_METHOD),
+    ("JNIEnv.CallIntMethod", &CALL_INT_METHOD),
+    ("JNIEnv.CallVoidMethod", &CALL_VOID_METHOD),
+    ("JNIEnv.CallStaticObjectMethod", &CALL_STATIC_OBJECT_METHOD),
+    ("JNIEnv.CallStaticBooleanMethod", &CALL_STATIC_BOOLEAN_METHOD),
+    ("JNIEnv.CallStaticIntMethod", &CALL_STATIC_INT_METHOD),
+    ("JNIEnv.CallStaticVoidMethod", &CALL_STATIC_VOID_METHOD),
+    ("JNIEnv.GetStaticFieldID", &GET_STATIC_FIELD_ID),
+    ("JNIEnv.GetStaticObjectField", &GET_STATIC_OBJECT_FIELD),
+    ("JNIEnv.GetStaticIntField", &GET_STATIC_INT_FIELD),
+    ("JNIEnv.SetStaticObjectField", &SET_STATIC_OBJECT_FIELD),
+    ("JNIEnv.SetStaticIntField", &SET_STATIC_INT_FIELD),
+    ("JNIEnv.ReleaseStringUTFChars", &RELEASE_STRING_UTF_CHARS),
+    ("JNIEnv.UnregisterNatives", &UNREGISTER_NATIVES),
+    ("JNIEnv.MonitorEnter", &MONITOR_ENTER),
+    ("JNIEnv.MonitorExit", &MONITOR_EXIT),
+    ("JNIEnv.GetStringUTFRegion", &GET_STRING_UTF_REGION),
+    ("JNIEnv.NewWeakGlobalRef", &NEW_WEAK_GLOBAL_REF),
+    ("JNIEnv.DeleteWeakGlobalRef", &DELETE_WEAK_GLOBAL_REF),
+    ("JNIEnv.ExceptionCheck", &EXCEPTION_CHECK),
+    ("JNIEnv.NewDirectByteBuffer", &NEW_DIRECT_BYTE_BUFFER),
+    ("JNIEnv.GetDirectBufferAddress", &GET_DIRECT_BUFFER_ADDRESS),
+    ("JNIEnv.GetDirectBufferCapacity", &GET_DIRECT_BUFFER_CAPACITY),
+];
+
 /// Registry of interned UTF-8 byte strings: `str_handle` allocates a readable,
 /// null-terminated copy in guest-addressable memory (guest==host) and returns a
 /// stable handle for the same bytes. This is the JIT analogue of the QEMU
@@ -751,6 +830,18 @@ pub fn build_jni() -> (u64, u64) {
         let vm_getenv = reg(jni_vm_getenv);
         vm_functions[VM_GET_ENV] = vm_getenv; // GetEnv: writes *penv=env, returns JNI_OK
         let vm_fn_tbl = u64array(&vm_functions);
+
+        // Record a human name for every filled JNIEnv/JavaVM slot so the JIT_TRACE
+        // hostcall dumper prints which JNI function the engine dispatches (instead
+        // of an anonymous `slotN`). This is what makes the real-boot run-log
+        // readable when GameActivity init churns JNI calls.
+        for (func_name, slot) in JNI_METHOD_NAMES {
+            let idx = **slot;
+            if idx < functions.len() {
+                crate::jit::name_host_call_slot(functions[idx], func_name);
+            }
+        }
+        crate::jit::name_host_call_slot(vm_functions[VM_GET_ENV], "JavaVM.GetEnv");
 
         let env = object2(env_fn_tbl);
         let vm = object2(vm_fn_tbl);
