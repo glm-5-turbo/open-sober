@@ -564,8 +564,8 @@ fn main() {
                         let at = arm64jit::resolver::name_of_call_addr(t.pc)
                             .unwrap_or_else(|| format!("{:#x}", t.pc));
                         eprintln!(
-                            "  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
-                            t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x19,
+                            "  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x5={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                            t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x3, t.x5, t.x19,
                             // deref predicate pointer if it looks valid (guest rw segment)
                             if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
                             t.x29, t.sp
@@ -703,9 +703,28 @@ fn main() {
                 .and_then(|i| args.get(i + 1).cloned())
         } {
             let period_ms: u64 = hex.trim().parse().expect("--futex-kick needs integer period-ms");
+            // Optional --futex-set <hex>: write a SPECIFIC latch value each tick
+            // (the awaited token) instead of the free-running old+1. This tests
+            // whether the idle barrier is a fixed "go" token (0xF4240) that the
+            // producer must write verbatim, vs a pure version-counter (wait-until-
+            // changed) where any new value works. `old.wrapping_add(1)` cannot
+            // distinguish: if the waiter re-arms to a constant each cycle, a fixed
+            // write is the correct producer signal and a version increment is a
+            // stray number the loop ignores.
+            let set_val: Option<i32> = {
+                let args: Vec<String> = std::env::args().collect();
+                args.iter()
+                    .position(|a| a == "--futex-set")
+                    .and_then(|i| args.get(i + 1).cloned())
+                    .map(|v| i32::from_str_radix(v.trim_start_matches("0x"), 16).expect("--futex-set needs hex i32"))
+            };
             const IDLE_FUTEX_CALLSITE: u64 = 0x10284d134; // guest lr when parked in the idle barrier
             std::thread::spawn(move || {
-                eprintln!("[elfjit:futexkick] driving per-thread idle futex latch every {period_ms} ms");
+                if let Some(v) = set_val {
+                    eprintln!("[elfjit:futexkick] driving idle futex latch every {period_ms} ms, WRITING FIXED {v:#x} (awaited-token test)");
+                } else {
+                    eprintln!("[elfjit:futexkick] driving per-thread idle futex latch every {period_ms} ms");
+                }
                 for it in 0..6000 {
                     std::thread::sleep(std::time::Duration::from_millis(period_ms));
                     for t in arm64jit::jit::snapshot_threads() {
@@ -727,7 +746,7 @@ fn main() {
                         // the next waiter captures that same value and
                         // re-blocks; a fixed write is a self-defeating one-off).
                         // Gate is the exact idle call-site.
-                        let nv = old.wrapping_add(1);
+                        let nv = set_val.unwrap_or_else(|| old.wrapping_add(1));
                         unsafe { *(latch as *mut libc::c_int) = nv };
                         unsafe {
                             libc::syscall(
@@ -790,8 +809,8 @@ fn main() {
                     let at = arm64jit::resolver::name_of_call_addr(t.pc)
                         .unwrap_or_else(|| format!("{:#x}", t.pc));
                     lines.push_str(&format!(
-                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
-                        t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x19,
+                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x5={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                        t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x3, t.x5, t.x19,
                         if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
                         t.x29, t.sp
                     ));

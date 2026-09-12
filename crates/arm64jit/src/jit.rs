@@ -1274,6 +1274,10 @@ pub struct ThreadSnapshot {
     pub x0: u64,
     pub x1: u64,
     pub x2: u64,
+    pub x3: u64,
+    pub x4: u64,
+    pub x5: u64,
+    pub x6: u64,
     pub x19: u64,
     pub x20: u64,
     pub x29: u64,
@@ -1299,6 +1303,10 @@ pub fn snapshot_threads() -> Vec<ThreadSnapshot> {
                 x0: s.x[0],
                 x1: s.x[1],
                 x2: s.x[2],
+                x3: s.x[3],
+                x4: s.x[4],
+                x5: s.x[5],
+                x6: s.x[6],
                 x19: s.x[19],
                 x20: s.x[20],
                 x29: s.x[29],
@@ -7293,6 +7301,13 @@ mod thread_snapshot_tests {
         // global (gate-2 cond_wait's predicate arg); also x20.
         st.x[19] = 0x106863af8; // upstream: gate-1 init poll / gate-2 cond predicate
         st.x[20] = 0x3333;
+        // The idle-futex barrier passes futex(uaddr=x1, op=0x89 WAIT_BITSET,
+        // val=x3, ..., timeout, uaddr2=NULL, bitset=x6); carry x3/x5/x6 so the
+        // sampler can name the awaited value and bitset after the futex was the
+        // missing producer signal during cycle-SH boots.
+        st.x[3] = 0x0; // waited FUTEX_WAIT_BITSET val (idle latch starts 0)
+        st.x[5] = 0x0; // uaddr2=NULL
+        st.x[6] = 0xff; // bitset
         register_guest_thread(&mut st as *mut CpuState);
 
         let snaps = snapshot_threads();
@@ -7303,6 +7318,9 @@ mod thread_snapshot_tests {
         assert_eq!(mine.sp, 0x2222);
         assert_eq!(mine.x19, 0x106863af8, "x19 = predicate pointer the waiter re-checks");
         assert_eq!(mine.x20, 0x3333, "x20 survives");
+        assert_eq!(mine.x3, 0x0, "x3 = awaited FUTEX_WAIT_BITSET val");
+        assert_eq!(mine.x5, 0x0, "x5 = uaddr2 (NULL)");
+        assert_eq!(mine.x6, 0xff, "x6 = bitset");
         assert_eq!(mine.x29, 0x1111);
     }
 }
