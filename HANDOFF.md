@@ -1,5 +1,43 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle F) — boot wall's FIRST gate CROSSED from the host: engine owner now leaves the idle ldaxr-poll, bursts 919→948 blocks, reaches a real cond_wait (workspace 395/0)
+
+Commits `5dd02ee` + `a69c42a` (dev). For cycles C-E the boot froze at the
+GameActivity rendezvous: all three guest threads parked while the engine owner
+busy-polled guest global **0x106863af8 until == 1** (`adrp x8,#0x106863000; add
+x8,x8,#0xaf8; ldar x8,[x8]; cmp #1; b.eq`) holding the recursive rendezvous
+mutex 0x6edae60. No Java layer exists on this box to set it, so it never
+released.
+
+This cycle added **host-side lifecycle release** and proved the boot advances:
+
+- `--kicker 0x<guest-global>[=<val|bcast>]` (repeatable, elfjit): detached
+  host thread writes a value to / `pthread_cond_broadcast`s a guest global
+  while `jit_run` parks — feeds awaited lifecycle state from outside.
+- `JIT_DRIVE_LIFECYCLE=1`: `host_cond_wait` becomes a 2 ms sawtooth timedwait
+  so a guest cond_wait entered before we satisfy its predicate still returns
+  periodically and re-checks an externally-satisfied flag.
+- `snapshot_threads()` now carries x19/x20; elfjit's sampler derefs the
+  predicate pointer so the log names *which global* a parked owner awaits.
+
+### Result (headless, reproducible): first motion across the wall
+`--kicker 0x106863af8=1` + `JIT_DRIVE_LIFECYCLE=1` makes the owner
+1. leave the `ldaxr [0x106863af8];cmp #1` init poll (gate 1),
+2. burst 919 -> 948 compiled blocks (29 new init blocks),
+3. park at a DISTINCT second wait: `pthread_cond_wait(cond=0x10683a168,
+   mutex=0x10683a140)` at guest call-site 0x102b4cd78 (gate 2), re-checking
+   `*x19` each 2 ms wake and re-parking while `*0x106863af8 == 1`.
+
+### Gate 2 (the new precise frontier)
+The wait-loop at 0x102b4cd50 re-parks while `*0x106863af8 == 1` and proceeds
+only when it differs; the guest RE-ARMS the flag to 1 (store 0x102b4cdb4)
+after consuming it, so driving it to 2 from the host does not persist. It is a
+guest-managed state that must transition via its own refcount paths, not a
+static flag. Releasing gate 2 needs the engine's app-command / ALooper
+dispatch to broadcast 0x10683a168 with accompanying state.
+
+Run-log: `/home/hermes-worker/runs/kicker-gate1-runlog.txt`.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle E) — boot wall pinned at register+futex level; concurrent thread-state sampler + GLIBC mutex owner/count/kind (workspace 395/0)
 
 Commits `1dae9e1` + `eaf00e6` (dev). This cycle pinpointed the
