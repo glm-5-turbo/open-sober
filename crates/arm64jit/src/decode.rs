@@ -562,6 +562,7 @@ pub enum Inst {
         rn: u8,
         op: u8, // 0=fsqrt, 1=frintm(toward -inf), 2=frintp(+inf), 3=frintz(toward 0)
         sz: bool, // true = double
+        half: bool, // true = fp16 (byte2 top set, e.g. 0x1ee1 vs 0x1e21)
     },
     // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
     // Gate (insn & 0xffe0_fc00) in {0x7ee0_d400 (double) , 0x7ea0_d400 (single)};
@@ -2347,6 +2348,26 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         }
     }
 
+    // FP16 frecpe/frsqrte (esize 2): byte1(bits23:16)==0xf9 (bit20 set, unlike the
+    // fp32 forms where bit20 is a fixed 0), byte2(bits15:8)&0xfc==0xd8, byte3 prefix
+    // top-nibble 0x0e, bit23 set. sqrt = bit29 (frsqrte .8h 0x6ef9d801 vs frecpe
+    // .8h 0x4ef9d801). q=bit30. These forms are excluded by the fp32 gate's
+    // bit20-CLEAR requirement, so this dedicated gate runs first.
+    if ((insn >> 24) & 0x0f) == 0x0e
+        && ((insn >> 16) & 0xff) == 0xf9
+        && ((insn >> 8) & 0xff) & 0xfc == 0xd8
+        && (insn & 0x0080_0000) != 0
+    {
+        let q = (insn >> 30) & 1 == 1;
+        return Inst::SimdFreFrsqrte {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            sqrt: (insn & 0x2000_0000) != 0,
+            esize: 2,
+            q,
+        };
+    }
+
     // Per-lane approximate reciprocal (frecpe) or 1/sqrt (frsqrte), two-reg-misc.
     // Gate: byte3 low-nibble 0x0e (0x..e prefix), byte1 == 0xd8 family (0xfc mask
     // clears the rn-spill bits 1:0), byte2 bit23 SET (0x0080_0000; disjoint from
@@ -3710,12 +3731,22 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             0x1e24_4000 => Some(8), // frintn s
             0x1e67_4000 => Some(9), // frintx d (round, current mode = nearest)
             0x1e27_4000 => Some(9), // frintx s
+            // --- FP16 (H-bit) scalar unary: byte2(bits23:16) top-nibble 0xe ---
+            0x1ee1_c000 => Some(0), // fsqrt h
+            0x1ee5_4000 => Some(1), // frintm h (floor)
+            0x1ee4_c000 => Some(2), // frintp h (ceil)
+            0x1ee5_c000 => Some(3), // frintz h (trunc)
+            0x1ee4_4000 => Some(8), // frintn h (nearest-even)
+            0x1ee7_4000 => Some(9), // frintx h (nearest)
+            0x1ee0_c000 => Some(5), // fabs h
+            0x1ee6_4000 => Some(7), // frinta h
+            0x1ee1_4000 => Some(6), // fneg h
             _ => None,
         };
         if let Some(op) = unary {
             let rd = (insn & 0x1f) as u8;
             let rn = ((insn >> 5) & 0x1f) as u8;
-            return Inst::FpUnary { rd, rn, op, sz };
+            return Inst::FpUnary { rd, rn, op, sz, half: ((insn >> 20) & 0xf) == 0xe };
         }
     }
 
@@ -4518,6 +4549,8 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                 (0x4ee1_8800, 2, 8, false), (0x4ee1_9800, 3, 8, false), // 2d
                 (0x2e21_8800, 4, 4, true),  (0x6e21_8800, 4, 4, true),  // frinta 2s/4s
                 (0x6e61_8800, 4, 8, true),                             // frinta 2d
+                (0x2e21_9800, 0, 4, false), (0x6e21_9800, 0, 4, false), // frintx 2s/4s (nearest)
+                (0x6e61_9800, 0, 8, false),                            // frintx 2d
                 // ---- FP16 (esize 2) frint: byte0 0x4e/.8h 0x0e/.4h, byte1 0x79,
                 // esize bit in byte2 0xf9 vs 0x79 distinguishes z/x from m/n/a.
                 (0x0e79_9800, 1, 2, false), (0x4e79_9800, 1, 2, false), // frintm 4h/8h
@@ -6730,28 +6763,30 @@ mod logical_imm_regressions {
                     }
                     // fsqrt d1, d1 = 0x1e61c021 (real libroblox audio mix) => FpUnary op0.
                     match decode(0x1e61c021) {
-                        Inst::FpUnary { rd, rn, op, sz } => {
+                        Inst::FpUnary { rd, rn, op, sz, half } => {
                             assert_eq!(rd, 1);
                             assert_eq!(rn, 1);
                             assert_eq!(op, 0); // fsqrt
                             assert!(sz);
+                            assert!(!half);
                         }
                         other => panic!("fsqrt d1,d1 -> {other:?}"),
                     }
                     // frintm d3, d3 = 0x1e654063 (round toward -inf) => FpUnary op1.
                     match decode(0x1e654063) {
-                        Inst::FpUnary { rd, rn, op, sz } => {
+                        Inst::FpUnary { rd, rn, op, sz, half } => {
                             assert_eq!(rd, 3);
                             assert_eq!(rn, 3);
                             assert_eq!(op, 1); // frintm
                             assert!(sz);
+                            assert!(!half);
                         }
                         other => panic!("frintm d3,d3 -> {other:?}"),
                     }
                     // frintx d0,d1 = 0x1e674020 (real libroblox: 0x1e674000) => op 9.
-                    assert!(matches!(decode(0x1e674020), Inst::FpUnary { rd: 0, rn: 1, op: 9, sz: true }), "got {:?}", decode(0x1e674020));
+                    assert!(matches!(decode(0x1e674020), Inst::FpUnary { rd: 0, rn: 1, op: 9, sz: true, half: false }), "got {:?}", decode(0x1e674020));
                     // frintn s0,s1 = 0x1e244020 => op 8, single.
-                    assert!(matches!(decode(0x1e244020), Inst::FpUnary { rd: 0, rn: 1, op: 8, sz: false }), "got {:?}", decode(0x1e244020));
+                    assert!(matches!(decode(0x1e244020), Inst::FpUnary { rd: 0, rn: 1, op: 8, sz: false, half: false }), "got {:?}", decode(0x1e244020));
                     // fmov d6,d0 = 0x1e604006 must still be FmovFp (NOT FpUnary/frintm).
                             assert!(matches!(decode(0x1e604006), Inst::FmovFp { rd: 6, rn: 0, .. }));
                             // ucvtf v2.2d, v2.2d = 0x6e61d842 (real libroblox audio mix) => Ucvtf2d.
@@ -7978,6 +8013,18 @@ mod fp16_scalar_and_gate_regressions {
         assert!(matches!(decode_op(0x6e799800), Inst::SimdFrint { mode: 0, esize: 2, .. }),
             "frintx .8h must NOT be FMaxV: {:?}", decode_op(0x6e799800));
         assert!(matches!(decode_op(0x0e799801), Inst::SimdFrint { q: false, esize: 2, .. }));
+        // FP16 scalar unary: fneg h0=0x1ee14000 (real), frintm h0=0x1ee54000 (real).
+        assert!(matches!(decode_op(0x1ee14000),
+            Inst::FpUnary { rd: 0, rn: 0, op: 6, half: true, .. }),
+            "fneg h got {:?}", decode_op(0x1ee14000));
+        assert!(matches!(decode_op(0x1ee54000), Inst::FpUnary { op: 1, half: true, .. }));
+        // FP16 frecpe/frsqrte: frecpe v0.8h=0x4ef9d801 (real), frsqrte .8h=0x6ef9d801,
+        // frecpe .4h=0x0ef9d801. bit20-SET distinguishes fp16 from fp32 forms.
+        assert!(matches!(decode_op(0x4ef9d801),
+            Inst::SimdFreFrsqrte { rd: 1, rn: 0, sqrt: false, esize: 2, q: true }),
+            "frecpe .8h got {:?}", decode_op(0x4ef9d801));
+        assert!(matches!(decode_op(0x6ef9d801), Inst::SimdFreFrsqrte { sqrt: true, esize: 2, q: true, .. }));
+        assert!(matches!(decode_op(0x0ef9d801), Inst::SimdFreFrsqrte { sqrt: false, esize: 2, q: false, .. }));
         // fmaxv s0,v1.4s = 0x6e30f820 must stay FMaxV (bit22 clear now separates).
         assert!(matches!(decode_op(0x6e30f820), Inst::FMaxV { .. }));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),

@@ -1916,11 +1916,78 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::FpUnary { rd, rn, op, sz } => {
+        Inst::FpUnary { rd, rn, op, sz, half } => {
             // scalar 1-source FP: fsqrt / frint{mpz} / fabs / fneg.
             // d-reg = low 8B of yate.v[reg]; s-reg = low 4B.
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            if !sz {
+            if half {
+                // fp16: 16-bit lane in the low half of the slot.
+                buf.mov_load16(RAX, RBX, vslot(rn));
+                match op {
+                    5 => { // fabs h: clear sign bit
+                        buf.and_ri64(RAX, 0x7fff);
+                    }
+                    6 => { // fneg h: flip sign bit
+                        buf.xor_ri64(RAX, 0x8000);
+                    }
+                    0 => { // fsqrt h
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps
+                        buf.cvtss2sd(0, 0);
+                        buf.sqrtsd(0, 0);
+                        buf.cvtsd2ss(0, 0);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph
+                        buf.movd_r32_xmm(RAX, 0);
+                    }
+                    1 => { // frintm h: floor
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]);
+                        buf.cvtss2sd(0, 0);
+                        buf.roundsd(0, 0, 0b01);
+                        buf.cvtsd2ss(0, 0);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]);
+                        buf.movd_r32_xmm(RAX, 0);
+                    }
+                    2 => { // frintp h: ceil (toward +inf) = roundsd 0b10
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]);
+                        buf.cvtss2sd(0, 0);
+                        buf.roundsd(0, 0, 0b10);
+                        buf.cvtsd2ss(0, 0);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]);
+                        buf.movd_r32_xmm(RAX, 0);
+                    }
+                    3 => { // frintz h: trunc = roundsd 0b11
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]);
+                        buf.cvtss2sd(0, 0);
+                        buf.roundsd(0, 0, 0b11);
+                        buf.cvtsd2ss(0, 0);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]);
+                        buf.movd_r32_xmm(RAX, 0);
+                    }
+                    8 => { // frintn h: round nearest-even = roundsd 0b00
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]);
+                        buf.cvtss2sd(0, 0);
+                        buf.roundsd(0, 0, 0b00);
+                        buf.cvtsd2ss(0, 0);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]);
+                        buf.movd_r32_xmm(RAX, 0);
+                    }
+                    9 => { // frintx h: round current mode = nearest
+                        buf.movd_xmm_r32(0, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]);
+                        buf.cvtss2sd(0, 0);
+                        buf.roundsd(0, 0, 0b00);
+                        buf.cvtsd2ss(0, 0);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]);
+                        buf.movd_r32_xmm(RAX, 0);
+                    }
+                    _ => return Err(format!("FpUnary half op {op} not implemented")),
+                }
+                buf.mov_store16(RBX, vslot(rd), RAX);
+            } else if !sz {
                 // single-precision: operate on the low 32 bits.
                 buf.mov_load32(RAX, RBX, vslot(rn));
                 match op {
@@ -3397,7 +3464,16 @@ pub fn translate(
             // F3 0F 52 = rsqrtss, F2 0F 52 = rsqrtsd.
             for lane in 0..lanes {
                 let off = lane * e;
-                if e == 4 {
+                if e == 2 {
+                    // FP16: promote to fp32, apply approximate op, demote back.
+                    buf.mov_load16(RAX, RBX, f(rn) + off);
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    buf.bytes.extend_from_slice(if sqrt { &[0xf3, 0x0f, 0x52, 0xc0] } else { &[0xf3, 0x0f, 0x53, 0xc0] });
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store16(RBX, f(rd) + off, RAX);
+                } else if e == 4 {
                     buf.mov_load32(RAX, RBX, f(rn) + off);
                     buf.movd_xmm_r32(0, RAX);
                     buf.bytes.extend_from_slice(if sqrt { &[0xf3, 0x0f, 0x52, 0xc0] } else { &[0xf3, 0x0f, 0x53, 0xc0] });
