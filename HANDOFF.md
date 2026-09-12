@@ -1,5 +1,42 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle R) — FP16 by-element fmla/fmls/fmul (the biggest remaining family) closed; workspace 423/0; HEAD f3251b7.
+
+Closed **`fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx]`** (~2000+ real .text
+instances — the single largest remaining family, the multiply-accumulate core
+of the FMOD/audio + render/HDR math paths). Coverage 11,437 -> 9,552 Unsupported
+(-1,885), distinct 6,281 -> 5,735, 0 PANIC.
+
+- **New `Inst::SimdFp16BEl` + decode gate**: byte0-nibble 0xf, bit29 CLEAR,
+  bit23 CLEAR, **bit10 CLEAR**, bit13 CLEAR. The bit10 CLEAR is the new critical
+  discriminator: FP16-indexed (bit10=0) vs shift-by-immediate (shl/ushr/sshr/
+  usra/ssra/srshr/srsra... bit10=1 FIXED), which share byte0 prefix AND bit23=0
+  AND alias the FMUL/FMLA/FMLS opcode bits[15:12] onto the shift's [14:12]
+  marker (fmul=bit15, fmls=bit14, fmla=bit12==usra's 0b001). bit13 CLEAR excludes
+  widening SimdMullEl (requires bit13 SET); bit23 CLEAR excludes f32
+  FmlaEl/SimdFmulEl (bit23 SET). MUST precede the shift gates. Verified disjoint
+  over 30+ both-family cross-compiled encodings.
+- **Fields**: op = bit15(fmul)|bit14(fmls)|else fmla; idx (.8h 3-bit) =
+  (bit11<<2)|(bit21<<1)|bit20, .4h = (bit21<<1)|bit20; vlm = bits[19:16] (v0-v15).
+- **Translate**: hoist-splat Vm.h[idx]->xmm2 (F16C promote once, BEFORE the lane
+  loop so rd==rm can't clobber), per-lane promote Vn.h[i]->f32, fma in f32, demote
+  ->store16. **Vd must be promoted (vcvtph2ps) before the accumulate** — Vd is
+  fp16, unlike the f32 FmlaEl path. fmul copies xmm1->xmm0 (movaps) so all ops
+  demote the same xmm0->xmm0 vcvtps2ph.
+- Regression: decode pins (real fmul v2.8h,v1.h[4]=0x4f019882, fmla v31.8h,
+  v15.h[7]=0x4f3f1bdf, fmls v2.4h,v1.h[2]=0x0f215082, .h[idx0..7]; + f32-untouched
+  pins: fmla/fmls stay FmlaEl, fmul stays SimdFmulEl) and exec tests (fmla .4h,
+  fmls .4h, fmul .8h 8 lanes incl. high-slot st.v[3] index). Workspace 423/0.
+
+### Next lever (docs/fp16-decode-gap.md updated)
+**SIMD modified-immediate orr/bic v.2s/.4s** (0x4f0177eX, ~100) — the next
+largest remaining family. Then fmaxnm/fminnm v.4s (0x4e21c8xx ~30), vector
+fcvtas v.4s (~150), scalar fabs/fneg/fsqrt, vector-immediate bic/orr (0x2f047400).
+
+The real HARD wall is unchanged: the engine's own producer never enqueues work
+onto its per-thread idle futex, so the main loop re-parks. Decoder coverage is
+what lets a real frame/audio path run instead of block-tracker-breaking.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle Q) — decoder FP16/NEON coverage -3,481; workspace 421/0; HEAD d284c2d.
 
 Closed the FP16 decoder gaps that will block-tracker-break a real frame/audio path
