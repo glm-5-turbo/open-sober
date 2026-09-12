@@ -785,6 +785,9 @@ pub enum Inst {
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
     // ---- SIMD unsigned compare-higher halfword: cmhi Vd.8H/.4H ----
     SimdCmhiH { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD unsigned compare-higher/same byte: cmhi/cmhs Vd.16B/.8B, Vn, Vm ----
+    // byte-lane (size 0b00). op 0=cmhi(>), 1=cmhs(>=, unsigned). all-ones/0 per byte.
+    SimdCmhiB { rd: u8, rn: u8, rm: u8, lanes: u8, ge: bool },
     // ---- SIMD unsigned compare-higher 2D: cmhi Vd.2D, Vn.2D, Vm.2D ----
     SimdCmhiD { rd: u8, rn: u8, rm: u8 },
     // ---- SIMD unsigned compare-higher-or-same: cmhs Vd.T, Vn.T, Vm.T ----
@@ -4427,8 +4430,23 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                             lanes: cl,
                                                                                                                                                                                                         };
                                                                                                                                                                                                     }
-                                                                                                                                                                                                    // 2D (64-bit lanes): 0x6ee0_3400 (Q=1). Per 8-byte lane all-ones if Vn>Vm.
-                                                                                                                                                                                                    if scm == 0x6ee0_3400 {
+                                                                                                                                                                                                    // byte-lane cmhi/cmhs (size 0b00): byte2(bits15:8)&0xf8 in {0x34,0x3c}, size bits 23:22==0.
+        // prefix low-nibble 0x0e, Q=bit30. ge (cmhs=0x3c, bit10 SET) vs cmhi(0x34). 16B/8B.
+        let b2c = (insn >> 8) & 0xf8;
+        if b2c == 0x30 && (insn >> 22 & 3) == 0
+            && (insn & 0x0f00_0000) == 0x0e00_0000
+        {
+            let ge = (insn & 0x0800) != 0; // cmhs (bit11 set) vs cmhi (bit11 clear)
+            return Inst::SimdCmhiB {
+                rd: (insn & 0x1f) as u8,
+                rn: ((insn >> 5) & 0x1f) as u8,
+                rm: ((insn >> 16) & 0x1f) as u8,
+                lanes: if insn & 0x4000_0000 != 0 { 16 } else { 8 },
+                ge,
+            };
+        }
+        // 2D (64-bit lanes): 0x6ee0_3400 (Q=1). Per 8-byte lane all-ones if Vn>Vm.
+        if scm == 0x6ee0_3400 {
                                                                                                                                                                                                         let rm = ((insn >> 16) & 0x1f) as u8;
                                                                                                                                                                                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
@@ -7673,6 +7691,15 @@ mod fp16_scalar_and_gate_regressions {
             Inst::SimdMulH { rd: 0, rn: 1, rm: 2, lanes: 4 }));
         assert!(!matches!(decode_op(0x4ea29c20), Inst::SimdMulH { .. }), "mul .4s stays SimdMul");
         assert!(!matches!(decode_op(0x4e709cf0), Inst::SimdMul { .. }));
+        // byte-lane cmhi: real 0x6e313607 (cmhi v7.16b v16>v17), 0x6e223420, 0x2e223420 (8b).
+        assert!(matches!(decode_op(0x6e313607),
+            Inst::SimdCmhiB { rd: 7, rn: 16, rm: 17, lanes: 16, ge: false }),
+            "got {:?}", decode_op(0x6e313607));
+        assert!(matches!(decode_op(0x6e223420),
+            Inst::SimdCmhiB { rd: 0, rn: 1, rm: 2, lanes: 16, ge: false }));
+        assert!(matches!(decode_op(0x2e223420),
+            Inst::SimdCmhiB { rd: 0, rn: 1, rm: 2, lanes: 8, ge: false }));
+        assert!(!matches!(decode_op(0x6ea03400), Inst::SimdCmhiB { .. }), "cmhi .4S stays SimdCmhi");
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),

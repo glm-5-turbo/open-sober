@@ -7882,6 +7882,24 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn cmhi_byte_exec() {
+        // (reg 1 low 4 bytes), v2= {0x0f,0x06,0x20,0x02}. cmhi => Vn>Vm unsigned:
+        // {0x10>0x0f=T, 0x05>0x06=F, 0x20>0x20=F, 0x01>0x02=F} -> {0xff,0,0,0}.
+        let mut st = CpuState::new();
+        st.v[2] = 0x0000_0000_0001_0020_0005_0010; // won't work: v1 bytes in reg1 = st.v[2]
+        // build properly: reg r low bytes at st.v[2r]. v1=reg1 => st.v[2], v2=reg2 => st.v[4].
+        let mut st2 = CpuState::new();
+        st2.v[2] = 0x0000_0000_0000_0000u64; // v1 (reg1) bytes cleared except low 4
+        st2.v[2] = 0x0000_0000_0001_0020_0005_0010u64; // v1 first 6 bytes
+        st2.v[4] = 0x0000_0000_0002_0020_0006_000Fu64; // v2 first 6 bytes
+        let _r = exec_bytes(&mut st2, &[0x20, 0x34, 0x22, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0);
+        let b = |s: &CpuState, off: usize| -> u8 { ((s.v[0] >> (8 * off)) & 0xff) as u8 };
+        assert_eq!(b(&st2,0), 0xff, "0x10>0x0f"); // strict: 0x10 > 0x0f -> ones
+        assert_eq!(b(&st2,1), 0x00, "0x05>0x06");
+        assert_eq!(b(&st2,2), 0x00, "0x20>0x20"); // equal, not higher
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.
