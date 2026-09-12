@@ -333,6 +333,8 @@ pub enum Inst {
     SimdFreFrsqrte { rd: u8, rn: u8, sqrt: bool, esize: u8, q: bool },
     // ---- SIMD halving add: uhadd/shadd Vd.T, Vn.T, Vm.T (floor((a+b)/2)) ----
     SimdHadd { rd: u8, rn: u8, rm: u8, unsigned: bool, esize: u8, q: bool },
+    // ---- SIMD halving subtract: shsub/uhsub Vd.T, Vn.T, Vm.T (floor((a-b)/2)) ----
+    SimdHsub { rd: u8, rn: u8, rm: u8, unsigned: bool, esize: u8, q: bool },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise NOT (two-input mvn alias, single-source): mvn Vd.16B/8B, Vn ----
@@ -2371,6 +2373,19 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     if (insn & 0x1f20_fc00) == 0x0e20_0400 {
         let esize = 1u8 << ((insn >> 22) & 3);
         return Inst::SimdHadd {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            unsigned: (insn & 0x2000_0000) != 0,
+            esize,
+            q: (insn >> 30) & 1 == 1,
+        };
+    }
+    // ---- SIMD halving subtract: shsub/uhsub Vd.T, Vn.T, Vm.T (floor((a-b)/2)) ----
+    // byte1(bits15:8)==0x24 (vs hadd's 0x04); U=bit29, Q=bit30, esize by bits[23:22].
+    if (insn & 0x1f20_fc00) == 0x0e20_2400 {
+        let esize = 1u8 << ((insn >> 22) & 3);
+        return Inst::SimdHsub {
             rd: (insn & 0x1f) as u8,
             rn: ((insn >> 5) & 0x1f) as u8,
             rm: ((insn >> 16) & 0x1f) as u8,

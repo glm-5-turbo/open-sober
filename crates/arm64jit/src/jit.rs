@@ -7892,6 +7892,24 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn shsub_uhsub_exec() {
+        // shsub v0.8h, v1.8h, v2.8h = 0x4e612400: floor((a-b)/2) signed per lane.
+        // v1={5,1,-3,7}, v2={1,4,3,2} -> (5-1)/2=2, (1-4)/2=floor(-1.5)=-2,
+        // (-3-3)/2=-3, (7-2)/2=2 (floor 2.5=2).
+        let mut st = CpuState::new();
+        st.v[0] = 0x0007_FFFD_0001_0005; // v1 (rn=0) {5,1,-3,7}
+        st.v[2] = 0x0002_0003_0004_0001; // v2 (rm=1) {1,4,3,2}
+        exec_bytes(&mut st, &[0x00, 0x24, 0x61, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> i16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 as i16 };
+        assert_eq!(h(&st,0), 2, "(5-1)/2");
+        assert_eq!(h(&st,1), -2, "(1-4)/2 floor -1.5");
+        assert_eq!(h(&st,2), -3, "(-3-3)/2");
+        assert_eq!(h(&st,3), 2, "(7-2)/2 floor 2.5");
+        // uhsub v0.4h, v1.4h, v2.4h = 0x6e612400: unsigned.
+        // v1={1,10}, v2={4,2} -> (1-4)mod /2 floor, (10-2)/2=4.
+    }
+
+    #[test]
     fn smlsl_widen_exec() {
         // smlsl v0.4s, v1.4h, v2.4h = 0x0e62a020: Vd = Vd - widen(s16*s16) per lane.
         // v1s = {2,5,-3,7}, v2s = {3,-2,4,10} -> prods {6,-10,-12,70}.

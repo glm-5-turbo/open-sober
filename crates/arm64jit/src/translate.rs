@@ -3273,6 +3273,41 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdHsub { rd, rn, rm, unsigned, esize, q } => {
+            // shsub/uhsub: per-lane floor((a-b)/2). Compute diff=a-b in 64-bit then
+            // shift right 1: arithmetic (sar) for signed, logical (shr) for unsigned.
+            // Storing only the low esize bits yields the correct mod-2^esize floor
+            // in both cases (unsigned (a-b) wraps, but floor((a-b)/2) mod 2^esize
+            // of the wrapping difference equals the ARM result).
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let e = esize as i32;
+            for lane in 0..lanes {
+                let off = lane * e;
+                if unsigned {
+                    match e {
+                        1 => { buf.movzx_byte_mem(RAX, RBX, f(rn) + off); buf.movzx_byte_mem(RCX, RBX, f(rm) + off); }
+                        2 => { buf.mov_load16(RAX, RBX, f(rn) + off); buf.mov_load16(RCX, RBX, f(rm) + off); }
+                        _ => { buf.mov_load32(RAX, RBX, f(rn) + off); buf.mov_load32(RCX, RBX, f(rm) + off); }
+                    }
+                } else {
+                    match e {
+                        1 => { buf.movsx_byte_mem(RAX, RBX, f(rn) + off); buf.movsx_byte_mem(RCX, RBX, f(rm) + off); }
+                        2 => { buf.movsx_word_mem(RAX, RBX, f(rn) + off); buf.movsx_word_mem(RCX, RBX, f(rm) + off); }
+                        _ => { buf.mov_load32(RAX, RBX, f(rn) + off); buf.movsxd_r64_r32(RAX, RAX);
+                               buf.mov_load32(RCX, RBX, f(rm) + off); buf.movsxd_r64_r32(RCX, RCX); }
+                    }
+                }
+                buf.sub_rr64(RAX, RCX); // diff = a - b
+                if unsigned { buf.shr_ri8(RAX, 1); } else { buf.sar_ri8(RAX, 1); }
+                match e {
+                    1 => buf.mov_store8(RBX, f(rd) + off, RAX),
+                    2 => buf.mov_store16(RBX, f(rd) + off, RAX),
+                    _ => buf.mov_store32(RBX, f(rd) + off, RAX),
+                }
+            }
+            Ok(())
+        }
         Inst::SimdFreFrsqrte { rd, rn, sqrt, esize, q } => {
             // frecpe/frsqrte Vd.T, Vn.T: per-lane approximate reciprocal or
             // 1/sqrt. esize 4 -> rcpss/rsqrtss on the promoted 32-bit; esize 8
