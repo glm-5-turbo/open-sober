@@ -1,5 +1,32 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH14) — deque-injection path proven STRUCTURALLY capped (disasm-verified); located the real render-init fn 0x105b3a2d8 (full eglGetDisplay→init→CreateContext→CreateWindowSurface→MakeCurrent) and proved it is framework-gated. New JIT_REGION_WATCH diagnostic. Workspace 469/0.
+
+This cycle answered the ~13-cycle open question definitively: WHY does no
+deque-injection (SH5-SH13) reach egl*/gl*? Disassembly of the drain (0x2856f94)
+and the type-4 maintenance handler (0x10285371c) proves it is STRUCTURAL:
+- The drain pop-loop passes **w4=4 hardcoded** (constant in the loop) as the
+  dispatch task type — it is NOT derived from node data, so no node content can
+  change it. The handler `cmp w4,#1..4` therefore always takes maintenance.
+- The type-4 handler dispatches through **runtime-built BSS globals**
+  (0x1068262e8/0x106826300/0x106826308) that the Android framework producer
+  populates; all are statically 0 on this box. So the deque vtable-substitution
+  path (SH11-13's --deque-node-live) is a documented DEAD-END — stop investing.
+- Back-traced from the egl GOT slots to the engine's REAL render-init:
+  **fn 0x105b3a2d8 → thunk 0x105b3a280**, calling
+  eglGetDisplay(0x105b3a3b0)→eglInitialize(0x105b3a3c4)→eglCreateContext
+  (0x105b3a400)→**eglCreateWindowSurface(0x105b3b1a0)**→eglMakeCurrent. It reads
+  a runtime-built context global (0x1067d16f0, statically 0), so it too is
+  framework-gated — not a host-drivable entry on this box as-is.
+- New `JIT_REGION_WATCH=<lo>-<hi>` (jit.rs): logs first block-entry in a region.
+  Verified render-init region — 0 hits (never reached); StartApp region — 3 hits.
+  A portable reachability probe for the next cycle's framework-emulation work.
+- Next lever is NOT more deque surgery: fabricate the framework context obj the
+  render-init derefs + drive the ALooper app-command lifecycle so a real
+  producer posts the work item (SH7/N/P levers). Window layer is already wired
+  (XID 0x200000). Baselines: --jni exit 0; stable idle exit 124. Doc:
+  `docs/frontier-sh14-renderinit-located.md`.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH13) — REAL engine vtable dispatch: `--deque-node-live 0x106829f00` (the LIVE sentinel's real vtable → engine's own drain-node task-processor 0x10285371c) makes the engine's NATIVE dispatch machinery run our injected foreign nodes — ~124 pops in 16s, process stable to timeout (exit 124), zero crash, and the block-cache GROWS past the probe baseline (≈2147 compiles / 7,361,652 hits vs the probe's flat ≈434). No probe logging (dispatch goes through the real processor). Workspace 469/0.
 
 SH12 left the type-4 dispatch firing through OUR host-thunk PROBE, which only

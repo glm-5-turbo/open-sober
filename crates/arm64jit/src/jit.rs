@@ -2052,6 +2052,27 @@ pub fn jit_run_inner(image: &[u8], base: u64, state: *mut CpuState) -> Result<u6
                 .unwrap_or(8192)
         };
         let block = cached_block(image, base, pc, state, block_budget)?;
+        // JIT_REGION_WATCH=<lo-hex>-<hi-hex>: on entering ANY block whose guest pc
+        // lies in [lo, hi), log it once (dedup by pc) so a diagnostic run can tell
+        // whether the boot/init reaches a particular guest code region (e.g. the
+        // engine's EGL/GLES render-init). Useful where a whole function's reach is
+        // in question (vs JIT_DUMP_PC's single exact pc).
+        if let Ok(rw) = std::env::var("JIT_REGION_WATCH") {
+            if let Some((lo_s, hi_s)) = rw.split_once('-') {
+                if let (Ok(lo), Ok(hi)) = (u64::from_str_radix(lo_s.trim_start_matches("0x"), 16),
+                                           u64::from_str_radix(hi_s.trim_start_matches("0x"), 16)) {
+                    if pc >= lo && pc < hi {
+                        use std::sync::OnceLock;
+                        static WATCHED: OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+                        let seen = WATCHED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+                        let mut s = seen.lock().unwrap();
+                        if s.insert(pc) {
+                            eprintln!("[region-watch] entered region 0x{lo:x}-0x{hi:x} at guest pc=0x{pc:x}");
+                        }
+                    }
+                }
+            }
+        }
         // JIT_DUMP_PC=<guest-hex>: on entering a block at exactly this guest PC,
         // dump the full x-register file (and a couple of key host-side facts) so
         // a miscompiled straight-line guest function can be pinned to the exact
