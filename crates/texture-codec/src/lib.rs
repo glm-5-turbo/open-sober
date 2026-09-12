@@ -300,6 +300,50 @@ mod tests {
     }
 
     #[test]
+    fn etc2_rgba8_eac_solid_blocks_decode_expected_alpha() {
+        // ETC2-RGBA8 (0x9278, the real Android RGBA-EAC format) block = 16 bytes:
+        //   [0..8]  EAC alpha sub-block (solid: data[0]=A, data[1]=0 => multiplier==0
+        //           path in decode_etc2_a8_block => every texel alpha = data[0]),
+        //   [8..16] ETC2-RGB sub-block (bit-identical to the SH29-proven ETC1 blocks).
+        // This pins the EAC-alpha half of decode_etc2_rgba8, which the RGB-only
+        // 0x9274 path cannot exercise. Same encoding the --renderframe-etc2a harness
+        // uploads live (alphas 255/190/128/64 on the red/green/blue/white blocks).
+        let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
+        let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
+        let rgba8 = |a: u8, rgb: [u8; 8]| -> [u8; 16] {
+            let mut d = [0u8; 16];
+            d[0] = a; // EAC alpha base (solid, multiplier==0)
+            d[1] = 0; // multiplier==0 (data[1] & 0xf0 == 0)
+            d[8..16].copy_from_slice(&rgb);
+            d
+        };
+        let red = blk(enc(255), enc(2), enc(2));   // (255,2,2)
+        let grn = blk(enc(2), enc(255), enc(2));   // (2,255,2)
+        let blu = blk(enc(2), enc(2), enc(255));   // (2,2,255)
+        let wht = blk(enc(255), enc(255), enc(255)); // white
+        let mut data = [0u8; 64]; // 8x8 = 4 blocks, row-major top-first
+        data[0..16].copy_from_slice(&rgba8(255, red));
+        data[16..32].copy_from_slice(&rgba8(190, grn));
+        data[32..48].copy_from_slice(&rgba8(128, blu));
+        data[48..64].copy_from_slice(&rgba8(64, wht));
+
+        let px = decompress(GL_COMPRESSED_RGBA8_ETC2_EAC, 8, 8, &data).expect("8x8 ETC2-RGBA8 decodes");
+        assert_eq!(px.len(), 64);
+        let col = |i: usize| px[i].to_le_bytes(); // memory [b,g,r,a]
+        // block0 (top-left, row0 col0) = red with alpha 255
+        assert_eq!(col(0), [2, 2, 255, 255]);
+        // block1 (top-right, row0 col4) = green, alpha 190
+        assert_eq!(col(4), [2, 255, 2, 190]);
+        // block2 (bottom-left, row4 col0) = blue, alpha 128
+        assert_eq!(col(4 * 8), [255, 2, 2, 128]);
+        // block3 (bottom-right, row4 col4) = white, alpha 64
+        assert_eq!(col(4 * 8 + 4), [255, 255, 255, 64]);
+        // Every texel within a block carries that block's alpha (solid EAC).
+        assert_eq!(col(2), [2, 2, 255, 255]);
+        assert_eq!(col(4 * 8 + 2), [255, 2, 2, 128]);
+    }
+
+    #[test]
     fn android_block_sizes_table() {
         // 14 ASTC footprints, indexed by format-0x93B0.
         assert_eq!(ASTC_BLOCK_SIZES.len(), 14);

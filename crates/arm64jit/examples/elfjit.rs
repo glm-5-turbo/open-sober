@@ -2984,6 +2984,15 @@ fn main() {
                         // (not gl_FragCoord) — proving per-texel UV mapping, which no single-attrib
                         // draw path can. Readback: the 4 quadrants read the 4 texel colors.
                         if renderframe_args.iter().any(|a| a == "--renderframe-quad") {
+                            // --renderframe-etc2a: like the quad RGBA path but upload the
+                            // texture as a REAL ETC2-RGBA8/EAC texture (0x9278 — the real
+                            // Android RGBA-EAC format) through glCompressedTexImage2D, and
+                            // map the DECODED ALPHA to the fragment RGB. The 4 quadrant
+                            // readbacks then read the 4 distinct EAC block alphas as gray
+                            // levels (255/190/128/64) — robust proof the EAC alpha
+                            // sub-block decodes live (window framebuffers often discard
+                            // alpha, so the gray-scale mapping makes it window-capturable).
+                            let etc2a_mode = renderframe_args.iter().any(|a| a == "--renderframe-etc2a");
                             const GL_ARRAY_BUFFER: u64 = 0x8892;
                             const GL_ELEMENT_ARRAY_BUFFER: u64 = 0x8893;
                             const GL_STATIC_DRAW: u64 = 0x88e4;
@@ -3026,7 +3035,14 @@ fn main() {
                                 let _ = gcall(0x1062d75d0, 0,0,1280,720,0,0); // glScissor
                                 // Shaders with a real UV varying.
                                 let vs_src = b"attribute vec4 aPos;\nattribute vec2 aUV;\nvarying vec2 vUV;\nvoid main(){ vUV = aUV; gl_Position = aPos; }\n\0";
-                                let fs_src = b"precision mediump float;\nuniform sampler2D uTex;\nvarying vec2 vUV;\nvoid main(){ gl_FragColor = texture2D(uTex, vUV); }\n\0";
+                                let fs_src: &[u8] = if etc2a_mode {
+                                    // Output the DECODED ALPHA as RGB gray-scale (alpha=?->RGB)
+                                    // so the EAC alpha sub-block is window-capturable even on an
+                                    // alpha-less window framebuffer.
+                                    b"precision mediump float;\nuniform sampler2D uTex;\nvarying vec2 vUV;\nvoid main(){ vec4 t = texture2D(uTex, vUV); gl_FragColor = vec4(t.aaa, 1.0); }\n\0"
+                                } else {
+                                    b"precision mediump float;\nuniform sampler2D uTex;\nvarying vec2 vUV;\nvoid main(){ gl_FragColor = texture2D(uTex, vUV); }\n\0"
+                                };
                                 let vs_ptr = base + 0x400;
                                 let fs_ptr = base + 0x800;
                                 std::ptr::copy_nonoverlapping(vs_src.as_ptr(), vs_ptr as *mut u8, vs_src.len());
@@ -3050,23 +3066,65 @@ fn main() {
                                 let _ = gcall(0x1062d78f0, prog, 1, uv_name, 0,0,0);  // glBindAttribLocation aUV->1
                                 let _ = gcall(0x1062d78e0, prog, 0,0,0,0,0);          // glLinkProgram
                                 let _ = gcall(0x1062d75a0, prog, 0,0,0,0,0);          // glUseProgram
-                                // Texture: 2x2 RGBA checkerboard RED/GREEN/BLUE/WHITE.
+                                // Texture: default = 2x2 RGBA checkerboard RED/GREEN/BLUE/WHITE;
+                                // --renderframe-etc2a = a REAL 8x8 ETC2-RGBA8/EAC texture (0x9278)
+                                // via glCompressedTexImage2D (the last compressed format with an
+                                // unimplemented live-path prove). The bridge decodes ETC2-RGBA8 and
+                                // re-uploads, so the EAC alpha + RGB both reach the quad.
                                 let tex_data = base + 0xf60;
-                                let tex: [u8;16] = [255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255];
-                                std::ptr::copy_nonoverlapping(tex.as_ptr(), tex_data as *mut u8, 16);
                                 let tex_sp = base + 0xf80;
-                                *(tex_sp as *mut u64) = tex_data;
                                 let tex_id_slot = base + 0xfd0;
-                                let _ = gcall(0x1062d7980, 1, tex_id_slot, 0,0,0,0); // glGenTextures
+                                if etc2a_mode {
+                                    // ETC2-RGBA8 8x8 = 4 x 16-byte blocks, row-major top-first.
+                                    // Each block = [A,0(alpha,mul==0),..6 pad, RGB-block]. The RGB
+                                    // blocks are the SH29-proven ETC2 colors; the EAC alpha per
+                                    // block is 255/190/128/64. FS maps alpha->RGB so the quadrant
+                                    // readbacks read those 4 gray levels.
+                                    const GL_COMPRESSED_RGBA8_ETC2_EAC: u64 = 0x9278;
+                                    let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
+                                    let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
+                                    let rgba8 = |a: u8, rgb: [u8; 8]| -> [u8; 16] {
+                                        let mut d = [0u8; 16];
+                                        d[0] = a; d[1] = 0;
+                                        d[8..16].copy_from_slice(&rgb);
+                                        d
+                                    };
+                                    let eac: [u8; 64] = {
+                                        let mut d = [0u8; 64];
+                                        d[0..16].copy_from_slice(&rgba8(255, blk(enc(255), enc(2), enc(2))));   // block0
+                                        d[16..32].copy_from_slice(&rgba8(190, blk(enc(2), enc(255), enc(2))));  // block1
+                                        d[32..48].copy_from_slice(&rgba8(128, blk(enc(2), enc(2), enc(255))));  // block2
+                                        d[48..64].copy_from_slice(&rgba8(64, blk(enc(255), enc(255), enc(255)))); // block3
+                                        d
+                                    };
+                                    std::ptr::copy_nonoverlapping(eac.as_ptr(), tex_data as *mut u8, 64);
+                                    let _ = gcall(0x1062d7980, 1, tex_id_slot, 0,0,0,0); // glGenTextures
+                                    let _ = gcall(0x1062d75e0, GL_TEXTURE0, 0,0,0,0,0);     // glActiveTexture
+                                    let _ = gcall(0x1062d75f0, GL_TEXTURE_2D, *(tex_id_slot as *const u32) as u64, 0,0,0,0); // glBindTexture
+                                    let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2801, GL_NEAREST, 0,0,0); // MIN
+                                    let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2800, GL_NEAREST, 0,0,0); // MAG
+                                    let mut sce = arm64jit::jit::CpuState::new();
+                                    sce.tpidr = tpidr; sce.x[31] = isp;
+                                    sce.x[0] = GL_TEXTURE_2D; sce.x[1] = 0; sce.x[2] = GL_COMPRESSED_RGBA8_ETC2_EAC;
+                                    sce.x[3] = 8; sce.x[4] = 8; sce.x[5] = 0; sce.x[6] = 64; sce.x[7] = tex_data;
+                                    eprintln!("[elfjit:renderframe-etc2a] uploading 8x8 ETC2-RGBA8 (0x9278) 4-block EAC via glCompressedTexImage2D");
+                                    let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7990, &mut sce as *mut CpuState); // glCompressedTexImage2D
+                                } else {
+                                    let tex: [u8;16] = [255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255];
+                                    std::ptr::copy_nonoverlapping(tex.as_ptr(), tex_data as *mut u8, 16);
+                                    *(tex_sp as *mut u64) = tex_data;
+                                    let _ = gcall(0x1062d7980, 1, tex_id_slot, 0,0,0,0); // glGenTextures
+                                    let _ = gcall(0x1062d75e0, GL_TEXTURE0, 0,0,0,0,0);     // glActiveTexture
+                                    let _ = gcall(0x1062d75f0, GL_TEXTURE_2D, *(tex_id_slot as *const u32) as u64, 0,0,0,0); // glBindTexture
+                                    let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2801, GL_NEAREST, 0,0,0); // MIN
+                                    let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2800, GL_NEAREST, 0,0,0); // MAG
+                                    let mut steg = arm64jit::jit::CpuState::new();
+                                    steg.tpidr = tpidr; steg.x[31] = tex_sp;
+                                    steg.x[0]=GL_TEXTURE_2D; steg.x[1]=0; steg.x[2]=GL_RGBA; steg.x[3]=2; steg.x[4]=2; steg.x[5]=0; steg.x[6]=GL_RGBA; steg.x[7]=GL_UNSIGNED_BYTE;
+                                    let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d79a0, &mut steg as *mut CpuState); // glTexImage2D
+                                    let _ = tex_sp;
+                                }
                                 let tex_id = *(tex_id_slot as *const u32) as u64;
-                                let _ = gcall(0x1062d75e0, GL_TEXTURE0, 0,0,0,0,0);     // glActiveTexture
-                                let _ = gcall(0x1062d75f0, GL_TEXTURE_2D, tex_id, 0,0,0,0); // glBindTexture
-                                let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2801, GL_NEAREST, 0,0,0); // MIN
-                                let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2800, GL_NEAREST, 0,0,0); // MAG
-                                let mut steg = arm64jit::jit::CpuState::new();
-                                steg.tpidr = tpidr; steg.x[31] = tex_sp;
-                                steg.x[0]=GL_TEXTURE_2D; steg.x[1]=0; steg.x[2]=GL_RGBA; steg.x[3]=2; steg.x[4]=2; steg.x[5]=0; steg.x[6]=GL_RGBA; steg.x[7]=GL_UNSIGNED_BYTE;
-                                let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d79a0, &mut steg as *mut CpuState); // glTexImage2D
                                 let uni = base + 0xe20; std::ptr::copy_nonoverlapping(b"uTex\0".as_ptr(), uni as *mut u8, 5);
                                 let ploc = gcall(0x1062d7900, prog, uni, 0,0,0,0).unwrap_or(0) & 0xffff_ffff;
                                 let _ = gcall(0x1062d7910, ploc, 0,0,0,0,0); // glUniform1i(uTex,0)
