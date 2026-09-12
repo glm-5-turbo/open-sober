@@ -67,3 +67,44 @@ strings (guestpc "adcast" = .dynstr "broadcast"). 15 GLOB_DAT were left
 unresolved (0x67ca950, 0x67cf398-0x67cf3f0, 0x67d0140/48) — candidates for the
 indirect-branch-into-string. Next: bind/seed those GOT slots, or a vtable entry,
 so the worker's indirect call lands on real code.
+## Append (cycle SH, 2026-09-12) — decoder 100% closed; boot boundary re-verified
+
+arm64jit decode now reports **ZERO Unsupported / ZERO PANIC across the whole
+libroblox.so .text span** (11,437 -> 0). The decoder is permanently done.
+
+Fresh run confirms the boot wall is unchanged and now precisely characterized.
+
+**Idle wait function (guessed name: engine lamport-style futex barrier), entry
+0x10284d018:**
+
+- Preamble: `bl 0x102b9e9b0(x0=1, x1=x19)` — the ARM64 atomics/re-arm helper
+  (ldaddal when a 0x10683b000+0xa58 flag is set, else ldaxr/stlxr add; x0 is
+  added to [x1]). This is the `x19` counter the parked futex word sits at.
+- `cmp x21, x0, lsr#32 / b.ne 0x10284d0ec` — compare a version/hi word.
+- `cmn x20, #-1 / b.eq 0x10284d114` — if x20 (target/progress bound) == -1,
+  take the **infinite wait path** 0x10284d114; else compute a bounded wait
+  (x20*1000 ns, msub magic) and go through the same futex.
+- **Parked site lr=0x10284d134** (all three threads): below `bl 0x1062d62d0`
+  (futex syscall thunk). The regs (x0=0x62 syscall FUTEX, x1=0x7fdf..8cc =
+  `x19+4` futex word, x2=0x89, x3=w21=0xF4240 expected, x6=-1) show a
+  `FUTEX_WAIT_BITSET`/WAKE on the per-thread futex word at `x19+4` awaiting
+  the guest's "go" value.
+- Loop body: after futex returns, `mov w20,wzr; b 0x10284d0f0` -> `mov x0,#-1;
+  mov x1,x19; bl 0x102b9e9b0` (re-arm: add -1, i.e. decrement) -> ret.
+- The `0x10284d0e4 cmp x8,x20 / b.cs 0x10284d13c` at the top is the bounded-
+  wait variant that proceeds to "work" when a progress counter reaches x20.
+
+**Why --futex-kick cannot advance it:** the kicker writes values 0x1528+
+(its own counter) to the futex word, but the guest latches await a specific
+"go" semantics: 0xF4240 is the spare state, and a *released* thread re-arms
+(x19 -= 1) then re-parks until the guest's OWN producer flips the latch to a
+"work available" value. The kicker is a spurious releaser; it can neither
+produce guest work nor teach the producer to run. To cross this gate the JIT
+must surface the engine's producer path (the thread that enqueues onto these
+per-thread latches) — the true next lever, now that decode is 100%.
+
+Thread census at idle: guest tid 0 (owner, host 852481), tid 1 (852482),
+tid 2 (852483) ALL park at lr=0x10284d134 on their own futex word. 3 threads,
+all waits; the producer thread is not among them (either never spawned or
+blocked earlier upstream — next trace: which thread spawns/feeds these
+latches).
