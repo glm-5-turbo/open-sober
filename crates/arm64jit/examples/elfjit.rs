@@ -2993,6 +2993,13 @@ fn main() {
                             // sub-block decodes live (window framebuffers often discard
                             // alpha, so the gray-scale mapping makes it window-capturable).
                             let etc2a_mode = renderframe_args.iter().any(|a| a == "--renderframe-etc2a");
+                            // --renderframe-astc: like --renderframe-etc2a but upload the texture
+                            // as a REAL ASTC 4x4 LDR void-extent texture (0x93B0 — the load-bearing
+                            // Android format desktop GL cannot native-decode, so our interception is
+                            // REQUIRED there). Same gray-scale alpha->RGB proof: the 4 blocks' EAC-free
+                            // ASTC void-extent alphas (255/190/128/64) render as 4 gray lobes.
+                            let astc_mode = renderframe_args.iter().any(|a| a == "--renderframe-astc");
+                            let comp_gray = etc2a_mode || astc_mode;
                             const GL_ARRAY_BUFFER: u64 = 0x8892;
                             const GL_ELEMENT_ARRAY_BUFFER: u64 = 0x8893;
                             const GL_STATIC_DRAW: u64 = 0x88e4;
@@ -3035,9 +3042,9 @@ fn main() {
                                 let _ = gcall(0x1062d75d0, 0,0,1280,720,0,0); // glScissor
                                 // Shaders with a real UV varying.
                                 let vs_src = b"attribute vec4 aPos;\nattribute vec2 aUV;\nvarying vec2 vUV;\nvoid main(){ vUV = aUV; gl_Position = aPos; }\n\0";
-                                let fs_src: &[u8] = if etc2a_mode {
-                                    // Output the DECODED ALPHA as RGB gray-scale (alpha=?->RGB)
-                                    // so the EAC alpha sub-block is window-capturable even on an
+                                let fs_src: &[u8] = if comp_gray {
+                                    // Output the DECODED ALPHA as RGB gray-scale (alpha=A->RGB)
+                                    // so the EAC/ASTC alpha sub-block is window-capturable even on an
                                     // alpha-less window framebuffer.
                                     b"precision mediump float;\nuniform sampler2D uTex;\nvarying vec2 vUV;\nvoid main(){ vec4 t = texture2D(uTex, vUV); gl_FragColor = vec4(t.aaa, 1.0); }\n\0"
                                 } else {
@@ -3074,30 +3081,46 @@ fn main() {
                                 let tex_data = base + 0xf60;
                                 let tex_sp = base + 0xf80;
                                 let tex_id_slot = base + 0xfd0;
-                                if etc2a_mode {
-                                    // ETC2-RGBA8 8x8 = 4 x 16-byte blocks, row-major top-first.
-                                    // Each block = [A,0(alpha,mul==0),..6 pad, RGB-block]. The RGB
-                                    // blocks are the SH29-proven ETC2 colors; the EAC alpha per
-                                    // block is 255/190/128/64. FS maps alpha->RGB so the quadrant
-                                    // readbacks read those 4 gray levels.
-                                    const GL_COMPRESSED_RGBA8_ETC2_EAC: u64 = 0x9278;
-                                    let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
-                                    let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
-                                    let rgba8 = |a: u8, rgb: [u8; 8]| -> [u8; 16] {
-                                        let mut d = [0u8; 16];
-                                        d[0] = a; d[1] = 0;
-                                        d[8..16].copy_from_slice(&rgb);
-                                        d
-                                    };
-                                    let eac: [u8; 64] = {
+                                if comp_gray {
+                                    // ETC2-RGBA8 8x8 = 4 x 16-byte blocks; ASTC 4x4 8x8 = 4 x 16-byte
+                                    // LDR void-extent blocks. Both encode a solid color+alpha per
+                                    // 4x4 block, so the 4 blocks give 4 distinct alphas (255/190/
+                                    // 128/64). The ETC2-RGBA8 RGB is the SH29-proven ETC2 color; the
+                                    // ASTC RGB=alpha. FS maps alpha->RGB so the quadrant readbacks
+                                    // read those 4 gray levels.
+                                    let (comp_fmt, ctex): (u64, [u8; 64]) = if astc_mode {
+                                        // ASTC LDR void-extent: bytes 9/11/13/15 = UNORM16 high bytes
+                                        // of R/G/B/A (Khronos void-extent block, buf[0]=0xFC).
+                                        let ve = |g: u8| -> [u8; 16] {
+                                            let mut d = [0u8; 16];
+                                            d[0] = 0xFC; d[1] = 0x01;
+                                            d[9] = g; d[11] = g; d[13] = g; d[15] = g;
+                                            d
+                                        };
+                                        let mut d = [0u8; 64];
+                                        d[0..16].copy_from_slice(&ve(255));
+                                        d[16..32].copy_from_slice(&ve(190));
+                                        d[32..48].copy_from_slice(&ve(128));
+                                        d[48..64].copy_from_slice(&ve(64));
+                                        (0x93B0u64, d)
+                                    } else {
+                                        const GL_COMPRESSED_RGBA8_ETC2_EAC: u64 = 0x9278;
+                                        let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
+                                        let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
+                                        let rgba8 = |a: u8, rgb: [u8; 8]| -> [u8; 16] {
+                                            let mut d = [0u8; 16];
+                                            d[0] = a; d[1] = 0;
+                                            d[8..16].copy_from_slice(&rgb);
+                                            d
+                                        };
                                         let mut d = [0u8; 64];
                                         d[0..16].copy_from_slice(&rgba8(255, blk(enc(255), enc(2), enc(2))));   // block0
                                         d[16..32].copy_from_slice(&rgba8(190, blk(enc(2), enc(255), enc(2))));  // block1
                                         d[32..48].copy_from_slice(&rgba8(128, blk(enc(2), enc(2), enc(255))));  // block2
                                         d[48..64].copy_from_slice(&rgba8(64, blk(enc(255), enc(255), enc(255)))); // block3
-                                        d
+                                        (GL_COMPRESSED_RGBA8_ETC2_EAC, d)
                                     };
-                                    std::ptr::copy_nonoverlapping(eac.as_ptr(), tex_data as *mut u8, 64);
+                                    std::ptr::copy_nonoverlapping(ctex.as_ptr(), tex_data as *mut u8, 64);
                                     let _ = gcall(0x1062d7980, 1, tex_id_slot, 0,0,0,0); // glGenTextures
                                     let _ = gcall(0x1062d75e0, GL_TEXTURE0, 0,0,0,0,0);     // glActiveTexture
                                     let _ = gcall(0x1062d75f0, GL_TEXTURE_2D, *(tex_id_slot as *const u32) as u64, 0,0,0,0); // glBindTexture
@@ -3105,9 +3128,10 @@ fn main() {
                                     let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2800, GL_NEAREST, 0,0,0); // MAG
                                     let mut sce = arm64jit::jit::CpuState::new();
                                     sce.tpidr = tpidr; sce.x[31] = isp;
-                                    sce.x[0] = GL_TEXTURE_2D; sce.x[1] = 0; sce.x[2] = GL_COMPRESSED_RGBA8_ETC2_EAC;
+                                    sce.x[0] = GL_TEXTURE_2D; sce.x[1] = 0; sce.x[2] = comp_fmt;
                                     sce.x[3] = 8; sce.x[4] = 8; sce.x[5] = 0; sce.x[6] = 64; sce.x[7] = tex_data;
-                                    eprintln!("[elfjit:renderframe-etc2a] uploading 8x8 ETC2-RGBA8 (0x9278) 4-block EAC via glCompressedTexImage2D");
+                                    let what = if astc_mode { "ASTC 4x4 (0x93B0) LDR void-extent" } else { "ETC2-RGBA8 (0x9278)" };
+                                    eprintln!("[elfjit:renderframe] uploading 8x8 {what} 4-block via glCompressedTexImage2D");
                                     let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7990, &mut sce as *mut CpuState); // glCompressedTexImage2D
                                 } else {
                                     let tex: [u8;16] = [255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255];

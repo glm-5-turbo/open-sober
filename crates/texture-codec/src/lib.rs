@@ -344,6 +344,42 @@ mod tests {
     }
 
     #[test]
+    fn astc_ldr_void_extent_blocks_decode_expected_color_and_alpha() {
+        // ASTC (0x93B0 = 4x4) LDR void-extent solid-color block (Khronos astc.txt
+        // "Void-Extent Blocks"): buf[0]=0xFC, bit8 set (buf[1]&1), bit9 = Dynamic-Range
+        // flag = 0 for LDR. Color components are UNORM16 at bytes 8(R)/10(G)/12(B)/14(A);
+        // texture2ddecoder's LDR path reads the UNORM16 HIGH bytes [9,11,13,15] = value>>8
+        // (exact truncation for a value set as hi<<8), so a solid color+alpha is fully
+        // determined by those 4 bytes. Same encoding the --renderframe-astc harness
+        // uploads live (gray alphas 255/190/128/64 on the 4 blocks).
+        let void_extent = |g: u8| -> [u8; 16] {
+            let mut d = [0u8; 16];
+            d[0] = 0xFC; // low 8 bits of the 9-bit block-mode "111111100"
+            d[1] = 0x01; // bit 8 = 1; bit 9 (Dynamic Range) = 0 => LDR
+            // UNORM16 high bytes = 8-bit color (UNORM16 value = g<<8).
+            d[9] = g; // R low->high
+            d[11] = g; // G
+            d[13] = g; // B
+            d[15] = g; // A
+            d
+        };
+        let mut data = [0u8; 64]; // 8x8 = 4 blocks (row-major): alphas 255/190/128/64
+        data[0..16].copy_from_slice(&void_extent(255));
+        data[16..32].copy_from_slice(&void_extent(190));
+        data[32..48].copy_from_slice(&void_extent(128));
+        data[48..64].copy_from_slice(&void_extent(64));
+
+        let px = decompress(0x93B0, 8, 8, &data).expect("8x8 ASTC 4x4 decodes");
+        assert_eq!(px.len(), 64);
+        let mem = |i: usize| px[i].to_le_bytes(); // [b,g,r,a]
+        assert_eq!(mem(0), [255, 255, 255, 255]); // block0 top-left, alpha 255
+        assert_eq!(mem(4), [190, 190, 190, 190]); // block1 top-right, alpha 190
+        assert_eq!(mem(4 * 8), [128, 128, 128, 128]); // block2 bottom-left, alpha 128
+        assert_eq!(mem(4 * 8 + 4), [64, 64, 64, 64]); // block3 bottom-right, alpha 64
+        assert_eq!(mem(2), [255, 255, 255, 255]); // solid within block0
+    }
+
+    #[test]
     fn android_block_sizes_table() {
         // 14 ASTC footprints, indexed by format-0x93B0.
         assert_eq!(ASTC_BLOCK_SIZES.len(), 14);
