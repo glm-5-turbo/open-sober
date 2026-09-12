@@ -490,23 +490,22 @@ fn main() {
         // blocks and what it awaits. Runs concurrently with the jit_run.
         if std::env::var_os("JIT_THREADS").is_some() {
             std::thread::spawn(|| {
-                for _ in 0..50 {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                for it in 0..100 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let (c, h) = arm64jit::jit::block_cache_stats();
+                    eprintln!("[elfjit:stats] it={it} compiles={c} hits={h}");
                     let snaps = arm64jit::jit::snapshot_threads();
-                    let mut lines =
-                        format!("[elfjit:sampler] guest threads {}", snaps.len());
                     for t in &snaps {
                         let at = arm64jit::resolver::name_of_call_addr(t.pc)
                             .unwrap_or_else(|| format!("{:#x}", t.pc));
-                        lines.push_str(&format!(
-                            "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                        eprintln!(
+                            "  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
                             t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x19,
                             // deref predicate pointer if it looks valid (guest rw segment)
                             if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
                             t.x29, t.sp
-                        ));
+                        );
                     }
-                    eprintln!("{lines}");
                 }
             });
         }
@@ -547,9 +546,11 @@ fn main() {
                         if is_bcast {
                             bc(addr as *const u8);
                         } else {
-                            // PULSE: hold 1 through the first gate (~1.5s),
-                            // then release to 0 so a wait-that-loops-while-==1 can exit.
-                            let v = if it < 60 { 1u64 } else { 0u64 };
+                            // PULSE: hold 1 through the first gate (init poll wants *pred==1),
+                            // then set 2 — the wait loops while *pred==1 (cd7c
+                            // b.eq) and proceeds only when *pred !=1 and !=0
+                            // (cd84 cbz-on-zero); 2 is the terminal "done" state.
+                            let v = if it < 60 { 1u64 } else { 2u64 };
                             *((addr) as *mut u64) = v;
                             if it % 25 == 0 {
                                 eprintln!("[elfjit:kicker] t={it} guest_global 0x{addr:x}=%{:#x}", *((addr) as *const u64));
