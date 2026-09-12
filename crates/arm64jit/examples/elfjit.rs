@@ -644,6 +644,38 @@ fn main() {
                                         t.x19, qw, qw & 0xffffffff, qw >> 32, t.x1
                                     );
                                 }
+                                // RAW STACK DUMP: print the parked waiter's sp
+                                // window so the true frame layout (drain root,
+                                // consumer struct, Q, timeout, saved x30) is
+                                // resolved empirically instead of by inference.
+                                // sp is host-readable (guest==host addressing).
+                                if std::env::var_os("JIT_STACKDUMP").is_some() {
+                                    let mut line = format!("      [stack sp={sp:#x}]");
+                                    for o in (0..96usize).step_by(8) {
+                                        let v = unsafe { *(sp as *const u64).add(o / 8) };
+                                        line.push_str(&format!(" +{o:02x}={v:#018x}"));
+                                    }
+                                    eprintln!("{line}");
+                                }
+                                // [sp+0x50]=drain x20 (root), [sp+0x58]=drain x19
+                                // (consumer) per drain 0x2856e54 stp x20,x19,[sp,#80]
+                                // + generic-wait clobbers [sp+40..72] only. Try those.
+                                if std::env::var_os("JIT_DEQUE_PROBE2").is_some() {
+                                    let dr = unsafe { *(sp as *const u64).add(0x50 / 8) };
+                                    let dc = unsafe { *(sp as *const u64).add(0x58 / 8) };
+                                    eprintln!(
+                                        "      [probe2] sp+0x50(drain x20 root)={dr:#x} sp+0x58(drain x19 consumer)={dc:#x}",
+                                    );
+                                    if is_ptr(dr) {
+                                        let rd = unsafe { *(dr as *const u64) };
+                                        eprintln!("        [root]={rd:#x}");
+                                        if is_ptr(rd) {
+                                            let head = unsafe { *(rd as *const u64) };
+                                            eprintln!("        [[root]] head={head:#x} (node {:#x} tag {:#x})",
+                                                head & 0xffffffffffff, head >> 48);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -972,14 +1004,22 @@ fn main() {
                         unsafe {
                             *(np as *mut u64) = 0; // node.next = null (this node becomes the tail)
                             (np as *mut u64).add(14).write_volatile(vt); // [node+112] = vtable
-                            // The deque head/tail fields are at slot+0x10 / slot+0x18
-                            // (a pointer into the slot's ring arena; empty == both
-                            // point at the slot+8 sentinel). Set both to our node so
-                            // head=tail=node (single-element circular deque). The
-                            // consumer's pop does ldar[[x20]] then CAS-pop it via
-                            // node.next (0), restoring the head to empty.
-                            (headcell as *mut u64).add(2).write_volatile(np); // [slot+0x10] HEAD
-                            (headcell as *mut u64).add(3).write_volatile(np); // [slot+0x18] TAIL
+                            // WAIT — the drain's POP reads the head-node cell at
+                            // [headcell + 0x0] (drain 0x2856f94: `ldr x23,[x20];
+                            // ldar x24,[x23]` where x23 = [x20] = headcell, so the
+                            // popped node = the VALUE at [headcell]). Prior cycles
+                            // wrote to slot+0x10/0x18 (the ring arena's HEAD/TAIL
+                            // internals) which the pop never reads — that is why
+                            // nodes sat unconsumed. The real head-node cell the pop
+                            // drains is offset +0x0. Publish our node there.
+                            (headcell as *mut u64).write_volatile(np); // [headcell+0] = head node
+                            // The drain's tag guard (0x2856e6c-78): `ldr x26,[x1,#104];
+                            // ldr x24,[x23]; cmp x9, x24 lsr#48; b.ne ret` requires the
+                            // head-node's high-16 tag == [headcell+8]. Publish the
+                            // node's own tag word there so the guard passes.
+                            (headcell as *mut u64).add(1).write_volatile(np >> 48);
+                            // Keep next/self-link sane: node.next=0 (tail).
+                            *((np as *mut u64)) = 0;
                             // Bump the wait object's version epoch so the parked
                             // consumer's proceed-gate (cmp [Q']>>32) opens. NOTE:
                             // self-defeating — see --deque-node-bump above.
@@ -992,14 +1032,26 @@ fn main() {
                                     1i64,
                                     0usize,
                                 );
+                            } else {
+                                // Even without a version bump, a plain FUTEX_WAKE
+                                // lets the drain's wait return; with --drain-poll
+                                // forcing a finite timeout it re-enters the pop-loop
+                                // and sees our node in [headcell+0].
+                                libc::syscall(
+                                    libc::SYS_futex,
+                                    t.x1 as usize,
+                                    libc::FUTEX_WAKE as i64,
+                                    1i64,
+                                    0usize,
+                                );
                             }
                         }
                         eprintln!(
-                            "[elfjit:deque-producer] enqueued node={:#x} into slot[{:#x}] HEAD(+0x10)={:#x} TAIL(+0x18)={:#x} Q'{:#x} epoch {:#x}->{:#x} futex={:#x} guest_tid={}",
-                            np, headcell, headcell + 0x10, headcell + 0x18, t.x19, qw >> 32, (qw >> 32) + 1, t.x1, t.guest_tid
+                            "[elfjit:deque-producer] enqueued node={:#x} into headcell[+0]={:#x} Q'{:#x} epoch {:#x} futex={:#x} guest_tid={}",
+                            np, headcell, t.x19, qw >> 32, t.x1, t.guest_tid
                         );
                         enqueued.insert(t.guest_tid);
-                        placed.push((headcell + 0x10, np, t.x19));
+                        placed.push((headcell, np, t.x19));
                     }
                 }
             });
@@ -1017,6 +1069,45 @@ fn main() {
             unsafe { *(rearm as *mut u32) = 0xd503_201fu32 }; // NOP
             unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC) };
             eprintln!("[kernel:NOP re-arm store 0x{rearm:x} (gate-2) under JIT_DRIVE_LIFECYCLE");
+        }
+    }
+    // --drain-poll <ms>: force the engine idle-task-deque consumer's drain
+    // (0x2856e40) to use a FINITE wait timeout instead of the infinite -1 it
+    // blocks on during idle. The parked threads deadlock because
+    // `mov x2,x22` (0x2856f40, x22=drain timeout arg = -1) hands generic-wait
+    // 0x284d014 an infinite timeout -> it parks in a bare futex forever, so the
+    // drain's pop-loop at 0x2856f94 (reached ONLY when the wait returns
+    // timed-out w0=1 AND the version matches) never runs. Patching that copy to
+    // a finite ms value makes the wait time out, the drain reach the pop-loop,
+    // find a host-placed task node in [headcell+0], and dispatch [node+112]->[vt+40].
+    // Patch the guest IMAGE before jit_run so the drain block compiles with it.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--drain-poll") {
+            let ms: u32 = args
+                .get(i + 1)
+                .expect("--drain-poll <ms>")
+                .parse()
+                .expect("--drain-poll needs integer ms");
+            assert!(ms < 4096, "--drain-poll ms must be < 4096 (imm12)");
+            // Patch the guest image (identity host mapping) BEFORE jit_run so the
+            // drain block compiles with the finite timeout. The parked threads'
+            // lr=0x10284d134 shows true guest addrs are in 0x1028xxxx, so the
+            // instruction's true guest==host addr is 0x102856f40 directly (NOT
+            // re-mapped via guest_of, which double-shifts to 0x202856f40).
+            let insn_addr: u64 = 0x102856f40;
+            let patch: u32 = 0xd280_0002 | (ms << 5); // mov x2, #ms (imm12<4096)
+            let page = insn_addr & !0xfff;
+            eprintln!("[elfjit:drain-poll] base_load=0x{:x} base_addr=0x{:x} guest_of(0x102856f40)=0x{:x}; read now={:08x}",
+                el.info.base_load_addr, el.base_addr, el.guest_of(0x102856f40),
+                unsafe { *(insn_addr as *const u32) });
+            if unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_WRITE) } == 0 {
+                unsafe { *(insn_addr as *mut u32) = patch };
+                unsafe { libc::mprotect(page as *mut libc::c_void, 4096, libc::PROT_READ | libc::PROT_EXEC) };
+                eprintln!("[elfjit:drain-poll] patched 0x{insn_addr:x} -> mov x2,#{ms}ms (0x{patch:08x})");
+            } else {
+                eprintln!("[elfjit:drain-poll] WARN mprotect RW failed at 0x{page:x} errno={}", std::io::Error::last_os_error());
+            }
         }
     }
 
