@@ -1,6 +1,54 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle L) — FRONTIER DIAGNOSIS CORRECTED: the engine main-loop idle barrier is a REAL futex reached through the imported libc `syscall()` function, NOT a "zero-syscall CPU flag spin". Fixed the cross-arch syscall-number bug that made it busy-spin; the futex now genuinely blocks all 3 guest threads (workspace 405/0, HEAD 11189dd).
+## Session (Sep 12, 2026, hermes-worker, cycle M) — the cycle-L idle-futex barrier is now HOST-DRIVABLE: `--futex-kick` releases the per-thread latch, the boot's init advances 1515→1670 blocks and reaches the native-window layer (ANativeWindow) for the first time (workspace 405/0, HEAD df5d0a4).
+
+Cycle L pinned the engine main-loop idle barrier as a REAL per-thread futex:
+each guest thread parks in `guest_svc`'s FUTEX_WAIT_BITSET on its OWN latch
+(uaddr = x1 = x19+4) at guest call-site lr=0x10284d134, with zero forward
+motion. The static `--kicker` (fixed guest globals) couldn't reach these
+per-thread dynamic latches, so the boot sat flat from the start.
+
+**New elfjit lever `--futex-kick <period-ms>`** (commit `df5d0a4`): a detached
+host producer snapshots the parked guest threads and, for each one at the idle
+futex call-site, increments its latch (a version-counter futex — a bare fixed
+write self-defeats because the next waiter captures the same value as expected
+and re-blocks) and issues a real host FUTEX_WAKE. One tick per kick.
+
+**Verified (reproducible):** vs flat idle, with `--futex-kick 2`:
+- compiles advance 1515 → 1670 (155 new StartApp init blocks),
+- `hostcall@ANativeWindow_fromSurface` is reached (guest pc 0x10258b3a0) — the
+  boot's first window-layer touch, and `pthread_cond_wait` appears (85x),
+- JNI setup churns: FindClass 23x, GetStaticMethodID 46x, mempool_calloc 75x,
+  JavaVM.GetEnv, NewGlobalRef, ExceptionCheck.
+
+The engine then re-parks on the same futex as a well-behaved idle loop — it
+awaits a producer-ENQUEUED work item (a render/task). The futex-kick wakes the
+consumer but no *work* is queued, so it sleeps again. `ALooper_pollOnce` is
+still never reached (0 calls), `ANativeWindow_fromSurface` returns NULL (dead-
+ends before eglCreateWindowSurface).
+
+Run (reproducible): exit 124 (ran until harness timeout):
+```
+cargo build -p arm64jit --example elfjit
+JIT_DRIVE_LIFECYCLE=1 timeout 20 ./target/debug/examples/elfjit \
+  ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144 \
+  --kicker 0x106863af8 --futex-kick 2
+```
+Run-log: `/home/hermes-worker/runs/cycleM-futex-kick-runlog.txt`.
+
+### Next lever (two candidate walls, both now concrete)
+1. **Wire a real native window into `ANativeWindow_fromSurface`** (GRAPHICS_-
+   RECOMMENDATION §5.3): it currently returns 0, so eglCreateWindowSurface can
+   never be created. Map the ANativeWindow to an X11 Window XID (Xvfb present,
+   elfjit already links input-wrapper+x11rb; the egl_window_present gate shows
+   the exact pattern). Then when the engine reaches the window/surface path it
+   can proceed to a first headless llvmpipe frame.
+2. **Reach the engine's looper/producer**: `ALooper_pollOnce` is never called —
+   the app-command FIFO feed (JIT_DRIVE_LIFECYCLE) is inert until the engine's
+   app-main thread runs the looper. Identify which guest thread/entry should
+   drive the looper and ensure it is spawned/woken.
+
+---
 
 **This corrects cycles I–J's wrong conclusion.** The settled main loop issues
 ~204k futex syscalls / 12s, but only through the imported `syscall@LIBC`
