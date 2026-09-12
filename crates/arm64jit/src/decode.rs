@@ -2463,12 +2463,14 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     }
 
     // ---- SIMD byte reverse in 64-bit element: rev64 Vd.T, Vn.T ----
-    // Gate (insn & 0x3f00_f800)==0x0e00_0800 (REV64-family residue; q=bit30;
-    // arrangement via size bits). Byte-reverse each 64-bit granule.
-    // MUST also require bits[13:12]==00: the raw `==0x0e00_0800` residue drops
-    // bit12, so the unzip ops (uzp1 byte1 0x18, uzp2 0x58) were misdecoded as
-    // rev64 (gcc's magic-division reducer uses uzp2 to gather product-high words).
-    if insn & 0x3f00_ff00 == 0x0e00_0800 {
+    // Gate (insn & 0x3f00_fc00)==0x0e00_0800 (REV64-family residue; q=bit30;
+    // arrangement via size bits). Byte-reverse each 64-bit granule. The byte1
+    // mask is 0xfc (NOT 0xff) so the Vn spill bits (insn bits 9:8 ARE byte1
+    // bits 1:0) are cleared: rev64 with rn >= 4 sets bit8 and rn >= 16 sets
+    // bit9, turning byte1 into 0x0a/0x28 (e.g. rev64 v16.2s = 0x0ea00a10).
+    // The 0x08 marker is bit11; bits[13:12]==00 (the -0x18/0x58 mask also pins
+    // this) excludes uzp1/uzp2, whose byte1 0x18/0x58 fails `&0xfc` anyway.
+    if insn & 0x3f00_fc00 == 0x0e00_0800 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 8, q: (insn >> 30) & 1 == 1 };
@@ -6393,16 +6395,26 @@ mod logical_imm_regressions {
             (0x4e6008a5, true),     // rev64 v5.8h
             (0x0ea008a5, false),    // rev64 v5.2s  [real libroblox boot]
             (0x4ea008a5, true),     // rev64 v5.4s
+            // high-Vn forms (rn bits spill into byte1 bits 1:0 -> 0x0a/0x28):
+            (0x0ea00a10u32, false), // rev64 v16.2s [real libroblox, rn=16]
+            (0x4ea00ab5, true),     // rev64 v21.4s [real libroblox]
+            (0x0ea00a74, false),    // rev64 v20.2s [real libroblox]
         ] {
             match decode(word) {
-                Inst::SimdRev { granule, q: gotq, .. } => {
+                Inst::SimdRev { granule, q: gotq, rn, .. } => {
                     assert_eq!(granule, 8, "rev64 must be granule 8 for {word:#x}");
                     assert_eq!(gotq, q, "rev64 q flag for {word:#x}");
+                    let want_rn = ((word >> 5) & 0x1f) as u8;
+                    assert_eq!(rn, want_rn, "rev64 rn for {word:#x}");
                 }
                 other => panic!("rev64 {word:#x} -> {other:?} (expected SimdRev granule 8)"),
             }
         }
-        // dup-from-GPR v9.8b (0x0e010d09, byte1 0x0d) must NOT be captured as rev64.
+        // the high-SACK uzp/trn must still NOT be captured: uzp1 byte1 0x18, uzp2 0x58.
+        assert!(!matches!(decode(0x0e0118a5), Inst::SimdRev { .. }),
+            "uzp1 must not become rev64");
+        assert!(!matches!(decode(0x0e0158a5), Inst::SimdRev { .. }),
+            "uzp2 must not become rev64");
         assert!(
             matches!(decode(0x0e010d09), Inst::SimdDupGp { .. }),
             "dup v9.8b (0x0e010d09) must stay SimdDupGp, got {:?}",
