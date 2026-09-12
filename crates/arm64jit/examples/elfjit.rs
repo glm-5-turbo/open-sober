@@ -619,6 +619,70 @@ fn main() {
                 }
             });
         }
+        // Per-thread futex latch kicker (--futex-kick <period-ms>). The engine
+        // main-loop idle barrier (cycle L) is a REAL per-thread futex: each
+        // guest thread parks in guest_svc's FUTEX_WAIT_BITSET on its OWN latch
+        // (uaddr = x1 = x19+4, awaited val 0xF4240) at call-site lr=0x10284d134
+        // — a wait-until-changed tick/frame barrier. A host-side producer must
+        // CHANGE the latch value and FUTEX_WAKE it to release the wait, else
+        // the loop re-parks (a plain WAKE is a spurious wake; the value is
+        // still the awaited one, so the futex immediately re-blocks). This was
+        // unreachable by the static --kicker (which only writes fixed guest
+        // globals). The sampler already exposes each parked thread's x1, so we
+        // locate the per-thread latch live and write a value != awaited before
+        // waking — advancing the loop one tick per kick into egl*/gl*.
+        if let Some(hex) = {
+            let args: Vec<String> = std::env::args().collect();
+            args.iter()
+                .position(|a| a == "--futex-kick")
+                .and_then(|i| args.get(i + 1).cloned())
+        } {
+            let period_ms: u64 = hex.trim().parse().expect("--futex-kick needs integer period-ms");
+            const IDLE_FUTEX_CALLSITE: u64 = 0x10284d134; // guest lr when parked in the idle barrier
+            std::thread::spawn(move || {
+                eprintln!("[elfjit:futexkick] driving per-thread idle futex latch every {period_ms} ms");
+                for it in 0..6000 {
+                    std::thread::sleep(std::time::Duration::from_millis(period_ms));
+                    for t in arm64jit::jit::snapshot_threads() {
+                        if t.lr != IDLE_FUTEX_CALLSITE {
+                            continue;
+                        }
+                        let latch = t.x1; // per-thread futex uaddr (== x19+4)
+                        // The latch must be host-addressable (guest==host map).
+                        if latch < 0x100000000 || latch >> 56 != 0 {
+                            continue;
+                        }
+                        // A futex uaddr is a 4-byte `int` (4-aligned) — read as a
+                        // c_int, never as a u64 (the 4-aligned address misaligns).
+                        let old = unsafe { *(latch as *const libc::c_int) };
+                        // Version-counter futex: the waiter captures *latch as
+                        // its "expected" value and blocks WHILE *latch is
+                        // unchanged. Releasing it requires writing a NEW value
+                        // (increment the version — never reuse the previous or
+                        // the next waiter captures that same value and
+                        // re-blocks; a fixed write is a self-defeating one-off).
+                        // Gate is the exact idle call-site.
+                        let nv = old.wrapping_add(1);
+                        unsafe { *(latch as *mut libc::c_int) = nv };
+                        unsafe {
+                            libc::syscall(
+                                libc::SYS_futex,
+                                latch as usize,
+                                libc::FUTEX_WAKE as i64,
+                                1i64,
+                                0usize,
+                            );
+                        }
+                        if it % 50 == 0 {
+                            eprintln!(
+                                "[elfjit:futexkick] it={it} guest_tid={} latch={latch:#x} old={old:#x}->{nv:#x}",
+                                t.guest_tid
+                            );
+                        }
+                    }
+                }
+            });
+        }
         // Disable the gate-2 re-arm store: the owner's cond-wait loop at
     // 0x102b4cd50/0x102b4cd84 re-parks while *x19==1 and, on seeing that
     // pred has become 0, RE-ARMS it back to 1 (`mov x8,#1; str x8,[x19]` at
