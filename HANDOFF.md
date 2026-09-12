@@ -1,5 +1,51 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle H) — ROOT-CAUSED + FIXED the recursive-mutex rendezvous: `sanitize_mutex` was destroying glibc's `__owner`, so the owner deadlocked on its OWN recursive re-lock; boot now CROSSES the wall that parked every run since cycle C (workspace 398/0)
+
+Commit `9e8d3a9` (dev). After crossing the GameActivity gates (cycles C–G), both
+engine threads futex-parked on the glibc-RECURSIVE mutex `0x6edae60` at
+`pthread_mutex_lock(0x102b53bb0)` with `__owner=0x0` while `__count=1` — a deadlock,
+no forward motion, flat 948 compiles.
+
+**The bug (real, boot-blocking):** `sanitize_mutex` ran before EVERY glibc
+lock/unlock/cond_wait and zeroed offset 8 when it read `> 0x10000`, treating it as a
+bogus bionic "recursion count". But offset 8 of a **glibc** `pthread_mutex_t` is
+`__owner` — the host owner TID. A real TID like 3392123 exceeds 0x10000, so the
+freshly-set owner of the LIVE recursive mutex was wiped on the next lock. glibc then
+saw `__owner==0 != self` on the owner's own recursive re-lock and futex-blocked it.
+`g_owner_tid=0x0` with `g_count=1` at the park is impossible for a correct glibc
+recursive mutex — only sanitize writes offset 8. (Bionic stores owner_tid at offset
+4, NOT 8; offset 8 is never a bionic leak worth clearing on either ABI.)
+
+**Fix:** sanitize only masks the kind bits at offset 16; it leaves offset 8 alone.
+Regression test now asserts `__owner` survives sanitize (was: asserts it's cleared).
+
+**Result (headless, reproducible):** the boot CROSSES gate1 + gate2 + the recursive
+rendezvous. The worker thread now does real init it never reached before:
+`pthread_setname_np`, `FindClass`, `pthread_once`, mempool/`pthread_key_create`
+TLS, mutex init/lock/unlock (trace shows `g_owner_tid=0x33f7b7` PRESERVED). The fence
+is a SIGSEGV instead of a deadlock — machine gained ground.
+
+### NEW wall (next frontier): worker SIGSEGV — 32-bit hash index keeps stale upper bits
+Worker faults deterministically at `guestpc=0x102173210`, instr `ldr w8,[x8,x0,lsl#2]`
+(caller of hash fn `0x102173258`): `x8=0x1073301c0` (a 0x2000-byte table just memset
+to 0xff = 2048×4B entries), `x0=0x1000007f5`. Low 32 of x0 (`0x7f5`=2037) is a VALID
+index; the upper `0x100000000` (= JIT_BASE) is stale. Index varies per run (988, 2037)
+→ a genuine guest hash value leaking the translation-base high bit: a 32-bit `w`-write
+in the hash loop `0x102173258` (contains `lsl x12,x1,x4` 64-bit + `mul w11,w8,w9` +
+32-bit adds) isn't zero-extending the upper half, which the final `orr x0,x8,x12`
+(fn epilogue, `x8` zeroed at `0x10217332c`) then propagates. Next: find the exact
+non-zero-extending W-write in `0x102173258` (or in the loop `0x1021732a8..0x102173334`).
+
+Repro:
+```
+cargo build -p arm64jit --example elfjit
+JIT_DRIVE_LIFECYCLE=1 timeout 20 ./target/debug/examples/elfjit \
+  ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144 \
+  --kicker 0x106863af8        # deterministic SIGSEGV guestpc=0x102173210 (tid 1)
+```
+Run-log: `/home/hermes-worker/runs/gate-crossed-cycleH-runlog.txt` (SIGSEGV, not park).
+
 ## Session (Sep 12, 2026, hermes-worker, cycle G) — `--kicker` value bug fixed + real ALooper app-command dispatch (workspace 396/0)
 
 Commit `c0736e2` (dev). Cycle F crossed the boot wall's first two GameActivity
