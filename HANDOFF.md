@@ -34,13 +34,17 @@ renderer[+142] u16 count; primitive[+0]=vb,[+4]=offset,[+8]=format idx,
 
 Reproducible: runs/capture_triangle.sh; run-log runs/sh25-triangle.txt.
 
-**Next (closest unblocked):** sustainable real-geometry rendering — a loop of
-bind → clear → coherent-draw → swap on the detached host thread (mirror
---rendersustain) re-seeding the clear color / primitive per frame so a recording
-proves fresh geometry renders (the last property a real main-loop frame drive
-needs). The engine's own main-loop producer still never enqueues a render task
+**SH25b (fd5227b):** `--renderframe-triangle-loop <N>` — same bind → clear →
+coherent-draw → swap recipe rendered SUSTAINABLY on the detached host thread,
+cycling clear-bg through 5 colors/frame; verified 6 iters all Ok(0x1), red
+triangle in every captured frame (runs/capture_triangle_loop.sh). Geometry
+analog of SH23's --rendersustain.
+
+**Next (closest unblocked):** GLES slots 11+ (texture/uniform/shader dispatch) +
+ETC2/ASTC compressed-texture interception so a *textured/shaded* draw renders;
+then scale the (fully-reversed) coherent-renderer rotation onto a larger real
+mesh. The engine's own main-loop producer still never enqueues a render task
 (the long-standing structural wall) — harness drives its own code on a time base.
-Also open: GLES slots 11+ (texture/uniform/shader) + ETC2/ASTC tex interception.
 Baselines unchanged: --jni exit 0; stable idle exit 124.
 
 ## Session (Sep 12, 2026, hermes-worker, cycle SH24) — the engine's OWN real GEOMETRY draw path now dispatches glDrawElements through the GLES bridge: complete 16-slot dispatch map (slots 9/10 = glDrawElements/glDrawArrays), new `--renderframe-drawprobe` that drives the engine's own geometry wrapper 0x5b35288 to a real indexed glDrawElements through the bridge (mode=GL_TRIANGLES, GL_UNSIGNED_INT, GL_ELEMENT_ARRAY_BUFFER bind), wrapper Ok(0x0) + post-draw swap Ok(0x1), exit 124 stable. Workspace 473/0; HEAD e358df0.
