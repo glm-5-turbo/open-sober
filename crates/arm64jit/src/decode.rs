@@ -433,7 +433,7 @@ pub enum Inst {
     // ---- SIMD FP compare->mask: fcmeq/fcmgt/fcmge Vd.T, Vn.T, Vm.T ----
     // result lane = all-ones if Vn op Vm, else 0. op 0=eq,1=gt,2=ge (lt/le are
     // gt/ge with Vn/Vm swapped). esize 4 (.2s/.4s) or 8 (.2d); q = bit30.
-    VecFpCmp { rd: u8, rn: u8, rm: u8, esize: u8, op: u8, q: bool },
+    VecFpCmp { rd: u8, rn: u8, rm: u8, esize: u8, op: u8, q: bool, abs: bool },
     // ---- SIMD FP compare-to-zero: fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd.T, Vn.T, #0.0 ----
     // op 0=eq 1=gt 2=ge 3=lt 4=le. Per-lane result = all-ones if Vn op 0 else 0.
     VecFpCmpZero { rd: u8, rn: u8, op: u8, esize: u8, q: bool },
@@ -1504,7 +1504,28 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         } else {
             2u8 // fcmge
         };
-        return Inst::VecFpCmp { rd, rn, rm, esize, op, q };
+        return Inst::VecFpCmp { rd, rn, rm, esize, op, q, abs: false };
+    }
+    // ---- SIMD FP absolute-compare->mask: facgt/facge Vd.T, Vn.T, Vm.T ----
+    // Compares |Vn| vs |Vm| (sign bit ignored). byte2(bits15:8)&0xfc==0xec
+    // (0xec=.2s/.2d, 0xee=.4s), prefix 0x2e/0x6e (U=bit29 SET for the fac*
+    // family), facgt=bit23 SET (0x0080_0000), facge=bit23 clear. Real libroblox
+    // 0x6eb1ee51 (facgt .4s), 0x2eb1ecc2 (facgt .2s). op 1=gt, 2=ge; abs=true.
+    if ((insn & 0xffe0_fc00) >> 8) & 0xff == 0xec
+        && matches!((insn >> 24) & 0x3f, 0x2e | 0x6e)
+    {
+        // esize: bit22 SET = .2d (64-bit lanes), else .2s/.4s (32-bit).
+        // gt/ge are distinguished by bit23 (facgt vs facge).
+        let esize = if (insn >> 22) & 1 == 1 { 8u8 } else { 4u8 };
+        return Inst::VecFpCmp {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            rm: ((insn >> 16) & 0x1f) as u8,
+            esize,
+            op: if (insn >> 23) & 1 == 1 { 1u8 } else { 2u8 }, // facgt / facge
+            q: (insn >> 30) & 1 == 1,
+            abs: true,
+        };
     }
     // ---- SIMD FP compare-to-zero: fcmeq/fcmgt/fcmge/fcmlt/fcmle Vd.T, Vn.T, #0.0 ----
     // byte2 (bits15:8) 0xc8=gt/ge, 0xd8=eq/le, 0xe8=lt; bit29 flips gt->ge (0xc8)
@@ -7919,6 +7940,15 @@ mod fp16_scalar_and_gate_regressions {
             "fabd .2d got {:?}", decode_op(0x6ee3d4a4));
         assert!(matches!(decode_op(0x4ee0d400), Inst::Simd2dFp { op: 3, .. }));
         assert!(matches!(decode_op(0x4ee0f400), Inst::Simd2dFp { op: 5, .. }));
+        // SIMD fp absolute-compare: facgt v2.2s=0x2eb1ecc2, facge v2.2s=0x2e31ecc2,
+        // facgt v17.4s=0x6eb1ee51 (real), facge v1.2d=0x6e71ec21 -> VecFpCmp abs:true.
+        assert!(matches!(decode_op(0x2eb1ecc2),
+            Inst::VecFpCmp { rd: 2, rn: 6, rm: 17, esize: 4, op: 1, q: false, abs: true }),
+            "facgt .2s got {:?}", decode_op(0x2eb1ecc2));
+        assert!(matches!(decode_op(0x2e31ecc2), Inst::VecFpCmp { op: 2, abs: true, .. }));
+        assert!(matches!(decode_op(0x6eb1ee51), Inst::VecFpCmp { q: true, abs: true, .. }));
+        assert!(matches!(decode_op(0x6e71ec21), Inst::VecFpCmp { esize: 8, op: 2, abs: true, .. }),
+            "facge .2d got {:?}", decode_op(0x6e71ec21));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).

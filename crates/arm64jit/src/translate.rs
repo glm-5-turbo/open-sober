@@ -2457,11 +2457,10 @@ pub fn translate(
                                                                                                                                                                                                 }
                                                                                                                                                                                                 Ok(())
                                                                                                                                                                                             }
-                                                                                                                                                                                            Inst::VecFpCmp { rd, rn, rm, esize, op, q } => {
-            // fcmeq/fcmgt/fcmge Vd.T, Vn.T, Vm.T: per-lane result = all-ones
-            // if Vn op Vm, else 0 (the mask gcc ANDs/sub-adds to count lanes).
-            // Compare via comiss/comisd (CF=1 if Vn<Vm; ZF=1 if equal), then
-            // setcc AL, movzx, neg -> all-ones or 0 in the low 32/64 bits.
+                                                                                                                                                                                            Inst::VecFpCmp { rd, rn, rm, esize, op, q, abs } => {
+            // fcmeq/fcmgt/fcmge (and with abs: facgt/facge) Vd.T, Vn.T, Vm.T:
+            // per-lane result = all-ones if Vn op Vm, else 0. For abs, compare
+            // |Vn| vs |Vm| (clear sign bit of both loaded lanes first via pand).
             let db = crate::jit::VECTOR_BASE + (rd as i32) * 16;
             let nb = crate::jit::VECTOR_BASE + (rn as i32) * 16;
             let mb = crate::jit::VECTOR_BASE + (rm as i32) * 16;
@@ -2477,12 +2476,24 @@ pub fn translate(
                 if esize == 8 {
                     buf.movq_load(0, RBX, nb + off);
                     buf.movq_load(1, RBX, mb + off);
+                    if abs {
+                        buf.mov_ri64(RAX, 0x7fff_ffff_ffff_ffff);
+                        buf.movq_xmm_r64(2, RAX);
+                        buf.pand(0, 2);
+                        buf.pand(1, 2);
+                    }
                     buf.comisd(0, 1);
                 } else {
                     buf.mov_load32(RAX, RBX, nb + off);
                     buf.movd_xmm_r32(0, RAX);
                     buf.mov_load32(RAX, RBX, mb + off);
                     buf.movd_xmm_r32(1, RAX);
+                    if abs {
+                        buf.mov_ri64(RAX, 0x0000_0000_7fff_ffff);
+                        buf.movq_xmm_r64(2, RAX);
+                        buf.pand(0, 2);
+                        buf.pand(1, 2);
+                    }
                     buf.comiss(0, 1);
                 }
                 buf.setcc_rm8(cc, 0); // AL = 0/1
