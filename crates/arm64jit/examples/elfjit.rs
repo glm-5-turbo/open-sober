@@ -1888,7 +1888,7 @@ fn main() {
                         *(objA.wrapping_add(384) as *mut u64) = 0;
                         *(objA.wrapping_add(392) as *mut u64) = 0;
                         // objB[+140]=1, [+124]=1 (nonzero flags)
-                        *(objB.wrapping_add(140) as *mut u32) = 1;
+                        *(objB.wrapping_add(140) as *mut u32) = 0; // 0 -> glDrawBuffers(1,{GL_BACK}) for the default FB
                         *(objB.wrapping_add(124) as *mut u32) = 1;
                         // view: [+128]=w=[+132]=h, [+140]=framebuffer id 0
                         *(view.wrapping_add(128) as *mut u32) = 1280;
@@ -1968,8 +1968,16 @@ fn main() {
                         // bridge takes over. Names are per-slot guesses from the
                         // clear-path usage; refine by reading which slot the engine
                         // needs once the drive passes the current stop.
+                        // Slot->function names corrected by disassembly (SH22): the clear
+                        // path dispatches slot0 as glDrawBuffers (builds
+                        // {GL_COLOR_ATTACHMENT0..3} / {GL_BACK} buf arrays) and slot2 as
+                        // glClearBufferfv (per-buffer clear loop uses GL_COLOR=0x1800 /
+                        // GL_DEPTH=0x1801 buffer enums, drawbuffer in w1, value ptr in x2).
+                        // The SH19-21 "glClearColor"+"glClearDepthf" guesses mis-routed
+                        // those dispatches (glClearDepthf bridge ignored the int/ptr args
+                        // and cleared nothing -> black window).
                         let seed_names = [
-                            "glClearColor", "glClear", "glClearDepthf",
+                            "glDrawBuffers", "glClear", "glClearBufferfv",
                             "glClearStencil", "glColorMask", "glDepthMask",
                             "glStencilMask", "glViewport",
                         ];

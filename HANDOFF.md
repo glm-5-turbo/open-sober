@@ -1,5 +1,40 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH22) — BROKEN THE SH21 WALL: the engine's OWN frame-fn 0x105b32c00 now presents a real, correctly-colored 1280x720 frame through the GLES bridge (18430/18432 sampled px = the exact --renderframe-color 0.4,0.2,0.95), stable exit 124, zero crash. Workspace 472/0 (was 471).
+
+SH21 left the window black, blaming "the per-buffer clear loop clears depth-style buffers via a guessed slot2=glClearDepthf". Disassembly of the clear-state
+sub-fn 0x5b32e08 corrects this: **0x1800=GL_COLOR / 0x1801=GL_DEPTH are
+`glClearBufferfv` BUFFER enums** (the loop does `slot2(0x1800, drawbuffer=i,
+value=clearstate+4+i*0x10)` iterating 4 color draw-buffers; the depth branch
+does `slot2(0x1801,0,...)`). So **slot2 = glClearBufferfv**, and slot0 (which the
+preamble dispatches with {GL_COLOR_ATTACHMENT0..3} / {GL_BACK}=0x405 arrays) =
+**glDrawBuffers** — the SH19-21 "glClearColor"+"glClearDepthf" seed guesses
+mis-routed both. glClearDepthf's float bridge ignored the int/ptr args and
+cleared nothing → that was the black window.
+
+Fixes (commit): (1) resolver.rs adds glClearBufferfv + glDrawBuffers to
+GLES_INT_NAME_LIST (both pure int/ptr ABI, safe through the integer HostCall —
+they previously resolved None so the bridge couldn't seed); (2) elfjit seed_names
+corrected to slot0=glDrawBuffers, slot2=glClearBufferfv; (3) objB[+140]=0 so the
+default-FB preamble takes glDrawBuffers(1,{GL_BACK}) instead of the 4-color-attach
+form.
+
+Verified real run (runs/sh22-color-frame-from-engine-framefn.txt):
+`slot 0 (glDrawBuffers) <- bridge 0x7f0000003010`, `slot 2 (glClearBufferfv) <-
+bridge 0x7f0000003018`, `engine frame-fn 0x105b32c00 returned Ok`,
+`post-frame swap returned Ok(0x1)`, exit 124. Frame artifact:
+runs/sh22-color-frame-from-engine-framefn.{png,rgb} — raw RGB(102,51,242) =
+(0.4,0.2,0.95) = exact clear color; only ~0.013% black (window edge). No channel
+swap (the SH21 capture script mislabeled grab byte order b,g,r; raw rgb24 is
+r,g,b). Doc: docs/frontier-sh22-color-frame.md.
+
+Honest framing: the frame is still *harness-driven* (fabricated renderer/view/
+clear-state objects, one frame-fn invocation + manual swap). The engine's real
+main-loop producer still never enqueues a render task, so it doesn't drive
+frames natively yet. But the mechanical reverse of slot0/slot2 removes the last
+guess-blocker in the engine's own clear path. Baselines unchanged: --jni exit 0;
+stable idle exit 124.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH21) — reverse: the frame-fn 0x105b32c00's clear-color object is its 5th arg **x4** (not x2 as SH20 guessed). Fabricating a clear-state x4 object makes the engine's OWN clear-state sub-fn 0x105b32e08 run glColorMask(all-1) + a per-buffer clear-dispatch loop + glGetError THROUGH the bridge. Workspace 471/0 (was 471).
 
 SH20's drive stopped SILENTLY after the GL preamble (glBindFramebuffer/

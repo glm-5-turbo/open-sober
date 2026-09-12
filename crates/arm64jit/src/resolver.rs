@@ -246,6 +246,7 @@ pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
     b"glBufferSubData\0",
     b"glCheckFramebufferStatus\0",
     b"glClear\0",
+    b"glClearBufferfv\0",
     b"glClearStencil\0",
     b"glColorMask\0",
     b"glCompileShader\0",
@@ -266,6 +267,7 @@ pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
     b"glDisable\0",
     b"glDisableVertexAttribArray\0",
     b"glDrawArrays\0",
+    b"glDrawBuffers\0",
     b"glDrawElements\0",
     b"glEnable\0",
     b"glEnableVertexAttribArray\0",
@@ -1799,6 +1801,27 @@ mod tests {
             let in_ = resolve_gles_int(nm.as_bytes())
                 .unwrap_or_else(|| panic!("{n} NOT resolvable via int with trailing NUL"));
             eprintln!("resolve_gles_int({n}\\0) -> slot {in_:#x}");
+        }
+    }
+
+    #[test]
+    fn resolve_gles_int_clear_buffer_fv_and_draw_buffers() {
+        // Regression (SH22): the engine's frame clear path dispatches slot2 as
+        // glClearBufferfv (per-buffer clear loop with GL_COLOR=0x1800/GL_DEPTH=
+        // 0x1801 buffer enums, drawbuffer in w1, float4 value ptr in x2) and slot0
+        // as glDrawBuffers (GL_COLOR_ATTACHMENT0..3 / GL_BACK arrays). Neither was
+        // in GLES_INT_NAME_LIST, so they resolved to None and elfjit's
+        // --renderframe-seedgles seeded slot0/2 with glClearColor/glClearDepthf --
+        // which misinterpreted the int/ptr args and never cleared the color buffer
+        // (black window). Both are pure integer/pointer ABI (<=8 args, no float
+        // s-regs), so they must resolve through the integer bridge.
+        for n in ["glClearBufferfv", "glDrawBuffers"] {
+            let nm = format!("{n}\0");
+            resolve_gles_int(nm.as_bytes())
+                .unwrap_or_else(|| panic!("{n} NOT resolvable via int bridge"));
+            eprintln!("resolve_gles_int({n}\\0) -> int bridge OK");
+            // Not mixed-ABI wrapped: resolve_gles_mixed must reject them.
+            assert!(resolve_gles_mixed(nm.as_bytes()).is_none(), "{n} should not be mixed-wrapped");
         }
     }
 
