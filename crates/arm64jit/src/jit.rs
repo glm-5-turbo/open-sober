@@ -4551,6 +4551,28 @@ mod tests {
     }
 
     #[test]
+    fn fcvtas_vector_exec() {
+        use crate::jit::exec_bytes;
+        // fcvtas v3.4s, v3.4s = 0x4e21c863: round fp32 lanes to int32.
+        // v3 = v[6],v[7] (two 64-bit slots, 4 lanes). Inputs {3.9, -2.5, 7.2, 4.5}.
+        let mut st = CpuState::new();
+        st.v[6] = (((-2.5f32).to_bits() as u64) << 32) | 3.9f32.to_bits() as u64;
+        st.v[7] = ((4.5f32.to_bits() as u64) << 32) | 7.2f32.to_bits() as u64;
+        exec_bytes(&mut st, &[0x63, 0xc8, 0x21, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec");
+        // v3 is vd==rn: in-place. lanes: {3.9->4, -2.5->-2(nearest-even), 7.2->7, 4.5->4}.
+        assert_eq!(st.v[6] & 0xffff_ffff, 4, "lane0 3.9->4");
+        assert_eq!((st.v[6] >> 32) & 0xffff_ffff, (-2i64 as u64) & 0xffff_ffff, "lane1 -2.5->-2");
+        assert_eq!(st.v[7] & 0xffff_ffff, 7, "lane2 7.2->7");
+        assert_eq!((st.v[7] >> 32) & 0xffff_ffff, 4, "lane3 4.5->4 (nearest-even)");
+        // fcvtas v0.2s, v1.2s = 0x0e21c820: {2.0, -1.1} -> {2, -1}
+        let mut st2 = CpuState::new();
+        st2.v[2] = (((-1.1f32).to_bits() as u64) << 32) | 2.0f32.to_bits() as u64; // v1.2s
+        exec_bytes(&mut st2, &[0x20, 0xc8, 0x21, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).expect("exec2");
+        assert_eq!(st2.v[0] & 0xffff_ffff, 2, "2.0->2");
+        assert_eq!((st2.v[0] >> 32) & 0xffff_ffff, (-1i64 as u64) & 0xffff_ffff, "-1.1->-1");
+    }
+
+    #[test]
     fn simd_mull_widening_multiply_correct() {
         // smull/umull/smlal/umlal widen esrc-byte elements to res and multiply.
         // Decode regression: the old gate read res_esize from bit22 (missed

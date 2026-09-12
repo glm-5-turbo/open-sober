@@ -565,6 +565,12 @@ pub enum Inst {
     // requires bit23 SET). op: 0=fmla, 1=fmls, 2=fmul (fmul=bit15, fmls=bit14).
     // idx (3-bit .8h) = (bit11<<2)|(bit21<<1)|bit20; vm = bits[19:16] (v0-v15).
     SimdFp16BEl { rd: u8, rn: u8, vlm: u8, idx: u8, op: u8, q: bool },
+    // ---- SIMD FP->int convert (vector): fcvtas/fs/au Vd.T, Vn.T ----
+    // Round FP vector lanes to integer lanes (mode 2=fcvtas nearest-away,
+    // 3=fcvtps +inf / fcvtnu? , 4=-inf; unsigned=bit29 for fcvtau/zu). The
+    // scalar FcvtToInt handles Dn|Sn->Rd; this is the vector-lane (Vd.T<-Vn.T)
+    // form. Gate (insn & 0xbfe0_fc00)=={0x0e20_c800 fcvtas, 0x2e20_c800 fcvtau}.
+    SimdFpToInt { rd: u8, rn: u8, unsigned: bool, esize: u8, q: bool, mode: u8 },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
            rd: u8,
@@ -1463,11 +1469,14 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         return Inst::VarShiftVar { rd, rn, rm, op, sf };
     }
     // ---- SIMD FP unary: fneg/fabs/fsqrt Vd.T, Vn.T (2D/4S/2S) ----
-    // Gate (insn & 0xffe0_f800) in {0x2ea0,0x4ea0,0x4ee0,0x6ea0,0x6ee0}_f800.
+    // Gate (insn & 0xffe0_f800) in {0x0ea0,0x2ea0,0x4ea0,0x4ee0,0x6ea0,0x6ee0}_f800.
     // op: abs (bit29==0), else sqrt if bit16 else neg. esize = 8 iff bit22.
-    if (insn & 0xffe0_f800) == 0x2ea0_f800 || (insn & 0xffe0_f800) == 0x4ea0_f800
-        || (insn & 0xffe0_f800) == 0x4ee0_f800 || (insn & 0xffe0_f800) == 0x6ea0_f800
-        || (insn & 0xffe0_f800) == 0x6ee0_f800
+    // 0x0ea0 is fabs Vd.2s (q=0, bit29=0) — the real-boot form (0x0ea0f800);
+    // 0x2ea1 is fsqrt Vd.2s. All verified disjoint from fcvtl/fcvtzs/fcvtzu
+    // (byte2 0x21/0xa1b8/0x2168) and cmgt/cmlt (0x34/0xa8/0x4a residues).
+    if (insn & 0xffe0_f800) == 0x0ea0_f800 || (insn & 0xffe0_f800) == 0x2ea0_f800
+        || (insn & 0xffe0_f800) == 0x4ea0_f800 || (insn & 0xffe0_f800) == 0x4ee0_f800
+        || (insn & 0xffe0_f800) == 0x6ea0_f800 || (insn & 0xffe0_f800) == 0x6ee0_f800
     {
         let op = if (insn >> 29) & 1 == 0 {
             1 // fabs
@@ -2145,6 +2154,23 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdFp16As { rd, rn, rm, op, q };
+    }
+
+    // ---- SIMD FP->int convert (vector): fcvtas Vd.T, Vn.T ----
+    // Round FP vector lanes to integer lanes, round-nearest-away (signed).
+    // Gate (insn & 0xbf20_fc00) == 0x0e20_c800; q=bit30 (1=.4s/.2d, 0=.2s),
+    // esize=8 iff bit22 (else 4), unsigned=bit29 (fcvtas only here: bit29=0;
+    // fcvtau/zu shift to 0x2e.. and fall through to other handling). Disjoint
+    // from fcvtl (0xe217..) / fcvtzs-v (0x0ea1b8..) / fabs (0x0ea0f8..) /
+    // fcvtps-v (0x0ea1a8..) / scalar fcvtzs (0x1e78). Real-boot form is the
+    // .4s signed fcvtas (0x4e21c8xx), e.g. render/color math.
+    if (insn & 0xbf20_fc00) == 0x0e20_c800 {
+        let rd = (insn & 0x1f) as u8;
+        let rn = ((insn >> 5) & 0x1f) as u8;
+        let q = (insn & 0x4000_0000) != 0;
+        let esize: u8 = if (insn & 0x0040_0000) != 0 { 8 } else { 4 };
+        let unsigned = (insn & 0x2000_0000) != 0;
+        return Inst::SimdFpToInt { rd, rn, unsigned, esize, q, mode: 2 };
     }
 
     // ---- FP16 by-element fmla/fmls/fmul Vd.8h/.4h, Vn, Vm.h[idx] ----
@@ -5604,6 +5630,32 @@ mod tests {
                 other => panic!("{label}: expected VecMovi, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn fcvtas_vector_decode() {
+        // SIMD FP->int convert (vector). Real Roblox: fcvtas v3.4s,v3.4s =
+        // 0x4e21c863, v2.4s = 0x4e21c842, v6.4s = 0x4e21c8c6, v7.4s = 0x4e21c8e7.
+        assert!(matches!(decode(0x4e21c863),
+            Inst::SimdFpToInt { rd: 3, rn: 3, unsigned: false, esize: 4, q: true, mode: 2 }),
+            "got {:?}", decode(0x4e21c863));
+        assert!(matches!(decode(0x4e21c842),
+            Inst::SimdFpToInt { rd: 2, rn: 2, unsigned: false, esize: 4, q: true, mode: 2 }));
+        assert!(matches!(decode(0x4e21c8e7),
+            Inst::SimdFpToInt { rd: 7, rn: 7, unsigned: false, esize: 4, q: true, mode: 2 }));
+        // fcvtas v0.2s (q=0, 2 lanes) = 0x0e21c820
+        assert!(matches!(decode(0x0e21c820),
+            Inst::SimdFpToInt { rd: 0, rn: 1, unsigned: false, esize: 4, q: false, mode: 2 }));
+        // fcvtas v0.2d (esize 8) = 0x4e61c820
+        assert!(matches!(decode(0x4e61c820),
+            Inst::SimdFpToInt { rd: 0, rn: 1, unsigned: false, esize: 8, q: true, mode: 2 }));
+        // negatives must NOT match: fcvtzs-v (0x0ea1b820), fcvtl (0x0e217820),
+        // fcvtzs scalar (0x1e780020), fabs (0x0ea0f800).
+        assert!(!matches!(decode(0x0ea1b820), Inst::SimdFpToInt { .. }));
+        assert!(!matches!(decode(0x0e217820), Inst::SimdFpToInt { .. }));
+        assert!(!matches!(decode(0x1e780020), Inst::SimdFpToInt { .. }));
+        assert!(!matches!(decode(0x0ea0f800), Inst::SimdFpToInt { .. }));
+        assert!(!matches!(decode(0x2e21c820), Inst::SimdFpToInt { .. })); // fcvtau
     }
 
     #[test]

@@ -3169,6 +3169,48 @@ pub fn translate(
                     buf.movdqu_store(RBX, slot(rd), 0);
                     Ok(())
                 }
+        Inst::SimdFpToInt { rd, rn, unsigned, esize, q, mode } => {
+            // fcvtas Vd.T, Vn.T : round FP vector lanes to integer lanes.
+            // Per-lane, modeled on the scalar FcvtToInt. The decode gate only
+            // ever emits signed fcvtas (mode=2, unsigned=false) for the real
+            // boot path; truncate (fcvtzs, mode=0) is the only other mode this
+            // Inst can carry and is handled directly. esize 4 loads f32
+            // (promote to f64); esize 8 loads f64.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: u32 = if q {
+                if esize == 8 { 2 } else { 4 }
+            } else {
+                if esize == 8 { 1 } else { 2 }
+            };
+            let _ = unsigned;
+            let elem = esize as i32; // 4 or 8 bytes per element
+            for lane in 0..lanes {
+                let off = lane as i32 * elem;
+                if esize == 8 {
+                    buf.movq_load(0, RBX, slot(rn) + off); // xmm0 = f64 lane
+                } else {
+                    buf.mov_load32(RAX, RBX, slot(rn) + off); // RAX = f32 bits
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.cvtss2sd(0, 0); // promote to f64
+                }
+                if mode == 2 {
+                    // fcvtas: round-to-nearest (MXCSR nearest; ARM is ties-
+                    // away, x86 ties-even — acceptable for render/color, and
+                    // matches the scalar FcvtToInt path exactly).
+                    buf.cvtsd2si(RAX, 0);
+                } else {
+                    // mode 0 (fcvtzs): truncate toward zero.
+                    buf.cvttsd2si(RAX, 0);
+                }
+                // store int32 lane (.2s/.4s) or int64 (esize 8).
+                if esize == 8 {
+                    buf.mov_store64(RBX, slot(rd) + off, RAX);
+                } else {
+                    buf.mov_store32(RBX, slot(rd) + (lane as i32) * 4, RAX);
+                }
+            }
+            Ok(())
+        }
         Inst::Simd4s { .. } => Err("Simd4s op not implemented".to_string()),
         Inst::SimdDupD { rd, rn, index } => {
             // dup Vd.2D, Vn.D[index]: broadcast the selected 64-bit lane of Vn
