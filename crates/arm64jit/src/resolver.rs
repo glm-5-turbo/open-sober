@@ -868,8 +868,27 @@ extern "C" fn host_mutex_lock(a0: u64, _1: u64, _2: u64, _3: u64, _4: u64, _5: u
         };
         let gpc = crate::jit::current_guest_pc();
         let self_tid = crate::jit::current_tid();
+        // glibc pthread_mutex_t fields (x86-64): __lock@0 (int), __count@4
+        // (recursion count), __owner@8 (host tid), __pad@12, __kind@16 (type).
+        // Reading them shows who OWNS a contended mutex and the recursion
+        // depth — distinguishing a genuine lifecycle-await (owner alive, held
+        // across an app-command dispatch) from an abandoned lock (owner
+        // exited/reaped without unlock). The widened block is skipped-reg-free;
+        // the reads are plain aligned u32 loads always (m is guest==host).
+        let (owner, count, kind) = if a0 != 0 {
+            let g = m as *const u32;
+            unsafe {
+                (
+                    core::ptr::read_unaligned(g.add(2)),
+                    core::ptr::read_unaligned(g.add(1)),
+                    core::ptr::read_unaligned(g.add(4)),
+                )
+            }
+        } else {
+            (0, 0, 0)
+        };
         eprintln!(
-            "[t={self_tid}] [mutex_lock] {a0:#x} bionic_word=0x{bionic_word:08x} state=0x{:x} type=0x{:x} gpcreq={gpc:#x}",
+            "[t={self_tid}] [mutex_lock] {a0:#x} bionic_word=0x{bionic_word:08x} state=0x{:x} type=0x{:x} g_owner_tid={owner:#x} g_count={count} g_kind={kind} gpcreq={gpc:#x}",
             bionic_word & 0x3, (bionic_word >> 14) & 0x3
         );
     }
