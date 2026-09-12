@@ -1,5 +1,58 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle J) — STABLE MAIN LOOP HOLDS; the cycle-I "futex" next-lever is DISPROVEN and replaced with the true barrier (per-thread TLS-flag spin, framework-owned). Workspace green, tree clean.
+
+The real-boot milestone from cycle I is unchanged and still holds: libroblox.so
+loads, JNI_OnLoad returns 0x10006, StartApp drives the engine, all guest threads
+run the engine main loop headlessly until the harness timeout (exit 124; no
+crash/leak; block-cache flat at 1871 compiles, hits ~19M, RSS ~5MB). This cycle
+made no production code change — it re-established the frontier from first
+principles and fixed the wrong plan.
+
+**The cycle-I lever ("POST the awaited futex value + FUTEX_WAKE") is cancelled:**
+the settled main loop makes **ZERO guest syscalls** (a 40s JIT_TRACE_SVC=1 run
+printed zero futex and zero `guest svc` lines). The futex instructions at
+0x10284d114-138 are a transient init burst, not the settled loop. There is no
+futex to wake.
+
+**The true steady-state barrier** is a pure-CPU spin at guest 0x10284d524:
+`adrp/add x0,#0x7e0; bl 0x102b9dee0` (per-thread object getter),
+`ldrb w8,[x0]; and w8,w8,#1; cbz <loop>` — it polls **bit0 of a per-thread TLS
+object returning its address** (JIT_DUMP_PC=0x10284d538 shows x0 =
+0x7f6998043df8 vs 0x7f6990036568 across threads). Seeding the static window
+0x1067d67e0/f0/f8=1 via `--kicker 0x..=1` did NOT advance compiles (flat 1871):
+the gate is dynamic, driven by the absent Android framework event/looper
+producer plus a real window/surface. Same class of framework-owned lifecycle
+gate as cycles C–I, now at the steady main-loop level — not a decoder/loader/ISA
+gap, not a futex.
+
+### Next lever (ordered / real)
+The gate is an idle "has-pending-work" latch, NOT a seedable singleton: a 40s
+JIT_TRACE_SVC capture shows the settled loop makes ZERO guest syscalls; a 40s
+static-kicker seed of 0x1067d67e0/f0/f8=1 did NOT advance compiles; and even
+FORCING the flag-set branch (patch `and w8,w8,#1` @ 0x10284d53c -> `mov w8,#1`
+under JIT_DRIVE_LIFECYCLE) left compiles flat at 1871 (the 0x10284d548 handler
+is an idle maintenance loop, not a work producer). So bit0 means "pending work /
+should run" and forward motion needs framework-ENQUEUED work items, not a flag
+seed:
+1. Build the surviving looper/framework + EGL window/surface layer the engine
+   awaits, so a real producer can post the work items that set the latch (correct
+   ordering), then drive them. A GPU host is needed for meaningful frame-perf
+   proof.
+Boot stabilization (the achievable on-VPS milestone) is DONE and captured.
+
+Run-logs (cycle J, reproducible):
+```
+cargo build -p arm64jit --example elfjit
+JIT_DRIVE_LIFECYCLE=1 JIT_STATS=1 timeout 15 ./target/debug/examples/elfjit \
+  ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144 \
+  --kicker 0x106863af8    # exit 124 = stable main loop until timeout
+```
+- `/home/hermes-worker/runs/mainloop-tlsflag-spin-runlog.txt` (narrative + cmd)
+- `/home/hermes-worker/runs/mainloop-tlsflag-spin-raw.txt` (verified raw: 1871 flat)
+- Diagnostic used: `JIT_DUMP_PC=0x10284d538` (dumps x0 = polled per-thread ptr);
+  `JIT_TRACE_SVC=1` (proves zero svc in the settled loop); `disasm` example.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle I) — REAL BOOT REACHES A STABLE RUNNING ENGINE MAIN LOOP: crossed the cycle-H worker SIGSEGV (UXTW, not a W-write leak), the pthread_key_create destructor SIGILL, and the step-budget false abort. libroblox.so now loads + JNI inits + the main loop runs indefinitely headless (exit 124 on harness timeout). Workspace 400+/0.
 
 Commits `b7da1a9` + `9c9332b` (dev). Cycle-H's stated next wall (worker SIGSEGV
