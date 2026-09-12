@@ -1259,6 +1259,8 @@ pub struct ThreadSnapshot {
     pub x0: u64,
     pub x1: u64,
     pub x2: u64,
+    pub x19: u64,
+    pub x20: u64,
     pub x29: u64,
     pub sp: u64,
 }
@@ -1282,6 +1284,8 @@ pub fn snapshot_threads() -> Vec<ThreadSnapshot> {
                 x0: s.x[0],
                 x1: s.x[1],
                 x2: s.x[2],
+                x19: s.x[19],
+                x20: s.x[20],
                 x29: s.x[29],
                 sp: s.x[31],
             }

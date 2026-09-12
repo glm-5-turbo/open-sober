@@ -1064,6 +1064,21 @@ fn resolve_glibc_pthread(name: &str) -> MutexLockFn {
     unsafe { std::mem::transmute(ptr) }
 }
 extern "C" fn host_cond_wait(a0: u64, a1: u64, _2: u64, _3: u64, _4: u64, _5: u64, _6: u64, _7: u64) -> u64 {
+    // Lifecycle drive (JIT_DRIVE_LIFECYCLE=1): no real Java layer broadcasts a
+    // guest condvar, so a cond_wait entered before we satisfy the predicate can
+    // sleep forever. Emulate a bounded sawtooth: short timedwait instead of a
+    // non-timeout wait, returning to the guest's predicate re-check loop so it
+    // observes externally-satisfied lifecycle flags and advances.
+    if std::env::var_os("JIT_DRIVE_LIFECYCLE").is_some() {
+        type SawtoothFn = unsafe extern "C" fn(*mut u8, *mut u8, *const libc::timespec) -> i32;
+        let f: SawtoothFn =
+            unsafe { std::mem::transmute(*REAL_COND_TIMEDWAIT.get().expect("pthread_cond_timedwait resolved")) };
+        let ts = libc::timespec { tv_sec: 0, tv_nsec: 2_000_000 };
+        unsafe {
+            sanitize_mutex(a1 as *mut u8);
+            return f(a0 as *mut u8, a1 as *mut u8, &ts) as u64;
+        }
+    }
     let f = *REAL_COND_WAIT.get().expect("pthread_cond_wait resolved");
     if std::env::var_os("JIT_TRACE").is_some() {
         let gpc = crate::jit::current_guest_pc();

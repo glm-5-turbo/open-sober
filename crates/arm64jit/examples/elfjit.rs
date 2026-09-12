@@ -499,11 +499,64 @@ fn main() {
                         let at = arm64jit::resolver::name_of_call_addr(t.pc)
                             .unwrap_or_else(|| format!("{:#x}", t.pc));
                         lines.push_str(&format!(
-                            "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x29={:#x} sp={:#x}",
-                            t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x29, t.sp
+                            "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                            t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x19,
+                            // deref predicate pointer if it looks valid (guest rw segment)
+                            if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
+                            t.x29, t.sp
                         ));
                     }
                     eprintln!("{lines}");
+                }
+            });
+        }
+        // Host-side lifecycle kicker (experimental): the engine owner parks
+        // busy-polling a guest global (`ldar x8,[x8]; cmp #1; b.eq`) until the
+        // Java layer's app-command sets it. On this box there is no Java side,
+        // so `--kicker 0x<guest-hex-global>=<value-hex>` spawns a detached host
+        // thread that writes the value to that guest global repeatedly WHILE
+        // jit_run is parked, to test whether releasing the awaited predicate
+        // lets StartApp proceed past the rendezvous toward the looper.
+        let mut kickers: Vec<(u64, bool)> = Vec::new();
+        let args: Vec<String> = std::env::args().collect();
+        let mut i = 0;
+        while i < args.len() {
+            if let Some(k) = args[i].strip_prefix("--kicker") {
+                let spec = if k.is_empty() {
+                    i += 1;
+                    if i >= args.len() { panic!("--kicker needs a value"); }
+                    args[i].clone()
+                } else {
+                    k.trim_start_matches('=').to_string()
+                };
+                let (addr_s, val_s) = spec.split_once('=').unwrap_or((spec.trim_start_matches("0x"), "1"));
+                let addr = u64::from_str_radix(addr_s.trim_start_matches("0x"), 16).expect("bad kicker addr");
+                let is_bcast = val_s.trim_start_matches("0x").to_ascii_lowercase() == "bcast";
+                kickers.push((addr, is_bcast));
+            }
+            i += 1;
+        }
+        for (addr, is_bcast) in kickers {
+            std::thread::spawn(move || {
+                eprintln!("[elfjit:kicker] host thread drives 0x{addr:x} ({})", if is_bcast { "pthread_cond_broadcast" } else { "=value" });
+                let bc: unsafe extern "C" fn(*const u8) -> i32 = unsafe {
+                    std::mem::transmute(libc::dlsym(libc::RTLD_NEXT, c"pthread_cond_broadcast".as_ptr()))
+                };
+                for it in 0..400 {
+                    unsafe {
+                        if is_bcast {
+                            bc(addr as *const u8);
+                        } else {
+                            // PULSE: hold 1 through the first gate (~1.5s),
+                            // then release to 0 so a wait-that-loops-while-==1 can exit.
+                            let v = if it < 60 { 1u64 } else { 0u64 };
+                            *((addr) as *mut u64) = v;
+                            if it % 25 == 0 {
+                                eprintln!("[elfjit:kicker] t={it} guest_global 0x{addr:x}=%{:#x}", *((addr) as *const u64));
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
                 }
             });
         }
@@ -533,8 +586,10 @@ fn main() {
                     let at = arm64jit::resolver::name_of_call_addr(t.pc)
                         .unwrap_or_else(|| format!("{:#x}", t.pc));
                     lines.push_str(&format!(
-                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x29={:#x} sp={:#x}",
-                        t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x29, t.sp
+                        "\n  host_tid={} guest_tid={} pc={at} lr={:#x} x0={:#x} x1={:#x} x2={:#x} x19={:#x}[*={:#x}] x29={:#x} sp={:#x}",
+                        t.host_tid, t.guest_tid, t.lr, t.x0, t.x1, t.x2, t.x19,
+                        if (0x100000000..0x108000000).contains(&t.x19) && t.x19 & 7 == 0 { unsafe { *(t.x19 as *const u64) } } else { 0 },
+                        t.x29, t.sp
                     ));
                 }
                 eprintln!("{lines}");
