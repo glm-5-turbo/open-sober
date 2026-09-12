@@ -1,6 +1,57 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle N) — the ANativeWindow layer now maps to a REAL desktop X11 window, wired race-free before StartApp; `ANativeWindow_fromSurface` hands the guest a genuine 0x200000 XID on Xvfb (workspace 408/0, HEAD 6adcd84).
+## Session (Sep 12, 2026, hermes-worker, cycle O) — decode() hardened to never panic on ANY guest byte; whole-executable scan's 5260 latent JIT-abort sites → 0, `.text` stays 0-gap (workspace 409/0, HEAD 8fdf763).
+
+Prior cycles claimed "decode() never panics" but verified it only against `.text`.
+The **whole-executable** scandecode scan (all PF_X segments — including the
+data-region bytes a computed branch could land on) found **5260 decode() PANIC
+sites**, every one outside `.text`. Two decoder gates shifted without guarding a
+zero element-size field — a hard JIT abort (the whole process dies) on arbitrary
+guest bytes:
+
+1. **umov/smov** (insn&0xbfe0_fc00 == {0x0e00_3c00, 0x0e00_2c00}):
+   `1 << imm5.trailing_zeros()` PANICS when imm5==0 (tz=32, shift overflow).
+2. **vector dup** (insn&0xffe0_0c00 == {0x0e00_0400, 0x4e00_0400}):
+   `1 << (f & f.wrapping_neg()).trailing_zeros()` PANICS when f==0.
+
+Both now return `Inst::Unsupported` for the reserved zero-size encoding. **Key
+subtlety:** the guard must be exact-zero ONLY — imm5/f packs BOTH element size
+AND the lane index (e.g. `dup v21.2s, v23.s[1]` = 0x0e0c06f5 has f=0b01100 →
+esize 4 via `f & -f`, src_idx 1), so any `f>8`/power-of-two bound wrongly rejects
+real hardware instructions. An over-eager bound was written first, caught by the
+regression test acting on real libroblox insns, and reverted.
+
+**Verified (reproducible, no boot regression):**
+- scandecode whole-exe (25,911,396 insns): **PANIC hits 5260 → 0**;
+  `.text` (1,376,321 insns) still **0 Unsupported / 0 panics**.
+- New regression `umov_smov_and_vector_dup_zero_imm5_do_not_panic` pins both
+  gates + the real `dup v21.2s,v23.s[1]` / `dup v27.2s,v24.s[1]` forms.
+- Workspace 409 passed / 0 failed (was 408). Real boot unchanged: reaches
+  StartApp + stable engine main loop, exit 124, no crash.
+- Run-log: `/home/hermes-worker/runs/cycleO-decode-panic-hardening-runlog.txt`.
+
+### Next lever (unchanged — the hard remaining wall, now with more precision)
+The engine main loop is reached and the ANativeWindow layer maps to a REAL X11
+window (cycle N), but no **guest thread runs the app-glue looper**, so
+`ALooper_pollOnce` is never called, the queued APP_CMD_START/RESUME/INIT_WINDOW
+are never drained, and `eglCreateWindowSurface` never fires. Disasm pinned the
+missing thread: **0x102bcd5d0** is the android_native_app_glue main loop
+(currently anonymous, filed inside `nativePreloadFlagOverrides`' block). Prologue
+takes the `android_app*` state in x0, stores it in x19, then the loop at
+0x102bcd648 reads state flags (+8/+9/+10) and calls
+`ALooper_pollOnce(-1, NULL, &events, &source)` (0x102bcd670), dispatching via
+`blr x8` where x8 = `[source+16]` (the `process` fn). No internal caller invokes
+it — it is the host-or-driver-started glue thread. Both `pthread_create`s spawned
+in the boot run the engine worker loop 0x10284d168, never the glue loop.
+
+Two routes to a first headless llvmpipe frame, in order of cleanliness:
+1. **Drive the glue looper (0x102bcd5d0)**: fabricate an `android_app` state
+   object (the fields the loop touches: looper handle, state-flags at +8/+9/+10,
+   the app-command source `{id,process,..}` at the callback), and start it as a
+   guest thread so it drains the ALoop. The app-command source's `process` fn is
+   what must eventually call ANativeWindow_fromSurface→eglCreateWindowSurface.
+2. **Enqueue a render/task directly** onto the engine's per-thread work-queue
+   (the idle futex all 3 threads park on at 0x10284d134).
 
 Cycle M's `ANativeWindow_fromSurface` returned a `HOST_THUNK_BASE|0x2000`
 sentinel — a fake address Mesa's x11-EGL platform would reject in
