@@ -1,5 +1,36 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH21) — reverse: the frame-fn 0x105b32c00's clear-color object is its 5th arg **x4** (not x2 as SH20 guessed). Fabricating a clear-state x4 object makes the engine's OWN clear-state sub-fn 0x105b32e08 run glColorMask(all-1) + a per-buffer clear-dispatch loop + glGetError THROUGH the bridge. Workspace 471/0 (was 471).
+
+SH20's drive stopped SILENTLY after the GL preamble (glBindFramebuffer/
+glViewport/glScissor) — no clear ever fired — because the frame-fn passes its
+5th arg x4 to x20 (`0x105b32c30 mov x20,x4`), gated on x4!=0 AND [x4]!=0
+(`0x105b32d44 cbz x20` / `0x105b32d4c cbz [x20]`), then bl's the clear-state
+sub-fn 0x105b32e08 which reads the clear RGBA float4 from [x4+4..16]
+(`mov x21,x2`; `ldp s0,s1,[x21,#4]` / `ldp s2,s3,[x21,#12]`). SH20 left x4=0 →
+the whole clear path was skipped, window stayed black. The "x2 = clear-color
+struct ptr" comment was WRONG; the clear path uses x4.
+
+New elfjit `--renderframe-drive` fabricates a clear-state object ([\+0]=0xF =
+w20 per-buffer clear bitmask, RGBA float4 at [+4..20] from the new
+`--renderframe-color r,g,b,a` lever, default 0.4,0.2,0.95,1) and passes it as
+the frame-fn's x4. JIT_TRACE now shows NEW hostcalls that never fired before:
+glColorMask(all-1) x30=0x105b32e44 (inside the sub-fn) + the per-buffer clear
+loop at 0x105b32ec8 (mov w0,#0x1800; bl slot2-stub) iterating the 4 bits of
+w20 + glGetError — then clean `frame-fn returned Ok` + `post-frame swap
+Ok(0x1)`, stable exit 124. Run-log: runs/sh21-clearstate-x4.txt.
+
+**Honest remaining wall (visible COLOR frame not yet achieved):** the window
+still captures black because the per-buffer clear loop dispatches slot2
+(seeded glClearDepthf — the 8 slot->function names in --renderframe-seedgles
+are heuristic guesses) with integer 0x1800, i.e. it clears depth/stencil-style
+buffers, not the color buffer. Getting a visible colored frame needs: (1) the
+TRUE function of the slot 0x105b32ec8 dispatches + real slot0/2 names; (2)
+which w20 bit maps to GL_COLOR_BUFFER; (3) the second main-fn object at
+0x105b32d5c (x22, `ldr q0,[x22]; str q0,[x27]`) — likely the color-clear
+source. Doc: docs/frontier-sh21-clearstate-x4.md. Baselines unchanged (--jni
+exit 0; stable idle exit 124).
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH20) — resolve_gles_int/resolve_egl now accept trailing-NUL names: ALL 8 of the engine's GLES dispatch slots resolve through the bridge (was 2). Workspace 471/0; HEAD 78eca29.
 
 Built on SH19's --renderframe-seedgles. The 6 int-ABI slots (glClear, glViewport,

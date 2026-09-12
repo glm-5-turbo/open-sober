@@ -1894,6 +1894,50 @@ fn main() {
                         *(view.wrapping_add(128) as *mut u32) = 1280;
                         *(view.wrapping_add(132) as *mut u32) = 720;
                         *(view.wrapping_add(140) as *mut u32) = 0;
+                        // Clear color: the engine's frame-fn takes the clear-color
+                        // object as its 5th arg x4 (0x105b32c30 `mov x20,x4`), passed
+                        // as the clear-state sub-fn 0x105b32e08's x2 (its prologue
+                        // `mov x21,x2`), which reads the RGBA float4 from
+                        // [obj+4],[obj+8],[obj+12],[obj+16] (LDP s0,s1,[x21,#4] /
+                        // LDP s2,s3,[x21,#12]). The sub-fn call is gated on
+                        // x4!=0 AND [x4]!=0 (0x105b32d44 cbz x20 / 0x105b32d4c cbz
+                        // [x20]). SH20 left x4=0 so the engine's own clear never
+                        // fired and the window stayed black. Fix: fabricate a
+                        // clear-state object (nonzero [+0] flag + RGBA float4 at
+                        // [+4..16]) and pass it as x4 (optionally recolored via
+                        // --renderframe-color r,g,b,a).
+                        let default_cc = [0.40f32, 0.20f32, 0.95f32, 1.0f32];
+                        let mut cc = default_cc;
+                        if let Some(i) = renderframe_args
+                            .iter()
+                            .position(|a| a == "--renderframe-color")
+                        {
+                            let csv = renderframe_args.get(i + 1).cloned().unwrap_or_default();
+                            let vals: Vec<f32> = csv
+                                .split(',')
+                                .filter_map(|x| x.parse::<f32>().ok())
+                                .collect();
+                            if vals.len() >= 4 {
+                                cc = [vals[0], vals[1], vals[2], vals[3]];
+                            }
+                        }
+                        let clearobj = base + 0x400; // frame-fn x4 = clear-state obj
+                        *(clearobj as *mut u32) = 0xF; // [obj+0]: clear-buffer bitmask (w20); 0xF=all 4
+                        for (k, v) in cc.iter().enumerate() {
+                            *(clearobj.wrapping_add(4 + (k as u64) * 4) as *mut f32) = *v;
+                        }
+                        // Frame-fn 6th arg x5 -> x22 (0x105b32c28 `mov x22,x5`), the
+                        // main-fn's second clear-source object (0x105b32d5c cbz x22 /
+                        // ldr q0,[x22] copies [+0..16] vec; gated on [x22]!=0). The
+                        // harness left x5=0 so this path was skipped too.
+                        let ccobj = base + 0x500;
+                        *(ccobj.wrapping_add(0) as *mut f32) = cc[0];
+                        *(ccobj.wrapping_add(4) as *mut f32) = cc[1];
+                        *(ccobj.wrapping_add(8) as *mut f32) = cc[2];
+                        *(ccobj.wrapping_add(12) as *mut f32) = cc[3];
+                        eprintln!(
+                            "[elfjit:renderframe-drive] clear-color x5 obj 0x{ccobj:x} (RGBA {cc:?} at [+0..16])"
+                        );
                         // SH19 diagnostic: dump the 8 engine-GLES dispatch slots the
                         // frame's clear path `br`-stubs read. The stubs 0x5b3a1c0..
                         // (with a 0x10 stride) do `adrp x8, 6d3b000; ldr x2,[x8,#752]`
@@ -1963,7 +2007,9 @@ fn main() {
                         sd.x[31] = isp;
                         sd.x[0] = renderer;
                         sd.x[1] = view;
-                        sd.x[2] = view; // clear-color struct ptr (unused if path short-circuits)
+                        sd.x[2] = view; // 3rd arg (w2, unused by main fn path)
+                        sd.x[4] = clearobj; // 5th arg -> x20 -> clear-state sub-fn x2
+                        sd.x[5] = ccobj; // 6th arg -> x22 -> color-source object
                         match arm64jit::jit::jit_run(
                             iimg, ibase, 0x105b32c00, &mut sd as *mut CpuState,
                         ) {
