@@ -7858,6 +7858,30 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn mul_halfword_exec() {
+        // mul v0.8h, v1.8h, v2.8h = 0x4e629c20: per halfword lane low-16 product.
+        // v1={5, 1000, -3, 300, 7, -2, 99, 50}; v2={4, 3, -7, 2, 11, 8, -1, 20}.
+        // -> {20, 3000, 21, 600, 77, -16, -99, 1000} all fit in i16.
+        let mut st = CpuState::new();
+        // v1 lanes 0-3 = st.v[2], lanes 4-7 = st.v[3]; v2 = st.v[4],st.v[5]; res v0 = st.v[0],st.v[1].
+        st.v[2] = 0x012C_FFFD_03E8_0005u64; // {5,1000,-3,300}
+        st.v[3] = 0x0032_0063_FFFE_0007u64; // {7,-2,99,50}
+        st.v[4] = 0x0002_FFF9_0003_0004u64; // {4,3,-7,2}
+        st.v[5] = 0x0014_FFFF_0008_000Bu64; // {11,8,-1,20}
+        exec_bytes(&mut st, &[0x20, 0x9c, 0x62, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> i16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 as i16 };
+        assert_eq!(h(&st,0), 20, "5*4");
+        assert_eq!(h(&st,1), 3000, "1000*3");
+        assert_eq!(h(&st,2), 21, "(-3)*(-7)");
+        assert_eq!(h(&st,3), 600, "300*2");
+        let h_hi = |s: &CpuState, off: usize| -> i16 { ((s.v[1] >> (16 * off)) & 0xffff) as u16 as i16 };
+        assert_eq!(h_hi(&st,0), 77, "7*11");
+        assert_eq!(h_hi(&st,1), -16, "(-2)*8");
+        assert_eq!(h_hi(&st,2), -99, "99*(-1)");
+        assert_eq!(h_hi(&st,3), 1000, "50*20");
+    }
+
+    #[test]
     fn frecps_frsqrts_exec() {
         // frecps v0.4s, v1.4s, v2.4s = 0x4e22fc20: 2 - Vn*Vm per lane.
         // v1 = {0.5, 1.0, 2.0, 4.0}; v2 = {0.5, 1.0, 2.0, 4.0}.

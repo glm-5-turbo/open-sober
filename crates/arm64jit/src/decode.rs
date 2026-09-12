@@ -762,6 +762,8 @@ pub enum Inst {
     // ---- SIMD 32-bit lane multiply: mul Vd.4S/Vd.2S, Vn., Vm. ----
     // 4S gate (Q=1) 0x4ea09c00 ; 2S gate (Q=0) 0x0ea09c00. Per-lane low-32 product.
     SimdMul { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD 16-bit lane multiply: mul Vd.8H/.4H, Vn., Vm. (integer halfword) ----
+    SimdMulH { rd: u8, rn: u8, rm: u8, lanes: u8 },
     // ---- SIMD widening multiply: smull/umull Vd.T, Vn.T, Vm.T (src*U res) ----
         // Gate (insn & 0x0f00_c000): 0x0e00_c000 = mull, 0x0e00_8000 = mlal (accumulate).
         // unsigned=bit28; res_esize 4(.4s from .4h) or 8(.2d from .2s) by bit22; q=bit30.
@@ -4296,12 +4298,22 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                     // 4S (Q=1) gate 0x4ea09c00 ; 2S (Q=0) gate 0x0ea09c00.
                                                                                                                     let sm = insn & 0xffe0_fc00;
                                                                                                                     let mul_lanes = if sm == 0x4ea0_9c00 { Some(4) } else if sm == 0x0ea0_9c00 { Some(2) } else { None };
-                                                                                                                    if let Some(lanes) = mul_lanes {
-                                                                                                                        let rm = ((insn >> 16) & 0x1f) as u8;
-                                                                                                                        let rn = ((insn >> 5) & 0x1f) as u8;
-                                                                                                                        let rd = (insn & 0x1f) as u8;
-                                                                                                                        return Inst::SimdMul { rd, rn, rm, lanes };
-                                                                                                                            }
+                                                                                                                                                                                                                                        if let Some(lanes) = mul_lanes {
+                                                                                                                                                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                                            return Inst::SimdMul { rd, rn, rm, lanes };
+                                                                                                                                                                                                                                        }
+                                                                                                                                                                                                                                        // ---- SIMD 16-bit lane multiply: mul Vd.8H/.4H, Vn., Vm. ----
+                                                                                                                                                                                                                                        // halfword 3-same integer mul: byte2(bits15:8)==0x9c, size bits23:22==0b01,
+                                                                                                                                                                                                                                        // byte1 top 0x70 family. real: 0x4e709cf0. SimdMul above needs size 0b10 (0xa0).
+                                                                                                                                                                                                                                        if (insn & 0x0000_fc00) == 0x0000_9c00 && (insn >> 22 & 0x3) == 1 && (insn & 0x0f00_0000) == 0x0e00_0000 {
+                                                                                                                                                                                                                                            let h_lanes: u8 = if insn & 0x4000_0000 != 0 { 8 } else { 4 };
+                                                                                                                                                                                                                                            let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                                            let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                                            return Inst::SimdMulH { rd, rn, rm, lanes: h_lanes };
+                                                                                                                                                                                                                                        }
                                                                                                                         // ---- scalar FP fixed-point convert to int: fcvtzs/fcvtzu Rd, Fn, #fbits ----
         // (result = trunc(Fn * 2^fbits)). top16 0x1e18/0x1e58/0x9e18/0x9e58
         // (signed) and the same with bit16 set for unsigned (0x1e19..).
@@ -7650,6 +7662,17 @@ mod fp16_scalar_and_gate_regressions {
             Inst::SimdFpUnary { rd: 5, rn: 5, op: 1, esize: 2, q: false }),
             "got {:?}", decode_op(0x0ef8f8a5));
         assert!(!matches!(decode_op(0x0ef8d820), Inst::SimdFpUnary { .. }), "fcmeq-to-zero must be SimdFp16Cmpz");
+        // SIMD halfword mul: real 0x4e709cf0 (mul v16.8h = v7*... => lanes 8),
+        // 0x4e629c20 mul v0.8h, 0x0e629c20 mul v0.4h. f32 mul (0x4ea29c20) stays SimdMul.
+        assert!(matches!(decode_op(0x4e709cf0),
+            Inst::SimdMulH { rd: 16, rn: 7, rm: 16, lanes: 8 }),
+            "got {:?}", decode_op(0x4e709cf0));
+        assert!(matches!(decode_op(0x4e629c20),
+            Inst::SimdMulH { rd: 0, rn: 1, rm: 2, lanes: 8 }));
+        assert!(matches!(decode_op(0x0e629c20),
+            Inst::SimdMulH { rd: 0, rn: 1, rm: 2, lanes: 4 }));
+        assert!(!matches!(decode_op(0x4ea29c20), Inst::SimdMulH { .. }), "mul .4s stays SimdMul");
+        assert!(!matches!(decode_op(0x4e709cf0), Inst::SimdMul { .. }));
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),

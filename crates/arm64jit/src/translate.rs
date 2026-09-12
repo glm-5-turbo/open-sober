@@ -3641,10 +3641,24 @@ pub fn translate(
                                                                                             buf.mov_load32(RAX, RBX, slot(rn) + off);
                                                                                             buf.mov_load32(RCX, RBX, slot(rm) + off);
                                                                                             buf.imul_rr64(RAX, RCX); // low 32 = (a*b) mod 2^32
-                                                                                            buf.mov_store32(RBX, slot(rd) + off, RAX);
-                                                                                                                        }
-                                                                                                                        Ok(())
-                                                                                                                    }
+                                                                                                                                                                                                                    buf.mov_store32(RBX, slot(rd) + off, RAX);
+                                                                                                                                                                                                                }
+                                                                                                                                                                                                                Ok(())
+                                                                                                                                                                                                            }
+                                                                                                                                                                                                            Inst::SimdMulH { rd, rn, rm, lanes } => {
+                                                                                                                                                                                                                // mul Vd.8H/.4H, Vn., Vm.: per 16-bit lane, low-16 product
+                                                                                                                                                                                                                // (mod-2^16 wrap). 64-bit imul of zero-extended 16-bit operands yields
+                                                                                                                                                                                                                // the correct low-16 for signed/unsigned halfwords (imul truncates).
+                                                                                                                                                                                                                let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                                                                                                                                                                                                                for i in 0..lanes {
+                                                                                                                                                                                                                    let off = (i as i32) * 2;
+                                                                                                                                                                                                                    buf.movzx_word_mem(RAX, RBX, slot(rn) + off);
+                                                                                                                                                                                                                    buf.movzx_word_mem(RCX, RBX, slot(rm) + off);
+                                                                                                                                                                                                                    buf.imul_rr64(RAX, RCX);
+                                                                                                                                                                                                                    buf.mov_store16(RBX, slot(rd) + off, RAX);
+                                                                                                                                                                                                                }
+                                                                                                                                                                                                                Ok(())
+                                                                                                                                                                                                            }
                                                                                                                     Inst::SimdMla { rd, rn, rm, lanes, sub } => {
                                                                                         // mla/mls Vd.4S/2S, Vn., Vm.: Vd = Vd +/- Vn*Vm per 32-bit lane.
                                                                                         // low-32 of the product, accumulate into the existing Vd lane.
