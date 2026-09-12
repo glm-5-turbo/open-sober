@@ -522,6 +522,7 @@ pub enum Inst {
             rm: u8,
             op: u8,
             sz: bool,
+            half: bool, // true = half-precision (H) scalar FP16 arithmetic
         },
         // ---- scalar 3-source FP multiply-accumulate: fmadd/fmsub/fnmadd/fnmsub ----
         // Dd = Da +- (Dn×Dm), optionally negated. o1=bit21 (fn*), o2=bit15 (sub).
@@ -542,9 +543,17 @@ pub enum Inst {
         sz: bool, // true = double
     },
     // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
-    // Gate (insn & 0xffe0_fc00)==0x7ee0_d400 (scalar double; verified vs real
-    // 0x7ee1d503 and compiler 0x7ee1d400). Disjoint from fadd/fmul/fdiv/fcmp.
-    Fabd { rd: u8, rn: u8, rm: u8 },
+    // Gate (insn & 0xffe0_fc00) in {0x7ee0_d400 (double) , 0x7ea0_d400 (single)};
+    // sz = bit22. Disjoint from fadd/fmul/fdiv/fcmp.
+    Fabd { rd: u8, rn: u8, rm: u8, sz: bool },
+    // ---- scalar FP16 <-> FP32/FP64 convert: fcvt (s->h / h->s / d->h / h->d) ----
+    // op: 0=H->S (fcvt s0,h0 0x1ee24000), 1=S->H (fcvt h0,s0 0x1e23c000),
+    //     2=H->D (fcvt d0,h0 0x1ee2c000), 3=D->H (fcvt h0,d0 0x1e63c000).
+    FcvtHalf { rd: u8, rn: u8, op: u8 },
+    // ---- SIMD unsigned rounding-halving add: urhadd Vd.T, Vn.T, Vm.T =---
+    // (a+b+1)>>1 per lane. byte-lane forms (.16b/.8b), esize 1 only for now.
+    // Gate (insn & 0xffe0_fc00) == {0x6e201400 (q=1), 0x2e201400 (q=0)}.
+    Urhadd { rd: u8, rn: u8, rm: u8, bytes: u8 },
     // ---- FP convert to integer (fcvtas/fcvtzs): Dn|Sn -> Rd (signed int) ----
     FcvtToInt {
            rd: u8,
@@ -3180,22 +3189,28 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
 
     // ---- scalar FP 3-source (d-float) : class 0x1E00_0000, opcode = insn with the
     // three register fields masked. Verified: fmul=1e600800 fadd=1e602800 fsub=1e603800
-    // fdiv=1e601800 (d, sz=1); 1-source fmov/fneg/fabs are separately classified and
-    // not handled here.
-    if insn & 0x1f80_0000 == 0x1e00_0000 {
+    // fdiv=1e601800 (d, sz=1); single (s) variants 0x1e20_0800 etc; 1-source fmov/fneg/fabs
+    // are separately classified and not handled here. Half-precision (H) scalar forms
+    // live in the SAME class with bit23 SET (0x1E80_0000) and byte2 0xee2 residues
+    // these record the register-masked residue: single 0x1e20_0800, double 0x1e60_0800,
+        // half 0x1ee0_0800 (bit19 is rm[3] => masked out, so the half residue is
+        // 0x1ee0_*, not 0x1ee2_*; verified vs compiler 0x1ee20820/0x1ee22820/0x1ee23820/
+        // 0x1ee21820 which all mask to 0x1ee0_0800/2800/3800/1800).
+    if insn & 0x1f80_0000 == 0x1e00_0000 || insn & 0x1f80_0000 == 0x1e80_0000 {
         let sz = (insn >> 22) & 1 == 1;
+        let half = insn & 0x1f80_0000 == 0x1e80_0000; // bit23 set => FP16 (H) scalar
         let rm = ((insn >> 16) & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         let op = match insn & !(((0x1f) as u32) << 16 | ((0x1f) as u32) << 5 | 0x1f) {
-            0x1e60_0800 | 0x1e20_0800 => Some(4), // fmul
-            0x1e60_2800 | 0x1e20_2800 => Some(5), // fadd
-            0x1e60_3800 | 0x1e20_3800 => Some(6), // fsub
-            0x1e60_1800 | 0x1e20_1800 => Some(7), // fdiv
+            0x1e60_0800 | 0x1e20_0800 | 0x1ee0_0800 => Some(4), // fmul (d/s/h)
+            0x1e60_2800 | 0x1e20_2800 | 0x1ee0_2800 => Some(5), // fadd
+            0x1e60_3800 | 0x1e20_3800 | 0x1ee0_3800 => Some(6), // fsub
+            0x1e60_1800 | 0x1e20_1800 | 0x1ee0_1800 => Some(7), // fdiv
             _ => None,
         };
         if let Some(op) = op {
-            return Inst::FpScalar { rd, rn, rm, op, sz };
+            return Inst::FpScalar { rd, rn, rm, op, sz, half };
         }
         // 1-source scalar FP in the same 0x1e00_0000 class: fsqrt=0x1e61c000,
         // frintm(toward -inf)=0x1e654000, frintp(+inf)=0x1e648000, frintz=0x1e65c000.
@@ -3579,6 +3594,25 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                                     return Inst::Fmla { rd, rn, rm, el64, q, sub };
                                 }
 
+                // ---- scalar FP conditional compare: fccmp Dn, Dm, #nzcv, <cond> ----
+                    // MUST decode BEFORE the FMOV-imm gates: fccmp shares the
+                    // 0x1e00_0000 class and a cond>=8 sets bits[15:12], so a cond
+                    // like `lt` (0xb) would otherwise be misread as an FMOV immediate
+                    // (`(insn & 0x1000) != 0` lane anchor) and produce a wrong FmovImm.
+                    // Structural gate `(insn & 0xffe0_0c10)` keeps invariant bits
+                    // [31:21] + [11:10] + [4], clears Rm[20:16], cond[15:12], Rn[9:5],
+                    // nzcv[3:0]. Verified vs real `fccmp s0,s1,#0x0,eq`=0x1e210400 ->
+                    // 0x1e200400 (s) and `fccmp d0,d1,#3,ne`=0x1e611403 -> 0x1e600400
+                    // (d). fcmp/fabs/fmov-imm all gate to 0x1e200000/0x1e600000, so no
+                    // collision. The OLD gate (0xfff0_fc03 == 0x1e20_c400) never matched.
+                    if (insn & 0xffe0_0c10) == 0x1e20_0400 || (insn & 0xffe0_0c10) == 0x1e60_0400 {
+                        let sz = (insn & 0x400000) != 0; // 1 => double (0x1e6...), 0 => single
+                        let rn = ((insn >> 5) & 0x1f) as u8;
+                        let rm = ((insn >> 16) & 0x1f) as u8;
+                        let nzcv = (insn & 0xf) as u8;
+                        let cond = ((insn >> 12) & 0xf) as u8;
+                        return Inst::Fccmp { rn, rm, nzcv, cond, sz };
+                    }
                 // ---- FMOV scalar immediate (fmov Dd, #imm) / (fmov Sd, #imm) ----
                 // Double imm family `0x1e_XX_1...` (imm8 in bits 13:20, `0x1000`
                 // lane anchor). Gate `(insn&0xffe0_0000)==0x1e60_0000` (masks out
@@ -3631,17 +3665,6 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                         let rm = ((insn >> 16) & 0x1f) as u8;
                         return Inst::Fcmp { rn, rm, against_zero, sz };
                     }
-                    // ---- scalar FP conditional compare: fccmp Dn, Dm, #nzcv, <cond> ----
-                    // Mask 0xfff0_fc03 (drops rn/rm/rd/cond/nzcv) yields 0x1e60_c400 (d)
-                    // / 0x1e20_c400 (s); disjoint from fcmp (0x1e602000).
-                    if (insn & 0xfff0_fc03) == 0x1e60_c400 || (insn & 0xfff0_fc03) == 0x1e20_c400 {
-                        let sz = (insn & 0x400000) != 0; // 1 => double (0x1e6...), 0 => single
-                        let rn = ((insn >> 5) & 0x1f) as u8;
-                        let rm = ((insn >> 16) & 0x1f) as u8;
-                        let nzcv = (insn & 0xf) as u8;
-                        let cond = ((insn >> 12) & 0xf) as u8;
-                        return Inst::Fccmp { rn, rm, nzcv, cond, sz };
-                    }
                     // ---- scalar FP->int stored to a FP reg: fcvtzs Dd,Dn / Sd,Sn ----
                     // Prefix 0x5e (bit29 set = scalar FP target, vs vector 0xfe/0x4e);
                     // residue (insn&0xffe0_fc00) in {0x5ea0_b800 (s), 0x5ee0_b800 (d)}.
@@ -3654,13 +3677,15 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                         return Inst::FcvtTzReg { rd, rn, dbl, unsigned };
                     }
                             // ---- scalar FP absolute difference: fabd Dd, Dn, Dm = |dn - dm| ----
-                            // Gate (insn & 0xffe0_fc00) == 0x7ee0_d400 (scalar double; disjoint from
-                            // fadd/fmul/fdiv/fcmp/scvtf). rn=bits5-9, rm=bits16-20, rd=bits0-4.
-                            if (insn & 0xffe0_fc00) == 0x7ee0_d400 {
+                            // Gate (insn & 0xffe0_fc00) in {0x7ee0_d400 (double),
+                            // 0x7ea0_d400 (single, bit22 clear)}; disjoint from
+                            // fadd/fmul/fdiv/fcmp/scvtf. rn=bits5-9, rm=bits16-20, rd=bits0-4.
+                            if (insn & 0xffe0_fc00) == 0x7ee0_d400 || (insn & 0xffe0_fc00) == 0x7ea0_d400 {
                                 let rn = ((insn >> 5) & 0x1f) as u8;
                                 let rm = ((insn >> 16) & 0x1f) as u8;
                                 let rd = (insn & 0x1f) as u8;
-                                return Inst::Fabd { rd, rn, rm };
+                                let sz = (insn & 0x400000) != 0; // 1 => double
+                                return Inst::Fabd { rd, rn, rm, sz };
                             }
                             // ---- scalar FP conditional select: fcsel Dd, Dn, Dm, <cond> ----
                                 // Structural mask `(insn & 0x1f20_0c00) == 0x1e20_0c00` separates
@@ -3713,6 +3738,38 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
                                         let rn = ((insn >> 5) & 0x1f) as u8;
                                         let rd = (insn & 0x1f) as u8;
                                         return Inst::Fcvt { to_d: true, rd, rn }; // d{rd} = (double) s{rn}
+                                    }
+
+                                    // ---- scalar FP16 convert: fcvt Vd, Vn (h<->s / h<->d) ----
+                                    // op 0=H->S 0x1ee24000, 1=S->H 0x1e23c000, 2=H->D 0x1ee2c000,
+                                    // 3=D->H 0x1e63c000 (mask 0xffff_fc00 keeps rn/rd). These
+                                    // byte2-distinct gates live AFTER the s<->d Fcvt (0x1e624000/
+                                    // 0x1e22c000) so they can't collide. Verified vs compiler
+                                    // 0x1ee24000/0x1e23c000/0x1ee2c000/0x1e63c000.
+                                    {
+                                        let op = if (insn & 0xffff_fc00) == 0x1ee2_4000 { Some(0) }
+                                            else if (insn & 0xffff_fc00) == 0x1e23_c000 { Some(1) }
+                                            else if (insn & 0xffff_fc00) == 0x1ee2_c000 { Some(2) }
+                                            else if (insn & 0xffff_fc00) == 0x1e63_c000 { Some(3) }
+                                            else { None };
+                                        if let Some(op) = op {
+                                            let rn = ((insn >> 5) & 0x1f) as u8;
+                                            let rd = (insn & 0x1f) as u8;
+                                            return Inst::FcvtHalf { rd, rn, op };
+                                        }
+                                    }
+
+                                    // ---- SIMD unsigned rounding-halving add: urhadd Vd.T, Vn.T, Vm.T ----
+                                    // (a+b+1)>>1 per lane. Byte-lane forms (.16b q=0x6e / .8b q=0x2e),
+                                    // esize 1 (bit22 clear). Verified vs real 0x6e221420 => Urhadd.
+                                    if ((insn & 0xffe0_fc00) == 0x6e20_1400 || (insn & 0xffe0_fc00) == 0x2e20_1400)
+                                        && ((insn >> 22) & 3) == 0
+                                    {
+                                        let rm = ((insn >> 16) & 0x1f) as u8;
+                                        let rn = ((insn >> 5) & 0x1f) as u8;
+                                        let rd = (insn & 0x1f) as u8;
+                                        let bytes: u8 = if (insn >> 30) & 1 == 1 { 16 } else { 8 };
+                                        return Inst::Urhadd { rd, rn, rm, bytes };
                                     }
 
                                     // ---- NEON mov Vd.D[1], Vn.D[0] (dup the low 64 into the high lane) ----
@@ -6002,15 +6059,16 @@ mod logical_imm_regressions {
         assert!(matches!(decode(0x6e180402), Inst::InsD1D0 { .. }));
         // fabd d3, d8, d1 = 0x7ee1d503 (real libroblox audio mix) => Fabd |d8-d1|.
         match decode(0x7ee1d503) {
-            Inst::Fabd { rd, rn, rm } => {
+            Inst::Fabd { rd, rn, rm, sz } => {
                 assert_eq!(rd, 3);
                 assert_eq!(rn, 8);
                 assert_eq!(rm, 1);
+                assert!(sz);
             }
             other => panic!("fabd d3,d8,d1 -> {other:?}"),
         }
         // fabd d0,d0,d1 = 0x7ee1d400 (compiler) => Fabd.
-        assert!(matches!(decode(0x7ee1d400), Inst::Fabd { rd: 0, rn: 0, rm: 1 }));
+        assert!(matches!(decode(0x7ee1d400), Inst::Fabd { rd: 0, rn: 0, rm: 1, sz: true }));
         // dup v1.4s, w10 = 0x4e040d41 (real libroblox audio mix channel loop) => SimdDupSReg.
         match decode(0x4e040d41) {
             Inst::SimdDupGp { rd, rn, esize, q } => {
@@ -6853,3 +6911,74 @@ mod logical_imm_regressions {
             }
         }
     }
+
+#[cfg(test)]
+mod fp16_scalar_and_gate_regressions {
+    use super::*;
+
+    fn decode_op(insn: u32) -> Inst { decode(insn) }
+
+    #[test]
+    fn fccmp_s_d_real_encodings_decode() {
+        // Real single fccmp s0,s1,#0x0,eq = 0x1e210400 (Roblox audio mix). The old
+        // gate (0xfff0_fc03 == 0x1e20c400) never matched; this pins the corrected
+        // structural gate (0xffe0_0c10 == 0x1e200400) so real fccmp now decodes.
+        match decode_op(0x1e210400) {
+            Inst::Fccmp { rn, rm, nzcv, cond, sz } => {
+                assert_eq!((rn, rm, nzcv, cond, sz), (0, 1, 0, 0, false));
+            }
+            other => panic!("fccmp s0,s1,#0x0,eq (0x1e210400) -> {other:?}"),
+        }
+        // Compiler fccmp s0,s1,#5,lt = 0x1e21b405, fccmp d0,d1,#3,ne = 0x1e611403
+        assert!(matches!(decode_op(0x1e21b405),
+            Inst::Fccmp { rn: 0, rm: 1, nzcv: 5, cond: 0xb, sz: false }));
+        assert!(matches!(decode_op(0x1e611403),
+            Inst::Fccmp { rn: 0, rm: 1, nzcv: 3, cond: 1, sz: true }));
+        // fcmp/fabs/fcsel must NOT be swallowed by the fccmp gate.
+        assert!(matches!(decode_op(0x1e212040), Inst::Fcmp { .. }), "fcmp s");
+        assert!(matches!(decode_op(0x1e20c021), Inst::FpUnary { op: 5, .. }),
+            "fabs s0,s0 stays fp-unary");
+    }
+
+    #[test]
+    fn fabd_single_precision_decodes() {
+        // Real scalar single fabd s2,s2,s3 = 0x7ea3d442 (fp16/audio mix) => Fabd.
+        match decode_op(0x7ea3d442) {
+            Inst::Fabd { rd, rn, rm, sz } => {
+                assert_eq!((rd, rn, rm), (2, 2, 3));
+                assert!(!sz);
+            }
+            other => panic!("fabd s2,s2,s3 -> {other:?}"),
+        }
+        // double still decodes (regression on the existing path)
+        assert!(matches!(decode_op(0x7ee1d503), Inst::Fabd { sz: true, .. }));
+    }
+
+    #[test]
+    fn fp16_scalar_convert_decodes() {
+        // fcvt h<->s / h<->d ground truth from the cross-compiler (armv8.2-a+fp16).
+        assert!(matches!(decode_op(0x1ee24000), Inst::FcvtHalf { op: 0, rd: 0, rn: 0 })); // fcvt s0,h0
+        assert!(matches!(decode_op(0x1e23c000), Inst::FcvtHalf { op: 1, rd: 0, rn: 0 })); // fcvt h0,s0
+        assert!(matches!(decode_op(0x1ee2c000), Inst::FcvtHalf { op: 2, rd: 0, rn: 0 })); // fcvt d0,h0
+        assert!(matches!(decode_op(0x1e63c000), Inst::FcvtHalf { op: 3, rd: 0, rn: 0 })); // fcvt h0,d0
+        // Real Roblox fcvt s1,h1 = 0x1ee24021 (rn=1)
+        assert!(matches!(decode_op(0x1ee24021), Inst::FcvtHalf { op: 0, rn: 1, .. }));
+        assert!(matches!(decode_op(0x1e23c000), Inst::FcvtHalf { op: 1, .. }));
+    }
+
+    #[test]
+    fn fp16_scalar_arith_and_urhadd_decode() {
+        // fmul h0,h1,h2 = 0x1ee20820, fadd = 0x1ee22820 (half scalar arithmetic).
+        // (The `half` flag selects F16C translation; bit22 happens to be part of the
+        // FP16 scalar encoding 0x1ee2, so sz is a meaningless by-product here.)
+        assert!(matches!(decode_op(0x1ee20820),
+            Inst::FpScalar { op: 4, rd: 0, rn: 1, rm: 2, half: true, .. }));
+        assert!(matches!(decode_op(0x1ee22820),
+            Inst::FpScalar { op: 5, rd: 0, rn: 1, rm: 2, half: true, .. }));
+        // urhadd v0.16b,v1,v2 = 0x6e221420 and .8b q=0 0x2e221420.
+        assert!(matches!(decode_op(0x6e221420),
+            Inst::Urhadd { rd: 0, rn: 1, rm: 2, bytes: 16 }));
+        assert!(matches!(decode_op(0x2e221420),
+            Inst::Urhadd { rd: 0, rn: 1, rm: 2, bytes: 8 }));
+    }
+}

@@ -1,18 +1,34 @@
-# Decoder gap: real .text has 14,918 Unsupported (FP16/NEON) instructions
+# Decoder gap: real .text has 13,087 Unsupported (SOC/FP16/NEON) instructions
 
 **Reproducible scan (scandecode, .text span [0x102d95980, 0x1072d5a84]):**
 - total instructions:   13,961,732
-- Unsupported hits:     14,918
-- decode() PANIC hits:  0                        (decode never aborts — safe)
-- distinct opcodes:     7,743 (by top16 family, dominated by FP16 `.8h`/`.4h`)
+- Unsupported hits:     13,087   (was 14,918; -1,831 this cycle)
+- decode() PANIC hits:  0        (decode never aborts — safe)
+- distinct opcodes:     7,225     (was 7,743)
 
-**This corrects the earlier HANDOFF claim of "0 unsupported in .text."** The idle
-boot is stable because the engine's *own* main loop never executes these — they
-live in the FMOD/audio and render/HDR math paths that only run once the game
-actually drives audio/render. So they don't block boot stabilization, but they
-WILL JIT-abort (block-tracker breaks at `Inst::Unsupported`) the moment the real
-boot reaches them. The `0 PANIC` guarantee holds (decode() is total), so the work
-is decoder *coverage*, not crash-hardening.
+**Closed this cycle (commit …): the scalar FP16 + real scalar-FP gate families.**
+- **Scalar FP16 convert** (`fcvt s,h / h,s / d,h / h,d`) — new `FcvtHalf`, translated via
+  F16C (`vcvtph2ps` / `vcvtps2ph $0` RN, emitted as raw VEX bytes; host confirmed f16c).
+- **Scalar FP16 arithmetic** (`fadd/fmul/fsub/fdiv h`) — extended `FpScalar` with a
+  `half` flag (the 0x1eE0/bit23-set global); promote->op->demote via F16C inline.
+- **`fccmp s/d` decode gate FIXED** — the old `(insn & 0xfff0_fc03) == 0x1e20_c400`
+  never matched ANY real fccmp (mask/constant mismatch). Correct structural gate
+  `(insn & 0xffe0_0c10) == {0x1e200400 s, 0x1e600400 d}`. MUST decode before the
+  FMOV-imm gates: a cond≥8 sets bits[15:12] (e.g. `lt`=0xb) that the FMOV-imm
+  `(insn & 0x1000) != 0` lane anchor read as an immediate → wrong FmovImm. Exposed
+  by a regression test on the real `fccmp s0,s1,#0,eq` / compiler `lt`/`ne` forms.
+- **`fabd s`** — added the single-precision form `0x7ea0_d400` (real `fabd s2,s2,s3`
+  = 0x7ea3d442); `Fabd` gained a `sz` field; single path `subss`+clear bit31.
+- **`urhadd v.16b/.8b`** — new `Urhadd` (unsigned rounding-halving add `(a+b+1)>>1`,
+  byte-lane), pure integer per-byte.
+- Regression tests: decode pins + runtime exec tests (`exec_bytes`) for fcvt h<->s,
+  fabd s, urhadd bytes, fadd h (F16C path) — all green, workspace 419/0.
+
+The idle boot is stable because the engine's *own* main loop never executes these —
+the FP16 scalar + gate ops live in the FMOD/audio and render/HDR math paths that only
+run once the game drives audio/render. They don't block boot stabilization, but they
+WILL JIT-abort (block-tracker breaks at `Inst::Unsupported`) the moment the real boot
+reaches them. `0 PANIC` guarantee holds (decode() total).
 
 ## Dominant families (capstone ground-truth, instance counts)
 ```

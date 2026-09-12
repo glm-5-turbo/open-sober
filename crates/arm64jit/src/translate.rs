@@ -1812,11 +1812,11 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::FpScalar { rd, rn, rm, op, sz } => {
-            // scalar FP on d/s regs. d-reg = low 8 bytes of CpuState.v[reg].slot
+        Inst::FpScalar { rd, rn, rm, op, sz, half } => {
+            // scalar FP on d/s/h regs. d-reg = low 8 bytes of CpuState.v[reg].slot
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16; // low 8B of a 16B slot
             // ops 0-3 (fmov/fabs/fneg) are double-only; single handled for 4-7 below.
-            if !sz && op <= 3 {
+            if !sz && op <= 3 && !half {
                 return Err(format!("FpScalar single-precision (sz=0) op {op} not implemented"));
             }
             match op {
@@ -1840,7 +1840,32 @@ pub fn translate(
                     buf.mov_store64(RBX, vslot(rd), RAX);
                 }
                 4 | 5 | 6 | 7 => {
-                    if sz {
+                    if half {
+                        // Half-precision (FP16) scalar arithmetic: promote both h
+                        // operands (low 16 bits of each slot) to f32 via F16C
+                        // vcvtph2ps, do the f32 op, then demote to f16 (RN) and
+                        // store the low 16 bits. Encodings (F16C, immediate 0 = RN):
+                        //   vcvtph2ps xmm,xmm  = C4 E2 79 13 /r (reg form)
+                        //   vcvtps2ph $0,xmm,xmm = C4 E3 79 1D /r 00
+                        let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+                        buf.mov_load32(RAX, RBX, f(rn)); // h{rn} in low 16
+                        buf.movd_xmm_r32(0, RAX);        // xmm0 low 32 = h{rn}
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                        buf.mov_load32(RAX, RBX, f(rm));
+                        buf.movd_xmm_r32(1, RAX);
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc9]); // vcvtph2ps xmm1,xmm1
+                        let opcode: u8 = match op {
+                            4 => 0x59, // mulss
+                            5 => 0x58, // addss
+                            6 => 0x5c, // subss
+                            7 => 0x5e, // divss
+                            _ => unreachable!(),
+                        };
+                        buf.bytes.extend_from_slice(&[0xf3, 0x0f, opcode, 0xc1]); // opss xmm0,xmm1
+                        buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                        buf.movd_r32_xmm(RAX, 0); // RAX low 16 = f16 result
+                        buf.mov_store32(RBX, f(rd), RAX); // store low 32 (f16 in low 16)
+                    } else if sz {
                         buf.movq_load(0, RBX, vslot(rn));
                         buf.movq_load(1, RBX, vslot(rm));
                         match op {
@@ -1971,19 +1996,32 @@ pub fn translate(
             buf.movq_store(RBX, vslot(rd), 0);
             Ok(())
         }
-        Inst::Fabd { rd, rn, rm } => {
-            // fabd Dd, Dn, Dm = |dn - dm| (scalar double). Compute a-b in xmm,
+        Inst::Fabd { rd, rn, rm, sz } => {
+            // fabd Vd, Dn, Dm = |dn - dm| (scalar). Compute a-b in xmm,
             // round-trip the bit pattern to a GPR, clear the sign bit, and store.
-            // Honest for finite doubles; NaN stays NaN (sign-bit clear keeps it a NaN).
+            // Honest for finite floats; NaN stays NaN (sign-bit clear keeps it a NaN).
             let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
-            buf.movq_load(0, RBX, vslot(rn));
-            buf.movq_load(1, RBX, vslot(rm));
-            buf.subsd(0, 1); // xmm0 = rn - rm
-            buf.movq_r64_xmm(RDX, 0); // RDX = bits(rn - rm)
-            buf.mov_ri64(RDI, 0x7fff_ffff_ffff_ffff); // ~signbit
-            buf.and_rr64(RDX, RDI); // clear bit 63 (|x|)
-            buf.movq_xmm_r64(0, RDX); // back to xmm
-            buf.movq_store(RBX, vslot(rd as u8), 0);
+            if sz {
+                buf.movq_load(0, RBX, vslot(rn));
+                buf.movq_load(1, RBX, vslot(rm));
+                buf.subsd(0, 1); // xmm0 = rn - rm
+                buf.movq_r64_xmm(RDX, 0); // RDX = bits(rn - rm)
+                buf.mov_ri64(RDI, 0x7fff_ffff_ffff_ffff); // ~signbit
+                buf.and_rr64(RDX, RDI); // clear bit 63 (|x|)
+                buf.movq_xmm_r64(0, RDX); // back to xmm
+                buf.movq_store(RBX, vslot(rd as u8), 0);
+            } else {
+                // single precision: subss + clear bit31 in the low 32 bits.
+                buf.mov_load32(RAX, RBX, vslot(rn));
+                buf.movd_xmm_r32(0, RAX);
+                buf.mov_load32(RAX, RBX, vslot(rm));
+                buf.movd_xmm_r32(1, RAX);
+                buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x5c, 0xc1]); // subss xmm0,xmm1
+                buf.movd_r32_xmm(RAX, 0); // RAX = bits(rn - rm)
+                buf.mov_ri64(RCX, 0x7fff_ffff); // ~signbit (32-bit)
+                buf.and_rr64(RAX, RCX); // clear bit 31 (|x|)
+                buf.mov_store32(RBX, vslot(rd as u8), RAX);
+            }
             Ok(())
         }
         Inst::FcvtToInt {
@@ -2980,6 +3018,62 @@ pub fn translate(
                 buf.movd_r32_xmm(RAX, 0);            // RAX = low 32 (single bits)
                 let dslot = crate::jit::VECTOR_BASE + (rd as i32) * 16;
                 buf.mov_store32(RBX, dslot, RAX);
+            }
+            Ok(())
+        }
+        Inst::FcvtHalf { rd, rn, op } => {
+            // scalar FP16 <-> FP32/FP64 convert. Op:
+            // 0=H->S (fcvt s,h)  1=S->H (fcvt h,s)  2=H->D (fcvt d,h)  3=D->H (fcvt h,d).
+            // Reuses the F16C promote (vcvtph2ps) / demote (vcvtps2ph, imm 0 = RN).
+            let vslot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            match op {
+                0 => {
+                    buf.mov_load32(RAX, RBX, vslot(rn)); // h{rn} in low16
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    buf.movd_r32_xmm(RAX, 0); // f32 in low32
+                    buf.mov_store32(RBX, vslot(rd), RAX);
+                }
+                1 => {
+                    buf.mov_load32(RAX, RBX, vslot(rn)); // f32 in low32
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                    buf.movd_r32_xmm(RAX, 0); // f16 in low16 (upper zeroed)
+                    buf.mov_store32(RBX, vslot(rd), RAX);
+                }
+                2 => {
+                    buf.mov_load32(RAX, RBX, vslot(rn)); // h{rn} in low16
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    buf.cvtss2sd(0, 0); // (double) f32
+                    buf.movq_store(RBX, vslot(rd), 0); // f64
+                }
+                3 => {
+                    buf.movq_load(0, RBX, vslot(rn)); // f64
+                    buf.cvtsd2ss(0, 0); // f32 in low32
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
+                    buf.movd_r32_xmm(RAX, 0); // f16 in low16
+                    buf.mov_store32(RBX, vslot(rd), RAX);
+                }
+                _ => return Err(format!("FcvtHalf: bad op {op}")),
+            }
+            Ok(())
+        }
+        Inst::Urhadd { rd, rn, rm, bytes } => {
+            // urhadd Vd.T, Vn.T, Vm.T = (a+b+1)>>1 per byte lane. Byte lanes on
+            // a 16B slot: load each byte of Vn and Vm, sum, +1, >>1, store.
+            let slot = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            for i in 0..bytes {
+                let off = i as i32;
+                buf.mov_load32(RAX, RBX, slot(rn) + off);
+                buf.and_ri64(RAX, 0xff);
+                buf.mov_load32(RDX, RBX, slot(rm) + off);
+                buf.and_ri64(RDX, 0xff);
+                buf.add_rr64(RAX, RDX); // a+b
+                buf.add_ri64(RAX, 1);   // a+b+1
+                buf.mov_ri64(RCX, 1);
+                buf.shr_cl64(RAX);      // (a+b+1)>>1
+                buf.mov_store8(RBX, slot(rd) + off, RAX);
             }
             Ok(())
         }

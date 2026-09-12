@@ -7193,3 +7193,83 @@ mod thread_snapshot_tests {
         assert_eq!(mine.x29, 0x1111);
     }
 }
+
+#[cfg(test)]
+mod fp16_and_fabd_fccmp_exec {
+    use super::*;
+
+    fn h(f: f32) -> u16 {
+        // f32 -> IEEE half (round-to-nearest-even; only exact small values used).
+        let b = f.to_bits();
+        let sign = ((b >> 16) as u16) & 0x8000;
+        let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
+        let man = ((b >> 13) & 0x3ff) as u16;
+        if exp <= 0 {
+            return sign; // subnormal/zero collapses to signed zero here
+        }
+        ((exp as u16) << 10) | man | sign
+    }
+
+    #[test]
+    fn fcvt_hs_and_sh_exec() {
+        // fcvt s0, h1 = 0x1ee24020 (H->S): 1.5h -> 1.5f in low32.
+        let code = [0x20u8, 0x40, 0xe2, 0x1e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.v[2] = h(1.5) as u64; // reg1 low64 (v[2r]=v[2])
+        exec_bytes(&mut st, &code, 0).unwrap();
+        assert_eq!((st.v[0] & 0xffff_ffff) as u32, 1.5f32.to_bits(),
+            "fcvt s0,h1 -> 1.5f, got {:#x}", st.v[0]);
+
+        // fcvt h0, s1 = 0x1e23c020 (S->H): 2.5f -> 2.5h in low16.
+        let code2 = [0x20u8, 0xc0, 0x23, 0x1e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st2 = CpuState::new();
+        st2.v[2] = 2.5f32.to_bits() as u64; // reg1 low64
+        exec_bytes(&mut st2, &code2, 0).unwrap();
+        assert_eq!((st2.v[0] & 0xffff) as u16, h(2.5),
+            "fcvt h0,s1 -> 2.5h, got {:#x}", st2.v[0]);
+    }
+
+    #[test]
+    fn fabd_single_exec() {
+        // fabd s2,s2,s3 = 0x7ea3d442: s2 = |s2 - s3| = |1.0 - 3.0| = 2.0.
+        let code = [0x42u8, 0xd4, 0xa3, 0x7e, 0xe0, 0x03, 0x00, 0xaa, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.v[4] = 1.0f32.to_bits() as u64; // reg2 low64 (s2)
+        st.v[6] = 3.0f32.to_bits() as u64; // reg3 low64 (s3)
+        exec_bytes(&mut st, &code, 0).unwrap();
+        assert_eq!((st.v[4] & 0xffff_ffff) as u32, 2.0f32.to_bits(), "fabd s |1-3|=2");
+    }
+
+    #[test]
+    fn urhadd_bytes_exec() {
+        // urhadd v0.16b,v1,v2 = 0x6e221420: per-byte (a+b+1)>>1.
+        let code = [0x20u8, 0x14, 0x22, 0x6e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        // reg1 low64 (v[2]): lane i a=i ; reg2 low64 (v[4]): b=15-i -> sum 15 -> 8
+        let mut a: u64 = 0;
+        let mut b: u64 = 0;
+        for i in 0..8 {
+            a |= (i as u64) << (i * 8);
+            b |= ((15 - i) as u64) << (i * 8);
+        }
+        st.v[2] = a;
+        st.v[4] = b;
+        exec_bytes(&mut st, &code, 0).unwrap();
+        let byte = |off: usize| -> u64 { (st.v[0] >> (off * 8)) & 0xff };
+        for i in 0..8 {
+            assert_eq!(byte(i), ((i + (15 - i) + 1) >> 1) as u64, "lane {i}");
+        }
+    }
+
+    #[test]
+    fn fp16_scalar_add_exec() {
+        // fadd h0,h1,h2 = 0x1ee22820: h0 = h1 + h2 = 1.5 + 2.5 = 4.0h.
+        let code = [0x20u8, 0x28, 0xe2, 0x1e, 0xc0, 0x03, 0x5f, 0xd6];
+        let mut st = CpuState::new();
+        st.v[2] = h(1.5) as u64; // reg1 (h1)
+        st.v[4] = h(2.5) as u64; // reg2 (h2)
+        exec_bytes(&mut st, &code, 0).unwrap();
+        assert_eq!((st.v[0] & 0xffff) as u16, h(4.0),
+            "fadd h -> 4.0h got {:#x}", st.v[0]);
+    }
+}
