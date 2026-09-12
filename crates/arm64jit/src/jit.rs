@@ -7858,6 +7858,31 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn trn1_trn2_exec() {
+        // trn1 v0.4h, v1.4h, v2.4h = 0x0e422820: Vd[0]=Vn[0], Vd[1]=Vm[0],
+        // Vd[2]=Vn[2], Vd[3]=Vm[2]. v1={1,2,3,4}, v2={5,6,7,8} -> {1,5,3,7}.
+        let mut st = CpuState::new();
+        st.v[2] = (4u64 << 48) | (3 << 32) | (2 << 16) | 1; // v1
+        st.v[4] = (8u64 << 48) | (7 << 32) | (6 << 16) | 5; // v2
+        exec_bytes(&mut st, &[0x20, 0x28, 0x42, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h(&st,0), 1, "Vd0=Vn0");
+        assert_eq!(h(&st,1), 5, "Vd1=Vm0");
+        assert_eq!(h(&st,2), 3, "Vd2=Vn2");
+        assert_eq!(h(&st,3), 7, "Vd3=Vm2");
+        // trn2 v0.4h, v1.4h, v2.4h = 0x0e426820: odd lanes -> {2,6,4,8}.
+        let mut st2 = CpuState::new();
+        st2.v[2] = (4u64 << 48) | (3 << 32) | (2 << 16) | 1; // v1
+        st2.v[4] = (8u64 << 48) | (7 << 32) | (6 << 16) | 5; // v2
+        exec_bytes(&mut st2, &[0x20, 0x68, 0x42, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let h2 = |s: &CpuState, off: usize| -> u16 { ((s.v[0] >> (16 * off)) & 0xffff) as u16 };
+        assert_eq!(h2(&st2,0), 2, "trn2 Vd0=Vn1");
+        assert_eq!(h2(&st2,1), 6, "trn2 Vd1=Vm1");
+        assert_eq!(h2(&st2,2), 4, "trn2 Vd2=Vn3");
+        assert_eq!(h2(&st2,3), 8, "trn2 Vd3=Vm3");
+    }
+
+    #[test]
     fn mul_halfword_exec() {
         // mul v0.8h, v1.8h, v2.8h = 0x4e629c20: per halfword lane low-16 product.
         // v1={5, 1000, -3, 300, 7, -2, 99, 50}; v2={4, 3, -7, 2, 11, 8, -1, 20}.

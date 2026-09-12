@@ -4049,6 +4049,90 @@ Inst::SimdZip1 { rd, rn, rm, esize, q } => {
             }
             Ok(())
 }
+Inst::SimdTrn1 { rd, rn, rm, esize, q } => {
+            // trn1 Vd.T, Vn.T, Vm.T: transpose even lanes. For k in 0..(N/2):
+            // Vd[2k]=Vn[2k] (even element of Vn), Vd[2k+1]=Vm[2k]. N = n/es
+            // elements per vector. No half-length split (unlike zip1): source
+            // index is 2k (not k). Guard rd aliasing a source.
+            let rn_src = permute_source(buf, rd, rn, false);
+            let rm_src = permute_source(buf, rd, rm, true);
+            let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
+            let n: i32 = if q { 16 } else { 8 };
+            let es = esize as i32;
+            for k in 0..(n / (2 * es)) {
+                let so = 2 * k * es;      // even source element byte offset
+                let d0 = 2 * k * es;
+                let d1 = (2 * k + 1) * es;
+                match esize {
+                    8 => {
+                        buf.mov_load64(RAX, RBX, rn_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load64(RAX, RBX, rm_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                    4 => {
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                    2 => {
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                    _ => {
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                }
+            }
+            Ok(())
+}
+Inst::SimdTrn2 { rd, rn, rm, esize, q } => {
+            // trn2 Vd.T, Vn.T, Vm.T: transpose odd lanes. For k in 0..(N/2):
+            // Vd[2k]=Vn[2k+1] (odd element), Vd[2k+1]=Vm[2k+1].
+            let rn_src = permute_source(buf, rd, rn, false);
+            let rm_src = permute_source(buf, rd, rm, true);
+            let slot = |r: i32| crate::jit::VECTOR_BASE + r * 16;
+            let n: i32 = if q { 16 } else { 8 };
+            let es = esize as i32;
+            for k in 0..(n / (2 * es)) {
+                let so = (2 * k + 1) * es; // odd source element byte offset
+                let d0 = 2 * k * es;
+                let d1 = (2 * k + 1) * es;
+                match esize {
+                    8 => {
+                        buf.mov_load64(RAX, RBX, rn_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load64(RAX, RBX, rm_src + so);
+                        buf.mov_store64(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                    4 => {
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store32(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                    2 => {
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store16(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                    _ => {
+                        buf.mov_load32(RAX, RBX, rn_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d0, RAX);
+                        buf.mov_load32(RAX, RBX, rm_src + so);
+                        buf.mov_store8(RBX, slot(rd as i32) + d1, RAX);
+                    }
+                }
+            }
+            Ok(())
+}
 Inst::SimdZip2 { rd, rn, rm, esize, q } => {
             // zip2 Vd.T, Vn.T, Vm.T: interleave the UPPER halves.
             // Vd[2k]=Vn[n/2+k] and Vd[(2k+1)]=Vm[n/2+k] for k in 0..(n/2),

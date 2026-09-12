@@ -816,6 +816,10 @@ pub enum Inst {
     SimdZip1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD zip2: upper-half interleave (gcc unsigned magic-div widen) ----
     SimdZip2 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
+    // ---- SIMD transpose even: trn1 Vd.T, Vn.T, Vm.T (Vd[2k]=Vn[2k], Vd[2k+1]=Vm[2k]) ----
+    SimdTrn1 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
+    // ---- SIMD transpose odd: trn2 (Vd[2k]=Vn[2k+1], Vd[2k+1]=Vm[2k+1]) ----
+    SimdTrn2 { rd: u8, rn: u8, rm: u8, esize: u8, q: bool },
     // ---- SIMD element extract to GPR: umov/smov Rd, Vn.bits[idx] ----
     SimdMovEl { rd: u8, rn: u8, esize: u8, index: u8, signed: bool, is_x: bool },
     // ---- SIMD integer add/sub 2D (64-bit lanes): add Vd.2D, Vn.2D, Vm.2D ----
@@ -2952,6 +2956,10 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             Some(3u8) // uzp1
         } else if p == 0x0e00_5800 {
             Some(4u8) // uzp2
+        } else if p == 0x0e00_2800 {
+            Some(5u8) // trn1
+        } else if p == 0x0e00_6800 {
+            Some(6u8) // trn2
         } else {
             None
         };
@@ -2961,7 +2969,11 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             let rd = (insn & 0x1f) as u8;
             let rn = ((insn >> 5) & 0x1f) as u8;
             let rm = ((insn >> 16) & 0x1f) as u8;
-            return if kind == 2 {
+            return if kind == 5 {
+                Inst::SimdTrn1 { rd, rn, rm, esize, q }
+            } else if kind == 6 {
+                Inst::SimdTrn2 { rd, rn, rm, esize, q }
+            } else if kind == 2 {
                 Inst::SimdZip2 { rd, rn, rm, esize, q }
             } else if kind == 3 {
                 Inst::SimdUz1 { rd, rn, rm, esize, q }
@@ -7707,6 +7719,23 @@ mod fp16_scalar_and_gate_regressions {
         assert!(matches!(decode_op(0x2e223420),
             Inst::SimdCmhiB { rd: 0, rn: 1, rm: 2, lanes: 8, ge: false }));
         assert!(!matches!(decode_op(0x6ea03400), Inst::SimdCmhiB { .. }), "cmhi .4S stays SimdCmhi");
+        // transpose: trn1 v3.4h = 0x0e412883 real (rd3,rn4,rm1; esize2,q0), trn1 v0.4h
+        // = 0x0e422820, trn2 v0.4h = 0x0e426820, trn1 v0.8h = 0x4e422820.
+        assert!(matches!(decode_op(0x0e412883),
+            Inst::SimdTrn1 { rd: 3, rn: 4, rm: 1, esize: 2, q: false }),
+            "got {:?}", decode_op(0x0e412883));
+        assert!(matches!(decode_op(0x0e422820),
+            Inst::SimdTrn1 { rd: 0, rn: 1, rm: 2, esize: 2, q: false }));
+        assert!(matches!(decode_op(0x4e422820),
+            Inst::SimdTrn1 { rd: 0, rn: 1, rm: 2, esize: 2, q: true }));
+        assert!(matches!(decode_op(0x0e426820),
+            Inst::SimdTrn2 { rd: 0, rn: 1, rm: 2, esize: 2, q: false }));
+        assert!(matches!(decode_op(0x0e132a14),
+            Inst::SimdTrn1 { rd: 20, rn: 16, rm: 19, esize: 1, q: false }),
+            "got {:?}", decode_op(0x0e132a14));
+        // negatives must NOT match: zip1 (0x0e013820), uzp1 (0x0e011800), rev64 (0x0ea00a01).
+        assert!(!matches!(decode_op(0x0e013820), Inst::SimdTrn1 { .. }) && !matches!(decode_op(0x0e013820), Inst::SimdTrn2 { .. }));
+        assert!(!matches!(decode_op(0x0e011800), Inst::SimdTrn1 { .. }) && !matches!(decode_op(0x0e011800), Inst::SimdTrn2 { .. }));
         // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
         // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
         assert!(matches!(decode_op(0x4ea1d820),
