@@ -2436,10 +2436,14 @@ fn main() {
                                     eprintln!(
                                         "[elfjit:renderframe-triangle] vbo={vbo:#x} ebo={ebo:#x} uploaded"
                                     );
-                                    // REFERENCE DRAW (debug): drive the draw directly
-                                    // (not through the engine wrapper) with my own
-                                    // glVertexAttribPointer, to isolate whether the
-                                    // shader+buffers can render a full triangle at all.
+                                    // REFERENCE DRAW (opt-in: SH25_REF=1): drive the
+                                    // draw directly (not through the engine wrapper) with
+                                    // our own glVertexAttribPointer, to cross-check the
+                                    // engine-path result. Now that the engine wrapper's
+                                    // primitive-setup renders the full triangle (format
+                                    // index fixed 5->3 = GL_FLOAT), the reference is
+                                    // redundant; default OFF (SH25_REF=1 re-enables).
+                                    if std::env::var("SH25_REF").map(|v| v == "1").unwrap_or(false) {
                                     // With a VBO bound, the attrib pointer's 6th arg is a
                                     // byte OFFSET (0 = start of the buffer), not a host
                                     // pointer — a wrong value silently collapses geometry.
@@ -2478,6 +2482,7 @@ fn main() {
                                             "[elfjit:renderframe-triangle] reference glDrawElements issued"
                                         );
                                     }
+                                    }
                                     // ---- Fabricate the COHERENT renderer ----
                                     // renderer[+56]=container ; [renderer+0x48]=the 16-byte
                                     // vertex-descriptor table base (entry[vb] @ +vb*16).
@@ -2492,7 +2497,7 @@ fn main() {
                                     let stride_tbl = base + 0x300; // u64 tbl [vb]
                                     let prim = base + 0x400;
                                     let ibo = base + 0x500;
-                                    let fmt_index: u32 = 5; // format[5]=size4 GL_FLOAT (table @0x100cecf8c)
+                                    let fmt_index: u32 = 3; // format[3]={size4, GL_FLOAT=0x1406} (table @0x100cecf8c). NOT format[5] which is {4, GL_SHORT=0x1402} — GL_SHORT misreads float verts -> degenerate.
                                     // descriptor[+72] = vbo id (the ARRAY_BUFFER we created)
                                     *(desc.wrapping_add(72) as *mut u32) = vbo as u32;
                                     // stride table[vb=0] = 16 (tight vec4)

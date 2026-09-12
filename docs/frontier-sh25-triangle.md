@@ -56,15 +56,17 @@ Capture runs/sh25-triangle.{png,rgb}: 415,696 px = exact shader red (255,0,0) =
 45.11% of frame on the 0,0,0.3 clear-blue background. Reproducible artifact:
 runs/capture_triangle.sh; run-log runs/sh25-triangle.txt.
 
-## Honest scope / the isolated remaining wall
-The verified full-triangle render goes through a REFERENCE draw added for
-diagnosis: with the same program + the same VBO/EBO, a direct
-`glVertexAttribPointer(0,4,GL_FLOAT,0,16,0)` + bind-ARRAY + enable-attrib0 +
-`glDrawElements(4,3,0x1405,0)` renders the full ±0.95 triangle. The engine's OWN
-wrapper path (primitive-setup's glVertexAttribPointer) still collapses to a small
-blob near screen center — its computed pointer/stride differs from what the data
-needs, and `glGetError` reads 0x8000 right after primitive-setup's attrib call.
-So the coherent renderer + real GL resources + real indexed draw are PROVEN
-bridge-functional (the frontier gap SH24 left), and the precise primitive-setup
-attrib-pointer arithmetic is the next, narrow reverse. Baselines unchanged
-(--jni exit 0; stable idle exit 124).
+## Honest scope — RESOLVED this cycle
+The engine's OWN wrapper path (primitive-setup's glVertexAttribPointer) ALSO
+renders the full triangle once the correct format-table index is used. The
+original collapse (tiny center blob) was a WRONG format-table index injected in
+the fabricated primitive: `[prim+8]`=5 selects format[5] =
+{size4, **GL_SHORT**=0x1402}, which misreads the float vertices as shorts ->
+degenerate/huge positions -> the triangle clipped to nothing. The fix is
+`fmt_index=3` = format[3] = {size4, **GL_FLOAT**=0x1406}. With that, the raw
+engine path `readback centroid=RGBA(255,0,0,255)` + 415,696 red px = the full
+±0.95 triangle, no reference draw needed. The `SH25_REF=1` reference draw
+(direct glVertexAttribPointer GL_FLOAT) is retained as an opt-in cross-check and
+now defaults OFF. The coherent-renderer frontier that SH24 left ("feed
+primitive-setup a real primitive list so it renders") is CROSSED. Baselines
+unchanged (--jni exit 0; stable idle exit 124).
