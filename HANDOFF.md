@@ -1,5 +1,57 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle E) — boot wall pinned at register+futex level; concurrent thread-state sampler + GLIBC mutex owner/count/kind (workspace 395/0)
+
+Commits `1dae9e1` + `eaf00e6` (dev). This cycle pinpointed the
+GameActivity lifecycle-await wall at register+futex level (previously only
+inferred by timing/heuristic). New concurrent guest-thread sampler
+(`snapshot_threads()`, JIT_THREADS=1) dumps every registered guest thread's
+hostcall slot (pc), guest call-site (x30), and wait-object args (x0..x2)
+while StartApp's parked `jit_run` never returns. Real libroblox StartApp
+boot:
+
+- **All 3 engine guest threads futex-park on `pthread_mutex_lock(0x6edae60)`,
+  x30 == `0x102b53bb0` for all three** (single call site inside the
+  GameActivity_initializeNativeCode rendezvous).
+- glibc fields of `0x6edae60`: **g_kind=1 (PTHREAD_MUTEX_RECURSIVE),
+  g_count=1** — a LIVE owner holds it with recursion depth 1; it is NOT an
+  abandoned/cross-ABI-wedged lock. Owner (tid 0) runs the GC/init atomic
+  refcount region at `0x102206afc/bb0` (`ldar x8,[x8,2808]; subs; b.eq`),
+  then re-acquires and parks.
+- **per-thread CPU while parked: owner 14% in `futex_wait_queue` (an active
+  wake/check/re-park POLL on the recursive mutex — polls the awaited
+  app-command/lifecycle flag); tids 1 & 2 0.7% truly idle.** Dispatcher
+  compiles flat at 767 (one jit step after StartApp, then the main loop parks).
+- New `disasm` example (`cargo run -p arm64jit --example disasm -- <elf>
+  <guest-addr...>`) decodes a guest region to name the enclosing functions.
+
+This confirms the documented wall (engine awaits Java-side app-command /
+looper / lifecycle state that would release `0x6edae60`) and converts the
+"identify what releases it" lever into a precise, reproducible pin — the
+owner polls a specific object at recursion-count-1 and only proceeds once that
+app-command arrives. It does NOT yet cross the wall. The Mesa llvmpipe egl/gl
+path and texture/float bridges remain fully wired (graphics gates green).
+
+### Next lever (unchanged — this is the hard remaining wall)
+Cross the GameActivity lifecycle-await so the engine proceeds to the looper and
+the already-wired Mesa llvmpipe egl/gl path produces a first real frame.
+Requires emulating the Android app-command / looper state: seed the flag/object
+the owner polls at `0x102206afc` (or the once-guard that gates it), OR feed
+ALooper_pollOnce synthetic app commands (APP_CMD_START/RESUME/INIT_WINDOW) from
+a host side so the awaited predicate is satisfied and `0x6edae60` releases.
+Then route the boot's `egl*`/`gl*` imports through the existing Mesa resolver
+for a first headless frame.
+
+### Repro
+```bash
+cd /home/hermes-worker/runs/open-sober
+cargo build -p arm64jit --example elfjit
+timeout 30 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni --startapp 0x258b144  # stable idle (exit 124)
+JIT_THREADS=1 timeout 15 ... --jni --startapp 0x258b144   # concurrent thread-state sampler
+JIT_TRACE=1 timeout 12 ... --jni --startapp 0x258b144 2>&1 | grep mutex_lock  # glibc owner/count/kind
+cargo run -p arm64jit --example disasm -- ~/.cache/open-sober/robbox/libroblox.so 0x102206bb0 0x102b53bb0
+```
+
 ## Session (Sep 12, 2026, hermes-worker, cycle D) — boot wall re-characterized; JIT_TRACE reverse-name registry (workspace 394/0)
 
 Commit `b99c3df` (dev). This cycle re-confirmed the real-boot wall exactly as
