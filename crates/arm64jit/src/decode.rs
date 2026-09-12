@@ -2330,7 +2330,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // byte0 0x0e/2e/4e/6e. bit29(U) + byte1 0x40 => fcmge vs fcmeq; byte1 0xc0
     // => fcmgt. Guarded so mov Vd.S[idx] (byte1 0x14, top-nibble 0x1) falls through.
     if (insn & 0x0000_fc00) == 0x0000_2400 && (insn & 0x0f00_0000) == 0x0e00_0000 {
-        let b1 = ((insn >> 16) & 0xfc) as u8;
+        let b1 = ((insn >> 16) & 0xe0) as u8; // bits 23:21 = size(23:22)+op, rm bits excluded
         let op = match b1 {
             0x40 => Some(if insn & 0x2000_0000 != 0 { 1 } else { 0 }), // fcmge / fcmeq
             0xc0 => Some(2),                                           // fcmgt

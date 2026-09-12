@@ -1,5 +1,5 @@
 fn main() {
-    for (w,l) in [(0x6e35dc44u32,"fmul4s"),(0x6e34dc40,"fmul4s b"),(0x4ea2ce24,"fmls4s"),(0x6ea0fa19,"fneg4s"),(0x4ebfce25,"fmls4s c"),(0x6e36dcc6,"fmul4s d")] {
+    for (w,l) in [(0x6eca26acu32,"real fcmgt8h v12"),(0x6ecb258b,"real fcmgt8h"),(0x2ecb258b,"real fcmgt4h"),(0x4e422420,"fcmeq8h"),(0x6ec22420,"fcmgt8h"),(0x6e1424a3,"mov .S[idx]")] {
         println!("{l}: {:?}", arm64jit::decode::decode(w));
     }
 }
