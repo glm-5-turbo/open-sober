@@ -2138,18 +2138,32 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
         };
     }
 
-    // ---- SIMD FP16 3-same: fadd/fsub/fmul Vd.8h/.4h ----
+    // ---- SIMD FP16 3-same: fadd/fsub/fmul/fdiv/fmax/fmin Vd.8h/.4h ----
     // Half-precision per-lane arithmetic (promote->op->demote via F16C). MUST decode
     // before the SIMD-select (bsl) gate below: the FP16 `fmul Vd.8h` opcode (byte1
     // 0x1c, e.g. 0x6e451c82) shares the select gate's byte1 0x1c pattern and was
-    // being swallowed as a bitwise select. Gate (insn & 0x9f60_f400) == 0x0e40_1400
-    // (widen to clear vn/vm/vd/Q) is disjoint from f32 three-same / FP16-by-element /
-    // urhadd / imm-ops / real bsl (verified vs compiler + real fadd v1.8h=0x4e401421).
-    if (insn & 0x9f60_f400) == 0x0e40_1400 {
+    // being swallowed as a bitwise select. Gate (insn & 0x9f60_f400) in
+    // {0x0e40_1400, 0x0e40_3400} — the 0x9f byte0-mask pins the 0x0e.. prefix
+    // (rejects f32 indexed-FMA which has byte0 nibble 0xf), 0x60 pins the fp16
+    // size (bit22 SET / bit21 CLEAR vs f32 three-same), and the byte1 top-nibble
+    // is 0x1 (fadd/sub/mul) or 0x3 (fdiv/max/min). op bits: U=bit29 (fmul/fdiv),
+    // bit23 (fsub/fmin), b1top (0x1 vs 0x3).
+    let _fp16_3same = (insn & 0x9f60_f400) == 0x0e40_1400
+        || (insn & 0x9f60_f400) == 0x0e40_3400;
+    if _fp16_3same {
         let q = (insn >> 30) & 1 == 1; // 1 => .8h, 0 => .4h
-        let op = if insn & 0x2000_0000 != 0 { 2 } // fmul (bit29)
+        let top = (insn >> 12) & 0xf;
+        let op = if top == 3 {
+            // fdiv / fmax / fmin group (byte1 top-nibble 0x3)
+            if insn & 0x2000_0000 != 0 { 3 }        // fdiv (bit29)
+            else if insn & 0x80_0000 != 0 { 5 }     // fmin (bit23)
+            else { 4 }                              // fmax
+        } else {
+            // fadd / fsub / fmul group (top-nibble 0x1)
+            if insn & 0x2000_0000 != 0 { 2 }        // fmul (bit29)
             else if insn & 0x80_0000 != 0 { 1 }     // fsub (bit23)
-            else { 0 };                             // fadd
+            else { 0 }                              // fadd
+        };
         let rm = ((insn >> 16) & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
@@ -7141,6 +7155,25 @@ mod fp16_scalar_and_gate_regressions {
         // real Roblox fadd v1.8h,v1.8h,v0.8h = 0x4e401421
         assert!(matches!(decode_op(0x4e401421),
             Inst::SimdFp16As { rd: 1, rn: 1, rm: 0, op: 0, q: true }));
+        // extended FP16 3-same: fdiv/fmax/fmin (byte1 top-nibble 0x3), real-boot forms.
+        // fdiv v1.8h, v0.8h, v1.8h = 0x6e413c01 (bit29 -> op 3)
+        assert!(matches!(decode_op(0x6e413c01),
+            Inst::SimdFp16As { rd: 1, rn: 0, rm: 1, op: 3, q: true }),
+            "got {:?}", decode_op(0x6e413c01));
+        // fdiv v1.4h = 0x2e413c01 (q=0)
+        assert!(matches!(decode_op(0x2e413c01),
+            Inst::SimdFp16As { rd: 1, rn: 0, rm: 1, op: 3, q: false }));
+        // fmax v0.8h, v0.8h, v1.8h = 0x4e413400 (op 4)
+        assert!(matches!(decode_op(0x4e413400),
+            Inst::SimdFp16As { rd: 0, rn: 0, rm: 1, op: 4, q: true }),
+            "got {:?}", decode_op(0x4e413400));
+        // fmin v1.8h, v0.8h, v1.8h = 0x4ec13401 (bit23 -> op 5)
+        assert!(matches!(decode_op(0x4ec13401),
+            Inst::SimdFp16As { rd: 1, rn: 0, rm: 1, op: 5, q: true }),
+            "got {:?}", decode_op(0x4ec13401));
+        // f32 indexed-fma (byte0 0xf) must NOT be swallowed: 0x4fc11082 fmul v2.4s...
+        assert!(!matches!(decode_op(0x4fc11082), Inst::SimdFp16As { .. }),
+            "f32 indexed-fma must stay FmlaEl, got {:?}", decode_op(0x4fc11082));
     }
 
     #[test]

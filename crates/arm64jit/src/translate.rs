@@ -3078,13 +3078,23 @@ pub fn translate(
             Ok(())
         }
         Inst::SimdFp16As { rd, rn, rm, op, q } => {
-            // fadd/fsub/fmul Vd.8h/.4h, Vn, Vm (half-precision 3-same): per-h laneke
-            // promote (clean, even with rd aliasing rn/rm because each lane's sources
-            // are read before its dest write), op in f32, demote. F16C:
+            // fadd/fsub/fmul/fdiv/fmax/fmin Vd.8h/.4h, Vn, Vm (half-precision
+            // 3-same): per-h lane promote (clean, even with rd aliasing rn/rm
+            // because each lane's sources are read before its dest write), op in
+            // f32, demote. F16C:
             //   vcvtph2ps xmm,xmm = C4 E2 79 13 /r ; vcvtps2ph $0 = C4 E3 79 1D /r 00.
             let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             let lanes: i32 = if q { 8 } else { 4 }; // half-precision lanes
-            let opcode: u8 = match op { 0 => 0x58, 1 => 0x5c, 2 => 0x59, _ => 0x58 }; // addss/subss/mulss
+            // SSE scalar opcodes (F3 0F op rC1): addss/subss/mulss/divss/maxss/minss.
+            let opcode: u8 = match op {
+                0 => 0x58, // fadd  addss
+                1 => 0x5c, // fsub  subss
+                2 => 0x59, // fmul  mulss
+                3 => 0x5e, // fdiv  divss
+                4 => 0x5f, // fmax  maxss
+                5 => 0x5d, // fmin  minss
+                _ => 0x58,
+            };
             for i in 0..lanes {
                 let off = i * 2;
                 // Vn[lan] promote -> xmm0
