@@ -1,6 +1,36 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle K) — REAL-CODE DECODER COMPLETE: every one of the 1,135,104 instructions in libroblox.so `.text` now decodes (0 Unsupported, 0 panics). Workspace 402/0, tree clean.
+## Session (Sep 12, 2026, hermes-worker, cycle L) — FRONTIER DIAGNOSIS CORRECTED: the engine main-loop idle barrier is a REAL futex reached through the imported libc `syscall()` function, NOT a "zero-syscall CPU flag spin". Fixed the cross-arch syscall-number bug that made it busy-spin; the futex now genuinely blocks all 3 guest threads (workspace 405/0, HEAD 11189dd).
+
+**This corrects cycles I–J's wrong conclusion.** The settled main loop issues
+~204k futex syscalls / 12s, but only through the imported `syscall@LIBC`
+function (the guest calls libc `syscall(nr,...)`, not `svc #0`). Cycle J's
+"settled loop makes zero guest syscalls; it's a pure TLS-flag spin" was a
+misdiagnosis — it probed only `svc #0` and missed the `syscall()` import path.
+
+**The bug:** `resolver::resolve` bound `syscall` to HOST glibc `syscall()`,
+which reads the number as an x86-64 syscall number. The guest's AArch64 futex
+(98) became x86-64 getrusage (98) → returned -1, never blocked, and the loop
+busy-spun re-issuing a dead futex.
+
+**The fix** (commit `11189dd`, regression-tested):
+1. `resolve("syscall")` → `host_syscall_intercept`, which rebuilds a CpuState
+   (x[8]=aarch64 nr, x[0..5]=args) and dispatches through `guest_svc`.
+2. `guest_svc` futex (98) now forwards `FUTEX_WAIT_BITSET` (op masked 9) to a
+   real host futex.
+
+**Verified:** all 3 guest threads now park INSIDE the real host futex at
+`0x10284d134` with `x2=0x89`. Each thread WAIT_BITSETs on its own per-thread
+latch uaddr (uaddr = x19+4). 405 tests (3 new). Boot exit 124, no crash.
+Run-log: `/home/hermes-worker/runs/syscall-futex-fix-runlog.txt`.
+
+### Next lever (REAL now, was wrongly cancelled by cycle J)
+The main loop idle barrier is a genuine per-thread FUTEX_WAIT_BITSET — the
+cycle-I lever (post the awaited futex value + FUTEX_WAKE from a host kicker)
+is now host-drivable. Identify each thread's awaited `val` (x3) and the
+producer value, then set the latch + FUTEX_WAKE so the loop advances.
+
+---
 
 New `scandecode` example (arm64jit) walks a PGX segment (or an optional
 [start,end] guest-vaddr window, to scan only `.text`) and reports every
