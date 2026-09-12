@@ -1,0 +1,134 @@
+[plt] patched __stack_chk_guard GOT 0x631aa30 (0x0) -> 0x55bd7656d8e0
+[plt] bound 534 JUMP_SLOT + 67 GLOB_DAT/ABS64 (0 unresolved), 11 unresolved
+PLT imports bound: 534 to host thunks (0 unbound)
+[mempool] big-alloc 0x1d9801c routed to host calloc (thunk @ 0x1062d9000)
+[mempool] thunk bytes: e0 03 01 aa 11 0a 40 f9 20 02 1f d6 00 00 00 00 08 00 00 00 (JIT-readable via guest image)
+loaded '/home/hermes-worker/.cache/open-sober/robbox/libroblox.so': is_pie=true base_load_vaddr=0x0 e_entry=0x100000000
+  segment guest=[0x100000000,0x1062d8190) host=same prot=r-x
+  segment guest=[0x1062dc1c0,0x1067d3000) host=same prot=rw-
+  segment guest=[0x1067d67c0,0x107333c3c) host=same prot=rw-
+[tail] reserved 402653184B guest RW tail @0x107334000
+[lsm-map] allocator 0x1d97744 routed to host calloc(x0) (thunk @ 0x1062d9800)
+[lsm-map] NOP'd LSM init store at 0x101d975f8 (guest 0x1d975f8) to keep seeded empty map
+[lsm-map] seeded static empty LocalStorageManager map: global 0x10726f8c0 -> bucket array 0x7fb4bc47b010 (4194304 buckets, shared zero sub @0x7fb4be47b010)
+[JNICall-singleton] seeded ptr 0x107333948 -> object 0x107333950 (zeroed bss ~ PTHREAD_MUTEX_INITIALIZER at +8)
+[lsm-map] readback global 0x10726f8c0 = 0x7fb4bc47b010 (must be non-zero)
+running entry guest=0x102173ff4 host=0x102173ff4 (segment base guest=0x100000000 size=0x7333c3c)
+guest sp=0x55bd9a478470 tls(tpidr)=0x55bd9a478580
+JNI boot: x0 = JavaVM* 0x55bd9a063960
+[roblox:JNIMain] TelemetryProtocol::setProcessTimeOverride: %ld
+[roblox:JNIMain] DeviceStaticParams is null.
+[elfjit] jit_run returned Ok(0x10006) — entering post-run phase
+JIT(no-QEMU) entry() -> 65542 (0x10006)
+[elfjit] driving StartApp @ guest 0x10258b144 after JNI_OnLoad (env=0x55bd9a063930 jobject=0x55bd9a5b2c80 params=0x55bd9aa59d10)
+[elfjit:kicker] host thread drives 0x106863af8 (pulse 1->2)
+[elfjit:kicker] t=0 guest_global 0x106863af8=%0x1
+[elfjit:appcmd] posting APP_CMD_0 (1)
+[elfjit:anativewindow] wired real X11 window XID=0x200000 on :239 as the guest ANativeWindow
+[elfjit:appcmd] posting APP_CMD_1 (2)
+[elfjit:appcmd] posting APP_CMD_2 (11)
+[elfjit:kicker] t=100 guest_global 0x106863af8=%0x2
+[elfjit:kicker] t=200 guest_global 0x106863af8=%0x2
+[elfjit:kicker] t=300 guest_global 0x106863af8=%0x2
+[elfjit:renderinit] driving THUNK 0x105b3a280 after 5000ms warm-up (ctx 0x1067d16f0=0x55bd7656d8d8, x0=0x200000, x1=0x0)
+[elfjit:renderinit] returned Ok(0x7fb4a8001d90)
+[elfjit:renderthunk] REAL ctx 0x7fb4a8001d90 vtable=0x106731ae0 egl: display=0x7fb4a808b5e0 surface=0x7fb4a800bde0 context=0x7fb4a80a8100
+[elfjit:renderthunk] ctx vtable[0..5] = 0x105b3b288 0x105b3b334 0x105b3b358 0x105b3b408 0x101dc7428 — [vt+16](idx2)=disp target
+[elfjit:renderframe] ctx=0x7fb4a8001d90 [+32]=display 0x7fb4a808b5e0 [+40]=surface 0x7fb4a800bde0 [+48]=context 0x7fb4a80a8100
+[elfjit:renderframe] swap returned Ok(0x1) (eglSwapBuffers)
+[elfjit:renderframe-drive] clear-color x5 obj 0x7fb4a9da02c0 (RGBA [0.4, 0.2, 0.95, 1.0] at [+0..16])
+[elfjit:renderframe-drive] gles-dispatch slot 0 guest 0x106d3b2f0 = 0x7f0000003010
+[elfjit:renderframe-drive] gles-dispatch slot 1 guest 0x106d3b2f8 = 0x7f0000003018
+[elfjit:renderframe-drive] gles-dispatch slot 2 guest 0x106d3b300 = 0x7f0000003020
+[elfjit:renderframe-drive] gles-dispatch slot 3 guest 0x106d3b308 = 0x7fb4be564420
+[elfjit:renderframe-drive] gles-dispatch slot 4 guest 0x106d3b310 = 0x7fb4be566840
+[elfjit:renderframe-drive] gles-dispatch slot 5 guest 0x106d3b318 = 0x7fb4be5640e0
+[elfjit:renderframe-drive] gles-dispatch slot 6 guest 0x106d3b320 = 0x7fb4be564100
+[elfjit:renderframe-drive] gles-dispatch slot 7 guest 0x106d3b328 = 0x7fb4be565600
+[elfjit:renderframe-drive] gles-dispatch values = [139637976739856, 139637976739864, 139637976739872, 140414264165408, 140414264174656, 140414264164576, 140414264164608, 140414264169984]
+[elfjit:renderframe-seedgles] raw slot snapshot (before seed):
+[elfjit:renderframe-seedgles]   slot  0 = 0x00007f0000003010  
+[elfjit:renderframe-seedgles]   slot  1 = 0x00007f0000003018  
+[elfjit:renderframe-seedgles]   slot  2 = 0x00007f0000003020  
+[elfjit:renderframe-seedgles]   slot  3 = 0x00007fb4be564420  glClearBufferfi
+[elfjit:renderframe-seedgles]   slot  4 = 0x00007fb4be566840  glUniformBlockBinding
+[elfjit:renderframe-seedgles]   slot  5 = 0x00007fb4be5640e0  glBindBufferBase
+[elfjit:renderframe-seedgles]   slot  6 = 0x00007fb4be564100  glBindBufferRange
+[elfjit:renderframe-seedgles]   slot  7 = 0x00007fb4be565600  glGetUniformBlockIndex
+[elfjit:renderframe-seedgles]   slot  8 = 0x00007fb4be564f00  glGetActiveUniformBlockiv
+[elfjit:renderframe-seedgles]   slot  9 = 0x00007fb4be564b00  glDrawElementsInstanced
+[elfjit:renderframe-seedgles]   slot 10 = 0x00007fb4be564a60  glDrawArraysInstanced
+[elfjit:renderframe-seedgles]   slot 11 = 0x0000000000000000  
+[elfjit:renderframe-seedgles]   slot 12 = 0x0000000000000000  
+[elfjit:renderframe-seedgles]   slot 13 = 0x00007fb4be565220  glGetProgramBinary
+[elfjit:renderframe-seedgles]   slot 14 = 0x00007fb4be565ba0  glProgramBinary
+[elfjit:renderframe-seedgles]   slot 15 = 0x00007fb4be565bc0  glProgramParameteri
+[elfjit:renderframe-seedgles] slot 0 (glDrawBuffers) <- bridge 0x7f0000003010
+[elfjit:renderframe-seedgles] slot 1 (glClearBufferiv) <- bridge 0x7f0000003018
+[elfjit:renderframe-seedgles] slot 2 (glClearBufferfv) <- bridge 0x7f0000003020
+[elfjit:renderframe-seedgles] slot 3 (glClearStencil) <- bridge 0x7f00000029b8
+[elfjit:renderframe-seedgles] slot 4 (glColorMask) <- bridge 0x7f0000002978
+[elfjit:renderframe-seedgles] slot 5 (glDepthMask) <- bridge 0x7f0000002998
+[elfjit:renderframe-seedgles] slot 6 (glStencilMask) <- bridge 0x7f00000029b0
+[elfjit:renderframe-seedgles] slot 7 (glViewport) <- bridge 0x7f0000002918
+[elfjit:renderframe-seedgles] slot 9 (glDrawElements) <- bridge 0x7f0000002a38
+[elfjit:renderframe-seedgles] slot 10 (glDrawArrays) <- bridge 0x7f0000002a40
+[elfjit:renderframe-drive] fabricated renderer 0x7fb4a9d9fdc0 (+16=1,+24->0x7fb4a9d9fec0[+552]=1,+40->0x7fb4a9d9ffc0[+140]=1) view 0x7fb4a9da00c0 ([+128]=1280 [+132]=720 [+140]=0)
+[elfjit:renderframe-drive] === frame iteration 0 color [0.4, 0.2, 0.95, 1.0] ===
+[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok(0x7fb4a9d9fdc0)
+[elfjit:renderframe-drive] post-frame swap returned Ok(0x1)
+[elfjit:renderframe-drawprobe] fabricated renderer 0x7fb4a9dc4160 ([+56]->cont, [+120]=ibo, [+142]=3, empty prim list)
+[elfjit:renderframe-drawprobe] geometry wrapper 0x5b35288 returned Ok(0x0)
+[elfjit:renderframe-triangle] compiled vs=0x1 fs=0x2
+[elfjit:renderframe-triangle] linked program=0x3 current
+[elfjit:renderframe-triangle] compile_status vs=0x1 fs=0x1 link_status=0x1
+[elfjit:renderframe-triangle] vbo=0x1 ebo=0x2 uploaded
+[elfjit:renderframe-triangle] coherent renderer 0x7fb4a9e423f0: container 0x7fb4a9e424f0 prim 0x7fb4a9e427f0 desc 0x7fb4a9e425f0 desc_tbl@renderer+0x48 stride 0x7fb4a9e426f0 ibo 0x7fb4a9e428f0
+[elfjit:renderframe-triangle] geometry wrapper 0x5b35288 returned Ok(0x0) (real indexed glDrawElements drawn)
+[elfjit:renderframe-triangle] readback: centroid(640,360)=RGBA(255,0,0,255) top-left-bg(60,20)=RGBA(255,0,0,255) top-right-bg(1200,20)=RGBA(255,0,0,255)
+[elfjit:renderframe-triangle] post-draw swap returned Ok(0x1)
+[elfjit:renderframe-drawprobe] post-draw swap returned Ok(0x1)
+[elfjit:renderframe-quad] program=0x6 compiled+linked; texture tex_id=0x1 uTex=0x0
+[elfjit:renderframe-quad] vbo=0x3 ebo=0x4 144 interleaved verts stride24 + 216 idx uploaded (6x6 grid)
+[elfjit:renderframe-quad] coherent renderer: 2-prim list (aPos+aUV) + 216-idx EBO fabricated
+[elfjit:renderframe-quad] geometry wrapper 0x5b35288 returned Ok(0x0) (6x6 MESH drawn)
+[elfjit:renderframe-quad] cell(0,0)@(160,90) readback=RGBA(0,0,64,255) (expect r=0 g=0)
+[elfjit:renderframe-quad] cell(1,0)@(351,90) readback=RGBA(51,0,64,255) (expect r=51 g=0)
+[elfjit:renderframe-quad] cell(2,0)@(544,90) readback=RGBA(102,0,64,255) (expect r=102 g=0)
+[elfjit:renderframe-quad] cell(3,0)@(736,90) readback=RGBA(153,0,64,255) (expect r=153 g=0)
+[elfjit:renderframe-quad] cell(4,0)@(927,90) readback=RGBA(204,0,64,255) (expect r=204 g=0)
+[elfjit:renderframe-quad] cell(5,0)@(1119,90) readback=RGBA(255,0,64,255) (expect r=255 g=0)
+[elfjit:renderframe-quad] cell(0,1)@(160,197) readback=RGBA(0,51,64,255) (expect r=0 g=51)
+[elfjit:renderframe-quad] cell(1,1)@(351,197) readback=RGBA(51,51,64,255) (expect r=51 g=51)
+[elfjit:renderframe-quad] cell(2,1)@(544,197) readback=RGBA(102,51,64,255) (expect r=102 g=51)
+[elfjit:renderframe-quad] cell(3,1)@(736,197) readback=RGBA(153,51,64,255) (expect r=153 g=51)
+[elfjit:renderframe-quad] cell(4,1)@(927,197) readback=RGBA(204,51,64,255) (expect r=204 g=51)
+[elfjit:renderframe-quad] cell(5,1)@(1119,197) readback=RGBA(255,51,64,255) (expect r=255 g=51)
+[elfjit:renderframe-quad] cell(0,2)@(160,306) readback=RGBA(0,102,64,255) (expect r=0 g=102)
+[elfjit:renderframe-quad] cell(1,2)@(351,306) readback=RGBA(51,102,64,255) (expect r=51 g=102)
+[elfjit:renderframe-quad] cell(2,2)@(544,306) readback=RGBA(102,102,64,255) (expect r=102 g=102)
+[elfjit:renderframe-quad] cell(3,2)@(736,306) readback=RGBA(153,102,64,255) (expect r=153 g=102)
+[elfjit:renderframe-quad] cell(4,2)@(927,306) readback=RGBA(204,102,64,255) (expect r=204 g=102)
+[elfjit:renderframe-quad] cell(5,2)@(1119,306) readback=RGBA(255,102,64,255) (expect r=255 g=102)
+[elfjit:renderframe-quad] cell(0,3)@(160,414) readback=RGBA(0,153,64,255) (expect r=0 g=153)
+[elfjit:renderframe-quad] cell(1,3)@(351,414) readback=RGBA(51,153,64,255) (expect r=51 g=153)
+[elfjit:renderframe-quad] cell(2,3)@(544,414) readback=RGBA(102,153,64,255) (expect r=102 g=153)
+[elfjit:renderframe-quad] cell(3,3)@(736,414) readback=RGBA(153,153,64,255) (expect r=153 g=153)
+[elfjit:renderframe-quad] cell(4,3)@(927,414) readback=RGBA(204,153,64,255) (expect r=204 g=153)
+[elfjit:renderframe-quad] cell(5,3)@(1119,414) readback=RGBA(255,153,64,255) (expect r=255 g=153)
+[elfjit:renderframe-quad] cell(0,4)@(160,522) readback=RGBA(0,204,64,255) (expect r=0 g=204)
+[elfjit:renderframe-quad] cell(1,4)@(351,522) readback=RGBA(51,204,64,255) (expect r=51 g=204)
+[elfjit:renderframe-quad] cell(2,4)@(544,522) readback=RGBA(102,204,64,255) (expect r=102 g=204)
+[elfjit:renderframe-quad] cell(3,4)@(736,522) readback=RGBA(153,204,64,255) (expect r=153 g=204)
+[elfjit:renderframe-quad] cell(4,4)@(927,522) readback=RGBA(204,204,64,255) (expect r=204 g=204)
+[elfjit:renderframe-quad] cell(5,4)@(1119,522) readback=RGBA(255,204,64,255) (expect r=255 g=204)
+[elfjit:renderframe-quad] cell(0,5)@(160,629) readback=RGBA(0,255,64,255) (expect r=0 g=255)
+[elfjit:renderframe-quad] cell(1,5)@(351,629) readback=RGBA(51,255,64,255) (expect r=51 g=255)
+[elfjit:renderframe-quad] cell(2,5)@(544,629) readback=RGBA(102,255,64,255) (expect r=102 g=255)
+[elfjit:renderframe-quad] cell(3,5)@(736,629) readback=RGBA(153,255,64,255) (expect r=153 g=255)
+[elfjit:renderframe-quad] cell(4,5)@(927,629) readback=RGBA(204,255,64,255) (expect r=204 g=255)
+[elfjit:renderframe-quad] cell(5,5)@(1119,629) readback=RGBA(255,255,64,255) (expect r=255 g=255)
+[elfjit:renderframe-quad] post-draw swap returned Ok(0x1)
+Option frames:v (set the number of frames to output) cannot be applied to input url :239 -- you are trying to apply an input option to an output file or vice versa. Move this option before the file it belongs to.
+Error parsing options for input file :239.
+Error opening input files: Invalid argument

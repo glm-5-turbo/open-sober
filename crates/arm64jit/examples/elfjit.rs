@@ -3014,6 +3014,20 @@ fn main() {
                                 .or_else(|| {
                                     renderframe_args.iter().any(|a| a == "--renderframe-quad-loop").then_some(6)
                                 });
+                            // --renderframe-grid <N>: scale the coherent renderer onto a REAL
+                            // larger mesh — an NxN grid of textured quads (N>1 => (N+1)^2
+                            // verts, 6*N^2 indices, one distinct texel color per cell drawn
+                            // at the real interpolated UV). Proves the engine's OWN geometry
+                            // wrapper + primitive-setup loop render a mesh of real topology
+                            // (many verts/indices), not just a single 4-vert quad (SH25-33).
+                            // Readback probes each cell center, which must read that cell's
+                            // distinct texel — per-cell UV->texel mapping across the mesh.
+                            let grid_n: Option<u32> = renderframe_args
+                                .iter()
+                                .position(|a| a == "--renderframe-grid")
+                                .and_then(|i| renderframe_args.get(i + 1))
+                                .and_then(|s| s.parse().ok())
+                                .filter(|&n| n >= 2 && n <= 8);
                             const GL_ARRAY_BUFFER: u64 = 0x8892;
                             const GL_ELEMENT_ARRAY_BUFFER: u64 = 0x8893;
                             const GL_STATIC_DRAW: u64 = 0x88e4;
@@ -3092,7 +3106,7 @@ fn main() {
                                 // via glCompressedTexImage2D (the last compressed format with an
                                 // unimplemented live-path prove). The bridge decodes ETC2-RGBA8 and
                                 // re-uploads, so the EAC alpha + RGB both reach the quad.
-                                let tex_data = base + 0xf60;
+                                let tex_data = base + 0x6000;
                                 let tex_sp = base + 0xf80;
                                 let tex_id_slot = base + 0xfd0;
                                 if comp_gray {
@@ -3148,8 +3162,32 @@ fn main() {
                                     eprintln!("[elfjit:renderframe] uploading 8x8 {what} 4-block via glCompressedTexImage2D");
                                     let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7990, &mut sce as *mut CpuState); // glCompressedTexImage2D
                                 } else {
-                                    let tex: [u8;16] = [255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255];
-                                    std::ptr::copy_nonoverlapping(tex.as_ptr(), tex_data as *mut u8, 16);
+                                    // Grid mode: an NxN RGBA texture, one DISTINCT solid color
+                                    // per texel (gi,gj). Each grid cell samples exactly one texel
+                                    // (all 4 of its verts share the texel-center UV, so the whole
+                                    // cell renders flat) -> a readback at any cell center must
+                                    // read that texel's unique color. Single-quad mode keeps the
+                                    // 2x2 checkerboard. tex_w/tex_h/tex_len below are used for the
+                                    // glTexImage2D dims + data length.
+                                    let (tex_w, tex_h, tex_len) = match grid_n {
+                                        Some(n) => (n, n, (n * n) as usize * 4),
+                                        None => (2, 2, 16),
+                                    };
+                                    let mut tex: Vec<u8> = vec![0u8; tex_len];
+                                    if let Some(n) = grid_n {
+                                        for gj in 0..n {
+                                            for gi in 0..n {
+                                                let i = (gj * n + gi) as usize * 4;
+                                                tex[i] = (gi as f32 / (n - 1) as f32 * 255.0) as u8;
+                                                tex[i + 1] = (gj as f32 / (n - 1) as f32 * 255.0) as u8;
+                                                tex[i + 2] = 64;
+                                                tex[i + 3] = 255;
+                                            }
+                                        }
+                                    } else {
+                                        tex.copy_from_slice(&[255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255]);
+                                    }
+                                    std::ptr::copy_nonoverlapping(tex.as_ptr(), tex_data as *mut u8, tex_len);
                                     *(tex_sp as *mut u64) = tex_data;
                                     let _ = gcall(0x1062d7980, 1, tex_id_slot, 0,0,0,0); // glGenTextures
                                     let _ = gcall(0x1062d75e0, GL_TEXTURE0, 0,0,0,0,0);     // glActiveTexture
@@ -3158,7 +3196,7 @@ fn main() {
                                     let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2800, GL_NEAREST, 0,0,0); // MAG
                                     let mut steg = arm64jit::jit::CpuState::new();
                                     steg.tpidr = tpidr; steg.x[31] = tex_sp;
-                                    steg.x[0]=GL_TEXTURE_2D; steg.x[1]=0; steg.x[2]=GL_RGBA; steg.x[3]=2; steg.x[4]=2; steg.x[5]=0; steg.x[6]=GL_RGBA; steg.x[7]=GL_UNSIGNED_BYTE;
+                                    steg.x[0]=GL_TEXTURE_2D; steg.x[1]=0; steg.x[2]=GL_RGBA; steg.x[3]=tex_w as u64; steg.x[4]=tex_h as u64; steg.x[5]=0; steg.x[6]=GL_RGBA; steg.x[7]=GL_UNSIGNED_BYTE;
                                     let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d79a0, &mut steg as *mut CpuState); // glTexImage2D
                                     let _ = tex_sp;
                                 }
@@ -3167,29 +3205,69 @@ fn main() {
                                 let ploc = gcall(0x1062d7900, prog, uni, 0,0,0,0).unwrap_or(0) & 0xffff_ffff;
                                 let _ = gcall(0x1062d7910, ploc, 0,0,0,0,0); // glUniform1i(uTex,0)
                                 eprintln!("[elfjit:renderframe-quad] program={prog:#x} compiled+linked; texture tex_id={tex_id:#x} uTex={ploc:#x}");
-                                // Interleaved quad: [pos.xyzw, uv.xy] per vertex, stride 24.
-                                let verts: [f32; 24] = [
-                                    -0.9,-0.9,0.0,1.0, 0.0,0.0, // v0 bottom-left uv(0,0)
-                                    0.9,-0.9,0.0,1.0, 1.0,0.0,  // v1 bottom-right uv(1,0)
-                                    0.9,0.9,0.0,1.0, 1.0,1.0,   // v2 top-right uv(1,1)
-                                    -0.9,0.9,0.0,1.0, 0.0,1.0,  // v3 top-left uv(0,1)
-                                ];
-                                let idx: [u32; 6] = [0,1,2, 0,2,3];
-                                let vbo_data = base + 0xc00;
-                                let ebo_data = base + 0xd40;
-                                std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, vbo_data as *mut u8, std::mem::size_of_val(&verts));
-                                std::ptr::copy_nonoverlapping(idx.as_ptr() as *const u8, ebo_data as *mut u8, std::mem::size_of_val(&idx));
-                                let vbo_slot = base + 0xf00;
-                                let ebo_slot = base + 0xf10;
-                                let _ = gcall(0x1062d77c0, 1, vbo_slot, 0,0,0,0); // glGenBuffers
-                                let vbo = *(vbo_slot as *const u32) as u64;
-                                let _ = gcall(0x1062d77b0, GL_ARRAY_BUFFER, vbo, 0,0,0,0);
-                                let _ = gcall(0x1062d77d0, GL_ARRAY_BUFFER, 96, vbo_data, GL_STATIC_DRAW, 0,0); // glBufferData
-                                let _ = gcall(0x1062d77c0, 1, ebo_slot, 0,0,0,0);
-                                let ebo = *(ebo_slot as *const u32) as u64;
-                                let _ = gcall(0x1062d77b0, GL_ELEMENT_ARRAY_BUFFER, ebo, 0,0,0,0);
-                                let _ = gcall(0x1062d77d0, GL_ELEMENT_ARRAY_BUFFER, 24, ebo_data, GL_STATIC_DRAW, 0,0);
-                                eprintln!("[elfjit:renderframe-quad] vbo={vbo:#x} ebo={ebo:#x} 4 interleaved verts stride24 + 6 idx uploaded");
+                                // Mesh construction: single quad (SH25-33) vs an NxN grid
+                                                                // (--renderframe-grid). The grid uses INDEPENDENT per-cell
+                                                                // quads (4 verts + 6 idx each), every vertex of a cell
+                                                                // sharing that cell's texel-center UV, so each cell renders
+                                                                // flat with its own distinct texel color -> a readback at any
+                                                                // cell center must read that texel. Grid = a REAL mesh:
+                                                                // (4*N*N) verts + (6*N*N) idx through the engine's own
+                                                                // primitive-setup + draw wrapper.
+                                                                let (n, nv, ni) = match grid_n {
+                                                                    Some(n) => {
+                                                                        let u = n as usize;
+                                                                        (u, 4 * u * u, 6 * u * u)
+                                                                    }
+                                                                    None => (1usize, 4, 6),
+                                                                };
+                                                                let mut verts: Vec<f32> = Vec::with_capacity(nv * 6);
+                                                                let mut idxs: Vec<u32> = Vec::with_capacity(ni);
+                                                                let cell = 1.8f32 / n as f32;
+                                                                if grid_n.is_some() {
+                                                                    // Grid mode: each cell's 4 verts share the texel-center UV
+                                                                    // so the whole cell renders flat with ITS distinct texel.
+                                                                    for gj in 0..n {
+                                                                        for gi in 0..n {
+                                                                            let x0 = -0.9f32 + gi as f32 * cell;
+                                                                            let y0 = -0.9f32 + gj as f32 * cell;
+                                                                            let (x1, y1) = (x0 + cell, y0 + cell);
+                                                                            let u = (gi as f32 + 0.5) / n as f32;
+                                                                            let v = (gj as f32 + 0.5) / n as f32;
+                                                                            let base = (gj * n + gi) as u32 * 4;
+                                                                            verts.extend_from_slice(&[x0,y0,0.0,1.0, u,v]); // 0 bl
+                                                                            verts.extend_from_slice(&[x1,y0,0.0,1.0, u,v]); // 1 br
+                                                                            verts.extend_from_slice(&[x1,y1,0.0,1.0, u,v]); // 2 tr
+                                                                            verts.extend_from_slice(&[x0,y1,0.0,1.0, u,v]); // 3 tl
+                                                                            idxs.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    // Single-quad mode (SH25-33): per-corner UVs map the 2x2
+                                                                    // checkerboard (RED/GREEN/BLUE/WHITE) to the 4 quadrants —
+                                                                    // keep the original corner UVs so the 4 readbacks stay distinct.
+                                                                    verts.extend_from_slice(&[-0.9,-0.9,0.0,1.0, 0.0,0.0]);
+                                                                    verts.extend_from_slice(&[0.9,-0.9,0.0,1.0, 1.0,0.0]);
+                                                                    verts.extend_from_slice(&[0.9,0.9,0.0,1.0, 1.0,1.0]);
+                                                                    verts.extend_from_slice(&[-0.9,0.9,0.0,1.0, 0.0,1.0]);
+                                                                    idxs.extend_from_slice(&[0,1,2, 0,2,3]);
+                                                                }
+                                                                let vbo_bytes = (nv * 6 * 4) as u64;
+                                                                let ebo_bytes = (ni * 4) as u64;
+                                let vbo_data = base + 0x2000;
+                                let ebo_data = base + 0x4000;
+                                                                std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, vbo_data as *mut u8, vbo_bytes as usize);
+                                                                std::ptr::copy_nonoverlapping(idxs.as_ptr() as *const u8, ebo_data as *mut u8, ebo_bytes as usize);
+                                                                let vbo_slot = base + 0xf00;
+                                                                let ebo_slot = base + 0xf10;
+                                                                let _ = gcall(0x1062d77c0, 1, vbo_slot, 0,0,0,0); // glGenBuffers
+                                                                let vbo = *(vbo_slot as *const u32) as u64;
+                                                                let _ = gcall(0x1062d77b0, GL_ARRAY_BUFFER, vbo, 0,0,0,0);
+                                                                let _ = gcall(0x1062d77d0, GL_ARRAY_BUFFER, vbo_bytes, vbo_data, GL_STATIC_DRAW, 0,0); // glBufferData
+                                                                let _ = gcall(0x1062d77c0, 1, ebo_slot, 0,0,0,0);
+                                                                let ebo = *(ebo_slot as *const u32) as u64;
+                                                                let _ = gcall(0x1062d77b0, GL_ELEMENT_ARRAY_BUFFER, ebo, 0,0,0,0);
+                                                                let _ = gcall(0x1062d77d0, GL_ELEMENT_ARRAY_BUFFER, ebo_bytes, ebo_data, GL_STATIC_DRAW, 0,0);
+                                                                eprintln!("[elfjit:renderframe-quad] vbo={vbo:#x} ebo={ebo:#x} {nv} interleaved verts stride24 + {ni} idx uploaded ({n}x{n} grid)");
                                 // Coherent renderer with TWO primitives -> TWO attribs.
                                 let renderer = base;
                                 let container = base + 0x100;
@@ -3210,33 +3288,55 @@ fn main() {
                                 // prim1: vb0 off16 fmt1(size2 float) attrib1 = aUV
                                 *(prim1 as *mut u32) = 0; *(prim1.wrapping_add(4) as *mut u32)=16; *(prim1.wrapping_add(8) as *mut u32)=1; *(prim1.wrapping_add(12) as *mut u32)=1; *(prim1.wrapping_add(16) as *mut u32)=0;
                                 *(renderer.wrapping_add(120) as *mut u64) = ibo;
-                                *(ibo.wrapping_add(72) as *mut u32) = ebo as u32;
-                                *(renderer.wrapping_add(142) as *mut u16) = 6;
-                                eprintln!("[elfjit:renderframe-quad] coherent renderer: 2-prim list (aPos+aUV) + 6-idx EBO fabricated");
-                                // Drive the engine's OWN geometry wrapper.
-                                let mut sw = arm64jit::jit::CpuState::new();
-                                sw.tpidr = tpidr; sw.x[31] = isp;
-                                sw.x[0] = renderer;
-                                sw.x[1] = 0; sw.x[2] = 0; sw.x[3] = 0;
-                                sw.x[4] = 6; // glDrawElements count
-                                sw.x[5] = 3; // nonzero -> indexed
-                                match arm64jit::jit::jit_run(iimg, ibase, 0x105b35288, &mut sw as *mut CpuState) {
-                                    Err(e) => eprintln!("[elfjit:renderframe-quad] geometry wrapper stopped: {e}"),
-                                    Ok(ok) => eprintln!("[elfjit:renderframe-quad] geometry wrapper 0x5b35288 returned Ok({ok:#x}) (textured QUAD drawn)"),
-                                }
-                                // Readback 4 on-quad points -> the 4 texel colors.
-                                let probes: [(u32,u32,&str,u64);4] = [
-                                    (320,180,"BL-red(0,0)",0xf40), (960,180,"BR-green(1,0)",0xf44),
-                                    (960,540,"TR-white(1,1)",0xf48), (320,540,"TL-blue(0,1)",0xf4c)];
-                                for (px,py,label,slot) in probes {
-                                    let mut pr = arm64jit::jit::CpuState::new();
-                                    pr.tpidr = tpidr; pr.x[31] = isp;
-                                    pr.x[0]=px as u64; pr.x[1]=py as u64; pr.x[2]=1; pr.x[3]=1; pr.x[4]=0x1908; pr.x[5]=0x1401; pr.x[6]=base+slot;
-                                    let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7940, &mut pr as *mut CpuState);
-                                }
-                                {
-                                    let p = |slot:u64| -> String { let b=base+slot; format!("RGBA({},{},{},{})",*(b as *const u8),*(b as *const u8).add(1),*(b as *const u8).add(2),*(b as *const u8).add(3)) };
-                                    eprintln!("[elfjit:renderframe-quad] readback: BL={} BR={} TR={} TL={}", p(0xf40), p(0xf44), p(0xf48), p(0xf4c));
+                                                                *(ibo.wrapping_add(72) as *mut u32) = ebo as u32;
+                                                                *(renderer.wrapping_add(142) as *mut u16) = ni as u16;
+                                                                eprintln!("[elfjit:renderframe-quad] coherent renderer: 2-prim list (aPos+aUV) + {ni}-idx EBO fabricated");
+                                                                // Drive the engine's OWN geometry wrapper.
+                                                                let mut sw = arm64jit::jit::CpuState::new();
+                                                                sw.tpidr = tpidr; sw.x[31] = isp;
+                                                                sw.x[0] = renderer;
+                                                                sw.x[1] = 0; sw.x[2] = 0; sw.x[3] = 0;
+                                                                sw.x[4] = ni as u64; // glDrawElements count
+                                                                sw.x[5] = 3; // nonzero -> indexed
+                                                                let shape = if grid_n.is_some() { format!("{n}x{n} MESH drawn") } else { "textured QUAD drawn".to_string() };
+                                                                match arm64jit::jit::jit_run(iimg, ibase, 0x105b35288, &mut sw as *mut CpuState) {
+                                                                    Err(e) => eprintln!("[elfjit:renderframe-quad] geometry wrapper stopped: {e}"),
+                                                                    Ok(ok) => eprintln!("[elfjit:renderframe-quad] geometry wrapper 0x5b35288 returned Ok({ok:#x}) ({shape})"),
+                                                                }
+                                // Readback: grid mode probes EVERY cell center (must read that cell's
+                                // distinct texel); single-quad mode keeps the 4 fixed
+                                // texel-corner probes (SH30).
+                                if let Some(gn) = grid_n {
+                                    for gj in 0..gn {
+                                        for gi in 0..gn {
+                                            let cndc_x = -0.9f32 + gi as f32 * cell + cell / 2.0;
+                                            let cndc_y = -0.9f32 + gj as f32 * cell + cell / 2.0;
+                                            let px = ((cndc_x + 1.0) * 640.0) as u32;
+                                            let py = ((cndc_y + 1.0) * 360.0) as u32;
+                                            let slot = 0xf40 + (((gj * gn + gi) % 8) as u64) * 4;
+                                            let mut pr = arm64jit::jit::CpuState::new();
+                                            pr.tpidr = tpidr; pr.x[31] = isp;
+                                            pr.x[0]=px as u64; pr.x[1]=py as u64; pr.x[2]=1; pr.x[3]=1; pr.x[4]=0x1908; pr.x[5]=0x1401; pr.x[6]=base+slot;
+                                            let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7940, &mut pr as *mut CpuState);
+                                            let b = base + slot;
+                                            let c = format!("RGBA({},{},{},{})", *(b as *const u8), *(b as *const u8).add(1), *(b as *const u8).add(2), *(b as *const u8).add(3));
+                                            eprintln!("[elfjit:renderframe-quad] cell({gi},{gj})@({px},{py}) readback={c} (expect r={:.0} g={:.0})", gi as f32/(gn-1) as f32*255.0, gj as f32/(gn-1) as f32*255.0);
+                                        }
+                                    }
+                                } else {
+                                    let probes: [(u32,u32,&str,u64);4] = [
+                                        (320,180,"BL-red(0,0)",0xf40), (960,180,"BR-green(1,0)",0xf44),
+                                        (960,540,"TR-white(1,1)",0xf48), (320,540,"TL-blue(0,1)",0xf4c)];
+                                    for (px,py,label,slot) in probes {
+                                        let mut pr = arm64jit::jit::CpuState::new();
+                                        pr.tpidr = tpidr; pr.x[31] = isp;
+                                        pr.x[0]=px as u64; pr.x[1]=py as u64; pr.x[2]=1; pr.x[3]=1; pr.x[4]=0x1908; pr.x[5]=0x1401; pr.x[6]=base+slot;
+                                        let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7940, &mut pr as *mut CpuState);
+                                    }
+                                    {
+                                        let p = |slot:u64| -> String { let b=base+slot; format!("RGBA({},{},{},{})",*(b as *const u8),*(b as *const u8).add(1),*(b as *const u8).add(2),*(b as *const u8).add(3)) };
+                                        eprintln!("[elfjit:renderframe-quad] readback: BL={} BR={} TR={} TL={}", p(0xf40), p(0xf44), p(0xf48), p(0xf4c));
+                                    }
                                 }
                                 // Swap.
                                 let mut se = arm64jit::jit::CpuState::new();
@@ -3267,7 +3367,7 @@ fn main() {
                                         let mut swn = arm64jit::jit::CpuState::new();
                                         swn.tpidr = tpidr; swn.x[31] = isp;
                                         swn.x[0] = renderer; swn.x[1] = 0; swn.x[2] = 0; swn.x[3] = 0;
-                                        swn.x[4] = 6; swn.x[5] = 3;
+                                        swn.x[4] = ni as u64; swn.x[5] = 3;
                                         if let Err(e) = arm64jit::jit::jit_run(iimg, ibase, 0x105b35288, &mut swn as *mut CpuState) {
                                             eprintln!("[elfjit:renderframe-quad-loop] iter {iter} wrapper stopped: {e}");
                                             continue;
