@@ -50,17 +50,45 @@ timeout exit 124. The deque crossing no longer faults.
 ## Remaining (next lever)
 The node is POPPED and the drain no longer crashes, but the probe-handler
 dispatch (`[vt+40]` -> our `probe` host-thunk) has not yet been confirmed
-logging — the drain consumes the node and re-parks, so the type-4 handler call
-count is still 0 in these runs. Two ways forward:
+logging — the drain consumes the node one-shot and the deque head drains to
+empty (`0x1000000000000`), so a sustained type-4 dispatch loop isn't yet
+observed. Two ways forward:
 1. Confirm the probe actually executes (or route `[vt+40]` to a real engine
    render/tick handler) so the crossing reaches egl*/gl*.
-2. Investigate whether the drain's post-pop re-enqueue returns to the idle
-   sentinel (headcell drained to empty) vs a perpetual ours-node loop.
+2. Understand the drain's post-pop: it pops our node, re-enqueues (or not),
+   and parks — read whether the head draining to empty means it consumed the
+   node as a one-shot task and went idle, vs a perpetual re-enqueue loop.
 Baselines unchanged and re-verified: `--jni` clean exit 0; stable idle
-(StartApp main loop) exit 124; workspace green 468/0.
+(StartApp main loop) exit 124; workspace green 469/0.
+
+## SH11b correction (same commit cycle): node+vtable MUST be guest-arena
+allocated (low48-safe) — host-heap allocations were structurally broken
+The crossing's residual faults (`pc 0x51`, garbage vt `[vt+16]=0x8b8b48...`)
+traced to TWO host-heap-abuse bugs in the injector, both fixed by allocating
+the node and probe vtable in the reserved guest RW tail:
+
+- **low48 packing**: the drain CAS-pops `low48(headcell)` = bits 47..0. A
+  host-heap node at `0x7f2a18000e00` truncates to `0x2a18000e00` on pop — a
+  DIFFERENT address — so the drain derefs garbage. Real engine nodes live in
+  the guest range `[0x100000000, 0x107...]` which is below 2^48.
+- **guest memory deref**: the drain reads `[node+112]` then `[vt+40]` as guest
+  memory. A host-heap probe vtable at `0x55a3...` (outside the mapped image) is
+  not readable by the JIT guest load, so `[vt+40]` reads garbage (0x8b8b48...)
+  instead of our registered host-thunk slot.
+
+New `guest_arena_set_base`/`guest_arena_alloc` (elfjit) allocate node + vtable
+from the reserved 384MB guest RW tail (`0x107334000`), so both the low48 packing
+is exact and the guest's `ldr [vt+40]` reads our registered probe slot from real
+mapped RW memory. The injected node now pops from the live idle drain at a guest
+address (`0x107334040`) with the process stable (exit 124). This is a real
+correctness fix (not just a harness nicety): any future render-task injector
+must allocate its node in the guest address space, never host heap.
 
 ## Files
 - crates/arm64jit/examples/elfjit.rs: deferred force-pop, head-node clone,
-  `[node+0]` zeroing, post-placement arm, `block_cache_drop_region` call.
+  `[node+0]` zeroing, post-placement arm + cache drop, guest_arena allocator
+  (node+vtable in the guest RW tail), probe dispatch logging.
 - crates/arm64jit/src/jit.rs: new `pub fn block_cache_drop_region(lo, hi)`.
-- Run-log: /home/hermes-worker/runs/deque-seq5.txt (exit 124, node popped).
+- Test: `block_cache_drop_region_compiles_fresh_after_eviction`.
+- Run-log: /home/hermes-worker/runs/deque-garena.txt (exit 124, node popped
+  at guest addr 0x107334040).
