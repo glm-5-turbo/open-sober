@@ -2013,44 +2013,88 @@ fn main() {
                         // --renderframe-loop <N>: repeat the engine's OWN recipe
                         // (bind already done by renderbind -> the real frame-fn
                         // 0x105b32c00 -> post-frame swap via real ctx) N times to
-                        // prove the render path is reentrant/sustainable — the
-                        // property the engine needs to drive frames from its own main
-                        // loop. Default 1.
+                        // prove the render path is reentrant/sustainable. Default 1.
+                        // --rendersustain <fps>: instead of a bounded loop, run the
+                        // engine's OWN recipe CONTINUOUSLY at ~fps on this detached
+                        // host thread while StartApp's main-loop jit_run idles
+                        // concurrently on the main thread — a live animated render
+                        // loop (the shape the engine needs to drive frames from its
+                        // own thread). Each frame cycles the clear color through a
+                        // small palette so a capture proves every frame is a fresh
+                        // render, not a static buffer.
                         let loop_n: usize = renderframe_args
                             .iter()
                             .position(|a| a == "--renderframe-loop")
                             .and_then(|i| renderframe_args.get(i + 1))
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(1);
-                        for iter in 0..loop_n {
-                            eprintln!("[elfjit:renderframe-drive] === frame iteration {iter} ===");
-                        let mut sd = arm64jit::jit::CpuState::new();
-                        sd.tpidr = tpidr;
-                        sd.x[31] = isp;
-                        sd.x[0] = renderer;
-                        sd.x[1] = view;
-                        sd.x[2] = view; // 3rd arg (w2, unused by main fn path)
-                        sd.x[4] = clearobj; // 5th arg -> x20 -> clear-state sub-fn x2
-                        sd.x[5] = ccobj; // 6th arg -> x22 -> color-source object
-                        match arm64jit::jit::jit_run(
-                            iimg, ibase, 0x105b32c00, &mut sd as *mut CpuState,
-                        ) {
-                            Err(e) => eprintln!("[elfjit:renderframe-drive] frame-fn stopped: {e}"),
-                            Ok(ok) => eprintln!(
-                                "[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok({ok:#x})"
-                            ),
-                        }
-                        // Then present whatever the frame-fn did on the real ctx.
-                        let mut se = arm64jit::jit::CpuState::new();
-                        se.tpidr = tpidr;
-                        se.x[31] = isp;
-                        se.x[0] = real_ctx;
-                        match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
-                            Err(e) => eprintln!("[elfjit:renderframe-drive] swap stopped: {e}"),
-                            Ok(ok) => eprintln!(
-                                "[elfjit:renderframe-drive] post-frame swap returned Ok({ok:#x})"
-                            ),
-                        }
+                        let sustain_fps: Option<f64> = renderframe_args
+                            .iter()
+                            .position(|a| a == "--rendersustain")
+                            .and_then(|i| renderframe_args.get(i + 1))
+                            .and_then(|v| v.parse().ok());
+                        let palette: [[f32; 4]; 5] = [
+                            [0.40, 0.20, 0.95, 1.0],
+                            [0.10, 0.70, 0.05, 1.0],
+                            [0.90, 0.15, 0.10, 1.0],
+                            [0.05, 0.60, 0.90, 1.0],
+                            [1.00, 0.82, 0.05, 1.0],
+                        ];
+                        let mut iter: u64 = 0;
+                        loop {
+                            // Per-frame color: sustain mode cycles the palette (so a
+                            // capture proves fresh renders); bounded --renderframe-loop
+                            // keeps the --renderframe-color (or default).
+                            let cur_color = match sustain_fps {
+                                Some(_) => palette[(iter as usize) % palette.len()],
+                                None => cc,
+                            };
+                            // Re-write both clear-color sources each iteration.
+                            unsafe {
+                                for (k, v) in cur_color.iter().enumerate() {
+                                    *(clearobj.wrapping_add(4 + (k as u64) * 4) as *mut f32) = *v;
+                                    *(ccobj.wrapping_add((k as u64) * 4) as *mut f32) = *v;
+                                }
+                            }
+                            eprintln!(
+                                "[elfjit:renderframe-drive] === frame iteration {iter} color {:?} ===",
+                                cur_color
+                            );
+                            let mut sd = arm64jit::jit::CpuState::new();
+                            sd.tpidr = tpidr;
+                            sd.x[31] = isp;
+                            sd.x[0] = renderer;
+                            sd.x[1] = view;
+                            sd.x[2] = view; // 3rd arg (w2, unused by main fn path)
+                            sd.x[4] = clearobj; // 5th arg -> x20 -> clear-state sub-fn x2
+                            sd.x[5] = ccobj; // 6th arg -> x22 -> color-source object
+                            match arm64jit::jit::jit_run(
+                                iimg, ibase, 0x105b32c00, &mut sd as *mut CpuState,
+                            ) {
+                                Err(e) => eprintln!("[elfjit:renderframe-drive] frame-fn stopped: {e}"),
+                                Ok(ok) => eprintln!(
+                                    "[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok({ok:#x})"
+                                ),
+                            }
+                            // Then present whatever the frame-fn did on the real ctx.
+                            let mut se = arm64jit::jit::CpuState::new();
+                            se.tpidr = tpidr;
+                            se.x[31] = isp;
+                            se.x[0] = real_ctx;
+                            match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
+                                Err(e) => eprintln!("[elfjit:renderframe-drive] swap stopped: {e}"),
+                                Ok(ok) => eprintln!(
+                                    "[elfjit:renderframe-drive] post-frame swap returned Ok({ok:#x})"
+                                ),
+                            }
+                            iter += 1;
+                            if let Some(fps) = sustain_fps {
+                                if fps > 0.0 {
+                                    std::thread::sleep(std::time::Duration::from_secs_f64(1.0 / fps));
+                                }
+                            } else if (iter as usize) >= loop_n {
+                                break;
+                            }
                         }
                     }
                 }
