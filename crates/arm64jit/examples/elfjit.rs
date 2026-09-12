@@ -2178,6 +2178,463 @@ fn main() {
                                     "[elfjit:renderframe-drawprobe] geometry wrapper 0x5b35288 returned Ok({ok:#x})"
                                 ),
                             }
+                            // --renderframe-triangle: fabricate a COHERENT renderer — a
+                            // real 1-primitive list, a real vertex-descriptor table, a
+                            // real stride table, a real IBO, real vertex/index buffers
+                            // (created + uploaded through the JIT bridge) and a real
+                            // compiled+linked shader program — then drive the engine's
+                            // own geometry wrapper 0x5b35288. Its primitive-setup
+                            // 0x5b353d0 runs its REAL loop (bind ARRAY_BUFFER, enable
+                            // attrib 0, glVertexAttribPointer at the format table) and
+                            // the wrapper then dispatches a REAL indexed glDrawElements
+                            // through GLES dispatch-table slot 9 with count=3, drawing
+                            // an actual visible triangle (proving real geometry, not
+                            // just the clear path, renders through the bridge).
+                            if renderframe_args.iter().any(|a| a == "--renderframe-triangle") {
+                                // GL enums used below.
+                                const GL_ARRAY_BUFFER: u64 = 0x8892;
+                                const GL_ELEMENT_ARRAY_BUFFER: u64 = 0x8893;
+                                const GL_STATIC_DRAW: u64 = 0x88e4;
+                                const GL_FLOAT: u64 = 0x1406;
+                                const GL_VERTEX_SHADER: u64 = 0x8b31;
+                                const GL_FRAGMENT_SHADER: u64 = 0x8b30;
+                                const GL_COMPILE_STATUS: u64 = 0x8b81;
+                                const GL_COLOR_BUFFER_BIT: u64 = 0x4000;
+                                // GLES PLT stubs (verified against the real binary).
+                                let plt_clear = 0x1062d7740u64;
+                                let plt_clearcolor = 0x1062d7710u64;
+                                let plt_viewport = 0x1062d75c0u64;
+                                let plt_scissor = 0x1062d75d0u64;
+                                let plt_genbuffers = 0x1062d77c0u64;
+                                let plt_bindbuffer = 0x1062d77b0u64;
+                                let plt_buffdata = 0x1062d77d0u64;
+                                let plt_createshader = 0x1062d7880u64;
+                                let plt_shadersource = 0x1062d7890u64;
+                                let plt_compileshader = 0x1062d78a0u64;
+                                let plt_getshaderiv = 0x1062d78b0u64;
+                                    let plt_getprogramiv = 0x1062d77f0u64;
+                                    let plt_readpixels = 0x1062d7940u64;
+                                    let plt_attachshader = 0x1062d78d0u64;
+                                let plt_linkprogram = 0x1062d78e0u64;
+                                let plt_bindattrib = 0x1062d78f0u64;
+                                let plt_useprogram = 0x1062d75a0u64;
+                                let plt_enableattrib = 0x1062d7850u64;
+                                let plt_attribptr = 0x1062d7860u64;
+                                let plt_dewelem = 0x1062d7830u64; // glDrawElements@plt (direct, not slot9)
+                                // Helper: drive a single guest PLT stub via jit_run and
+                                // return its x0 (the int-bridge HostCall returns via x0).
+                                let mut gcall = |addr: u64,
+                                                 a0: u64,
+                                                 a1: u64,
+                                                 a2: u64,
+                                                 a3: u64,
+                                                 a4: u64,
+                                                 a5: u64|
+                                                 -> Result<u64, String> {
+                                    let mut s = arm64jit::jit::CpuState::new();
+                                    s.tpidr = tpidr;
+                                    s.x[31] = isp;
+                                    s.x[0] = a0;
+                                    s.x[1] = a1;
+                                    s.x[2] = a2;
+                                    s.x[3] = a3;
+                                    s.x[4] = a4;
+                                    s.x[5] = a5;
+                                    let r = arm64jit::jit::jit_run(iimg, ibase, addr, &mut s as *mut CpuState)?;
+                                    Ok(s.x[0])
+                                };
+                                let objs = Box::leak(vec![0u8; 16384].into_boxed_slice());
+                                let base = objs.as_ptr() as u64;
+                                unsafe {
+                                    // Clear the framebuffer first so the triangle is
+                                    // visible against a known background. glClearColor is
+                                    // a FLOAT-ABI bridge (reads guest s0..s3 = v[0],v[2],
+                                    // v[4],v[6] low lanes), so set the SIMD lanes not x-regs.
+                                    let mut sc = arm64jit::jit::CpuState::new();
+                                    sc.tpidr = tpidr;
+                                    sc.x[31] = isp;
+                                    sc.v[0] = (0.0f32).to_bits() as u64;
+                                    sc.v[2] = (0.0f32).to_bits() as u64;
+                                    sc.v[4] = (0.3f32).to_bits() as u64;
+                                    sc.v[6] = (1.0f32).to_bits() as u64;
+                                    let _ = arm64jit::jit::jit_run(
+                                        iimg,
+                                        ibase,
+                                        plt_clearcolor,
+                                        &mut sc as *mut CpuState,
+                                    );
+                                    let _ = gcall(plt_clear, GL_COLOR_BUFFER_BIT, 0, 0, 0, 0, 0);
+                                    // Set the viewport + scissor to the window size so
+                                    // the rasterizer has a drawable region. The SH22
+                                    // frame-fn sets these; a 0-size stale viewport from
+                                    // context creation silently rasterizes nothing.
+                                    let _ = gcall(plt_viewport, 0, 0, 1280, 720, 0, 0);
+                                    let _ = gcall(plt_scissor, 0, 0, 1280, 720, 0, 0);
+                                    // Vertex shader: pass clip-space position straight
+                                    // through (data is already in NDC).
+                                    let vs_src = b"attribute vec4 aPos;\nvoid main(){ gl_Position = aPos; }\n\0";
+                                    // Fragment shader: solid red.
+                                    let fs_src = b"void main(){ gl_FragColor = vec4(1.0,0.0,0.0,1.0); }\n\0";
+                                    let vs_ptr = objs.as_ptr() as u64 + 0x400;
+                                    let fs_ptr = objs.as_ptr() as u64 + 0x800;
+                                    std::ptr::copy_nonoverlapping(
+                                        vs_src.as_ptr(),
+                                        vs_ptr as *mut u8,
+                                        vs_src.len(),
+                                    );
+                                    std::ptr::copy_nonoverlapping(
+                                        fs_src.as_ptr(),
+                                        fs_ptr as *mut u8,
+                                        fs_src.len(),
+                                    );
+                                    // src[] arrays: 1 string pointer each, NULL lengths.
+                                    let vs_ary = objs.as_ptr() as u64 + 0xa00;
+                                    let fs_ary = objs.as_ptr() as u64 + 0xa10;
+                                    *(vs_ary as *mut u64) = vs_ptr;
+                                    *(fs_ary as *mut u64) = fs_ptr;
+                                    // Triangle vertices (NDC, 3 x vec4). Fill most of the frame so the
+                                    // rendered footprint is easy to measure for scaling.
+                                    let verts: [f32; 12] = [
+                                        -0.95, -0.95, 0.0, 1.0, // v0
+                                        0.95, -0.95, 0.0, 1.0, // v1
+                                        0.0, 0.95, 0.0, 1.0, // v2
+                                    ];
+                                    let vbo_data = objs.as_ptr() as u64 + 0xc00;
+                                    // Indices: 3 (u32).
+                                    let idx: [u32; 3] = [0, 1, 2];
+                                    let ebo_data = objs.as_ptr() as u64 + 0xd00;
+                                    std::ptr::copy_nonoverlapping(
+                                        verts.as_ptr() as *const u8,
+                                        vbo_data as *mut u8,
+                                        std::mem::size_of_val(&verts),
+                                    );
+                                    std::ptr::copy_nonoverlapping(
+                                        idx.as_ptr() as *const u8,
+                                        ebo_data as *mut u8,
+                                        std::mem::size_of_val(&idx),
+                                    );
+                                    let shader_id_slot = objs.as_ptr() as u64 + 0xe00;
+                                    let _ = shader_id_slot;
+                                    // Compile vertex shader (glCreateShader returns id in x0).
+                                    let vs_shader = gcall(plt_createshader, GL_VERTEX_SHADER, 0, 0, 0, 0, 0)
+                                        .unwrap_or(0)
+                                        & 0xffff_ffff;
+                                    let _ = gcall(plt_shadersource, vs_shader, 1, vs_ary, 0, 0, 0);
+                                    let _ = gcall(plt_compileshader, vs_shader, 0, 0, 0, 0, 0);
+                                    // Compile fragment shader.
+                                    let fs_shader = gcall(plt_createshader, GL_FRAGMENT_SHADER, 0, 0, 0, 0, 0)
+                                        .unwrap_or(0)
+                                        & 0xffff_ffff;
+                                    let _ = gcall(plt_shadersource, fs_shader, 1, fs_ary, 0, 0, 0);
+                                    let _ = gcall(plt_compileshader, fs_shader, 0, 0, 0, 0, 0);
+                                    eprintln!(
+                                        "[elfjit:renderframe-triangle] compiled vs={vs_shader:#x} fs={fs_shader:#x}"
+                                    );
+                                    // Create + link program (id returned in x0).
+                                    let program = gcall(0x1062d78c0, 0, 0, 0, 0, 0, 0) // glCreateProgram@plt
+                                        .unwrap_or(0)
+                                        & 0xffff_ffff;
+                                    let _ = gcall(plt_attachshader, program, vs_shader, 0, 0, 0, 0);
+                                    let _ = gcall(plt_attachshader, program, fs_shader, 0, 0, 0, 0);
+                                    // Bind attrib location 0 = aPos BEFORE link.
+                                    let loc_name = objs.as_ptr() as u64 + 0xd20;
+                                    std::ptr::copy_nonoverlapping(
+                                        b"aPos\0".as_ptr(),
+                                        loc_name as *mut u8,
+                                        5,
+                                    );
+                                    let _ = gcall(plt_bindattrib, program, 0, loc_name, 0, 0, 0);
+                                    let _ = gcall(plt_linkprogram, program, 0, 0, 0, 0, 0);
+                                    let _ = gcall(plt_useprogram, program, 0, 0, 0, 0, 0);
+                                    eprintln!(
+                                        "[elfjit:renderframe-triangle] linked program={program:#x} current"
+                                    );
+                                    // Diagnostics: real compile/link status. Reading a
+                                    // GL int from a shifted-out 32-bit slot requires a
+                                    // predictable result location — use glGetShaderiv/
+                                    // glGetProgramiv writing a real int result slot.
+                                    let int_slot0 = objs.as_ptr() as u64 + 0xf20; // vs compile
+                                    let int_slot1 = objs.as_ptr() as u64 + 0xf24; // fs compile
+                                    let int_slot2 = objs.as_ptr() as u64 + 0xf28; // link
+                                    *(int_slot0 as *mut u32) = 0xdeadbeef;
+                                    *(int_slot1 as *mut u32) = 0xdeadbeef;
+                                    *(int_slot2 as *mut u32) = 0xdeadbeef;
+                                    let _ = gcall(
+                                        plt_getshaderiv,
+                                        vs_shader,
+                                        0x8b81, // GL_COMPILE_STATUS
+                                        int_slot0,
+                                        0,
+                                        0,
+                                        0,
+                                    );
+                                    let _ = gcall(
+                                        plt_getshaderiv,
+                                        fs_shader,
+                                        0x8b81,
+                                        int_slot1,
+                                        0,
+                                        0,
+                                        0,
+                                    );
+                                    let _ = gcall(
+                                        plt_getprogramiv,
+                                        program,
+                                        0x8b82, // GL_LINK_STATUS
+                                        int_slot2,
+                                        0,
+                                        0,
+                                        0,
+                                    );
+                                    unsafe {
+                                        eprintln!(
+                                            "[elfjit:renderframe-triangle] compile_status vs=0x{:x} fs=0x{:x} link_status=0x{:x}",
+                                            *(int_slot0 as *const u32),
+                                            *(int_slot1 as *const u32),
+                                            *(int_slot2 as *const u32)
+                                        );
+                                    }
+                                    // Create + fill the VBO (ARRAY_BUFFER) with verts.
+                                    // glGenBuffers writes the generated id to its out
+                                    // pointer — use a DEDICATED slot, never the data
+                                    // buffer (aliasing would clobber the vertices).
+                                    let vbo_id_slot = objs.as_ptr() as u64 + 0xf00;
+                                    let ebo_id_slot = objs.as_ptr() as u64 + 0xf10;
+                                    let _ = gcall(plt_genbuffers, 1, vbo_id_slot, 0, 0, 0, 0);
+                                    let vbo = *(vbo_id_slot as *const u32) as u64;
+                                    let _ = gcall(plt_bindbuffer, GL_ARRAY_BUFFER, vbo, 0, 0, 0, 0);
+                                    let _ = gcall(
+                                        plt_buffdata,
+                                        GL_ARRAY_BUFFER,
+                                        std::mem::size_of_val(&verts) as u64,
+                                        vbo_data,
+                                        GL_STATIC_DRAW,
+                                        0,
+                                        0,
+                                    );
+                                    // Create + fill the EBO (ELEMENT_ARRAY_BUFFER) idx.
+                                    let _ = gcall(plt_genbuffers, 1, ebo_id_slot, 0, 0, 0, 0);
+                                    let ebo = *(ebo_id_slot as *const u32) as u64;
+                                    let _ = gcall(
+                                        plt_bindbuffer,
+                                        GL_ELEMENT_ARRAY_BUFFER,
+                                        ebo,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                    );
+                                    let _ = gcall(
+                                        plt_buffdata,
+                                        GL_ELEMENT_ARRAY_BUFFER,
+                                        std::mem::size_of_val(&idx) as u64,
+                                        ebo_data,
+                                        GL_STATIC_DRAW,
+                                        0,
+                                        0,
+                                    );
+                                    eprintln!(
+                                        "[elfjit:renderframe-triangle] vbo={vbo:#x} ebo={ebo:#x} uploaded"
+                                    );
+                                    // REFERENCE DRAW (debug): drive the draw directly
+                                    // (not through the engine wrapper) with my own
+                                    // glVertexAttribPointer, to isolate whether the
+                                    // shader+buffers can render a full triangle at all.
+                                    // With a VBO bound, the attrib pointer's 6th arg is a
+                                    // byte OFFSET (0 = start of the buffer), not a host
+                                    // pointer — a wrong value silently collapses geometry.
+                                    {
+                                        let _ = gcall(plt_bindbuffer, GL_ARRAY_BUFFER, vbo, 0, 0, 0, 0);
+                                        let _ = gcall(plt_attribptr, 0, 4, GL_FLOAT, 0, 16, 0);
+                                        let _ = gcall(plt_enableattrib, 0, 0, 0, 0, 0, 0);
+                                        let _ = gcall(
+                                            plt_bindbuffer,
+                                            GL_ELEMENT_ARRAY_BUFFER,
+                                            ebo,
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                        );
+                                        eprintln!(
+                                            "[elfjit:renderframe-triangle] reference draw: attrib0(4xfloat,stride16,off0) + EBO bound"
+                                        );
+                                        // glDrawElements signature: (mode, count, type,
+                                        // indices-offset) -> (x0,x1,x2,x3).
+                                        let mut sd = arm64jit::jit::CpuState::new();
+                                        sd.tpidr = tpidr;
+                                        sd.x[31] = isp;
+                                        sd.x[0] = 4; // GL_TRIANGLES
+                                        sd.x[1] = 3; // count
+                                        sd.x[2] = 0x1405; // GL_UNSIGNED_INT
+                                        sd.x[3] = 0; // indices offset in EBO
+                                        let _ = arm64jit::jit::jit_run(
+                                            iimg,
+                                            ibase,
+                                            plt_dewelem,
+                                            &mut sd as *mut CpuState,
+                                        );
+                                        eprintln!(
+                                            "[elfjit:renderframe-triangle] reference glDrawElements issued"
+                                        );
+                                    }
+                                    // ---- Fabricate the COHERENT renderer ----
+                                    // renderer[+56]=container ; [renderer+0x48]=the 16-byte
+                                    // vertex-descriptor table base (entry[vb] @ +vb*16).
+                                    // container[+72]=begin,[+80]=end primitive list;
+                                    // container[+96]=stride table base ([cb+96+vb*8]).
+                                    // descriptor obj: [desc+72]=ARRAY_BUFFER id.
+                                    // IBO: renderer[+120]=ibo obj; [ibo+72]=EBO id.
+                                    // renderer[+142](u16)=element count.
+                                    let renderer = base;
+                                    let container = base + 0x100;
+                                    let desc = base + 0x200; // vertex descriptor obj
+                                    let stride_tbl = base + 0x300; // u64 tbl [vb]
+                                    let prim = base + 0x400;
+                                    let ibo = base + 0x500;
+                                    let fmt_index: u32 = 5; // format[5]=size4 GL_FLOAT (table @0x100cecf8c)
+                                    // descriptor[+72] = vbo id (the ARRAY_BUFFER we created)
+                                    *(desc.wrapping_add(72) as *mut u32) = vbo as u32;
+                                    // stride table[vb=0] = 16 (tight vec4)
+                                    *(stride_tbl as *mut u64) = 16;
+                                    // container
+                                    *(renderer.wrapping_add(56) as *mut u64) = container;
+                                    *(container.wrapping_add(72) as *mut u64) = prim;
+                                    *(container.wrapping_add(80) as *mut u64) = prim + 0x18; // 1 prim (stride 0x18)
+                                    *(container.wrapping_add(96) as *mut u64) = stride_tbl;
+                                    // descriptor table is INLINE at renderer+0x48: entry[vb] @ +vb*16 is the
+                                    // descriptor pointer (5b3546c ldr x11,[sp,#16] with
+                                    // sp+16=renderer+0x48; 5b3547c ldr x10,[x11, w9<<4]).
+                                    // vb=0 -> the desc ptr lives at renderer+0x48.
+                                    *(renderer.wrapping_add(0x48) as *mut u64) = desc;
+                                    // primitive: [+0]=vb idx(w9=0), [+4]=offset(w21=0),
+                                    // [+8]=format idx(w28=fmt_index), [+12]=type(w22=0 ->
+                                    // attrib index 0), [+16]=base(0).
+                                    *(prim as *mut u32) = 0;
+                                    *(prim.wrapping_add(4) as *mut u32) = 0;
+                                    *(prim.wrapping_add(8) as *mut u32) = fmt_index;
+                                    *(prim.wrapping_add(12) as *mut u32) = 0;
+                                    *(prim.wrapping_add(16) as *mut u32) = 0;
+                                    // IBO: renderer[+120]=ibo ; [ibo+72]=EBO id
+                                    *(renderer.wrapping_add(120) as *mut u64) = ibo;
+                                    *(ibo.wrapping_add(72) as *mut u32) = ebo as u32;
+                                    // renderer[+142] u16 element count = 3
+                                    *(renderer.wrapping_add(142) as *mut u16) = 3;
+                                    eprintln!(
+                                        "[elfjit:renderframe-triangle] coherent renderer 0x{renderer:x}: container 0x{container:x} prim 0x{prim:x} desc 0x{desc:x} desc_tbl@renderer+0x48 stride 0x{stride_tbl:x} ibo 0x{ibo:x}"
+                                    );
+                                    // Drive the engine's OWN geometry wrapper.
+                                    let mut sw = arm64jit::jit::CpuState::new();
+                                    sw.tpidr = tpidr;
+                                    sw.x[31] = isp;
+                                    sw.x[0] = renderer;
+                                    sw.x[1] = 0; // w22: draw-mode table index (0=GL_TRIANGLES)
+                                    sw.x[2] = 0; // w23: stride multiplier
+                                    sw.x[3] = 0; // -> w1 for primitive-setup
+                                    sw.x[4] = 3; // w20 -> glDrawElements count (wrapper `mov w1,w20`)
+                                    sw.x[5] = 3; // w21: nonzero -> indexed path selection
+                                    match arm64jit::jit::jit_run(
+                                        iimg,
+                                        ibase,
+                                        0x105b35288,
+                                        &mut sw as *mut CpuState,
+                                    ) {
+                                        Err(e) => eprintln!(
+                                            "[elfjit:renderframe-triangle] geometry wrapper stopped: {e}"
+                                        ),
+                                        Ok(ok) => eprintln!(
+                                            "[elfjit:renderframe-triangle] geometry wrapper 0x5b35288 returned Ok({ok:#x}) (real indexed glDrawElements drawn)"
+                                        ),
+                                    }
+                                    // glReadPixels readback: verify the triangle
+                                    // actually drew. Center (0,0 NDC -> ~639,360) should
+                                    // be RED; top-left corner should be background.
+                                    // glReadPixels verification: 3 probes — triangle centroid interior, left
+                                    // background, right background. Proves real drawn
+                                    // geometry landed at the expected sub-frame spots.
+                                    {
+                                        let mut sp = arm64jit::jit::CpuState::new();
+                                        sp.tpidr = tpidr;
+                                        sp.x[31] = isp;
+                                        sp.x[0] = 640;
+                                        sp.x[1] = 360;
+                                        sp.x[2] = 1;
+                                        sp.x[3] = 1;
+                                        sp.x[4] = 0x1908; // GL_RGBA
+                                        sp.x[5] = 0x1401; // GL_UNSIGNED_BYTE
+                                        sp.x[6] = objs.as_ptr() as u64 + 0xf40;
+                                        let _ = arm64jit::jit::jit_run(
+                                            iimg,
+                                            ibase,
+                                            plt_readpixels,
+                                            &mut sp as *mut CpuState,
+                                        );
+                                        let _ = sp;
+                                    }
+                                    let mut pb = arm64jit::jit::CpuState::new();
+                                    pb.tpidr = tpidr;
+                                    pb.x[31] = isp;
+                                    pb.x[0] = 1200;
+                                    pb.x[1] = 20;
+                                    pb.x[2] = 1;
+                                    pb.x[3] = 1;
+                                    pb.x[4] = 0x1908;
+                                    pb.x[5] = 0x1401;
+                                    pb.x[6] = objs.as_ptr() as u64 + 0xf44;
+                                    let _ = arm64jit::jit::jit_run(
+                                        iimg,
+                                        ibase,
+                                        plt_readpixels,
+                                        &mut pb as *mut CpuState,
+                                    );
+                                    let pc2 = objs.as_ptr() as u64 + 0xf48;
+                                    let mut pc3 = arm64jit::jit::CpuState::new();
+                                    pc3.tpidr = tpidr;
+                                    pc3.x[31] = isp;
+                                    pc3.x[0] = 60;
+                                    pc3.x[1] = 20;
+                                    pc3.x[2] = 1;
+                                    pc3.x[3] = 1;
+                                    pc3.x[4] = 0x1908;
+                                    pc3.x[5] = 0x1401;
+                                    pc3.x[6] = pc2;
+                                    let _ = arm64jit::jit::jit_run(
+                                        iimg,
+                                        ibase,
+                                        plt_readpixels,
+                                        &mut pc3 as *mut CpuState,
+                                    );
+                                    unsafe {
+                                        let c = |p: u64| -> String {
+                                            format!(
+                                                "RGBA({},{},{},{})",
+                                                *(p as *const u8),
+                                                *(p as *const u8).add(1),
+                                                *(p as *const u8).add(2),
+                                                *(p as *const u8).add(3)
+                                            )
+                                        };
+                                        eprintln!(
+                                            "[elfjit:renderframe-triangle] readback: centroid(640,360)={} top-left-bg(60,20)={} top-right-bg(1200,20)={}",
+                                            c(objs.as_ptr() as u64 + 0xf40),
+                                            c(pc2),
+                                            c(pb.x[6])
+                                        );
+                                    }
+                                }
+                                // Present the drawn frame.
+                                let mut se = arm64jit::jit::CpuState::new();
+                                se.tpidr = tpidr;
+                                se.x[31] = isp;
+                                se.x[0] = real_ctx;
+                                match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
+                                    Err(e) => eprintln!("[elfjit:renderframe-triangle] swap stopped: {e}"),
+                                    Ok(ok) => eprintln!(
+                                        "[elfjit:renderframe-triangle] post-draw swap returned Ok({ok:#x})"
+                                    ),
+                                }
+                            }
+
                             let mut se = arm64jit::jit::CpuState::new();
                             se.tpidr = tpidr;
                             se.x[31] = isp;
