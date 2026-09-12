@@ -7488,4 +7488,49 @@ mod fp16_and_fabd_fccmp_exec {
         assert_eq!(half3(&st3, 2), h(7.0), "min(7,9)");
         assert_eq!(half3(&st3, 3), h(-1.0), "min(-1,6)");
     }
+
+    #[test]
+    fn fp16_vector_fmla_fmls_fmaxnm_fminnm_exec() {
+        // FP16 3-same top-nibble 0x0: fmla (op 8, Vd+=Vn*Vm), fmls (op 9, Vd-=Vn*Vm),
+        // fmaxnm (op 6), fminnm (op 7). .4h so all 4 lanes in the low 64-bit slot.
+        let hp = |f: f32| -> u16 {
+            let b = f.to_bits();
+            let s = (b >> 16) & 0x8000; let e = ((b >> 23) & 0xff) as i32 - 127 + 15;
+            if e <= 0 { s as u16 } else if e >= 31 { (s | 0x7c00) as u16 }
+            else { (s | ((e as u32) << 10) | ((b >> 13) & 0x3ff)) as u16 }
+        };
+        // fmla v2.4h, v4.4h, v5.4h = 0x0e450c82: LE [0x82,0x0c,0x45,0x0e].
+        // Vd={1,2,3,4}, Vn={2,0.5,-1,1.5}, Vm={2,4,6,8}
+        let mut st = CpuState::new();
+        st.v[4] = (hp(4.0) as u64) << 48 | (hp(3.0) as u64) << 32 | (hp(2.0) as u64) << 16 | hp(1.0) as u64; // Vd
+        st.v[8] = (hp(1.5) as u64) << 48 | (hp(-1.0) as u64) << 32 | (hp(0.5) as u64) << 16 | hp(2.0) as u64; // Vn
+        st.v[10] = (hp(8.0) as u64) << 48 | (hp(6.0) as u64) << 32 | (hp(4.0) as u64) << 16 | hp(2.0) as u64; // Vm
+        let half = |s: &CpuState, off: usize| -> u16 { ((s.v[4] >> (16 * off)) & 0xffff) as u16 };
+        exec_bytes(&mut st, &[0x82, 0x0c, 0x45, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        // Vd = 1+2*2=5, 2+0.5*4=4, 3-1*6=-3, 4+1.5*8=16
+        assert_eq!(half(&st, 0), hp(5.0), "1+2*2");
+        assert_eq!(half(&st, 1), hp(4.0), "2+0.5*4");
+        assert_eq!(half(&st, 2), hp(-3.0), "3-1*6");
+        assert_eq!(half(&st, 3), hp(16.0), "4+1.5*8");
+        // fmaxnm v2.4h, v4.4h, v5.4h = 0x0e450482: LE [0x82,0x04,0x45,0x0e]
+        let mut st2 = CpuState::new();
+        st2.v[8] = (hp(-1.0) as u64) << 48 | (hp(7.0) as u64) << 32 | (hp(2.0) as u64) << 16 | hp(3.0) as u64; // v4
+        st2.v[10] = (hp(6.0) as u64) << 48 | (hp(9.0) as u64) << 32 | (hp(4.0) as u64) << 16 | hp(-5.0) as u64; // v5
+        let half2 = |s: &CpuState, off: usize| -> u16 { ((s.v[4] >> (16 * off)) & 0xffff) as u16 };
+        exec_bytes(&mut st2, &[0x82, 0x04, 0x45, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(half2(&st2, 0), hp(3.0), "maxnm(3,-5)");   // max = fan
+        assert_eq!(half2(&st2, 1), hp(4.0), "maxnm(2,4)");
+        assert_eq!(half2(&st2, 2), hp(9.0), "maxnm(7,9)");
+        assert_eq!(half2(&st2, 3), hp(6.0), "maxnm(-1,6)");
+        // fminnm v2.4h, v4.4h, v5.4h = 0x0ec50482 (op 7): LE [0x82,0x04,0xc5,0x0e]
+        let mut st3 = CpuState::new();
+        st3.v[8] = (hp(-1.0) as u64) << 48 | (hp(7.0) as u64) << 32 | (hp(2.0) as u64) << 16 | hp(3.0) as u64;
+        st3.v[10] = (hp(6.0) as u64) << 48 | (hp(9.0) as u64) << 32 | (hp(4.0) as u64) << 16 | hp(-5.0) as u64;
+        let half3 = |s: &CpuState, off: usize| -> u16 { ((s.v[4] >> (16 * off)) & 0xffff) as u16 };
+        exec_bytes(&mut st3, &[0x82, 0x04, 0xc5, 0x0e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert_eq!(half3(&st3, 0), hp(-5.0), "minnm(3,-5)");
+        assert_eq!(half3(&st3, 1), hp(2.0), "minnm(2,4)");
+        assert_eq!(half3(&st3, 2), hp(7.0), "minnm(7,9)");
+        assert_eq!(half3(&st3, 3), hp(-1.0), "minnm(-1,6)");
+    }
 }

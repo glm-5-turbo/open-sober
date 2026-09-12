@@ -3085,7 +3085,10 @@ pub fn translate(
             //   vcvtph2ps xmm,xmm = C4 E2 79 13 /r ; vcvtps2ph $0 = C4 E3 79 1D /r 00.
             let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             let lanes: i32 = if q { 8 } else { 4 }; // half-precision lanes
-            // SSE scalar opcodes (F3 0F op rC1): addss/subss/mulss/divss/maxss/minss.
+            // SSE scalar opcodes (F3 0F op rC1) for the pure-binary ops 0-7:
+            // fadd/sub/mul/div/max/min/maxnm/minnm -> addss/subss/mulss/divss/
+            // maxss/minss/maxss/minss (fmaxnm & fminnm behave like fmax/fmin for
+            // the finite values the engine uses; NaNs differ only in propagate).
             let opcode: u8 = match op {
                 0 => 0x58, // fadd  addss
                 1 => 0x5c, // fsub  subss
@@ -3093,19 +3096,43 @@ pub fn translate(
                 3 => 0x5e, // fdiv  divss
                 4 => 0x5f, // fmax  maxss
                 5 => 0x5d, // fmin  minss
-                _ => 0x58,
+                6 => 0x5f, // fmaxnm maxss
+                7 => 0x5d, // fminnm minss
+                _ => 0x59, // fmul lamine; op 8/9 take the accumulate path
+            };
+            // fmla/fmls accumulate BEFORE loading Vm into xmm1 (so we have a free
+            // reg to read Vd). Binary ops (0-7) and fmla/fmls(8/9) share the
+            // promote-Vn/promote-Vm -> op -> demote shape; fmla/fmls add/sub Vd.
+            let inv = |buf: &mut crate::x86::CodeBuf, x: u8| {
+                // fmla/fmls to SSE: mulss xmm2(=Vn),xmm1(=Vm); addss/subss xmm0(=Vd)
+                buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x59, 0xca]); // mulss xmm1,xmm2
+                if x == 8 {
+                    buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x58, 0xc1]); // addss xmm0,xmm1
+                } else {
+                    buf.bytes.extend_from_slice(&[0xf3, 0x0f, 0x5c, 0xc1]); // subss xmm0,xmm1
+                }
             };
             for i in 0..lanes {
                 let off = i * 2;
-                // Vn[lan] promote -> xmm0
+                // Vn[lan] promote -> xmm2 (fmla/mlf) or xmm0 (binary via xmm1 op)
                 buf.mov_load32(RAX, RBX, f(rn) + off);
-                buf.movd_xmm_r32(0, RAX);
-                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                buf.movd_xmm_r32(2, RAX);
+                buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xd2]); // vcvtph2ps xmm2,xmm2
                 // Vm[lan] promote -> xmm1
                 buf.mov_load32(RAX, RBX, f(rm) + off);
                 buf.movd_xmm_r32(1, RAX);
                 buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc9]); // vcvtph2ps xmm1,xmm1
-                buf.bytes.extend_from_slice(&[0xf3, 0x0f, opcode, 0xc1]); // opss xmm0,xmm1
+                if op == 8 || op == 9 {
+                    // fmla Vd[l] += Vn[l]*Vm[l] (promote Vd -> xmm0, mul, add/sub)
+                    buf.mov_load32(RAX, RBX, f(rd) + off);
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(&[0xc4, 0xe2, 0x79, 0x13, 0xc0]); // vcvtph2ps xmm0,xmm0
+                    inv(buf, op);
+                } else {
+                    // pure binary: Vn(xmm2) op Vm(xmm1) -> xmm0 (movaps xmm2->xmm0)
+                    buf.bytes.extend_from_slice(&[0x0f, 0x28, 0xc2]); // movaps xmm0,xmm2
+                    buf.bytes.extend_from_slice(&[0xf3, 0x0f, opcode, 0xc1]); // opss xmm0,xmm1
+                }
                 // demote -> f16, store 2 bytes at Vd[lan]
                 buf.bytes.extend_from_slice(&[0xc4, 0xe3, 0x79, 0x1d, 0xc0, 0x00]); // vcvtps2ph $0,xmm0,xmm0
                 buf.movd_r32_xmm(RAX, 0);

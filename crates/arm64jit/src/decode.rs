@@ -2158,11 +2158,19 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // is 0x1 (fadd/sub/mul) or 0x3 (fdiv/max/min). op bits: U=bit29 (fmul/fdiv),
     // bit23 (fsub/fmin), b1top (0x1 vs 0x3).
     let _fp16_3same = (insn & 0x9f60_f400) == 0x0e40_1400
-        || (insn & 0x9f60_f400) == 0x0e40_3400;
+        || (insn & 0x9f60_f400) == 0x0e40_3400
+        || (insn & 0x9f60_f400) == 0x0e40_0400;
     if _fp16_3same {
         let q = (insn >> 30) & 1 == 1; // 1 => .8h, 0 => .4h
         let top = (insn >> 12) & 0xf;
-        let op = if top == 3 {
+        let op = if top == 0 {
+            // fmla/fmls/fmaxnm/fminnm (byte1 top-nibble 0x0); bit11 = fmla/fmls,
+            // bit23 = fmls/fminnm (the sub/invert arm).
+            if insn & 0x800 != 0 {
+                if insn & 0x80_0000 != 0 { 9 } else { 8 } // fmls / fmla
+            } else if insn & 0x80_0000 != 0 { 7 }         // fminnm (bit23)
+            else { 6 }                                    // fmaxnm
+        } else if top == 3 {
             // fdiv / fmax / fmin group (byte1 top-nibble 0x3)
             if insn & 0x2000_0000 != 0 { 3 }        // fdiv (bit29)
             else if insn & 0x80_0000 != 0 { 5 }     // fmin (bit23)
@@ -7218,6 +7226,24 @@ mod fp16_scalar_and_gate_regressions {
         // f32 indexed-fma (byte0 0xf) must NOT be swallowed: 0x4fc11082 fmul v2.4s...
         assert!(!matches!(decode_op(0x4fc11082), Inst::SimdFp16As { .. }),
             "f32 indexed-fma must stay FmlaEl, got {:?}", decode_op(0x4fc11082));
+        // FP16 3-same top-nibble 0x0: fmla/fmls/fmaxnm/fminnm. Real Roblox:
+        // fmla v14.8h,v10,v13 = 0x4e4d0d4e; fmaxnm v3.8h = 0x4e410463;
+        // fminnm v3.8h = 0x4ec10463.
+        assert!(matches!(decode_op(0x4e4d0d4e),
+            Inst::SimdFp16As { rd: 14, rn: 10, rm: 13, op: 8, q: true }),
+            "got {:?}", decode_op(0x4e4d0d4e));
+        assert!(matches!(decode_op(0x4e4d0d4c),
+            Inst::SimdFp16As { rd: 12, rn: 10, rm: 13, op: 8, q: true }));
+        assert!(matches!(decode_op(0x4e410463),
+            Inst::SimdFp16As { rd: 3, rn: 3, rm: 1, op: 6, q: true }),
+            "got {:?}", decode_op(0x4e410463));
+        assert!(matches!(decode_op(0x4ec10463),
+            Inst::SimdFp16As { rd: 3, rn: 3, rm: 1, op: 7, q: true }),
+            "got {:?}", decode_op(0x4ec10463));
+        assert!(matches!(decode_op(0x0e420420),
+            Inst::SimdFp16As { rd: 0, rn: 1, rm: 2, op: 6, q: false })); // fmaxnm .4h
+        assert!(matches!(decode_op(0x4ec20c20),
+            Inst::SimdFp16As { rd: 0, rn: 1, rm: 2, op: 9, q: true })); // fmls .8h
     }
 
     #[test]
