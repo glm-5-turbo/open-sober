@@ -7557,4 +7557,37 @@ mod fp16_and_fabd_fccmp_exec {
         assert_eq!(half_at(2), 24, "30-6");
         assert_eq!(half_at(3), 33, "40-7");
     }
+
+    #[test]
+    fn frecpe_frsqrte_exec() {
+        // frecpe v0.4s, v1.4s = 0x4ea1d820: reciprocal estimates. 1/4 = 0.25 and
+        // 1/2 = 0.5 are exactly representable in the SSE rcpss approximation
+        // (powers of two, the x86 estimate is exact for them).
+        let mut st = CpuState::new();
+        st.v[2] = (4.0f32.to_bits() as u64) << 32 | 2.0f32.to_bits() as u64;
+        st.v[3] = (8.0f32.to_bits() as u64) << 32 | 16.0f32.to_bits() as u64;
+        // Both frecpe and x86 rcpss are ESTIMATES (within a few ULP), so assert
+        // near the true reciprocal, not exact.
+        let fb = |s: &CpuState, reg: usize, off: usize| -> u32 { (s.v[reg] >> (32 * off)) as u32 };
+        // v1.4s lane mapping: st.v[2] = lanes0-1 ({2,4}), st.v[3] = lanes2-3
+        // (low32=16.0 -> lane2, high32=8.0 -> lane3).
+        exec_bytes(&mut st, &[0x20, 0xd8, 0xa1, 0x4e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert!((f32::from_bits(fb(&st, 0, 0)) - 0.5).abs() < 0.001, "1/2");
+        assert!((f32::from_bits(fb(&st, 0, 1)) - 0.25).abs() < 0.001, "1/4");
+        assert!((f32::from_bits(fb(&st, 1, 0)) - 0.0625).abs() < 0.001, "1/16 (lane2)");
+        assert!((f32::from_bits(fb(&st, 1, 1)) - 0.125).abs() < 0.001, "1/8 (lane3)");
+        // frsqrte v0.4s, v1.4s = 0x6ea1d820: 1/sqrt. 1/sqrt(4)=0.5, 1/sqrt(16)=0.25
+        // are exact in the rsqrtss estimate for such squares.
+        let mut st2 = CpuState::new();
+        st2.v[2] = (4.0f32.to_bits() as u64) << 32 | 1.0f32.to_bits() as u64;
+        st2.v[3] = (16.0f32.to_bits() as u64) << 32 | 9.0f32.to_bits() as u64;
+        let fb2 = |s: &CpuState, reg: usize, off: usize| -> u32 { (s.v[reg] >> (32 * off)) as u32 };
+        // v1.4s lanes: st.v[2]={1.0,4.0}, st.v[3] lanes2-3 (low32=9.0->lane2, high32=16.0->lane3).
+        exec_bytes(&mut st2, &[0x20, 0xd8, 0xa1, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        assert!((f32::from_bits(fb2(&st2, 0, 0)) - 1.0).abs() < 0.001, "1/sqrt(1)");
+        assert!((f32::from_bits(fb2(&st2, 0, 1)) - 0.5).abs() < 0.001, "1/sqrt(4)");
+        // 1/sqrt(9)=1/3 ~0.333333 — x86 rsqrtss estimate within ~1.2 ULP.
+        assert!((f32::from_bits(fb2(&st2, 1, 0)) - (1.0f32 / 3.0)).abs() < 0.01, "1/sqrt(9)~1/3");
+        assert!((f32::from_bits(fb2(&st2, 1, 1)) - 0.25).abs() < 0.001, "1/sqrt(16)");
+    }
 }

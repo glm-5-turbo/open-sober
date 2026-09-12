@@ -3180,6 +3180,32 @@ pub fn translate(
             }
             Ok(())
         }
+        Inst::SimdFreFrsqrte { rd, rn, sqrt, esize, q } => {
+            // frecpe/frsqrte Vd.T, Vn.T: per-lane approximate reciprocal or
+            // 1/sqrt. esize 4 -> rcpss/rsqrtss on the promoted 32-bit; esize 8
+            // -> rcpsd/rsqrtsd on the 64-bit. Keep 32-bit for esize==4 (load
+            // f32, op, store f32); for esize 8 load/store f64.
+            let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
+            let lanes: i32 = if q { 16 / esize as i32 } else { 8 / esize as i32 };
+            let e = esize as i32;
+            // SSE: F3 0F 53 = rcpss (32-bit), F2 0F 53 /r = rcpsd (64-bit);
+            // F3 0F 52 = rsqrtss, F2 0F 52 = rsqrtsd.
+            for lane in 0..lanes {
+                let off = lane * e;
+                if e == 4 {
+                    buf.mov_load32(RAX, RBX, f(rn) + off);
+                    buf.movd_xmm_r32(0, RAX);
+                    buf.bytes.extend_from_slice(if sqrt { &[0xf3, 0x0f, 0x52, 0xc0] } else { &[0xf3, 0x0f, 0x53, 0xc0] });
+                    buf.movd_r32_xmm(RAX, 0);
+                    buf.mov_store32(RBX, f(rd) + off, RAX);
+                } else {
+                    buf.movq_load(0, RBX, f(rn) + off);
+                    buf.bytes.extend_from_slice(if sqrt { &[0xf2, 0x0f, 0x52, 0xc0] } else { &[0xf2, 0x0f, 0x53, 0xc0] });
+                    buf.movq_store(RBX, f(rd) + off, 0);
+                }
+            }
+            Ok(())
+        }
         Inst::SimdAbd { rd, rn, rm, signed: _signed, esize, q } => {
             // uabd/sabd Vd.T, Vn.T, Vm.T: per-lane |Vn - Vm|. Both uabd and sabd
             // compute the magnitude of the two's-complement (esize) difference,

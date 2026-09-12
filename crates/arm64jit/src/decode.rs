@@ -329,6 +329,8 @@ pub enum Inst {
     SimdVLog { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD abs diff: uabd/sabd ----
     SimdAbd { rd: u8, rn: u8, rm: u8, signed: bool, esize: u8, q: bool },
+    // ---- SIMD FP reciprocal/rsqrt estimate: frecpe/frsqrte Vd.T, Vn.T ----
+    SimdFreFrsqrte { rd: u8, rn: u8, sqrt: bool, esize: u8, q: bool },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
     SimdSel { rd: u8, rn: u8, rm: u8, op: u8 },
     // ---- SIMD bitwise NOT (two-input mvn alias, single-source): mvn Vd.16B/8B, Vn ----
@@ -2164,6 +2166,30 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             rn: ((insn >> 5) & 0x1f) as u8,
             rm: ((insn >> 16) & 0x1f) as u8,
             signed: (insn & 0x2000_0000) == 0,
+            esize,
+            q,
+        };
+    }
+
+    // ---- SIMD FP reciprocal/rsqrt estimate: frecpe/frsqrte Vd.T, Vn.T ----
+    // Per-lane approximate reciprocal (frecpe) or 1/sqrt (frsqrte), two-reg-misc.
+    // Gate: byte3 low-nibble 0x0e (0x..e prefix), byte1 == 0xd8 family (0xfc mask
+    // clears the rn-spill bits 1:0), byte2 bit23 SET (0x0080_0000; disjoint from
+    // the int->fp scvtf 0x4e21d800 / fmul/famax 0x..dc which have byte1 &0xfc
+    // == 0xdc AND/OR bit23 CLEAR) and bit20 CLEAR. sqrt = bit29 (frsqrte),
+    // q=bit30, esize=1<<bits[23:22]. Verified disjoint from scvtf/fmul/famax/
+    // fmax/fcvtzs/fcvtl/fabs and the real hits (0x4ea1d8xx, 0x6ea1d8xx).
+    if ((insn >> 24) & 0x0f) == 0x0e
+        && ((insn >> 8) & 0xff) & 0xfc == 0xd8
+        && (insn & 0x0080_0000) != 0
+        && (insn & 0x0010_0000) == 0
+    {
+        let q = (insn >> 30) & 1 == 1;
+        let esize = 1u8 << ((insn >> 22) & 3);
+        return Inst::SimdFreFrsqrte {
+            rd: (insn & 0x1f) as u8,
+            rn: ((insn >> 5) & 0x1f) as u8,
+            sqrt: (insn & 0x2000_0000) != 0,
             esize,
             q,
         };
@@ -7285,6 +7311,28 @@ mod fp16_scalar_and_gate_regressions {
         assert!(!matches!(decode_op(0x2e220c20), Inst::SimdAbd { .. }));
         assert!(!matches!(decode_op(0x0e220420), Inst::SimdAbd { .. }));
         assert!(!matches!(decode_op(0x4ea1d801), Inst::SimdAbd { .. }));
+        // FP reciprocal/rsqrt: frecpe v0.4s,v1.4s = 0x4ea1d820, frsqrte v0.4s
+        // = 0x6ea1d820; frecpe v0.2d = 0x4ee1d820. Real hits 0x4ea1d8xx.
+        assert!(matches!(decode_op(0x4ea1d820),
+            Inst::SimdFreFrsqrte { rd: 0, rn: 1, sqrt: false, esize: 4, q: true }),
+            "got {:?}", decode_op(0x4ea1d820));
+        assert!(matches!(decode_op(0x6ea1d820),
+            Inst::SimdFreFrsqrte { rd: 0, rn: 1, sqrt: true, esize: 4, q: true }));
+        assert!(matches!(decode_op(0x0ea1d820),
+            Inst::SimdFreFrsqrte { rd: 0, rn: 1, sqrt: false, esize: 4, q: false }));
+        assert!(matches!(decode_op(0x4ee1d820),
+            Inst::SimdFreFrsqrte { rd: 0, rn: 1, sqrt: false, esize: 8, q: true }),
+            "got {:?}", decode_op(0x4ee1d820));
+        assert!(matches!(decode_op(0x6ee1d820),
+            Inst::SimdFreFrsqrte { rd: 0, rn: 1, sqrt: true, esize: 8, q: true }));
+        // real frecpe v1.4s,v0.4s = 0x4ea1d801
+        assert!(matches!(decode_op(0x4ea1d801),
+            Inst::SimdFreFrsqrte { rd: 1, rn: 0, sqrt: false, esize: 4, q: true }));
+        // negatives: fabs/fmax/fcvtl/fcvtzs must NOT match.
+        assert!(!matches!(decode_op(0x4ea0f820), Inst::SimdFreFrsqrte { .. }));
+        assert!(!matches!(decode_op(0x4e22f420), Inst::SimdFreFrsqrte { .. }));
+        assert!(!matches!(decode_op(0x4e217801), Inst::SimdFreFrsqrte { .. }));
+        assert!(!matches!(decode_op(0x0ea1b820), Inst::SimdFreFrsqrte { .. }));
     }
 
     #[test]
