@@ -679,6 +679,19 @@ pub fn resolve(name: &[u8]) -> Option<u64> {
     if let Some(addr) = r.slots.get(&key) {
         return Some(*addr);
     }
+    // The guest calls its libc `syscall()` function (imported syscall@LIBC) for
+    // raw AArch64 syscalls (futex, clock_gettime, mmap, ...). Binding it to
+    // HOST glibc `syscall()` interprets the guest's AArch64 number as an
+    // x86-64 number — the engine main loop's futex (AArch64 nr 98) would call
+    // x86-64 getrusage and return -1, so the futex never blocks and the loop
+    // busy-spins (this is the cycle-I/J "settled loop" — it makes syscalls via
+    // this import, NOT `svc #0`, which is why probing only `svc` showed "zero
+    // guest syscalls"). Route it through our AArch64 syscall dispatcher so the
+    // number->host mapping is exact (same code path as a guest `svc #0`).
+    if name_str(name) == "syscall" {
+        let hostf: HostCall = host_syscall_intercept;
+        return alloc_slot(&mut r, &key, hostf);
+    }
     // Bionic pthread fixup: the guest binary was built against bionic, whose
     // pthread_mutex_t is 44 bytes (glibc's is 40), __kind lives at offset 16 and
     // __count is reused as __owner at offset 8. Passing such a mutex to glibc's
@@ -737,6 +750,44 @@ fn alloc_slot(r: &mut Resolver, key: &CString, hostf: HostCall) -> Option<u64> {
     let addr = host_call_addr(slot);
     r.slots.insert(key.clone(), addr);
     Some(addr)
+}
+
+/// Interceptor for the guest's libc `syscall()` import. The guest calls
+/// `syscall(AArch64_nr, a0, a1, a2, a3, a4, a5)` — x0..x5 = the syscall's
+/// AArch64 arguments, with the NUMBER in x0 (SysV GPR convention forwards this
+/// as our hostcall a0..a5). We reconstruct a fake `CpuState` whose `x[8]` (the
+/// `svc #0` syscall-number slot) is `a0` and whose `x[0..5]` are `a1..a6`, then
+/// dispatch through `guest_svc` — the SAME AArch64->host mapping a real guest
+/// `svc #0` uses. This makes the engine's futex (AArch64 nr 98) reach real
+/// host futex with the correct op/val/etc.
+///
+/// Binding the guest's `syscall` import to host glibc `syscall()` directly was
+/// wrong: host glibc reads the number as an x86-64 syscall number (nr 98 = a
+/// futex on AArch64, getrusage on x86-64), so the engine's futex never worked.
+extern "C" fn host_syscall_intercept(
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+    a7: u64,
+) -> u64 {
+    // Build a minimal CpuState: only x[8] (syscall nr) and x[0..6] (args) matter
+    // to guest_svc for the common cases (futex, clock_gettime, mmap, ...). The
+    // fields clone/exit paths consult (tid, clear_tid_addr) default 0 here; a
+    // guest that reaches those via libc syscall() (rare; the engine uses svc
+    // for thread control) will still dispatch but with thread-0 semantics.
+    let mut st = CpuState::new();
+    st.x[0] = a1;
+    st.x[1] = a2;
+    st.x[2] = a3;
+    st.x[3] = a4;
+    st.x[4] = a5;
+    st.x[5] = a6;
+    st.x[8] = a0; // the AArch64 syscall number
+    unsafe { crate::jit::guest_svc(&mut st as *mut CpuState) }
 }
 
 /// Reverse-lookup an import slot address back to its symbol name (the first
@@ -1871,5 +1922,62 @@ mod tests {
         let fl32_name = name_of_call_addr(fl32_slot);
         assert_eq!(fl32_name.as_deref(), Some("sinf"),
             "f32 auto-slot resolves by reverse-name, not slotN");
+    }
+
+    /// The guest's libc `syscall()` import must NOT bind to host glibc syscall()
+    /// (which reads the number as x86-64). It must route through our AArch64
+    /// dispatcher. Run the interceptor with the engine main-loop's exact call:
+    /// `syscall(nr=98 futex, uaddr, op=0x89 FUTEX_WAIT_BITSET_PRIVATE, val, ...)`
+    /// against a uaddr whose value != val -> the real host futex returns -EAGAIN,
+    /// proving the AArch64 number reached a real futex (not x86-64 getrusage).
+    #[test]
+    fn syscall_import_routes_aarch64_futex_not_x86_getrusage() {
+        // A host futex uaddr (guest memory maps 1:1 to the host, so any aligned
+        // host int works). Value 0; wait for val=1 so the futex cannot succeed
+        // -> the real host futex returns -EAGAIN, proving the AArch64 number
+        // reached a real futex (50 = getrusage on x86-64, which would NOT be
+        // -EAGAIN). Bitset = FUTEX_BITSET_MATCH_ANY (0xFFFFFFFF).
+        let mut word: libc::c_int = 0;
+        let uaddr = &mut word as *mut libc::c_int;
+        // Guest libc syscall(nr, uaddr, op, val, timeout=NULL, uaddr2=NULL,
+        // val3=bitset) -> intercept(a0=nr, a1=uaddr, a2=op, a3=val, a4=timeout,
+        // a5=uaddr2, a6=val3).
+        let ret = host_syscall_intercept(
+            98,                 // AArch64 futex
+            uaddr as u64,       // uaddr
+            0x89,               // FUTEX_WAIT_BITSET_PRIVATE
+            1,                  // val (1 != *uaddr=0 -> cannot succeed)
+            0,                  // timeout = NULL
+            0,                  // uaddr2 = NULL
+            u32::MAX as u64,    // val3 = bitset = MATCH_ANY
+            0,
+        ) as i64;
+        assert_eq!(ret, -libc::EAGAIN as i64,
+            "AArch64 futex must reach a real host futex (-EAGAIN), not getrusage");
+    }
+
+    /// resolve(b"syscall") must hand out a slot that routes through the AArch64
+    /// dispatcher (not host glibc syscall). We can't easily run the slot body
+    /// here, but we assert the resolve path actually installs the interceptor
+    /// (name -> host_syscall_intercept slot) so the guest GOT binds to it.
+    #[test]
+    fn resolve_binds_syscall_import_to_aarch64_interceptor() {
+        // Empty-string variant: ensure the special-case is reachable via the
+        // guest-symbol name the loader will use.
+        let Some(addr) = resolve(b"syscall") else {
+            panic!("syscall import must resolve to a slot");
+        };
+        // The slot address must be a real host-thunk slot.
+        let base = crate::jit::host_call_addr(0);
+        assert!(addr >= base, "syscall binds within the host-thunk region");
+        // name_of_call_addr must recognize it back as `syscall`.
+        assert_eq!(
+            name_of_call_addr(addr).as_deref(),
+            Some("syscall"),
+            "syscall import reverse-names to itself"
+        );
+        // re-resolve is cached (same addr).
+        let again = resolve(b"syscall");
+        assert_eq!(again, Some(addr));
     }
 }

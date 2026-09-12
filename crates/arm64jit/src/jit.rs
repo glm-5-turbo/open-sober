@@ -831,7 +831,11 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
             }
         }
         98 => unsafe {
-            // futex: only FUTEX_WAIT(0)/FUTEX_WAKE(1) forwarded to the host. Others return 0.
+            // futex: forward WAIT(0)/WAKE(1)/WAIT_BITSET(9) to the host; others
+            // return 0. The engine main loop's idle barrier is a libc
+            // `syscall(nr=futex, uaddr, op=0x89 FUTEX_WAIT_BITSET_PRIVATE,
+            // val, ...)` — must reach a REAL host futex (blocking on the
+            // matching value) or the guest busy-loops re-issuing it.
             let op = a[1] as i32;
             let fut = a[0] as *mut libc::c_int;
             let om = (op as u32) & 0x7f;
@@ -844,6 +848,17 @@ pub extern "C" fn guest_svc(st: *mut CpuState) -> u64 {
                     op,
                     a[2] as c_long,
                     a[3] as *const libc::timespec,
+                ) as c_long
+            } else if om == libc::FUTEX_WAIT_BITSET as u32 {
+                // futex(uaddr, op, val, timeout, uaddr2=NULL, val3=bitset).
+                libc::syscall(
+                    libc::SYS_futex,
+                    fut as usize,
+                    op,
+                    a[2] as c_long,
+                    a[3] as *const libc::timespec,
+                    0 as usize,
+                    a[5] as c_long, // val3 = the bitset
                 ) as c_long
             } else {
                 0
@@ -6397,6 +6412,38 @@ mod tests {
         let sfd = svc(&mut st);
         assert!(sfd >= 0, "signalfd4 returns a real fd, got {sfd}");
         unsafe { libc::close(sfd as i32); }
+    }
+
+    #[test]
+    fn guest_svc_futex_wait_bitset_forwards_to_real_host_futex() {
+        // The engine main loop's idle barrier is a libc `syscall(nr=98 futex,
+        // uaddr, op=0x89 FUTEX_WAIT_BITSET_PRIVATE, val, timeout, NULL, bitset)`
+        // — which arrives here via the `syscall` import interceptor as AArch64
+        // nr 98. It must forward FUTEX_WAIT_BITSET (op bitset-masked to 9) to a
+        // REAL host futex: a mismatched value returns -EAGAIN (not 0, which
+        // would busy-spin the loop, and not -ENOSYS).
+        let mut st = CpuState::new();
+        let mut word: libc::c_int = 0;
+        // Futex WAIT_BITSET with val=1, *uaddr=0 -> cannot succeed -> -EAGAIN.
+        st.x[8] = 98;                          // AArch64 futex
+        st.x[0] = (&mut word as *mut libc::c_int) as u64; // uaddr
+        st.x[1] = 0x89;                        // op = FUTEX_WAIT_BITSET_PRIVATE
+        st.x[2] = 1;                           // val (mismatch)
+        st.x[3] = 0;                           // timeout = NULL
+        st.x[4] = 0;                           // uaddr2 = NULL
+        st.x[5] = libc::c_int::MAX as u64;     // val3 = bitset
+        let r = guest_svc(&mut st as *mut CpuState) as i64;
+        assert_eq!(r, -libc::EAGAIN as i64,
+            "FUTEX_WAIT_BITSET must reach a real host futex (-EAGAIN), got {r}");
+
+        // FUTEX_WAKE (op 1) on a random futex is a no-op success (returns
+        // number woken = 0) — must not -ENOSYS either.
+        st.x[8] = 98;
+        st.x[0] = (&mut word as *mut libc::c_int) as u64;
+        st.x[1] = libc::FUTEX_WAKE as u64;
+        st.x[2] = 1;
+        let r = guest_svc(&mut st as *mut CpuState) as i64;
+        assert_eq!(r, 0, "FUTEX_WAKE returns 0 woken on an idle futex");
     }
 
     #[test]
