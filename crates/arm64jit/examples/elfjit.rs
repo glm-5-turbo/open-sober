@@ -1856,7 +1856,13 @@ fn main() {
                 // Same host thread, context already current (renderbind/renderinit).
                 if renderframe_args.iter().any(|a| a == "--renderframe-drive") {
                     // Guest-visible scratch for the objects (guest==host, low48).
-                    let objs = Box::leak(vec![0u8; 512].into_boxed_slice());
+                    // The engine writes deep into these (objA[+552/608],
+                    // renderer[+224/232/236/238], view[+124..140]) — MUST be large
+                    // enough that every fabricated struct (renderer/base, objA +0x100,
+                    // objB +0x200, view +0x300, plus engine writes past those) stays
+                    // inside the allocation, else the drive heap-corrupts at shutdown
+                    // ("free(): invalid next size").
+                    let objs = Box::leak(vec![0u8; 8192].into_boxed_slice());
                     let base = objs.as_ptr() as u64;
                     // view: +128=w(1280) +132=h(720) +140=default framebuffer(0)
                     unsafe {
@@ -1908,6 +1914,47 @@ fn main() {
                         eprintln!(
                             "[elfjit:renderframe-drive] gles-dispatch values = {vals:?}"
                         );
+                        // --renderframe-seedgles (opt-in): overwrite the 8 engine
+                        // GLES dispatch slots (BSS 0x106d3b2f0..0x106d3b328) with
+                        // OUR host-thunk GLES bridge slots (resolve_gles_mixed) so
+                        // the frame clear path's `br`-stubs dispatch through the
+                        // bridge (float/texture interception) instead of jumping to
+                        // raw Mesa (out-of-image). The engine's real GL-init fills
+                        // these with raw Mesa addresses (SH19); seeding proves the
+                        // bridge takes over. Names are per-slot guesses from the
+                        // clear-path usage; refine by reading which slot the engine
+                        // needs once the drive passes the current stop.
+                        let seed_names = [
+                            "glClearColor", "glClear", "glClearDepthf",
+                            "glClearStencil", "glColorMask", "glDepthMask",
+                            "glStencilMask", "glViewport",
+                        ];
+                        if renderframe_args.iter().any(|a| a == "--renderframe-seedgles") {
+                            for (i, name) in seed_names.iter().enumerate() {
+                                let slot_v = 0x106d3b2f0u64 + (i as u64) * 8;
+                                // Mixed (float) ABI first; fall back to int ABI for
+                                // glClear/glColorMask/glViewport etc.
+                                let slot = arm64jit::resolver::resolve_gles_mixed(
+                                    format!("{name}\0").as_bytes(),
+                                )
+                                .or_else(|| {
+                                    arm64jit::resolver::resolve_gles_int(
+                                        format!("{name}\0").as_bytes(),
+                                    )
+                                });
+                                match slot {
+                                    Some(bridge_slot) => {
+                                        unsafe { *(slot_v as *mut u64) = bridge_slot };
+                                        eprintln!(
+                                            "[elfjit:renderframe-seedgles] slot {i} ({name}) <- bridge {bridge_slot:#x}"
+                                        );
+                                    }
+                                    None => eprintln!(
+                                        "[elfjit:renderframe-seedgles] slot {i} ({name}) NOT resolvable"
+                                    ),
+                                }
+                            }
+                        }
                         eprintln!(
                             "[elfjit:renderframe-drive] fabricated renderer 0x{renderer:x} (+16=1,+24->0x{objA:x}[+552]=1,+40->0x{objB:x}[+140]=1) view 0x{view:x} ([+128]=1280 [+132]=720 [+140]=0)"
                         );

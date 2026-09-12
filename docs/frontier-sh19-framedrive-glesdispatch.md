@@ -1,5 +1,6 @@
 # SH19 (2026-09-12) — pinned the frame-fn 0x105b32c00 clear-path wall to the engine's
-# raw-Mesa GLES dispatch table; added a `--renderframe-drive` slot dump. Workspace 470/0.
+# raw-Mesa GLES dispatch table; added a `--renderframe-drive` slot dump + the
+# `--renderframe-seedgles` lever. Workspace 470/0.
 
 ## One-line result
 The engine's OWN frame-fn 0x105b32c00 clear path does not dispatch because the
@@ -11,6 +12,65 @@ A guest `br` to a raw Mesa address is not a dispatchable host-call slot, so
 (`run_loop: pc 0x7fa7c2b2ea80 outside image`). This is the SH3/SH3b-class bug
 (raw Mesa vs bridge slot) but for the engine's RUNTIME-built frame line-dispatch
 table, which its real GL init was supposed to populate through the bridge.
+
+## SH19b (follow-on): the engine's own frame-fn NOW RETURNS Ok
+New elfjit `--renderframe-seedgles` (opt-in) overwrites the 8 dispatch slots with
+host-thunk GLES bridge slots (`resolve_gles_mixed` / fallback `resolve_gles_int`).
+Seeding slot0 (glClearColor) + slot2 (glClearDepthf) — the two float-bridge slots
+the frame's clear state sub-fn 0x5b32e08 actually dispatches through — makes the
+frame-fn return cleanly instead of stopping out-of-image:
+```
+[elfjit:renderframe-drive] engine frame-fn 0x105b32c00 returned Ok(0x7f309dd9a6f0)
+[elfjit:renderframe-drive] post-frame swap returned Ok(0x1)
+exit=124 (stable to harness timeout; NO heap abort)
+```
+Also fixed the heap corruption (`free(): invalid next size`) that the SH18 drive
+hit at shutdown: the fabricated renderer object path grew the scratch from 512B to
+8192B so the engine's deep writes (objA[+552/608], renderer[+224/232/236/238],
+view[+124..140]) stay inside the allocation. The glClear/glColorMask/glViewport
+int slots aren't re-seeded (already resolvable via the engine's own path / generic
+resolver) and aren't needed for the drive to return. Reproducible run-log:
+runs/sh19-frame-seeded-ok.txt. Real rendered pixels still confirmed via the
+--renderthunk/--renderframe/--renderclear path (SH17/18).
+
+## The 8 slots and the stubs that read them (v2.738.1397 disasm)
+The frame-fn's clear-state sub-fn (0x5b32e08) calls indirect GL dispatchers by
+`bl` to tiny `adrp x8, 6d3b000; ldr xN,[x8,#752 + 8*k]; br xN` stubs at
+0x5b3a1c0 / 0x5b3a1cc / 0x5b3a1d8 / 0x5b3a1e4 / ... (0x10 stride). `adrp 6d3b000`
+(page guest 0x106d3b000) plus byte offset 752.. maps to:
+- slot k=0 guest 0x106d3b2f0 (br x2)  <- stub 0x5b3a1c0
+- slot k=1 guest 0x106d3b2f8 (br x3)  <- stub 0x5b3a1cc
+- slot k=2 guest 0x106d3b300 (br x3)  <- stub 0x5b3a1d8
+- slot k=3 guest 0x106d3b308 (br x3)  <- stub 0x5b3a1e4
+- slots 4..7: 0x310/0x318/0x320/0x328 (stubs 0x5b3a1f0..0x5b3a214)
+Elfjit's new `--renderframe-drive` slot dump prints these 8 at drive time.
+
+## Measured slot contents under a headless drive (reproducible)
+```
+[elfjit:renderframe-drive] gles-dispatch slot 0 guest 0x106d3b2f0 = 0x7fa7c2b2ea80
+... (all 8 are 0x7fa7…, i.e. HOST addresses, not 0x7f0000000000 host-thunk)
+[elfjit:renderframe-drive] frame-fn stopped: run_loop: pc 0x7fa7c2b2ea80 outside image
+```
+Important: an earlier wrong read (locations 0x1067d12f0) was a diagnostic bug
+(the stack-canary region, DER-cert bytes) — the CORRECT slots are the
+0x106d3b2f0 family loaded by `adrp 6d3b000` (the disasm literal). Fixed in SH19.
+
+## Why this is the same bridging bug as SH3/SH3b, now for the engine's own table
+SH3 routed `eglGetProcAddress` and SH3b routed `GLOB_DAT` *function* slots through
+the host-thunk GLES bridge so a guest `blr`/`br` to a returned pointer dispatches
+through our bridge (float bridge + compressed-texture interception). The frame-fn's
+dispatch table is the engine's OWN line/clear GL table (equivalent of the functions
+the clear sub-fn needs: glClearColor / glClear / glColorMask / glDepthMask /
+glStencilMask / viewport state) and it was populated at render-init/GL-init with
+RAW Mesa addresses — a path that did not go through our bridge. When the guest
+`br`s to that raw address, jit_run cannot dispatch it (it only treats
+HOST_THUNK_BASE-range slots as host calls) and aborts out-of-image.
+
+## Next lever
+The clear-clear path now derives from the engine's own frame-fn returning Ok
+through the bridge; the remaining renderer-object reverse (coherent view/renderer
+layout, the engine's real frame loop style) is the documented multi-week frontier.
+Baselines unchanged: `--jni` exit 0; stable idle startapp exit 124; workspace 470/0.
 
 ## The 8 slots and the stubs that read them (v2.738.1397 disasm)
 The frame-fn's clear-state sub-fn (0x5b32e08) calls indirect GL dispatchers by
