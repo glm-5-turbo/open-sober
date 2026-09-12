@@ -1,5 +1,61 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle G) — `--kicker` value bug fixed + real ALooper app-command dispatch (workspace 396/0)
+
+Commit `c0736e2` (dev). Cycle F crossed the boot wall's first two GameActivity
+lifecycle gates (ldaxr poll 0x106863af8 + cond_wait 0x10683a168) and pinned the
+residual to a glibc-RECURSIVE rendezvous mutex 0x6edae60 (call-site 0x102b53bb0)
+both engine threads futex-park on. This cycle did NOT cross that wall (confirmed
+it is genuinely unchanged — the engine parks *before* ALooper ever spins up), but
+removed a real harness bug and built the documented post-barrier mechanism:
+
+1. **`--kicker` value bug (real, boot-affecting).** elfjit parsed `=0xVAL` but
+   ignored it, always pulsing 1→2 for every non-bcast kicker. So
+   `--kicker 0x106863af8=1` actually KEPT WRITING 1 — the owner busy-spun the
+   gate-2 cond_wait (~1.2M block-cache hits) instead of crossing to 2. Now
+   `=bcast`, `=0xVAL` (exact value), or bare (Pulse 1→2) are distinct modes.
+   The correct gate-crossing invocation is the BARE form `--kicker 0x106863af8`
+   (Pulse 1→2); `=1` now correctly pins 1 (gate-2 probe). Verified: bare Pulse
+   crosses gate1+gate2, compiles grow 919→948, both threads land on the deep
+   recursive rendezvous.
+2. **Real ALooper app-command dispatch (shims.rs).** The old `ALooper_pollOnce`
+   returned 0 immediately with no event channel, so a boot that DID cross the
+   rendezvous would busy-spin the looper on a never-signalled fd instead of
+   dispatching lifecycle. Added `post_app_command`/`ALooper_pollOnce` (host-feedable
+   mutex'd FIFO drained into outFd/outEvents/outData, android_native_app_glue
+   convention; empty → ALOOPER_POLL_TIMEOUT, never blocks), the full ALooper family
+   (prepare/forThread non-null handle, addFd→1, removeFd→0, acquire/release→0),
+   `ANativeWindow_getWidth/getHeight`→1280x720, and an elfjit APP_CMD feed
+   (START/RESUME/INIT_WINDOW) under JIT_DRIVE_LIFECYCLE. Regression test
+   `alooper_pollonce_dispatches_host_fed_app_commands`.
+
+### Repro (headless, reproducible)
+```bash
+cargo build -p arm64jit --example elfjit
+timeout 40 ./target/debug/examples/elfjit ~/.cache/open-sober/robbox/libroblox.so 0x2173ff4 --jni          # clean exit 0
+JIT_DRIVE_LIFECYCLE=1 timeout 20 ./target/debug/examples/elfjit .../libroblox.so 0x2173ff4 --jni --startapp 0x258b144 --kicker 0x106863af8   # cross gates, park at rendezvous (124)
+JIT_DRIVE_LIFECYCLE=1 JIT_THREADS=1 ... --kicker 0x106863af8   # concurrent thread-state sampler
+```
+Run-log: `/home/hermes-worker/runs/gate-lifecycle-runlog.txt`.
+
+### Current wall (unchanged, precise)
+Both engine threads futex-park on the glibc-RECURSIVE mutex 0x6edae60 at
+call-site 0x102b53bb0 (GameActivity_initializeNativeCode rendezvous). Owner
+re-locks the recursive mutex while init-churning (compiles 919→948 after gates),
+then parks; worker blocks on it. `cond_wait`/`ALooper_pollOnce` never reached (0
+calls). Genuine Java app-command / looper lifecycle await — the same wall cycles
+C–F documented. Mesa llvmpipe egl/gl, GLES float/texture bridges, and now the
+ALooper app-command channel are all wired + tested; none can fire until this
+barrier is crossed.
+
+### Next lever (unchanged from cycles C–F, app-command feed now in place)
+Identify/release what lets the holder of 0x6edae60 proceed (which thread posts
+the app-command / looper event on real Android) and seed it, OR seed the
+rendezvous itself to pass without the looper. The engine never reaches
+ALooper_pollOnce before the barrier, so the new feed is inert until then. After
+the rendezvous, the feed dispatches APP_CMD_START/RESUME → wired Mesa llvmpipe
+egl/gl → first headless frame.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle F) — boot wall's FIRST TWO gates CROSSED from the host: owner leaves idle ldaxr-poll AND the gate-2 cond_wait, bursts 919→946 blocks, lands at the recursive-mutex rendezvous (workspace 395/0)
 
 Commits `5dd02ee` + `a69c42a` + `4b488af` (dev). For cycles C-E the boot froze at the
