@@ -4911,8 +4911,9 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                                      0x4e60_f400 => Some(4), // fmax
                                                                                                                                                                                                                      0x4ee0_f400 => Some(5), // fmin
                                                                                                                                                                                                                      0x4e60_c400 => Some(6), // fmaxnm
-                                                                                                                                                                                                                     0x4ee0_c400 => Some(7), // fminnm
-                                                                                                                                                                                                                     _ => None,
+                                                                                                                                                                                                                                                                                                          0x4ee0_c400 => Some(7), // fminnm
+                                                                                                                                                                                                                                                                                                          0x6ee0_d400 => Some(8), // fabd (fp64 abs-diff, bit29/byte2 0xd4; real 0x6ee3d4a4)
+                                                                                                                                                                                                                                                                                                          _ => None,
                                                                                                                                                                                                                  };
                                                                                                         if let Some(op) = op2d {
                                                                                                             let rm = ((insn >> 16) & 0x1f) as u8;
@@ -7911,6 +7912,13 @@ mod fp16_scalar_and_gate_regressions {
             Inst::SimdHighNarrow { rd: 7, rn: 17, rm: 6, dst_esize: 2, sub: true, round: true, q: true }));
         assert!(matches!(decode_op(0x6e004001), Inst::SimdExt { .. }),
             "EXT must stay SimdExt, got {:?}", decode_op(0x6e004001));
+        // SIMD fp64 absolute-difference: fabd v4.2d = 0x6ee3d4a4 (real libroblox)
+        // -> Simd2dFp op 8. fsub (0x4ee0d400) / fmin (0x4ee0f400) unaffected.
+        assert!(matches!(decode_op(0x6ee3d4a4),
+            Inst::Simd2dFp { rd: 4, rn: 5, rm: 3, op: 8 }),
+            "fabd .2d got {:?}", decode_op(0x6ee3d4a4));
+        assert!(matches!(decode_op(0x4ee0d400), Inst::Simd2dFp { op: 3, .. }));
+        assert!(matches!(decode_op(0x4ee0f400), Inst::Simd2dFp { op: 5, .. }));
         // SIMD FP16 compare-to-zero: fcmeq v0.4h,v1.#0 = 0x0ef8d820 (op0),
         // fcmgt = 0x0ef8c820 (op1), fcmge = 0x2ef8c820 (op2), fcmlt = 0x0ef8e820
         // (op3), fcmle = 0x2ef8d820 (op4), .8h real fcmlt v3 = 0x4ef8e843 (op3,q).

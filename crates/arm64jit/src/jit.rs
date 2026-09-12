@@ -8012,6 +8012,21 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn fabd_2d_exec() {
+        // fabd v4.2d, v5.2d, v3.2d = 0x6ee3d4a4 (real): |dn - dm| per fp64 lane.
+        let mut st = CpuState::new();
+        // rn=5 -> slot(5)=v[10]&[11]; rm=3 -> v[6]&[7]; rd=4 -> v[8]&[9].
+        st.v[10] = 5.0f64.to_bits();
+        st.v[11] = (-3.0f64).to_bits();
+        st.v[6] = 2.0f64.to_bits();
+        st.v[7] = (-10.0f64).to_bits();
+        exec_bytes(&mut st, &[0xa4, 0xd4, 0xe3, 0x6e, 0xc0, 0x03, 0x5f, 0xd6], 0).unwrap();
+        let d = |s: &CpuState, i: usize| -> f64 { f64::from_bits(s.v[8 + i]) };
+        assert_eq!(d(&st,0), 3.0, "|5-2|");
+        assert_eq!(d(&st,1), 7.0, "|-3-(-10)|");
+    }
+
+    #[test]
     fn addhn_q_exec() {
         // addhn2 v5.8h, v16.4s, v0.4s = 0x4e604205 (real): word+word then take the
         // HIGH 16 bits, narrowed to .8h; Q=1 writes the UPPER 64 of Vd. Oracle

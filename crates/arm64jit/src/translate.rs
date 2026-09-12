@@ -3701,6 +3701,13 @@ pub fn translate(
                                     // values the engine uses (NaN propagation differs).
                                     6 => buf.maxsd(0, 1), // fmaxnm
                                     7 => buf.minsd(0, 1), // fminnm
+                                    // fabd = |Vn - Vm|: subsd then clear the sign bit.
+                                    8 => {
+                                        buf.subsd(0, 1); // xmm0 = a - b
+                                        buf.mov_ri64(RDX, 0x7fff_ffff_ffff_ffff);
+                                        buf.movq_xmm_r64(1, RDX);
+                                        buf.pand(0, 1); // clear sign bit (|a-b|)
+                                    }
                                     _ => return Err(format!("Simd2dFp op {op} not implemented")),
                                 }
                                 buf.movq_store(RBX, slot(rd) + off, 0);
