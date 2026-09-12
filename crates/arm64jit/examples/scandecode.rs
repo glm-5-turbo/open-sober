@@ -5,13 +5,23 @@
 // into new code, so surfacing the full list converts "unknown future wall" into
 // a concrete, prioritized ledger.
 //
-// Usage: scandecode <elf>
-//   decodes all bytes in PF_X PT_LOADs, reporting Unsupported/panic by vaddr.
+// Usage: scandecode <elf> [guest-start-vaddr [guest-end-vaddr]]
+//   decodes bytes in PF_X PT_LOADs (or, when a [start,end] vaddr pair is given,
+//   just that window — useful to scan the .text section only so the Unsupported
+//   ledger reflects real code, not the padding/data gaps between sections).
 use arm64jit::decode::{decode, Inst};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: scandecode <elf>");
+    let path = std::env::args().nth(1).expect("usage: scandecode <elf> [start-vaddr [end-vaddr]]");
     let el = libloader::elf::load_elf_image(std::path::Path::new(&path)).expect("load elf");
+    let range: Option<(u64, u64)> = match (std::env::args().nth(2), std::env::args().nth(3)) {
+        (Some(s), Some(e)) => {
+            let s = u64::from_str_radix(s.trim_start_matches("0x"), 16).expect("bad start");
+            let e = u64::from_str_radix(e.trim_start_matches("0x"), 16).expect("bad end");
+            Some((s, e))
+        }
+        _ => None,
+    };
 
     let mut unsup: Vec<(u64, u32)> = Vec::new();
     let mut total = 0u64;
@@ -28,10 +38,16 @@ fn main() {
         let guest_base = seg.guest_vaddr;
         let mut off = 0usize;
         while off + 4 <= image.len() {
+            let pc = guest_base + off as u64;
+            if let Some((s, e)) = range {
+                if pc < s || pc + 4 > e {
+                    off += 4;
+                    continue;
+                }
+            }
             let w =
                 u32::from_le_bytes([image[off], image[off + 1], image[off + 2], image[off + 3]]);
             total += 1;
-            let pc = guest_base + off as u64;
             match std::panic::catch_unwind(|| decode(w)) {
                 Ok(Inst::Unsupported(_)) => unsup.push((pc, w)),
                 Ok(_) => {}

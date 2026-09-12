@@ -721,6 +721,12 @@ pub enum Inst {
     SimdCmhi { rd: u8, rn: u8, rm: u8, lanes: u8 },
     // ---- SIMD unsigned compare-higher 2D: cmhi Vd.2D, Vn.2D, Vm.2D ----
     SimdCmhiD { rd: u8, rn: u8, rm: u8 },
+    // ---- SIMD unsigned compare-higher-or-same: cmhs Vd.T, Vn.T, Vm.T ----
+    // Byte2 0x3c (vs cmhi's 0x34, bit10 set) => per lane all-ones if Vn>=Vm
+    // (unsigned); the "or same" variant of cmhi. cmovae (cc 0x43) not cmova.
+    SimdCmhs { rd: u8, rn: u8, rm: u8, lanes: u8 },
+    // ---- SIMD unsigned compare-higher-or-same 2D: cmhs Vd.2D, Vn.2D, Vm.2D ----
+    SimdCmhsD { rd: u8, rn: u8, rm: u8 },
     // ---- SIMD signed compare-greater: cmgt Vd.T, Vn.T, Vm.T (per 32/64-bit lane) ----
     // Gate 0x4ea0_3400(.4s q1)/0x0ea0_3400(.2s q0)/0x4ee0_3400(.2d); lanes 4/2/2.
     SimdCmgt { rd: u8, rn: u8, rm: u8, lanes: u8, dword: bool },
@@ -2349,7 +2355,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // MUST also require bits[13:12]==00: the raw `==0x0e00_0800` residue drops
     // bit12, so the unzip ops (uzp1 byte1 0x18, uzp2 0x58) were misdecoded as
     // rev64 (gcc's magic-division reducer uses uzp2 to gather product-high words).
-    if insn & 0x3f00_0c00 == 0x0e00_0800 && (insn & 0x1800) == 0 {
+    if insn & 0x3f00_ff00 == 0x0e00_0800 {
         let rn = ((insn >> 5) & 0x1f) as u8;
         let rd = (insn & 0x1f) as u8;
         return Inst::SimdRev { rd, rn, granule: 8, q: (insn >> 30) & 1 == 1 };
@@ -2636,7 +2642,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // so without this guard `zip1`/`uzp1` were swallowed as a bogus WidenShl (gcc's
     // magic-division uzp2/zip gather). shll's byte1 is exactly 0x38 (bits[1:0]=00).
     if ((insn >> 24) & 0x0f) == 0x0e && ((insn >> 28) & 1) == 0 && ((((insn >> 8) & 0xff) & 0x7c) == 0x38)
-        && ((insn >> 8) & 0x03) == 0
+        && (insn & 0x200000) != 0
     {
         let rd = (insn & 0x1f) as u8;
         let rn = ((insn >> 5) & 0x1f) as u8;
@@ -3993,6 +3999,22 @@ if (add2d == 0x0e20_0400 || add2d == 0x2e20_0400) && ((insn >> 15) & 1) == 1 && 
                                                                                                                                                                                                         let rd = (insn & 0x1f) as u8;
                                                                                                                                                                                                         return Inst::SimdCmhiD { rd, rn, rm };
                                                                                                                                                                                                                                                                                                                                             }
+                                                                                                                                                                                                                                                                                                                                            // ---- SIMD unsigned compare-higher-or-same: cmhs Vd.4S/2S/2D ----
+                                                                                                                                                                                                                                                                                                                                            // byte2 0x3c (bit10 set) vs cmhi's 0x34. Gates 0x6ea0_3c00(4S)/0x2ea0_3c00(2S).
+                                                                                                                                                                                                                                                                                                                                            let sms = insn & 0xffe0_fc00;
+                                                                                                                                                                                                                                                                                                                                            let cmhs_lanes = if sms == 0x6ea0_3c00 { Some(4) } else if sms == 0x2ea0_3c00 { Some(2) } else { None };
+                                                                                                                                                                                                                                                                                                                                            if let Some(clanes) = cmhs_lanes {
+                                                                                                                                                                                                                                                                                                                                                let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                return Inst::SimdCmhs { rd, rn, rm, lanes: clanes };
+                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                if sms == 0x6ee0_3c00 {
+                                                                                                                                                                                                                                                                                                                                                    let rm = ((insn >> 16) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                    let rn = ((insn >> 5) & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                    let rd = (insn & 0x1f) as u8;
+                                                                                                                                                                                                                                                                                                                                                    return Inst::SimdCmhsD { rd, rn, rm };
+                                                                                                                                                                                                                                                                                                                                                    }
                                                                                                                                                                                                                                                                                                                                             // ---- SIMD signed compare-greater (cmgt) 0x4ea0_3400(.4s)/0x0ea0_3400(.2s)/0x4ee0_3400(.2d) ----
                                                                                                                                                                                                                                                                                                                                             let cgt = insn & 0xffe0_fc00;
                                                                                                                                                                                                                                                                                                                                             if cgt == 0x4ea0_3400 { return Inst::SimdCmgt { rd:(insn&0x1f)as u8, rn:((insn>>5)&0x1f)as u8, rm:((insn>>16)&0x1f)as u8, lanes:4, dword:false }; }
@@ -6125,6 +6147,90 @@ mod logical_imm_regressions {
             Inst::SimdRev { granule, q: true, .. } => assert_eq!(granule, 4),
             other => panic!("rev32 v0.16b -> {other:?}"),
         }
+    }
+
+    #[test]
+    fn rev64_all_elem_sizes_decode_as_granule8() {
+        // Regression: the rev64 gate was `(insn & 0x3f00_0c00)==0x0e00_0800 &&
+        // (insn & 0x1800)==0`, but EVERY rev64 has byte1 0x08 (bit11 set), so the
+        // `(insn & 0x1800)==0` guard (meant to drop uzp) wrongly rejected the
+        // whole rev64 family -> all rev64 decoded as Unsupported. Real libroblox
+        // uses rev64 v5.2s (0x0ea008a5). Pin all six elem sizes to granule 8.
+        for (word, q) in [
+            (0x0e2008a5u32, false), // rev64 v5.8b
+            (0x4e2008a5, true),     // rev64 v5.16b
+            (0x0e6008a5, false),    // rev64 v5.4h
+            (0x4e6008a5, true),     // rev64 v5.8h
+            (0x0ea008a5, false),    // rev64 v5.2s  [real libroblox boot]
+            (0x4ea008a5, true),     // rev64 v5.4s
+        ] {
+            match decode(word) {
+                Inst::SimdRev { granule, q: gotq, .. } => {
+                    assert_eq!(granule, 8, "rev64 must be granule 8 for {word:#x}");
+                    assert_eq!(gotq, q, "rev64 q flag for {word:#x}");
+                }
+                other => panic!("rev64 {word:#x} -> {other:?} (expected SimdRev granule 8)"),
+            }
+        }
+        // dup-from-GPR v9.8b (0x0e010d09, byte1 0x0d) must NOT be captured as rev64.
+        assert!(
+            matches!(decode(0x0e010d09), Inst::SimdDupGp { .. }),
+            "dup v9.8b (0x0e010d09) must stay SimdDupGp, got {:?}",
+            decode(0x0e010d09)
+        );
+    }
+
+    #[test]
+    fn shll_widening_with_high_rn_decodes() {
+        // Regression: the WidenShl (shll/shll2) gate required
+        // `((insn>>8)&0x03)==0`, but bits[9:8] are rn bits[4:3] (not a permute
+        // discriminator), so any `shll Vd.4s, Vn.4h` with rn>=8 (v8-v31) decoded
+        // as Unsupported. Real libroblox has shll v16.4s,v16.4h (0x2e613a10) and
+        // shll2 v23.4s,v16.8h (0x6e613a17). The true discriminator vs zip/uzp/trn
+        // (bit21 set = shift-imm) now stands in.
+        match decode(0x2e613a10) {
+            Inst::WidenShl { rd, rn, dst_esize, nlanes, signed: true, upper: false } => {
+                assert_eq!(rd, 16);
+                assert_eq!(rn, 16);
+                assert_eq!(dst_esize, 4);
+                assert_eq!(nlanes, 4);
+            }
+            other => panic!("shll v16.4s,v16.4h,#16 (0x2e613a10) -> {other:?}"),
+        }
+        match decode(0x6e613a17) {
+            Inst::WidenShl { rd, rn, signed: true, upper: true, .. } => {
+                assert_eq!(rd, 23);
+                assert_eq!(rn, 16);
+            }
+            other => panic!("shll2 v23.4s,v16.8h,#16 (0x6e613a17) -> {other:?}"),
+        }
+        // Still not a permute: zip1 v0.8b (0x0e023a40) keeps SimdZip1 (bit21=0).
+        assert!(
+            matches!(decode(0x0e023a40), Inst::SimdZip1 { .. }),
+            "zip1 (0x0e023a40) must stay SimdZip1, got {:?}",
+            decode(0x0e023a40)
+        );
+    }
+
+    #[test]
+    fn cmhs_unsigned_ge_decodes_distinct_from_cmhi() {
+        // cmhi (>) = byte2 0x34; cmhs (>=, unsigned higher-or-same) = byte2 0x3c
+        // (bit10 set). Real libroblox has cmhs v2.2d (0x6ee13c02). Previously
+        // Unsupported. cmhs must decode to its own variant (cmovae, >=) not cmhi.
+        match decode(0x6ee13c02) {
+            Inst::SimdCmhsD { rd: 2, rn: 0, rm: 1 } => {}
+            other => panic!("cmhs v2.2d,v0,v1 (0x6ee13c02) -> {other:?}"),
+        }
+        match decode(0x6ea13c02) {
+            Inst::SimdCmhs { rd: 2, lanes: 4, .. } => {}
+            other => panic!("cmhs v2.4s (0x6ea13c02) -> {other:?}"),
+        }
+        match decode(0x2ea03c00) {
+            Inst::SimdCmhs { lanes: 2, .. } => {}
+            other => panic!("cmhs v?.2s (0x2ea03c00) -> {other:?}"),
+        }
+        // cmhi must stay cmhi (distinct gate, byte2 0x34).
+        assert!(matches!(decode(0x6ea13400), Inst::SimdCmhi { .. }), "got {:?}", decode(0x6ea13400));
     }
 
     #[test]
