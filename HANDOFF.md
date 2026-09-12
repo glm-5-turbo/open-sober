@@ -1,5 +1,52 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH3) — eglGetProcAddress routed through a GLES bridge (dynamic GLES loader no longer returns raw Mesa pointers); workspace 465/0; HEAD 3a30b3a.
+
+Decoder 100% (0 Unsupported / 0 PANIC on .text) unchanged. The boot frontier
+(engine producer never enqueues onto the idle work-queue futex) is unchanged
+but was re-confirmed this cycle: `--futex-kick 2 --futex-set 0xf4240` wakes
+all 3 threads (block-cache **hits** grow while **compiles** stay flat at 1668)
+— the futex latch (x19+4) is a *signal*, not the *work*; the queue head at
+[x19]=0 stays empty, so the engine re-arms and re-parks. A host-side producer
+must enqueue a real render/task item into that queue, not just poke the latch.
+
+Closed a real secondary gap toward a real frame — **`eglGetProcAddress`**:
+
+- The real binary imports `eglGetProcAddress` (readelf-confirmed UND FUNC); on
+  Android Roblox resolves most gl*/egl* entry points *dynamically* through it
+  and `blr`s the returned pointer.
+- It was binding to **Mesa's raw function** via the generic `resolve()` dlsym
+  path (comes BEFORE resolve_egl/resolve_gles_* in plt.rs), so a returned
+  pointer was a raw x86 Mesa address — not a registered host-thunk slot. A guest
+  `blr` to it can't dispatch through the host-call bridge, and the call would
+  bypass the GLES float bridge and the compressed-texture interception
+  (breaking glClearColor/glTexImage2D/glCompressedTexImage2D on a real frame).
+- Fix: `resolve()` and `resolve_egl()` both route the name to a shared
+  `resolve_egl_get_proc_address`, installing `w_eglGetProcAddress` (a GLES
+  bridge, HostGlesCall ABI: reads guest x0 = proc-name, resolves it to one of
+  OUR host-thunk slots: mixed float/texture -> int -> egl). A later guest `blr`
+  to the returned slot dispatches through the correct bridge, preserving float
+  and texture interception. Unknown names fall back to real Mesa (niche).
+- Subtlety: resolve_gles_int/resolve_egl build a CString from the name, so it
+  must be passed WITHOUT a trailing NUL (plt.rs names are NUL-free; the bridge
+  reads the guest C-string and passes the byte content). Mixed tolerates NUL.
+- New regression `egl_get_proc_address_bridge_returns_dispatchable_gles_slot`
+  pins: glClearColor + glCompressedTexImage2D (mixed bridge) and glGenTextures
+  (int bridge) all yield the same *dispatch target* as a direct import, unknown
+  names never collide with the GLES region. Added `jit::gles_bridge_fn` (pub)
+  to compare GLES-region slots by underlying fn (resolve_gles_mixed allocates a
+  fresh slot per call, so equality is by target not address).
+- Verified: workspace 465/0; egl_window_present + anativewindow_x11_surface
+  gates still pass; real boot unchanged (stable idle main loop, exit 124, no
+  egl/gl hostcalls yet — the engine still waits on the producer-enqueue).
+
+**Next lever (unchanged hard wall):** cross the engine's work-queue futex —
+reconstruct the queue element layout (wait primitive callers at 0x284d014:
+x19 = queue obj, latch x19+4 = generation/signal, [x19]=0 = head; fetch_add on
+entry frees the high-32 generation) and enqueue a real render/task from the
+host before posting the latch. Secondary tracks (GLES float bridge, texture
+path, eglGetProcAddress bridge) are complete and gated.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH2) — idle barrier PROVEN a work-queue futex; snapshot now captures futex args + `--futex-set <hex>`; workspace 464/0; HEAD 10e6b49.
 
 Decoder remains 100% (0 Unsupported / 0 PANIC on .text). The boot frontier
