@@ -244,6 +244,45 @@ mod tests {
     }
 
     #[test]
+    fn crafted_etc1_solid_blocks_decode_to_expected_colors() {
+        // A hand-crafted ETC1 block: individual mode (diff bit clear), table codeword
+        // 0, all 16 selectors 0. data = [R,G,B, 0(cw+diff+flip), 0,0,0,0]. Decode:
+        // each byte is split into two 4-bit sub-block base colors (high/low nibble,
+        // replicated as c*0x11) and +2 modifier (ETC1_MODIFIER_TABLE[0][0]) applied.
+        // So decoded channel = (c*0x11)+2, clamped. This is the exact blob the
+        // --renderframe-etc harness uploads (decoded live to 255,2,2 red / 2,255,2
+        // green / 2,2,255 blue / 255,255,255 white).
+        let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
+        let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
+        let red = blk(enc(255), enc(2), enc(2));
+        let mut out = [0u32; 16];
+        texture2ddecoder::decode_etc1(&red, 4, 4, &mut out).unwrap();
+        // every texel identical (solid block); BGRA-in-memory => from_le_bytes([b,g,r,a])
+        assert!(out.iter().all(|&p| p == out[0]));
+        assert_eq!(out[0], u32::from_le_bytes([2, 2, 255, 255]), "red ETC1 block -> (255,2,2)");
+
+        // Whole 8x8 (4 blocks, row-major top-first) via the crate's own decompress.
+        let etc_data: Vec<u8> = {
+            let mut d = Vec::with_capacity(32);
+            d.extend_from_slice(&red);
+            d.extend_from_slice(&blk(enc(2), enc(255), enc(2))); // green
+            d.extend_from_slice(&blk(enc(2), enc(2), enc(255))); // blue
+            d.extend_from_slice(&blk(enc(255), enc(255), enc(255))); // white
+            d
+        };
+        let px = decompress(GL_ETC1_RGB8_OES, 8, 8, &etc_data).expect("8x8 ETC1 decodes");
+        assert_eq!(px.len(), 64);
+        let col = |i: usize| px[i].to_le_bytes(); // [b,g,r,a] in memory
+        assert_eq!(col(0), [2, 2, 255, 255], "block0 top-left -> (255,2,2) red");
+        // a texel in block1 (top-right, e.g. row0 col4) -> green
+        assert_eq!(col(4), [2, 255, 2, 255], "block1 top-right -> (2,255,2) green");
+        // block2 (bottom-left, row4 col0) -> blue
+        assert_eq!(col(4 * 8), [255, 2, 2, 255], "block2 bottom-left -> (2,2,255) blue");
+        // block3 (bottom-right, row4 col4) -> white
+        assert_eq!(col(4 * 8 + 4), [255, 255, 255, 255], "block3 -> white");
+    }
+
+    #[test]
     fn non_android_and_unknown_formats_return_none() {
         assert!(decompress(0x83F1, 4, 4, &[0u8; 8]).is_none()); // DXT1 -> Mesa
         assert!(decompress(0xFFFFFFFF, 4, 4, &[0u8; 8]).is_none());

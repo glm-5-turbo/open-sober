@@ -2221,6 +2221,7 @@ fn main() {
                                 let plt_tex_parameteri = 0x1062d7960u64;
                                 let plt_gen_textures = 0x1062d7980u64;
                                 let plt_tex_image_2d = 0x1062d79a0u64;
+                                let plt_compressed_tex_image_2d = 0x1062d7990u64;
                                     let plt_getprogramiv = 0x1062d77f0u64;
                                     let plt_readpixels = 0x1062d7940u64;
                                     let plt_attachshader = 0x1062d78d0u64;
@@ -2291,7 +2292,14 @@ fn main() {
                                     // ES 1.00. Three interior probes then read back three DIFFERENT
                                     // texel colors, which no constant/solid shader can produce.
                                     let tex_mode = renderframe_args.iter().any(|a| a == "--renderframe-tex");
-                                    let fs_src: &[u8] = if tex_mode {
+                                    // --renderframe-etc: like --renderframe-tex but uploads the 2x2
+                                    // checkerboard as a REAL compressed ETC1 texture (4 solid
+                                    // 4x4 blocks = 8x8) through glCompressedTexImage2D
+                                    // (GL_ETC1_RGB8_OES=0x8d64). Proves the compressed-texture
+                                    // interception live: the bridge decodes ETC1->RGBA and
+                                    // uploads via glTexImage2D. Same FS + readback as tex_mode.
+                                    let etc_mode = renderframe_args.iter().any(|a| a == "--renderframe-etc");
+                                    let fs_src: &[u8] = if tex_mode || etc_mode {
                                         // 2x2 texels RED,GREEN,BLUE,WHITE. UV = floor(frag/640,360)
                                         // picks a quadrant, (uv+0.5)*0.5 samples its texel center
                                         // under NEAREST. centroid(640,360)->(1,1)->WHITE; (900,150)
@@ -2382,94 +2390,91 @@ fn main() {
                                     // textured draws will need. glTexImage2D has 9 args (pixels on
                                     // the guest stack), so drive it with a dedicated CpuState whose
                                     // sp=tex_sp points at a slot holding the pixels pointer.
-                                    if tex_mode {
-                                        const GL_TEXTURE0: u64 = 0x84c0;
-                                        const GL_TEXTURE_2D: u64 = 0x0de1;
-                                        const GL_RGBA: u64 = 0x1908;
-                                        const GL_UNSIGNED_BYTE: u64 = 0x1401;
-                                        const GL_NEAREST: u64 = 0x2600;
-                                        const GL_TEXTURE_MIN_FILTER: u64 = 0x2801;
-                                        const GL_TEXTURE_MAG_FILTER: u64 = 0x2800;
-                                        const GL_TEXTURE_2D_FAKE_SP: u64 = 0xf80;
-                                        const GL_TEX_DATA: u64 = 0xf60;
-                                        // 2x2 RGBA. int glTexImage2D uploads row-major; GL treats the
-                                        // first element as lower-left texel. Colors deliberately
-                                        // all distinct + none the base red:
-                                        //   texel(0,0)=RED, texel(1,0)=GREEN, texel(0,1)=BLUE,
-                                        //   texel(1,1)=WHITE (each @ (255,..) so readback is exact).
-                                        const TEX: [u8; 16] = [
-                                            255, 0, 0, 255, // texel(0,0) RED
-                                            0, 255, 0, 255, // texel(1,0) GREEN
-                                            0, 0, 255, 255, // texel(0,1) BLUE
-                                            255, 255, 255, 255, // texel(1,1) WHITE
-                                        ];
-                                        std::ptr::copy_nonoverlapping(
-                                            TEX.as_ptr(),
-                                            (base + GL_TEX_DATA) as *mut u8,
-                                            16,
-                                        );
-                                        // tex_id out slot (glGenTextures), uTex-loc slot.
-                                        let tex_id_slot = base + 0xfd0;
-                                        let _ = gcall(plt_gen_textures, 1, tex_id_slot, 0, 0, 0, 0);
-                                        let tex_id = *(tex_id_slot as *const u32) as u64;
-                                        let _ = gcall(plt_active_texture, GL_TEXTURE0, 0, 0, 0, 0, 0);
-                                        let _ = gcall(plt_bind_texture, GL_TEXTURE_2D, tex_id, 0, 0, 0, 0);
-                                        // NEAREST filtering so no mipmap is required and a probed
-                                        // quadrant yields one exact texel color.
-                                        let _ = gcall(
-                                            plt_tex_parameteri,
-                                            GL_TEXTURE_2D,
-                                            GL_TEXTURE_MIN_FILTER,
-                                            GL_NEAREST,
-                                            0,
-                                            0,
-                                            0,
-                                        );
-                                        let _ = gcall(
-                                            plt_tex_parameteri,
-                                            GL_TEXTURE_2D,
-                                            GL_TEXTURE_MAG_FILTER,
-                                            GL_NEAREST,
-                                            0,
-                                            0,
-                                            0,
-                                        );
-                                        // 9-arg glTexImage2D: x0-x7 in regs, 9th (pixels) at [sp+0].
-                                        // The PLT stub only does adrp/ldr/add/br (no push), so a fake
-                                        // sp whose [0] holds the pixels ptr is read correctly by the
-                                        // bridge's gs_stack.
-                                        let tex_sp = base + GL_TEXTURE_2D_FAKE_SP;
-                                        *(tex_sp as *mut u64) = base + GL_TEX_DATA;
-                                        let mut stex = arm64jit::jit::CpuState::new();
-                                        stex.tpidr = tpidr;
-                                        stex.x[31] = tex_sp;
-                                        stex.x[0] = GL_TEXTURE_2D;
-                                        stex.x[1] = 0; // level
-                                        stex.x[2] = GL_RGBA; // internalformat
-                                        stex.x[3] = 2; // width
-                                        stex.x[4] = 2; // height
-                                        stex.x[5] = 0; // border
-                                        stex.x[6] = GL_RGBA; // format
-                                        stex.x[7] = GL_UNSIGNED_BYTE; // type
-                                        let _ = arm64jit::jit::jit_run(
-                                            iimg,
-                                            ibase,
-                                            plt_tex_image_2d,
-                                            &mut stex as *mut CpuState,
-                                        );
-                                        // uTex = texture unit 0.
-                                        let uni = objs.as_ptr() as u64 + 0xe20;
-                                        std::ptr::copy_nonoverlapping(
-                                            b"uTex\0".as_ptr(),
-                                            uni as *mut u8,
-                                            5,
-                                        );
-                                        let ploc = gcall(plt_get_uniform_location, program, uni, 0, 0, 0, 0)
-                                            .unwrap_or(0) & 0xffff_ffff;
-                                        let _ = gcall(plt_uniform_1i, ploc, 0, 0, 0, 0, 0);
-                                        eprintln!(
-                                            "[elfjit:renderframe-tex] texture tex_id={tex_id:#x} bound+uploaded (2x2 RGBA RED/GREEN/BLUE/WHITE) uTex loc={ploc:#x}<-unit0"
-                                        );
+                                    if tex_mode || etc_mode {
+                                                                            const GL_TEXTURE0: u64 = 0x84c0;
+                                                                            const GL_TEXTURE_2D: u64 = 0x0de1;
+                                                                            const GL_RGBA: u64 = 0x1908;
+                                                                            const GL_UNSIGNED_BYTE: u64 = 0x1401;
+                                                                            const GL_NEAREST: u64 = 0x2600;
+                                                                            const GL_TEXTURE_MIN_FILTER: u64 = 0x2801;
+                                                                            const GL_TEXTURE_MAG_FILTER: u64 = 0x2800;
+                                                                            const GL_TEX_DATA: u64 = 0xf60;
+                                                                            // Shared: create + bind the texture on unit 0, NEAREST filtering.
+                                                                            let tex_id_slot = base + 0xfd0;
+                                                                            let _ = gcall(plt_gen_textures, 1, tex_id_slot, 0, 0, 0, 0);
+                                                                            let tex_id = *(tex_id_slot as *const u32) as u64;
+                                                                            let _ = gcall(plt_active_texture, GL_TEXTURE0, 0, 0, 0, 0, 0);
+                                                                            let _ = gcall(plt_bind_texture, GL_TEXTURE_2D, tex_id, 0, 0, 0, 0);
+                                                                            let _ = gcall(plt_tex_parameteri, GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST, 0, 0, 0);
+                                                                            let _ = gcall(plt_tex_parameteri, GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST, 0, 0, 0);
+                                                                            if tex_mode {
+                                                                                // RGBA 2x2 checkerboard via 9-arg glTexImage2D. pixels (the 9th arg) rides the
+                                                                                // guest stack at [sp+0]; the PLT stub is a leaf (adrp/ldr/add/br, never pushes sp),
+                                                                                // so a fake sp whose [0] holds the pixels ptr is read by the bridge's gs_stack.
+                                                                                const TEX: [u8; 16] = [
+                                                                                    255, 0, 0, 255, // texel(0,0) RED
+                                                                                    0, 255, 0, 255, // texel(1,0) GREEN
+                                                                                    0, 0, 255, 255, // texel(0,1) BLUE
+                                                                                    255, 255, 255, 255, // texel(1,1) WHITE
+                                                                                ];
+                                                                                std::ptr::copy_nonoverlapping(TEX.as_ptr(), (base + GL_TEX_DATA) as *mut u8, 16);
+                                                                                let tex_sp = base + 0xf80;
+                                                                                *(tex_sp as *mut u64) = base + GL_TEX_DATA;
+                                                                                let mut stex = arm64jit::jit::CpuState::new();
+                                                                                stex.tpidr = tpidr;
+                                                                                stex.x[31] = tex_sp;
+                                                                                stex.x[0] = GL_TEXTURE_2D;
+                                                                                stex.x[1] = 0; // level
+                                                                                stex.x[2] = GL_RGBA; // internalformat
+                                                                                stex.x[3] = 2; // width
+                                                                                stex.x[4] = 2; // height
+                                                                                stex.x[5] = 0; // border
+                                                                                stex.x[6] = GL_RGBA; // format
+                                                                                stex.x[7] = GL_UNSIGNED_BYTE; // type
+                                                                                let _ = arm64jit::jit::jit_run(iimg, ibase, plt_tex_image_2d, &mut stex as *mut CpuState);
+                                                                            } else {
+                                                                                // ETC1 compressed-texture interception live-path: upload a REAL 8x8 ETC1 texture
+                                                                                // (4 solid 4x4 blocks = 32 bytes) via glCompressedTexImage2D (GL_ETC1_RGB8_OES).
+                                                                                // The bridge decodes ETC1->RGBA (texture-codec) and re-uploads via glTexImage2D.
+                                                                                // All 8 args fit x0-x7 (no stack arg). Each block: individual mode, table codeword
+                                                                                // 0, all selectors 0 -> decoded color = (c*0x11)+2 per channel, clamped.
+                                                                                const GL_ETC1_RGB8_OES: u64 = 0x8d64;
+                                                                                let enc = |t: i32| -> u8 { let c = ((t - 2).clamp(0, 240) >> 4) as u8; (c << 4) | c };
+                                                                                let blk = |r: u8, g: u8, b: u8| -> [u8; 8] { [r, g, b, 0, 0, 0, 0, 0] };
+                                                                                // 8x8 ETC1: 4 blocks row-major top-first -> (255,2,2) red,(2,255,2) green,
+                                                                                // (2,2,255) blue,(255,255,255) white.
+                                                                                let etc_data: [u8; 32] = {
+                                                                                    let mut d = [0u8; 32];
+                                                                                    let red = blk(enc(255), enc(2), enc(2));
+                                                                                    let grn = blk(enc(2), enc(255), enc(2));
+                                                                                    let blu = blk(enc(2), enc(2), enc(255));
+                                                                                    let wht = blk(enc(255), enc(255), enc(255));
+                                                                                    d[0..8].copy_from_slice(&red);
+                                                                                    d[8..16].copy_from_slice(&grn);
+                                                                                    d[16..24].copy_from_slice(&blu);
+                                                                                    d[24..32].copy_from_slice(&wht);
+                                                                                    d
+                                                                                };
+                                                                                std::ptr::copy_nonoverlapping(etc_data.as_ptr(), (base + GL_TEX_DATA) as *mut u8, 32);
+                                                                                let mut sce = arm64jit::jit::CpuState::new();
+                                                                                sce.tpidr = tpidr;
+                                                                                sce.x[31] = isp;
+                                                                                sce.x[0] = GL_TEXTURE_2D;
+                                                                                sce.x[1] = 0; // level
+                                                                                sce.x[2] = GL_ETC1_RGB8_OES; // internalformat
+                                                                                sce.x[3] = 8; // width
+                                                                                sce.x[4] = 8; // height
+                                                                                sce.x[5] = 0; // border
+                                                                                sce.x[6] = 32; // imageSize
+                                                                                sce.x[7] = base + GL_TEX_DATA; // data
+                                                                                let _ = arm64jit::jit::jit_run(iimg, ibase, plt_compressed_tex_image_2d, &mut sce as *mut CpuState);
+                                                                            }
+                                                                            // Shared: uTex sampler = texture unit 0.
+                                                                            let uni = objs.as_ptr() as u64 + 0xe20;
+                                                                            std::ptr::copy_nonoverlapping(b"uTex\0".as_ptr(), uni as *mut u8, 5);
+                                                                            let ploc = gcall(plt_get_uniform_location, program, uni, 0, 0, 0, 0).unwrap_or(0) & 0xffff_ffff;
+                                                                            let _ = gcall(plt_uniform_1i, ploc, 0, 0, 0, 0, 0);
+                                                                            eprintln!("[elfjit:renderframe-tex] texture tex_id={tex_id:#x} bound+uploaded uTex loc={ploc:#x}<-unit0");
                                     }
                                     // Diagnostics: real compile/link status. Reading a
                                     // GL int from a shifted-out 32-bit slot requires a
@@ -2792,7 +2797,7 @@ fn main() {
                                     // must yield three DIFFERENT texel colors (WHITE/GREEN/RED),
                                     // which a constant shader cannot produce -> proves the sampled
                                     // texture actually rendered.
-                                    if tex_mode {
+                                    if tex_mode || etc_mode {
                                         let probes: [(u32, u32, &str, u64); 3] = [
                                             (640, 360, "centroid(WHITE)", 0xf50),
                                             (900, 150, "quad-(1,0)(GREEN)", 0xf54),

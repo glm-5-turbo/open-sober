@@ -1,5 +1,37 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH27) — the engine's OWN geometry wrapper now renders a REAL COMPRESSED-ETC1 texture: `--renderframe-etc` uploads a hand-crafted 8x8 ETC1 texture (4 solid blocks) via glCompressedTexImage2D; the GLES bridge decompresses ETC1->RGBA (texture-codec) and re-uploads. Three on-triangle probes read back the distinct decoded colors. Workspace 474/0; HEAD (this commit).
+
+Follows SH26's RGBA-textured triangle. The compressed-texture interception path
+(implemented since earlier cycles but never proven live) now renders end-to-end:
+a hand-crafted ETC1 block `[R,G,B,0,0,0,0,0]` — individual mode, table codeword 0
+(modifier +2), all selectors 0, so decoded channel = `(c*0x11)+2` clamped. Blocks
+for red `(255,2,2)`, green `(2,255,2)`, blue `(2,2,255)`, white `(255,255,255)`
+uploaded as an 8x8 texture through `glCompressedTexImage2D(GL_ETC1_RGB8_OES)`
+@plt; the bridge's w_glCompressedTexImage2D decompresses and re-uploads. Readback
+proves the decode ran (rounded channels match the (c*0x11)+2 prediction exactly):
+
+```
+uTex loc=0x0 ; compile_status vs=1 fs=1 link=1
+centroid(WHITE)  = RGBA(255,255,255,255)
+quad-(1,0)(GREEN)= RGBA(2,255,2,255)     quad-(0,0)(RED)= RGBA(255,2,2,255)
+geometry wrapper Ok(0x0) ; swap Ok(0x1) ; exit 124
+```
+
+Captured runs/sh27-etc.{rgb,png}: clear-blue bg + triangle interior 4-colored from
+decoded ETC1 (RED 155,909 / GREEN 155,899 / WHITE 52,001 / BLUE 51,947 ≈ 45.1%).
+New regression `crafted_etc1_solid_blocks_decode_to_expected_colors` pins the 4x4
+block -> (255,2,2) and the 8x8 quadrant decode. Reproducible: runs/capture_etc.sh;
+run-log runs/sh27-etc.txt; doc docs/frontier-sh27-etc.md. 8 texture PLT stubs pinned
+(see doc). Workspace 474/0.
+
+**Next (closest unblocked):** pin the real engine's GLES dispatch-table slot 11+
+mapping for texture/uniform/shader (disasm the engine's texture-binding path so a
+textured engine-driven draw routes through the slots rather than harness @plt),
+then scale the coherent renderer to a two-attrib (pos+UV) real mesh. Baselines
+unchanged: --jni exit 0 (0x10006); stable idle exit 124; untextured triangle and
+--renderframe-tex both intact.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH26) — the engine's OWN geometry wrapper now renders a REAL TEXTURED triangle: a 2x2 RGBA checkerboard sampled by a textured fragment shader, with every texture/uniform/shader call (glGenTextures/glBindTexture/glActiveTexture/glTexImage2D/glTexParameteri/glGetUniformLocation/glUniform1i) dispatching through the JIT GLES bridge. Workspace 473/0; HEAD (this commit).
 
 Follows SH25's solid-red triangle. New `--renderframe-tex` lever: textured FS

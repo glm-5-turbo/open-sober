@@ -1,5 +1,7 @@
 # Open-Sober Status — Ongoing Autonomous Development
 
+## SH27 (Sep 12, 2026): the engine's OWN geometry wrapper renders a REAL COMPRESSED-ETC1 texture. `--renderframe-etc` uploads a hand-crafted 8x8 ETC1 texture (4 solid blocks) via glCompressedTexImage2D (GL_ETC1_RGB8_OES); the GLES bridge decompresses ETC1->RGBA (texture-codec) and re-uploads. Three on-triangle probes read back distinct decoded colors (WHITE/GREEN/RED), and the rounded channels match the hand-computed (c*0x11)+2 prediction exactly, proving the ETC1 decode ran. Captured runs/sh27-etc.{png,rgb}: triangle interior 4-colored on clear-blue, exit 124. New regression `crafted_etc1_solid_blocks_decode_to_expected_colors` (texture-codec). Workspace 474/0 (was 473). Baselines unchanged (--jni exit 0, idle 124; --renderframe-tex intact).
+
 ## SH26 (Sep 12, 2026): the engine's OWN geometry wrapper now renders a REAL TEXTURED triangle — a 2x2 RGBA checkerboard sampled by a textured fragment shader, with every texture/uniform/shader call (glGenTextures/glBindTexture/glActiveTexture/glTexImage2D/glTexParameteri/glGetUniformLocation/glUniform1i) dispatching through the JIT GLES bridge. Workspace 473/0; HEAD (this commit).
 
 Follows SH25's solid-red triangle. New `--renderframe-tex` lever: textured FS
