@@ -1,5 +1,41 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH2) — idle barrier PROVEN a work-queue futex; snapshot now captures futex args + `--futex-set <hex>`; workspace 464/0; HEAD 10e6b49.
+
+Decoder remains 100% (0 Unsupported / 0 PANIC on .text). The boot frontier
+was re-probed empirically this cycle with a definitive conclusion:
+
+- **Live futex capture** (JIT_THREADS now carries x3 val / x5 uaddr2 / x6
+  bitset in the snapshot): all 3 guest threads park at lr=0x10284d134 with
+  `futex(uaddr, op=0x89 WAIT_BITSET|PRIVATE, val=x3=0x0)`. The per-thread latch
+  is re-armed to 0 each cycle; the consumer only proceeds when a producer posts
+  a NON-ZERO work token.
+- **`--futex-kick` (old+1: 0→1)** AND the new **`--futex-set 0xf4240`** (fixed
+  token written verbatim every tick) both leave compiles flat at 1668 / hits
+  ~8713: the engine re-parks either way. → **The latch is a signal, not the
+  work; a bare futex poke is NOT a producer.** The producer must enqueue an
+  actual work item (render/task) into the engine's per-thread queue (host-heap
+  object at x19[*=0x0], latch = x19+4), then set the latch. That queue's
+  structure is the frontier (reconstruct the consumer dequeue path after the
+  futex returns).
+- 0xF4240 = 1,000,000 is a pre-initialized "go" upper-bound counter the barrier
+  sites load; it is NOT the awaited futex val (that's 0x0).
+- New harness: `--futex-set <hex>` writes a chosen latch value each tick
+  (awaited-token experiment). Regression pins the snapshot's new x3/x5/x6
+  fields.
+
+Run (reproducible): same elfjit StartApp command as cycle SH; expect exit 124,
+3 threads parked `pc=syscall lr=0x10284d134 x3=0x0`, compiles flat 1668.
+Run-logs: `/home/hermes-worker/runs/futex-x3.txt` (awaited-val capture),
+`futex-set2.txt` (fixed-token negative).
+
+### Next lever (unchanged hard wall, sharpened)
+Reconstruct the engine's work queue: trace the consumer path that runs after
+the idle futex returns (what it dequeues / what "is there a task" check it
+does) to learn the queue struct layout, then enqueue a real work unit from the
+host and post the latch. All graphics/decoder/texture/import work is complete
+and gated; the boot needs this producer enqueue.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH) — arm64jit DECODER REACHES 100% COVERAGE on real libroblox.so: 11,437 Unsupported -> ZERO, 0 PANIC; workspace 464/0; HEAD 092e829.
 
 The decoder — the single largest structural wall in the project — is now
