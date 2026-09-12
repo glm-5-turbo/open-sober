@@ -95,12 +95,108 @@ fn egl_handle() -> *mut libc::c_void {
     addr as *mut libc::c_void
 }
 
+/// Read a NUL-terminated guest C string at `ptr` (guest==host mapping, so the
+/// guest pointer is directly host-addressable). Returns up to `cap-1` bytes.
+unsafe fn read_guest_cstr(ptr: u64, cap: usize) -> Option<Vec<u8>> {
+    if ptr == 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(cap.min(256));
+    let mut p = ptr as *const u8;
+    for _ in 0..cap {
+        let b = unsafe { *p };
+        if b == 0 {
+            return Some(out);
+        }
+        out.push(b);
+        p = p.add(1);
+    }
+    None
+}
+
+/// GLES bridge for the guest's `eglGetProcAddress(const GLubyte *procname)`.
+/// On real Android, Roblox resolves most GLES/EGL entry points *dynamically*
+/// through `eglGetProcAddress` and `blr`s the returned pointer. If we return
+/// Mesa's raw symbol (bound via the integer `HostCall`), the guest later
+/// dispatches a *raw x86 function address* as its branch target — which is not
+/// a registered host-thunk slot, so the dispatcher cannot route it, and the
+/// call would bypass the GLES float bridge and the compressed-texture
+/// interception (breaking glClearColor/glTexImage2D paths). Instead, resolve the
+/// requested name to one of OUR host-thunk slots and return that guest-callable
+/// address: a later guest `blr` to it dispatches through the correct bridge.
+/// Falls back to Mesa's real `eglGetProcAddress` for names we don't wrap.
+extern "C" fn w_eglGetProcAddress(st: *mut CpuState) -> u64 {
+    let s = unsafe { &*st };
+    let name_ptr = s.x[0];
+    // Resolve to our slot first (mixed bridge -> int -> egl), preserving the
+    // float bridge, compressed-texture interception, and dispatchability.
+    // NOTE: pass the name WITHOUT a trailing NUL — resolve_gles_int / resolve_egl
+    // build a CString from it (CString::new rejects an interior NUL), and
+    // resolve_gles_mixed's name_str strips at the first NUL anyway. plt.rs names
+    // are likewise NUL-free, so this matches the direct-import path exactly.
+    let Some(cstr) = (unsafe { read_guest_cstr(name_ptr, 256) }) else {
+        return 0;
+    };
+    if let Some(slot) = resolve_gles_mixed(&cstr) {
+        return slot;
+    }
+    if let Some(slot) = resolve_gles_int(&cstr) {
+        return slot;
+    }
+    if let Some(slot) = resolve_egl(&cstr) {
+        return slot;
+    }
+    // Not one of ours: ask real Mesa (e.g. extension functions we chose not to
+    // intercept). Return its raw pointer — a niche path; the guest's `blr` into
+    // Mesa's real libGLESv2 is a raw host call the dispatcher treats as a
+    // host-thunk miss and falls through to, matching the pre-bridge behavior.
+    let mh = gles_handle();
+    if mh.is_null() {
+        return 0;
+    }
+    let Some(cstr) = (unsafe { read_guest_cstr(name_ptr, 256) }) else {
+        return 0;
+    };
+    let Ok(c) = CString::new(cstr) else {
+        return 0;
+    };
+    let ptr = unsafe { sym_from(mh, c.as_ptr()) };
+    if ptr.is_null() {
+        return 0;
+    }
+    ptr as u64
+}
+
+/// Resolve the guest's `eglGetProcAddress` import to a GLES-bridge host-call
+/// slot. The bridge (w_eglGetProcAddress) returns one of OUR resolver slots for
+/// each requested GLES name, so a later guest `blr` to it dispatches through the
+/// correct host-thunk bridge (mixed/int/egl), preserving the float bridge and
+/// compressed-texture interception. Idempotent: reuses a cached slot if bound.
+fn resolve_egl_get_proc_address(key: &CString, r: &mut Resolver) -> Option<u64> {
+    if let Some(addr) = r.slots.get(key) {
+        return Some(*addr);
+    }
+    let slot = register_gles_call(w_eglGetProcAddress);
+    crate::jit::name_host_call_slot(slot, "eglGetProcAddress");
+    r.slots.insert(key.clone(), slot);
+    Some(slot)
+}
+
 /// Resolve an `egl*` import against Mesa's real libEGL (integer-ABI HostCall).
 /// Returns `None` if EGL isn't present on the host or the name isn't an EGL symbol.
 pub fn resolve_egl(name: &[u8]) -> Option<u64> {
     let ns = name_str(name);
     if !ns.starts_with("egl") {
         return None;
+    }
+    // `eglGetProcAddress` is the dynamic GLES loader: route it through a GLES
+    // bridge that returns one of OUR dispatchable host-thunk slots for the
+    // requested name (see resolve_egl_get_proc_address) instead of Mesa's raw
+    // function.
+    if ns == "eglGetProcAddress" {
+        let key = CString::new(name).ok()?;
+        let mut r = resolver().lock().unwrap();
+        return resolve_egl_get_proc_address(&key, &mut r);
     }
     let key = CString::new(name).ok()?;
     // If resolve() already bound this name (e.g. after RTLD_GLOBAL made it visible),
@@ -691,6 +787,16 @@ pub fn resolve(name: &[u8]) -> Option<u64> {
     if name_str(name) == "syscall" {
         let hostf: HostCall = host_syscall_intercept;
         return alloc_slot(&mut r, &key, hostf);
+    }
+    // `eglGetProcAddress` is the guest's dynamic GLES loader (Roblox resolves
+    // most ES entry points through it). Route it through the GLES bridge
+    // (resolve_egl_get_proc_address) so a returned pointer is one of OUR
+    // dispatchable host-thunk slots — preserving the GLES float bridge and
+    // compressed-texture interception — instead of Mesa's raw function. This
+    // branch must come BEFORE the generic dlsym below, which (once libEGL is
+    // RTLD_GLOBAL) would bind the real function and defeat the interception.
+    if name_str(name) == "eglGetProcAddress" {
+        return resolve_egl_get_proc_address(&key, &mut r);
     }
     // Bionic pthread fixup: the guest binary was built against bionic, whose
     // pthread_mutex_t is 44 bytes (glibc's is 40), __kind lives at offset 16 and
@@ -1979,5 +2085,85 @@ mod tests {
         // re-resolve is cached (same addr).
         let again = resolve(b"syscall");
         assert_eq!(again, Some(addr));
+    }
+
+    /// The guest's `eglGetProcAddress` import (Roblox resolves GLES functions
+    /// dynamically through it) must route through a GLES bridge that returns
+    /// one of OUR dispatchable host-thunk slots for the requested name — NOT
+    /// Mesa's raw function pointer (which the guest's later `blr` cannot
+    /// dispatch and which would bypass the GLES float bridge + compressed-
+    /// texture interception). The bridge, invoked like the dispatcher would,
+    /// must hand back the same slot a direct import of that GLES name resolves
+    /// to.
+    #[test]
+    fn egl_get_proc_address_bridge_returns_dispatchable_gles_slot() {
+        // Resolve the import itself -> a GLES-bridge slot whose body is
+        // w_eglGetProcAddress.
+        let Some(import_slot) = resolve_egl(b"eglGetProcAddress") else {
+            panic!("eglGetProcAddress must resolve");
+        };
+        // It must live in the host-thunk GLES region (dispatchable), not be 0.
+        assert!(import_slot >= crate::jit::host_gles_base(), "import binds in the GLES bridge region");
+        assert_eq!(name_of_call_addr(import_slot).as_deref(), Some("eglGetProcAddress"));
+
+        // Now drive the bridge the way the dispatcher drives a HostGlesCall:
+        // guest x0 = a C-string naming a wrapped GLES function, e.g. glClearColor
+        // (float bridge) and glCompressedTexImage2D (texture interception).
+        for (name, expect_mixed) in [
+            ("glClearColor", true),
+            ("glCompressedTexImage2D", true),
+            ("glGenTextures", false), // int-ABI -> resolve_gles_int slot
+        ] {
+            let mut cname = name.as_bytes().to_vec();
+            cname.push(0); // guest C-string (NUL-terminated)
+            let name_ptr = cname.as_ptr() as u64;
+            let mut st = CpuState::new();
+            st.x[0] = name_ptr;
+            let ret = w_eglGetProcAddress(&mut st as *mut CpuState);
+            // Must be a real host-thunk slot (dispatchable by a later guest blr).
+            assert!(
+                ret >= crate::jit::HOST_THUNK_BASE,
+                "eglGetProcAddress({name}) returns a dispatchable slot, got {ret:#x}"
+            );
+            // The returned slot must resolve to the SAME bridge function as a
+            // direct import of that GLES name — i.e. the mixed (float/texture)
+            // bridge for float-ABI names, the int bridge otherwise. Assert
+            // dispatch-target identity (resolve_gles_mixed allocates a fresh
+            // slot per call, so address equality would be wrong), so the
+            // interception is preserved through the dynamic path.
+            let direct = if expect_mixed {
+                resolve_gles_mixed(name.as_bytes())
+            } else {
+                resolve_gles_int(name.as_bytes())
+            };
+            let direct = direct.expect(&format!("direct import of wrapped GLES name must resolve: {name}"));
+            // For a mixed name, both slots dispatch through the same GLES bridge
+            // fn. For an int name, both are integer HostCall slots (same region).
+            if expect_mixed {
+                assert_ne!(crate::jit::gles_bridge_fn(ret), 0, "{name} is in the GLES bridge region");
+                assert_eq!(
+                    crate::jit::gles_bridge_fn(ret),
+                    crate::jit::gles_bridge_fn(direct),
+                    "dynamic eglGetProcAddress({name}) dispatches to the same GLES bridge as a direct import"
+                );
+            } else {
+                assert_eq!(ret, direct, "int-ABI GLES slot is cached/shared address");
+            }
+        }
+
+        // A name we don't wrap: falls back to Mesa (non-null real fn) or 0 if
+        // Mes a lacks it — never a raw Mesa pointer that pretends to be one of
+        // our slots.
+        let bogus = b"glDefinitelyNotARealFunction123\0";
+        let ret = {
+            let mut st = CpuState::new();
+            st.x[0] = bogus.as_ptr() as u64;
+            w_eglGetProcAddress(&mut st as *mut CpuState)
+        };
+        // Must NOT collude with our GLES region for an unknown name.
+        assert!(
+            ret < crate::jit::host_gles_base() || ret == 0,
+            "unknown proc name falls through or returns 0, got {ret:#x}"
+        );
     }
 }

@@ -602,6 +602,14 @@ fn host_gles_call_at(pc: u64) -> Option<(HostGlesCall, usize)> {
     hc.get(i).copied().flatten().map(|f| (f, i))
 }
 
+/// Public handle used by tests to compare the *underlying bridge function* for
+/// two different GLES slot addresses (resolve_gles_mixed allocates a fresh slot
+/// per call, so equality is by dispatch target, not address). Returns the
+/// HostGlesCall fn pointer for a `pc` in the GLES region, or 0.
+pub fn gles_bridge_fn(pc: u64) -> u64 {
+    host_gles_call_at(pc).map(|(f, _)| f as usize as u64).unwrap_or(0)
+}
+
 /// Supervisor-call dispatcher. AArch64 uses x8 as the syscall number and x0-x5
 /// as args (AArch64 Linux ABI: x8=number, x0..x5 args, return in x0, negative =
 /// -errno). The guest (Roblox on the Android aarch64 ABI) issues AArch64 syscall
