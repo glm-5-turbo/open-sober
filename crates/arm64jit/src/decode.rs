@@ -332,7 +332,7 @@ pub enum Inst {
     // ---- SIMD FP reciprocal/rsqrt estimate: frecpe/frsqrte Vd.T, Vn.T ----
     SimdFreFrsqrte { rd: u8, rn: u8, sqrt: bool, esize: u8, q: bool },
     // ---- SIMD halving add: uhadd/shadd Vd.T, Vn.T, Vm.T (floor((a+b)/2)) ----
-    SimdHadd { rd: u8, rn: u8, rm: u8, unsigned: bool, esize: u8, q: bool },
+    SimdHadd { rd: u8, rn: u8, rm: u8, unsigned: bool, esize: u8, q: bool, rounding: bool },
     // ---- SIMD halving subtract: shsub/uhsub Vd.T, Vn.T, Vm.T (floor((a-b)/2)) ----
     SimdHsub { rd: u8, rn: u8, rm: u8, unsigned: bool, esize: u8, q: bool },
     // ---- SIMD bitwise select: bsl/bit/bif Vd.128 (op 0/1/2) ----
@@ -2442,7 +2442,15 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
     // 3-same gate (byte1 top-0 fmaxnm 0x4e420420 / fmla also match byte1
     // 0x04&0xf4; the FP16 gate's byte2-0xf400 residue separates them). Disjoint
     // from urhadd (byte1 0x14) / uqadd (0x0c) / shadd-SIMD-int-shift.
-    if (insn & 0x1f20_fc00) == 0x0e20_0400 {
+    // Note: byte2 0x14 (rounding) signed + esize>=2 = srhadd reaches here; the
+    // unsigned byte-lane (.16b/.8b) urhadd forms are owned by the dedicated
+    // Urhadd gate (line ~4279) and MUST NOT be stolen: exclude rounding when
+    // (unsigned && esize==1) so those fall through to Urhadd.
+    let esize = 1u8 << ((insn >> 22) & 3);
+    let rounding = (insn & 0x1000) != 0;
+    let is_hadd = (insn & 0x1f20_fc00) == 0x0e20_0400
+        || ((insn & 0x1f20_fc00) == 0x0e20_1400 && !(rounding && (insn & 0x2000_0000) != 0 && esize == 1));
+    if is_hadd {
         let esize = 1u8 << ((insn >> 22) & 3);
         return Inst::SimdHadd {
             rd: (insn & 0x1f) as u8,
@@ -2451,6 +2459,7 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             unsigned: (insn & 0x2000_0000) != 0,
             esize,
             q: (insn >> 30) & 1 == 1,
+            rounding,
         };
     }
     // ---- SIMD halving subtract: shsub/uhsub Vd.T, Vn.T, Vm.T (floor((a-b)/2)) ----
@@ -8090,20 +8099,27 @@ mod fp16_scalar_and_gate_regressions {
         // halving add: uhadd v0.16b,v0,v1 = 0x6e210400; uhadd v0.8b = 0x2e210400;
         // shadd v0.8b = 0x0e220420. Real Roblox uses 0x6e210400/0x2e210400.
         assert!(matches!(decode_op(0x6e210400),
-            Inst::SimdHadd { rd: 0, rn: 0, rm: 1, unsigned: true, esize: 1, q: true }),
+            Inst::SimdHadd { rd: 0, rn: 0, rm: 1, unsigned: true, esize: 1, q: true, rounding: false }),
             "got {:?}", decode_op(0x6e210400));
         assert!(matches!(decode_op(0x2e210400),
-            Inst::SimdHadd { rd: 0, rn: 0, rm: 1, unsigned: true, esize: 1, q: false }));
+            Inst::SimdHadd { rd: 0, rn: 0, rm: 1, unsigned: true, esize: 1, q: false, rounding: false }));
         assert!(matches!(decode_op(0x0e220420),
-            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: false, esize: 1, q: false }),
+            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: false, esize: 1, q: false, rounding: false }),
             "got {:?}", decode_op(0x0e220420));
         assert!(matches!(decode_op(0x2e620420),
-            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: true, esize: 2, q: false }));
+            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: true, esize: 2, q: false, rounding: false }));
         // uhadd v0.16b,v1,v2 = 0x6e220420 (rm=2)
         assert!(matches!(decode_op(0x6e220420),
-            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: true, esize: 1, q: true }));
-        // urhadd (0x2e221420) and uqadd (0x2e220c20) must NOT match.
-        assert!(!matches!(decode_op(0x2e221420), Inst::SimdHadd { .. }));
+            Inst::SimdHadd { rd: 0, rn: 1, rm: 2, unsigned: true, esize: 1, q: true, rounding: false }));
+        // urhadd (0x2e221420) esize1-unsigned stays owned by the dedicated Urhadd
+        // gate; uqadd (0x2e220c20) must NOT match.
+        assert!(matches!(decode_op(0x2e221420), Inst::Urhadd { rd: 0, rn: 1, rm: 2, bytes: 8 }),
+            "urhadd got {:?}", decode_op(0x2e221420));
+        // srhadd v3.8h,v5,v3 = 0x4e6314a3 (real libroblox): signed esize2 rounding
+        // reaches SimdHadd (the unsigned esize1 forms stay with Urhadd).
+        assert!(matches!(decode_op(0x4e6314a3),
+            Inst::SimdHadd { rd: 3, rn: 5, rm: 3, unsigned: false, esize: 2, q: true, rounding: true }),
+            "srhadd got {:?}", decode_op(0x4e6314a3));
         assert!(!matches!(decode_op(0x2e220c20), Inst::SimdHadd { .. }));
         // sat-add with high registers: sqadd v16.8h,v16,v17 = 0x4e710e10 has byte2
         // 0x0e (rn=16 spills into bits 9:8). Was Unsupported before the byte2-0xfc

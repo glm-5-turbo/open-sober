@@ -3259,10 +3259,12 @@ pub fn translate(
             }
             Ok(())
         }
-        Inst::SimdHadd { rd, rn, rm, unsigned, esize, q } => {
+        Inst::SimdHadd { rd, rn, rm, unsigned, esize, q, rounding } => {
             // uhadd/shadd: per-lane floor((a+b)/2) = (a>>1)+(b>>1)+((a&1)&(b&1)).
             // For signed (shadd) use arithmetic shifts (sar) on sign-extended
             // values so the floor rounds toward -inf, matching ARM. esize-stride.
+            // srhadd/urhadd (rounding=true): round-half-up (a+b+1)>>1, arithmetic
+            // (sar) for signed / logical (shr) for unsigned after 64-bit add.
             let f = |r: u8| crate::jit::VECTOR_BASE + (r as i32) * 16;
             let lanes: i32 = if q { 16 / esize as i32 } else { 8 / esize as i32 };
             let e = esize as i32; // 1, 2, or 4 bytes
@@ -3283,6 +3285,18 @@ pub fn translate(
                         _ => { buf.mov_load32(RAX, RBX, f(rn) + off); buf.movsxd_r64_r32(RAX, RAX);
                                buf.mov_load32(RCX, RBX, f(rm) + off); buf.movsxd_r64_r32(RCX, RCX); }
                     }
+                }
+                if rounding {
+                    // (a+b+1)>>1 : add b, add 1, then arithmetic/logical shift.
+                    buf.add_rr64(RAX, RCX);
+                    buf.add_ri64(RAX, 1);
+                    if unsigned { buf.shr_ri8(RAX, 1); } else { buf.sar_ri8(RAX, 1); }
+                    match e {
+                        1 => buf.mov_store8(RBX, f(rd) + off, RAX),
+                        2 => buf.mov_store16(RBX, f(rd) + off, RAX),
+                        _ => buf.mov_store32(RBX, f(rd) + off, RAX),
+                    }
+                    continue;
                 }
                 // floor term: (a>>1)+(b>>1) then +((a&1)&(b&1)).
                 buf.mov_rr64(RDX, RAX); // RDX = a (save for carry)

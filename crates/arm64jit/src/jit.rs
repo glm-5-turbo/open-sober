@@ -8042,6 +8042,30 @@ mod fp16_and_fabd_fccmp_exec {
     }
 
     #[test]
+    fn srhadd_exec() {
+        // srhadd v0.8h, v5.8h, v3.8h (rd=0, rn=5, rm=3): round-half-up (a+b+1)>>1.
+        let mut st = CpuState::new();
+        // rn=5 -> v[10]&[11]; rm=3 -> v[6]&[7]; rd=0 -> v[0]&[1].
+        let pack = |h: &[i16]| -> (u64, u64) {
+            let mut lo = 0u64; let mut hi = 0u64;
+            for i in 0..4 { lo |= ((h[i] as u16) as u64) << (16*i); }
+            for i in 0..4 { hi |= ((h[4+i] as u16) as u64) << (16*i); }
+            (lo, hi)
+        };
+        let (rnlo, rnhi) = pack(&[1,2,3,4,-1,-2,-3,100]);
+        let (rmlo, rmhi) = pack(&[1,2,1,1,1,5,7,3]);
+        st.v[10]=rnlo; st.v[11]=rnhi;
+        st.v[6]=rmlo; st.v[7]=rmhi;
+        // srhadd v0.8h,v5.8h,v3.8h: bits[23:16]=0x63 (rm=3, size=0b01=>esize2),
+        // byte2(bits15:8)=0x14 (rounding), rn=5<<5, rd=0.
+        let code = 0x4e631400u32 | (5u32 << 5);
+        exec_bytes(&mut st, &code.to_le_bytes(), 0).unwrap();
+        let h = |s:&CpuState, off:usize| -> i16 { ((s.v[(if off<4 {0} else {1})] >> (16*(off%4))) as u16) as i16 };
+        let expect = [1,2,2,3,0,2,2,52];
+        for (i,e) in expect.iter().enumerate() { assert_eq!(h(&st,i), *e, "lane {i}"); }
+    }
+
+    #[test]
     fn addhn_q_exec() {
         // addhn2 v5.8h, v16.4s, v0.4s = 0x4e604205 (real): word+word then take the
         // HIGH 16 bits, narrowed to .8h; Q=1 writes the UPPER 64 of Vd. Oracle
