@@ -595,8 +595,25 @@ fn bind_glob_dat(
                     None => None,
                 }
             } else {
-                // Function / notype import: host-call thunk (callable).
-                crate::resolver::resolve(&name).map(|a| a.wrapping_add(r_addend as u64))
+                // Function / notype import: host-call thunk (callable). Mirror
+                // the JUMP_SLOT resolution chain (resolve -> float -> float32 ->
+                // egl -> gles_int -> gles_mixed) so a `gl*`/`egl*` function-
+                // pointer GLOB_DAT slot (e.g. glGetShaderInfoLog /
+                // glGetProgramInfoLog in a function table) binds to real Mesa
+                // instead of the benign NULL stub. Plain `resolve()` alone can't
+                // see GLES names (libGLESv2 is RTLD_LOCAL and lazily loaded).
+                [
+                    crate::resolver::resolve(&name),
+                    crate::resolver::resolve_float(&name),
+                    crate::resolver::resolve_float32(&name),
+                    crate::resolver::resolve_egl(&name),
+                    crate::resolver::resolve_gles_int(&name),
+                    crate::resolver::resolve_gles_mixed(&name),
+                ]
+                .into_iter()
+                .flatten()
+                .next()
+                .map(|a| a.wrapping_add(r_addend as u64))
             }
         };
 
@@ -1040,16 +1057,48 @@ mod tests {
     // resolves the full PLT JUMP_SLOT set you'd otherwise hit at runtime.
     #[test]
     fn bind_image_plt_real_roblox_binds_all() {
-        let path = "/home/code-agent/.cache/open-sober/libs/libroblox.so";
-        if !std::path::Path::new(path).exists() {
+        let candidates = [
+            "/home/code-agent/.cache/open-sober/libs/libroblox.so",
+            "/home/hermes-worker/.cache/open-sober/robbox/libroblox.so",
+        ];
+        let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
             eprintln!("skipping: no cached libroblox.so");
             return;
-        }
+        };
         let el = unsafe { libloader::elf::load_elf_image(std::path::Path::new(path)) }
             .expect("load_elf_image");
         let (bound, unbound) = bind_image_plt(&el, None);
         eprintln!("bound {bound}, unbound {unbound}");
         assert!(bound >= 500, "expected most of 537 JUMP_SLOT imports bound, got {bound}");
         assert_eq!(unbound, 0, "every import should bind via resolve/stub");
+    }
+
+    /// The GLOB_DAT *function* slot path must resolve GLES function-table names
+    /// (glGetShaderInfoLog / glGetProgramInfoLog) through the GLES resolver to a
+    /// real host-thunk slot, not the benign NULL stub. These were previously
+    /// unbound (plain dlsym can't see RTLD_LOCAL lazily-loaded libGLESv2), which
+    /// would make a real shader-compile info-log query return garbage. Hermetic:
+    /// exercises the exact chain bind_glob_dat's function branch now uses.
+    #[test]
+    fn glob_dat_function_chain_resolves_gles_names_to_real_slots() {
+        for name in ["glGetShaderInfoLog", "glGetProgramInfoLog", "glGetString", "glCompileShader"] {
+            // plt.rs passes NUL-FREE names to the resolver chain (the .dynstr
+            // scan breaks at the NUL and never pushes it); the GLOB_DAT function
+            // branch follows the same convention. Pass the NUL-free bytes.
+            let nafree = name.as_bytes();
+            let slot = [
+                crate::resolver::resolve(nafree),
+                crate::resolver::resolve_egl(nafree),
+                crate::resolver::resolve_gles_int(nafree),
+                crate::resolver::resolve_gles_mixed(nafree),
+            ]
+            .into_iter()
+            .flatten()
+            .next();
+            assert!(
+                slot.is_some_and(|s| s >= crate::jit::HOST_THUNK_BASE),
+                "{name} GLOB_DAT function slot must resolve to a real host-thunk slot, got {slot:?}"
+            );
+        }
     }
 }
