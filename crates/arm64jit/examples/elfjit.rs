@@ -1140,7 +1140,7 @@ fn main() {
                         let v = guest_arena_alloc(8 * 8) as *mut u8;
                         unsafe {
                             (v as *mut u64).add(2).write_volatile(0x_dead_beef); // [vt+16] ctx
-                            (v as *mut u64).add(4).write_volatile(probe_addr); // [vt+40] handler
+                            (v as *mut u64).add(5).write_volatile(probe_addr); // [vt+40] handler
                         }
                         eprintln!(
                             "[elfjit:deque-node-live] PROBE vtable (vt=0x{:x} guest, host-def 0x{vt_host:x}, [vt+40]=0x{probe_addr:x}) — foreign-node dispatch will hit a registered host-thunk",
@@ -1438,7 +1438,9 @@ fn main() {
             let ctxv = ctx.unwrap_or(0);
             unsafe {
                 (vt as *mut u64).add(2).write_volatile(ctxv); // [vt+16] (a0)
-                (vt as *mut u64).add(4).write_volatile(probe_addr); // [vt+40] (handler)
+                // Handler slot is [vt+40] = byte 40 = u64 index 5 (same fix as the
+                // --deque-node-live probe; writing index 4 reads 0 at [vt+40]).
+                (vt as *mut u64).add(5).write_volatile(probe_addr); // [vt+40] (handler)
             }
             let vtaddr = vt as u64;
             std::thread::spawn(move || {
