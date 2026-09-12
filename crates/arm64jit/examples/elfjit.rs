@@ -19,6 +19,36 @@ use arm64jit::jit::{CpuState, jit_run};
 use arm64jit::shims::set_anativewindow_xid;
 use input_wrapper::x11;
 
+// Guest-arena: allocate guest-visible RW buffer (node/vtable for the deque
+// injector) in the reserved guest RW tail, so the allocated address (a) is a
+// stable guest address < 2^48 (the deque's low48 head-packing keeps only
+// bits 47..0, so host-heap 0x7f2a... nodes get MANGLED on pop) and (b) is
+// mapped, so the guest's `ldr [vt+40]` derefs real RW memory instead of
+// reading garbage. Bump a tick counter from the tail base.
+static GUEST_ARENA_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static GUEST_ARENA_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Set the guest-arena base (called with the reserved tail start). Must be a
+/// guest RW mapping below 2^48.
+fn guest_arena_set_base(b: u64) {
+    GUEST_ARENA_BASE.store(b, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Allocate `size` bytes of zeroed guest-visible RW memory from the arena.
+/// Returns 0 if the arena wasn't set. 16-byte aligned.
+fn guest_arena_alloc(size: usize) -> u64 {
+    let base = GUEST_ARENA_BASE.load(core::sync::atomic::Ordering::Relaxed);
+    if base == 0 {
+        return 0;
+    }
+    let off = GUEST_ARENA_TICK.fetch_add(size as u64, core::sync::atomic::Ordering::Relaxed);
+    let addr = base + off;
+    unsafe {
+        std::ptr::write_bytes(addr as *mut u8, 0, size);
+    }
+    addr
+}
+
 // Diagnostic: on a host SIGSEGV inside a translated block, print the guest PC
 // (CpuState.pc, offset 256) + a few guest regs read from the CpuState (RBX).
 // elfjit is a diagnostic binary, so this stays in.
@@ -303,6 +333,10 @@ fn main() {
         Ok(_s) => println!("[tail] reserved {TAIL_SIZE}B guest RW tail @0x{tail_start:x}"),
         Err(e) => eprintln!("[tail] warn: guest-tail reserve skipped: {e}"),
     }
+    // Give the deque-node injector a guest-visible arena in the RW tail so its
+    // node/vtable allocations are stable guest addresses (< 2^48, low48-safe)
+    // backed by real mapped RW memory.
+    guest_arena_set_base(tail_start as u64);
 
     // Route the LocalStorageManager static hash-map's bucket-array allocator
     // (`0x1d97744`, receives its byte size in x0) to host calloc, so the
@@ -1098,13 +1132,18 @@ fn main() {
                             0
                         }
                         let probe_addr = arm64jit::jit::register_host_call_auto(probe);
+                        // Vtable MUST live at a guest-visible address (< 2^48,
+                        // mapped RW), not host heap: the drain does `ldr [vt+40]`
+                        // as guest memory, so a host-heap vt (0x55..) reads garbage.
                         let v = unsafe { libc::calloc(1, 8 * 8) as *mut u8 };
+                        let vt_host = v as u64;
+                        let v = guest_arena_alloc(8 * 8) as *mut u8;
                         unsafe {
                             (v as *mut u64).add(2).write_volatile(0x_dead_beef); // [vt+16] ctx
                             (v as *mut u64).add(4).write_volatile(probe_addr); // [vt+40] handler
                         }
                         eprintln!(
-                            "[elfjit:deque-node-live] PROBE vtable (vt=0x{:x}, [vt+40]=0x{probe_addr:x}) — foreign-node dispatch will hit a registered host-thunk",
+                            "[elfjit:deque-node-live] PROBE vtable (vt=0x{:x} guest, host-def 0x{vt_host:x}, [vt+40]=0x{probe_addr:x}) — foreign-node dispatch will hit a registered host-thunk",
                             v as u64
                         );
                         v as u64
@@ -1259,7 +1298,12 @@ fn main() {
                     let node: *mut u8 = {
                         let mut sentinel = 0u64;
                         let hn = old & 0xffff_ffff_ffff;
-                        let n = unsafe { libc::calloc(1, 256) as *mut u8 };
+                        // Node MUST be guest-arena allocated: its address is
+                        // low48-packed into the head cell AND the drain reads/
+                        // writes its fields as guest memory, so a host-heap
+                        // (0x7f2a...) node would be mangled by the pop's low48
+                        // truncation (0x7f2a... -> 0x2a...) and fault.
+                        let n = guest_arena_alloc(256) as *mut u8;
                         if !n.is_null() {
                             if is_ptr(hn) && hn != n as u64 {
                                 // Copy head-node node-constructor layout (link + refcount
@@ -1271,7 +1315,8 @@ fn main() {
                                 }
                                 sentinel = hn;
                                 eprintln!(
-                                    "[elfjit:deque-node-live] cloned head node 0x{sentinel:x} as node base (headcell[0]=0x{old:x})"
+                                    "[elfjit:deque-node-live] cloned head node 0x{sentinel:x} as node base (headcell[0]=0x{old:x}) -> guest node {:#x}",
+                                    n as u64
                                 );
                             } else {
                                 eprintln!(

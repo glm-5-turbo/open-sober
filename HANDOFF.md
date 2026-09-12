@@ -1,5 +1,42 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH11) — sequenced deque-node-live injection crosses the stable idle drain: node POPPED, exit 124, sentinel crash eliminated. Workspace 469/0; HEAD f4255fd.
+
+For ~10 cycles (SH7b/SH8/SH9) every `--deque-node-live` run died with an
+**exit-134 sentinel-as-task SIGSEGV** at ~200ms — before any injected node
+could land. This cycle fixed it as a SEQUENCING bug (not a wrong deque model):
+
+- **Defer the force-pop patches** when `--deque-node-live` is set, so the drain
+  stays stable (never pops) while we place our node. (Old behavior: force-pop
+  at startup popped the SENTINEL first → fault.)
+- **Inject while stable** by CLONING the live HEAD node's coherent payload
+  (the sentinel during idle — a real, re-enqueue-able task node) as the node
+  template, overriding `[node+112]` -> probe vt, forcing `[node+40]!=0`, and
+  **zeroing `[node+0]`** (fresh tail; the re-enqueue producer 0x285682c walks
+  it and a stale cloned link faults at pc 0x51). Replaces SH9's unreliable
+  `[consumer+104]` / `[x19+104]` sentinel indexing.
+- **ARM force-pop AFTER placement + drop the cached drain blocks** via new
+  `pub jit::block_cache_drop_region(lo, hi)` — the dispatcher had already
+  compiled the UNPATCHED pop-loop, so patching guest bytes alone had no effect
+  (that's why the earlier deferral ran stable but never crossed). Eviction
+  forces it to recompile the patched code, so the FIRST forced pop takes OUR
+  node (passes the self-skip guard, `[node+40]=1 -> probe`), not the sentinel.
+
+**Result (reproducible):** `NODE ... POPPED by live drainer (headcell now
+0x1000000000000) — deque crossed the barrier`; process stays stable to timeout
+**exit 124**, no SIGSEGV — the deque crossing no longer faults.
+
+**Residual (next lever):** the node pops cleanly and the drain reaches past the
+`blr` (lr=0x10285700c, node preserved in x3), but our probe handler hasn't been
+confirmed dispatching — the guest-side `[vt+16]` reads `0x8b8b48...` (garbage)
+not `0xdeadbeef`, so the drain's `[vt+40]` deref is landing on the wrong vtable
+(the host-heap probe vtable isn't being read through the guest image we
+expect). Resolving that — or supplying a REAL render/tick vtable for the node —
+is the path to reaching egl*/gl* on a real frame. Workspace **469/0**.
+Baselines unchanged: `--jni` clean exit 0; stable idle exit 124. Doc:
+`docs/frontier-sh11-seq-inject.md`; run-log:
+`/home/hermes-worker/runs/deque-seq5.txt`.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH9) — drain SELF-NODE-SKIP guard discovered (correction to SH8): sentinel-repoint can never fire; foreign-node path gives a controlled guest dispatch. Workspace 468/0; HEAD 480196f+.
 
 Disassembled the drain pop-loop `0x2856e40..0x28570a4` (file vaddr = guest−0x100000000)
