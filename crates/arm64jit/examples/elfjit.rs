@@ -1977,7 +1977,7 @@ fn main() {
                         // those dispatches (glClearDepthf bridge ignored the int/ptr args
                         // and cleared nothing -> black window).
                         let seed_names = [
-                            "glDrawBuffers", "glClear", "glClearBufferfv",
+                            "glDrawBuffers", "glClearBufferiv", "glClearBufferfv",
                             "glClearStencil", "glColorMask", "glDepthMask",
                             "glStencilMask", "glViewport",
                         ];

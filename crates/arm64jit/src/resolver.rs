@@ -247,6 +247,7 @@ pub const GLES_INT_NAME_LIST: &[&[u8]] = &[
     b"glCheckFramebufferStatus\0",
     b"glClear\0",
     b"glClearBufferfv\0",
+    b"glClearBufferiv\0",
     b"glClearStencil\0",
     b"glColorMask\0",
     b"glCompileShader\0",
@@ -1815,7 +1816,9 @@ mod tests {
         // which misinterpreted the int/ptr args and never cleared the color buffer
         // (black window). Both are pure integer/pointer ABI (<=8 args, no float
         // s-regs), so they must resolve through the integer bridge.
-        for n in ["glClearBufferfv", "glDrawBuffers"] {
+        // glClearBufferiv (slot1): the depth/stencil clear dispatch uses
+        // slot1(0x1802=GL_STENCIL, drawbuffer, value_ptr) — pure int/ptr ABI.
+        for n in ["glClearBufferfv", "glDrawBuffers", "glClearBufferiv"] {
             let nm = format!("{n}\0");
             resolve_gles_int(nm.as_bytes())
                 .unwrap_or_else(|| panic!("{n} NOT resolvable via int bridge"));
