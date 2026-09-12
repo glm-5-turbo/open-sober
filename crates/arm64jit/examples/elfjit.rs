@@ -1689,13 +1689,19 @@ fn main() {
             // buffer so the first store lands and we reach the EGL sequence.
             let scratch = Box::leak(vec![0u8; 4096].into_boxed_slice());
             s3.x[0] = scratch.as_ptr() as u64;
+            // Real caller (0x105b2ea98) passes x1 = the ANativeWindow (loaded from
+            // [parent+352] into x22 -> stored to [ctx+24] -> eglCreateWindowSurface's
+            // native-window arg). Mesa's x11 EGL platform wants the X11 Window XID as
+            // its native window, so hand the wired XID (0 = none wired -> leave 0).
+            s3.x[1] = arm64jit::shims::anativewindow_xid();
             let got = if ibase >= 0x100000000 && ibase >> 56 == 0 {
                 unsafe { *(0x1067d16f0u64 as *const u64) }
             } else {
                 0
             };
             eprintln!(
-                "[elfjit:renderinit] driving {render_init:#x} after {warmup_ms}ms warm-up (ctx 0x1067d16f0={got:#x}, x0=scratch {scratch:#p})"
+                "[elfjit:renderinit] driving {render_init:#x} after {warmup_ms}ms warm-up (ctx 0x1067d16f0={got:#x}, x0=scratch {scratch:#p}, x1(win)={:#x})",
+                s3.x[1],
             );
             match arm64jit::jit::jit_run(iimg, ibase, render_init, &mut s3 as *mut CpuState) {
                 Err(e) => eprintln!("[elfjit:renderinit] stopped: {e}"),

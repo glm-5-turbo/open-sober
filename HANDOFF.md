@@ -1,5 +1,37 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH16) — the real render-init's FULL EGL chain now SUCCEEDS headlessly: window surface created + context made current against Mesa llvmpipe+Xvfb, returned Ok(0x0). Workspace 470/0. HEAD 114d5f2+.
+
+Crossed the SH14-identified gateway (eglCreateWindowSurface + eglMakeCurrent,
+previously declared "framework-gated / not drivable"). Two things landed:
+
+1. **`vfprintf` crash-mask** (commit 114d5f2): libc++ terminate writes its message
+   body via `vfprintf`, not just `fwrite`. The guest passes glibc its bionic
+   FILE* + AAPCS64 va_list → SIGSEGV hid the reason. New `bionic_vfprintf` decodes
+   the AArch64 va_list and writes guest streams to fd 2. Now visible.
+2. **Root cause of eglCreateWindowSurface failing: the native window is the
+   render-init's x1 param.** Real caller 0x105b2ea90 `ldp x8,x1,[x0,#344]`; the
+   prologue `x22=x1` → `[ctx+24]` (stored at 0x105b3a340), which the surface
+   wrapper 0x105b3b194 reads as its win arg. The harness passed x1=0. Passing the
+   wired XID (0x200000) as x1 → the whole real chain succeeds:
+
+```
+ANativeWindow_fromSurface -> ANativeWindow_acquire -> eglGetDisplay -> eglInitialize
+-> eglChooseConfig(x3) -> eglGetConfigAttrib -> eglCreateContext
+-> eglCreateWindowSurface(win=0x200000) -> eglMakeCurrent -> eglQuerySurface(x2)
+-> eglSwapInterval
+[elfjit:renderinit] returned Ok(0x0)   (cleanly; engine main loop still idles, exit 124)
+```
+
+Real Roblox now has a live Mesa llvmpipe EGL context on a real Xvfb X11 window,
+headlessly on this VPS. Run-log: /home/hermes-worker/runs/sh16-renderinit-window-x1-success-runlog.txt.
+Doc: docs/frontier-sh15-renderinit-driving.md; STATUS.md.
+
+**Frontier (now with a live EGL context):** drive the engine's frame loop (gl*) —
+the wall of the main-loop producer never enqueuing a render task onto its idle
+futex/ALooper. Also still open: many gl*/shader paths will need the GLES bridge /
+compressed-texture / float paths under a real frame.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH15) — CORRECTION: SH14's "render-init framework-gated, not drivable" is WRONG at runtime. The REAL render-init (0x105b3a2d8) now drives its real EGL chain headlessly (ANativeWindow_acquire→eglGetDisplay→eglInitialize→eglGetError) through the JIT bridges before a libc++ abort. Workspace 469/0.
 
 This cycle reopened the rendering path SH14 declared a dead-end. Found that

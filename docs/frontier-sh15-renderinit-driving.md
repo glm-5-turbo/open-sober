@@ -77,15 +77,49 @@ Two findings closed this cycle (workspace still green, test total 470 → **470/
      -> eglInitialize -> eglChooseConfig(x3) -> eglCreateContext -> eglCreateWindowSurface
    ```
    Which then FAILS: the call lands with `x2=0x0` (native window arg NULL) because the
-   the render-init's context reads its native window from the framework-built context
-   object (`[ctx+24]`) which the isolated-thread harness cannot populate (x0 is a bare
-   scratch buffer; passing the live `*0x1067d16f0` corrupts it since render-init's
-   prologue stores INTO *x0). eglCreateWindowSurface returns NULL → runtime_error →
-   terminate — now VISIBLE instead of a silent SIGSEGV. With NO window wired the abort
-   is the eglInitialize error; WITH the window the rund goes one full EGL stage farther
-   to the surface. The exact next lever is supplying a coherent native window handle in
-   the render-init's context — through the ALooper/framework path or by seeding the
-   guest window global render-init reads.
+      render-init's context reads its native window from the framework-built context
+      object (`[ctx+24]`) which the isolated-thread harness cannot populate (x0 is a bare
+      scratch buffer; passing the live `*0x1067d16f0` corrupts it since render-init's
+      prologue stores INTO *x0). eglCreateWindowSurface returns NULL → runtime_error →
+      terminate — now VISIBLE instead of a silent SIGSEGV. With NO window wired the abort
+      is the eglInitialize error; WITH the window the rund goes one full EGL stage farther
+      to the surface. The exact next lever is supplying a coherent native window handle in
+      the render-init's context — through the ALooper/framework path or by seeding the
+      guest window global render-init reads.
+
+   ## SH16b — the native window comes via x1: render-init's FULL real EGL chain now SUCCEEDS headlessly (window surface + context made current)
+
+   Root-causing the x2=0 from above: at the real call site 0x105b2ea90 the caller does
+   `ldp x8, x1, [x0, #344]` then `bl render-init` — so the render-init's **x1 param is
+   the ANativeWindow** (loaded from `[parent+352]`), which the prologue moves to x22 and
+   stores to `[ctx+24]` (0x105b3a340 `str x22,[x19,#24]`), i.e. exactly the window field
+   `eglCreateWindowSurface`'s wrapper (0x105b3b194 `ldp x2,x8,[x0,#24]`) reads as its
+   native-window arg. The harness was passing `s3.x[1]=0` ⇒ win=0 ⇒ eglCreateWindowSurface
+   returned NULL. **Passing the wired XID as x1** (`s3.x[1] = anativewindow_xid()` = the
+   real X11 XID 0x200000 that Mesa's x11 EGL platform expects as its native window):
+
+   ```
+   hostcall@ANativeWindow_fromSurface
+   hostcall@ANativeWindow_acquire
+   hostcall@eglGetDisplay
+   hostcall@eglInitialize
+   hostcall@eglChooseConfig (x3)
+   hostcall@eglGetConfigAttrib
+   hostcall@eglCreateContext
+   hostcall@eglCreateWindowSurface  x2=0x200000   <-- the real window
+   hostcall@eglMakeCurrent          surface, surface, context
+   hostcall@eglQuerySurface (x2)
+   hostcall@eglSwapInterval
+   [elfjit:renderinit] returned Ok(0x0)
+   ```
+
+   The REAL Roblox binary now executes its complete render-init EGL setup against Mesa
+   llvmpipe + a real Xvfb X11 window **headlessly on this GPU-less VPS** and returns
+   successfully (exit 124 = the engine main loop still idles afterward, no crash). This
+   crosses the SH14-identified gateway (eglCreateWindowSurface/eglMakeCurrent) that was
+   declared framework-gated. Worklog: /home/hermes-worker/runs/sh16-renderinit-window-x1-success-runlog.txt.
+   Next: the engine's frame loop (gl* calls) once the main-loop producer enqueues a render
+   task — the long-standing idle-futex/ALooper wall, now with a live EGL context behind it.
 
 ## Repro
 ```bash
