@@ -2973,6 +2973,185 @@ fn main() {
                                 ),
                             }
                         }
+// --renderframe-quad: scale the (now fully reversed) coherent renderer onto a
+                        // real TWO-ATTRIB textured QUAD — the shape of real Roblox geometry.
+                        // primitive-setup 0x5b353d0 loops the primitive list, ONE vertex attrib
+                        // per primitive (via a slice at 0x5b35420). Two primitives -> two attribs:
+                        //   primitive[0]: vb=0, offset=0,  format[3]={size4,GL_FLOAT}, attrib=0 (aPos)
+                        //   primitive[1]: vb=0, offset=16, format[1]={size2,GL_FLOAT}, attrib=1 (aUV)
+                        // The VBO is interleaved [pos.xyzw, uv.xy] per vertex (stride 24). The
+                        // fragment shader samples a 2x2 texture at the REAL interpolated vertex UV
+                        // (not gl_FragCoord) — proving per-texel UV mapping, which no single-attrib
+                        // draw path can. Readback: the 4 quadrants read the 4 texel colors.
+                        if renderframe_args.iter().any(|a| a == "--renderframe-quad") {
+                            const GL_ARRAY_BUFFER: u64 = 0x8892;
+                            const GL_ELEMENT_ARRAY_BUFFER: u64 = 0x8893;
+                            const GL_STATIC_DRAW: u64 = 0x88e4;
+                            const GL_FLOAT: u64 = 0x1406;
+                            const GL_VERTEX_SHADER: u64 = 0x8b31;
+                            const GL_FRAGMENT_SHADER: u64 = 0x8b30;
+                            const GL_TEXTURE0: u64 = 0x84c0;
+                            const GL_TEXTURE_2D: u64 = 0x0de1;
+                            const GL_RGBA: u64 = 0x1908;
+                            const GL_UNSIGNED_BYTE: u64 = 0x1401;
+                            const GL_NEAREST: u64 = 0x2600;
+                            const GL_COLOR_BUFFER_BIT: u64 = 0x4000;
+                            let pb = |a: u64| -> Result<u64, String> {
+                                let mut s = arm64jit::jit::CpuState::new();
+                                s.tpidr = tpidr; s.x[31] = isp;
+                                s.x[0] = a;
+                                arm64jit::jit::jit_run(iimg, ibase, a, &mut s as *mut CpuState).map(|_| s.x[0])
+                            };
+                            let gcall = |addr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64| -> Result<u64, String> {
+                                let mut s = arm64jit::jit::CpuState::new();
+                                s.tpidr = tpidr; s.x[31] = isp;
+                                s.x[0]=a0; s.x[1]=a1; s.x[2]=a2; s.x[3]=a3; s.x[4]=a4; s.x[5]=a5;
+                                arm64jit::jit::jit_run(iimg, ibase, addr, &mut s as *mut CpuState).map(|_| s.x[0])
+                            };
+                            let objs = Box::leak(vec![0u8; 32768].into_boxed_slice());
+                            let base = objs.as_ptr() as u64;
+                            unsafe {
+                                // Clear + viewport.
+                                {
+                                    let mut sc = arm64jit::jit::CpuState::new();
+                                    sc.tpidr = tpidr; sc.x[31] = isp;
+                                    sc.v[0] = (0.0f32).to_bits() as u64;
+                                    sc.v[2] = (0.0f32).to_bits() as u64;
+                                    sc.v[4] = (0.3f32).to_bits() as u64;
+                                    sc.v[6] = (1.0f32).to_bits() as u64;
+                                    let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7710, &mut sc as *mut CpuState);
+                                }
+                                let _ = gcall(0x1062d7740, GL_COLOR_BUFFER_BIT, 0,0,0,0,0);
+                                let _ = gcall(0x1062d75c0, 0,0,1280,720,0,0); // glViewport
+                                let _ = gcall(0x1062d75d0, 0,0,1280,720,0,0); // glScissor
+                                // Shaders with a real UV varying.
+                                let vs_src = b"attribute vec4 aPos;\nattribute vec2 aUV;\nvarying vec2 vUV;\nvoid main(){ vUV = aUV; gl_Position = aPos; }\n\0";
+                                let fs_src = b"precision mediump float;\nuniform sampler2D uTex;\nvarying vec2 vUV;\nvoid main(){ gl_FragColor = texture2D(uTex, vUV); }\n\0";
+                                let vs_ptr = base + 0x400;
+                                let fs_ptr = base + 0x800;
+                                std::ptr::copy_nonoverlapping(vs_src.as_ptr(), vs_ptr as *mut u8, vs_src.len());
+                                std::ptr::copy_nonoverlapping(fs_src.as_ptr(), fs_ptr as *mut u8, fs_src.len());
+                                let vs_ary = base + 0xa00;
+                                let fs_ary = base + 0xa10;
+                                *(vs_ary as *mut u64) = vs_ptr;
+                                *(fs_ary as *mut u64) = fs_ptr;
+                                let vs = gcall(0x1062d7880, GL_VERTEX_SHADER, 0,0,0,0,0).unwrap_or(0) & 0xffff_ffff;
+                                let _ = gcall(0x1062d7890, vs, 1, vs_ary, 0,0,0); // glShaderSource
+                                let _ = gcall(0x1062d78a0, vs, 0,0,0,0,0);      // glCompileShader
+                                let fs = gcall(0x1062d7880, GL_FRAGMENT_SHADER, 0,0,0,0,0).unwrap_or(0) & 0xffff_ffff;
+                                let _ = gcall(0x1062d7890, fs, 1, fs_ary, 0,0,0);
+                                let _ = gcall(0x1062d78a0, fs, 0,0,0,0,0);
+                                let prog = gcall(0x1062d78c0, 0,0,0,0,0,0).unwrap_or(0) & 0xffff_ffff; // glCreateProgram
+                                let _ = gcall(0x1062d78d0, prog, vs, 0,0,0,0); // glAttachShader
+                                let _ = gcall(0x1062d78d0, prog, fs, 0,0,0,0);
+                                let pos_name = base + 0xd00; std::ptr::copy_nonoverlapping(b"aPos\0".as_ptr(), pos_name as *mut u8, 5);
+                                let uv_name = base + 0xd20; std::ptr::copy_nonoverlapping(b"aUV\0".as_ptr(), uv_name as *mut u8, 5);
+                                let _ = gcall(0x1062d78f0, prog, 0, pos_name, 0,0,0); // glBindAttribLocation aPos->0
+                                let _ = gcall(0x1062d78f0, prog, 1, uv_name, 0,0,0);  // glBindAttribLocation aUV->1
+                                let _ = gcall(0x1062d78e0, prog, 0,0,0,0,0);          // glLinkProgram
+                                let _ = gcall(0x1062d75a0, prog, 0,0,0,0,0);          // glUseProgram
+                                // Texture: 2x2 RGBA checkerboard RED/GREEN/BLUE/WHITE.
+                                let tex_data = base + 0xf60;
+                                let tex: [u8;16] = [255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255];
+                                std::ptr::copy_nonoverlapping(tex.as_ptr(), tex_data as *mut u8, 16);
+                                let tex_sp = base + 0xf80;
+                                *(tex_sp as *mut u64) = tex_data;
+                                let tex_id_slot = base + 0xfd0;
+                                let _ = gcall(0x1062d7980, 1, tex_id_slot, 0,0,0,0); // glGenTextures
+                                let tex_id = *(tex_id_slot as *const u32) as u64;
+                                let _ = gcall(0x1062d75e0, GL_TEXTURE0, 0,0,0,0,0);     // glActiveTexture
+                                let _ = gcall(0x1062d75f0, GL_TEXTURE_2D, tex_id, 0,0,0,0); // glBindTexture
+                                let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2801, GL_NEAREST, 0,0,0); // MIN
+                                let _ = gcall(0x1062d7960, GL_TEXTURE_2D, 0x2800, GL_NEAREST, 0,0,0); // MAG
+                                let mut steg = arm64jit::jit::CpuState::new();
+                                steg.tpidr = tpidr; steg.x[31] = tex_sp;
+                                steg.x[0]=GL_TEXTURE_2D; steg.x[1]=0; steg.x[2]=GL_RGBA; steg.x[3]=2; steg.x[4]=2; steg.x[5]=0; steg.x[6]=GL_RGBA; steg.x[7]=GL_UNSIGNED_BYTE;
+                                let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d79a0, &mut steg as *mut CpuState); // glTexImage2D
+                                let uni = base + 0xe20; std::ptr::copy_nonoverlapping(b"uTex\0".as_ptr(), uni as *mut u8, 5);
+                                let ploc = gcall(0x1062d7900, prog, uni, 0,0,0,0).unwrap_or(0) & 0xffff_ffff;
+                                let _ = gcall(0x1062d7910, ploc, 0,0,0,0,0); // glUniform1i(uTex,0)
+                                eprintln!("[elfjit:renderframe-quad] program={prog:#x} compiled+linked; texture tex_id={tex_id:#x} uTex={ploc:#x}");
+                                // Interleaved quad: [pos.xyzw, uv.xy] per vertex, stride 24.
+                                let verts: [f32; 24] = [
+                                    -0.9,-0.9,0.0,1.0, 0.0,0.0, // v0 bottom-left uv(0,0)
+                                    0.9,-0.9,0.0,1.0, 1.0,0.0,  // v1 bottom-right uv(1,0)
+                                    0.9,0.9,0.0,1.0, 1.0,1.0,   // v2 top-right uv(1,1)
+                                    -0.9,0.9,0.0,1.0, 0.0,1.0,  // v3 top-left uv(0,1)
+                                ];
+                                let idx: [u32; 6] = [0,1,2, 0,2,3];
+                                let vbo_data = base + 0xc00;
+                                let ebo_data = base + 0xd40;
+                                std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, vbo_data as *mut u8, std::mem::size_of_val(&verts));
+                                std::ptr::copy_nonoverlapping(idx.as_ptr() as *const u8, ebo_data as *mut u8, std::mem::size_of_val(&idx));
+                                let vbo_slot = base + 0xf00;
+                                let ebo_slot = base + 0xf10;
+                                let _ = gcall(0x1062d77c0, 1, vbo_slot, 0,0,0,0); // glGenBuffers
+                                let vbo = *(vbo_slot as *const u32) as u64;
+                                let _ = gcall(0x1062d77b0, GL_ARRAY_BUFFER, vbo, 0,0,0,0);
+                                let _ = gcall(0x1062d77d0, GL_ARRAY_BUFFER, 96, vbo_data, GL_STATIC_DRAW, 0,0); // glBufferData
+                                let _ = gcall(0x1062d77c0, 1, ebo_slot, 0,0,0,0);
+                                let ebo = *(ebo_slot as *const u32) as u64;
+                                let _ = gcall(0x1062d77b0, GL_ELEMENT_ARRAY_BUFFER, ebo, 0,0,0,0);
+                                let _ = gcall(0x1062d77d0, GL_ELEMENT_ARRAY_BUFFER, 24, ebo_data, GL_STATIC_DRAW, 0,0);
+                                eprintln!("[elfjit:renderframe-quad] vbo={vbo:#x} ebo={ebo:#x} 4 interleaved verts stride24 + 6 idx uploaded");
+                                // Coherent renderer with TWO primitives -> TWO attribs.
+                                let renderer = base;
+                                let container = base + 0x100;
+                                let desc = base + 0x200;
+                                let stride_tbl = base + 0x300;
+                                let prim0 = base + 0x400;
+                                let prim1 = base + 0x418;
+                                let ibo = base + 0x500;
+                                *(desc.wrapping_add(72) as *mut u32) = vbo as u32;
+                                *(stride_tbl as *mut u64) = 24;
+                                *(renderer.wrapping_add(56) as *mut u64) = container;
+                                *(container.wrapping_add(72) as *mut u64) = prim0;
+                                *(container.wrapping_add(80) as *mut u64) = prim1 + 0x18;
+                                *(container.wrapping_add(96) as *mut u64) = stride_tbl;
+                                *(renderer.wrapping_add(0x48) as *mut u64) = desc;
+                                // prim0: vb0 off0 fmt3(size4 float) attrib0 = aPos
+                                *(prim0 as *mut u32) = 0; *(prim0.wrapping_add(4) as *mut u32)=0; *(prim0.wrapping_add(8) as *mut u32)=3; *(prim0.wrapping_add(12) as *mut u32)=0; *(prim0.wrapping_add(16) as *mut u32)=0;
+                                // prim1: vb0 off16 fmt1(size2 float) attrib1 = aUV
+                                *(prim1 as *mut u32) = 0; *(prim1.wrapping_add(4) as *mut u32)=16; *(prim1.wrapping_add(8) as *mut u32)=1; *(prim1.wrapping_add(12) as *mut u32)=1; *(prim1.wrapping_add(16) as *mut u32)=0;
+                                *(renderer.wrapping_add(120) as *mut u64) = ibo;
+                                *(ibo.wrapping_add(72) as *mut u32) = ebo as u32;
+                                *(renderer.wrapping_add(142) as *mut u16) = 6;
+                                eprintln!("[elfjit:renderframe-quad] coherent renderer: 2-prim list (aPos+aUV) + 6-idx EBO fabricated");
+                                // Drive the engine's OWN geometry wrapper.
+                                let mut sw = arm64jit::jit::CpuState::new();
+                                sw.tpidr = tpidr; sw.x[31] = isp;
+                                sw.x[0] = renderer;
+                                sw.x[1] = 0; sw.x[2] = 0; sw.x[3] = 0;
+                                sw.x[4] = 6; // glDrawElements count
+                                sw.x[5] = 3; // nonzero -> indexed
+                                match arm64jit::jit::jit_run(iimg, ibase, 0x105b35288, &mut sw as *mut CpuState) {
+                                    Err(e) => eprintln!("[elfjit:renderframe-quad] geometry wrapper stopped: {e}"),
+                                    Ok(ok) => eprintln!("[elfjit:renderframe-quad] geometry wrapper 0x5b35288 returned Ok({ok:#x}) (textured QUAD drawn)"),
+                                }
+                                // Readback 4 on-quad points -> the 4 texel colors.
+                                let probes: [(u32,u32,&str,u64);4] = [
+                                    (320,180,"BL-red(0,0)",0xf40), (960,180,"BR-green(1,0)",0xf44),
+                                    (960,540,"TR-white(1,1)",0xf48), (320,540,"TL-blue(0,1)",0xf4c)];
+                                for (px,py,label,slot) in probes {
+                                    let mut pr = arm64jit::jit::CpuState::new();
+                                    pr.tpidr = tpidr; pr.x[31] = isp;
+                                    pr.x[0]=px as u64; pr.x[1]=py as u64; pr.x[2]=1; pr.x[3]=1; pr.x[4]=0x1908; pr.x[5]=0x1401; pr.x[6]=base+slot;
+                                    let _ = arm64jit::jit::jit_run(iimg, ibase, 0x1062d7940, &mut pr as *mut CpuState);
+                                }
+                                {
+                                    let p = |slot:u64| -> String { let b=base+slot; format!("RGBA({},{},{},{})",*(b as *const u8),*(b as *const u8).add(1),*(b as *const u8).add(2),*(b as *const u8).add(3)) };
+                                    eprintln!("[elfjit:renderframe-quad] readback: BL={} BR={} TR={} TL={}", p(0xf40), p(0xf44), p(0xf48), p(0xf4c));
+                                }
+                                // Swap.
+                                let mut se = arm64jit::jit::CpuState::new();
+                                se.tpidr = tpidr; se.x[31] = isp; se.x[0] = real_ctx;
+                                match arm64jit::jit::jit_run(iimg, ibase, swap_thunk, &mut se as *mut CpuState) {
+                                    Err(e) => eprintln!("[elfjit:renderframe-quad] swap stopped: {e}"),
+                                    Ok(ok) => eprintln!("[elfjit:renderframe-quad] post-draw swap returned Ok({ok:#x})"),
+                                }
+                            }
+                        }
+
                     }
                 }
                 // --renderclear <r,g,b,a>: draw an actual colored clear through the
