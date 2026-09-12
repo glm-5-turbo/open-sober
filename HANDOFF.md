@@ -1,6 +1,56 @@
 # Open Sober — Agent Handoff
 
-## Session (Sep 12, 2026, hermes-worker, cycle J) — STABLE MAIN LOOP HOLDS; the cycle-I "futex" next-lever is DISPROVEN and replaced with the true barrier (per-thread TLS-flag spin, framework-owned). Workspace green, tree clean.
+## Session (Sep 12, 2026, hermes-worker, cycle K) — REAL-CODE DECODER COMPLETE: every one of the 1,135,104 instructions in libroblox.so `.text` now decodes (0 Unsupported, 0 panics). Workspace 402/0, tree clean.
+
+New `scandecode` example (arm64jit) walks a PGX segment (or an optional
+[start,end] guest-vaddr window, to scan only `.text`) and reports every
+`Inst::Unsupported` plus any instruction that makes `decode()` panic. Against
+the real binary it found exactly 6 undecodable code instructions and, on the
+whole executable segment, proved `decode()` never panics. All 6 gaps fixed
+with objdump ground truth (commits `f492ce7`, `7445153`):
+
+1. **rev64: the WHOLE family was broken** (3 real hits, incl. `rev64 v5.2s`
+   `0x0ea008a5`). Gate was `(insn&0x3f00_0c00)==0x0e00_0800 &&
+   (insn&0x1800)==0`; every rev64 has byte1 0x08 (bit11 set), so the uzp guard
+   wrongly rejected all six element sizes -> `Unsupported`. Fixed to
+   `(insn&0x3f00_ff00)==0x0e00_0800` (byte1 exactly 0x08), still excluding
+   uzp(0x18/0x58), rev16(0x18), rev32(bit29), dup-from-GPR(0x0d).
+2. **shll/shll2 with rn>=8** (`0x2e613a10`, `0x6e613a17`, rn=v16): the
+   WidenShl gate required `((insn>>8)&0x03)==0`, but bits[9:8] are rn
+   bits[4:3], not a permute discriminator -> any shll on v8-v31 decoded
+   `Unsupported`. True discriminator vs zip/uzp/trn = bit21 (set=shift-imm).
+3. **cmhs (unsigned >=)** (`0x6ee13c02`): byte2 0x3c vs cmhi's 0x34.
+   New SimdCmhs/SimdCmhsD translate to cmovae (cc 0x43) per lane, distinct
+   from cmhi's cmova (`>`); 4S/2S/2D forms.
+
+**Also fixed: decode() must never panic.** The `dup`-from-GPR decoder computed
+`1u8 << imm5.trailing_zeros()`; imm5==0 (bits[20:16]) gives trailing_zeros=32
+-> shift-overflow PANIC, aborting the whole JIT on arbitrary guest bytes now
+emits `Unsupported` instead (regression:
+`dup_from_gpr_invalid_imm5_does_not_panic`).
+
+Result: full `.text` scans to `0 Unsupported / 0 decode() panics`. The JIT
+can no longer fault on any reachable instruction in the real binary's code.
+
+### Graphics/import readiness (boot-on-GPU prep)
+- PLT fully bound against the real binary: 534 JUMP_SLOT, 0 unresolved
+  (remaining 11 are GLOB_DAT data globals; `resolveimports` example).
+- All 118 egl*/gl*/ANativeWindow*/ALooper*/AAssetManager*/AConfiguration*
+  imports sit in the already-wired Mesa-llvmpipe resolver surface (the
+  eglGetDisplay->...->eglSwapBuffers headless gate passes).
+- Boot still reaches the stable engine main loop after the decoder changes
+  (1871 compiles flat, exit 124 until harness timeout) — no regression.
+
+### Frontier (unchanged, genuinely blocked on-this-box)
+The settled main loop is a pure-CPU spin on bit0 of a per-thread TLS object
+(`has-pending-work` latch at 0x10284d524 via getter 0x102b9dee0), driven by
+the absent Android framework event/looper producer + a real window/surface;
+needs the surviving looper/framework + EGL window layer, and a GPU host for
+meaningful frame-perf proof (cycles I-J evidence: zero syscalls, static seed
+and forced-branch both ineffective). Boot stabilization itself is DONE and
+captured. Workspace: 402 tests, 0 failed; tree clean; HEAD `7445153`.
+
+## Session (Sep 12, 2026, hermes-worker, cycle J) — STABLE MAIN LOOP HOLDS; the cycle-I "futex" next-lever is DISPROVEN and replaced with the true barrier (per-thread TLS-flag spin, framework-owned).
 
 The real-boot milestone from cycle I is unchanged and still holds: libroblox.so
 loads, JNI_OnLoad returns 0x10006, StartApp drives the engine, all guest threads
