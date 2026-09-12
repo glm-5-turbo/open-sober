@@ -1,5 +1,33 @@
 # Open-Sober Status — Ongoing Autonomous Development
 
+## SH25 (Sep 12, 2026): the coherent renderer renders a REAL visible triangle through the engine's OWN geometry wrapper. Workspace 473/0; HEAD 035ff6a.
+
+Follows SH24's draw-probe (empty prim list → dispatch-only proof). SH25 feeds
+primitive-setup 0x5b353d0 a **coherent** renderer + REAL GL resources through
+the JIT GLES int bridge (compiled+linked shader program with aPos→gl_Position
+VS, solid-red FS; real VBO 3×vec4 ±0.95 NDC; real EBO 0,1,2). Driving the
+engine's own geometry wrapper 0x5b35288 dispatches a real indexed
+glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_INT) that RENDERS 415,696 red px =
+45.11% of frame (clean triangle shape). Readback centroid RGBA(255,0,0,255);
+wrapper Ok(0x0); swap Ok(0x1); exit 124.
+
+Root cause of the SH24-observed "wrapper collapse": the fabricated primitive's
+format-table index [prim+8]=5 selects format[5]={size4, **GL_SHORT**}; the
+engine's glVertexAttribPointer misread float verts as shorts → degenerate.
+Fix fmt_index=3 = format[3]={size4, **GL_FLOAT**=0x1406}. Also fixed the wrapper
+count register (rides in the 4th drive arg w20, not x5) + added
+glViewport/glScissor + dedicated glGenBuffers id slots.
+
+Full coherent-renderer reverse in docs/frontier-sh25-triangle.md. Reproducible:
+runs/capture_triangle.sh; run-log runs/sh25-triangle.txt.
+
+Next (closest unblocked): sustainable real-geometry rendering (loop of bind →
+clear → coherent draw → swap on the detached host thread, mirroring
+--rendersustain), then GLES slots 11+ (texture/uniform/shader) + ETC2/ASTC
+texture interception. Baselines unchanged: --jni exit 0; idle exit 124.
+
+---
+
 ## SH13 (Sep 12, 2026): REAL engine vtable dispatch — the engine's native task-processor runs our injected nodes (~124 pops, exit 124, zero crash); block-cache grows past probe baseline
 
 Work on the `dev` branch (HEAD 1a0ffbb+), workspace 469/0. SH12

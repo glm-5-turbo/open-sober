@@ -1,5 +1,48 @@
 # Open Sober — Agent Handoff
 
+## Session (Sep 12, 2026, hermes-worker, cycle SH25) — the coherent renderer RENDERS a REAL VISIBLE triangle, and the engine's OWN geometry wrapper does it. Workspace 473/0; HEAD 035ff6a.
+
+Follows SH24's draw-probe (empty prim list → proved dispatch only). SH25 feeds
+primitive-setup 0x5b353d0 a **coherent** renderer and REAL GL resources, all
+through the JIT GLES int bridge on the live render-ctx: a compiled+linked shader
+program (VS `gl_Position=aPos`, FS solid red), a real VBO (3×vec4 NDC, ±0.95),
+a real EBO (0,1,2). Driving the engine's own geometry wrapper 0x5b35288
+dispatches a REAL indexed `glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_INT)` that
+RENDERS: readback `centroid(640,360)=RGBA(255,0,0,255)`; capture
+runs/sh25-triangle.{png,rgb} = **415,696 red px = 45.11% of frame** (a clean
+apex→base triangle shape), wrapper Ok(0x0), swap Ok(0x1), exit 124.
+
+Three real bugs fixed en route (each caused a silent empty/collapsed render):
+1. **Format-table index** — `[prim+8]`=5 is format[5]={size4, GL_SHORT=0x1402};
+   engine's glVertexAttribPointer misread float verts as shorts → degenerate.
+   Fix `fmt_index=3` = format[3]={size4, GL_FLOAT=0x1406}. This was WHY the
+   SH24-scoped "wrapper collapse" existed; with it the RAW engine path renders
+   the full triangle (SH25_REF direct-draw now defaults OFF, opt-in =1).
+2. **Wrapper count register** — glDrawElements COUNT rides in the 4th drive arg
+   (w20 → `mov w1,w20`), NOT x5 (SH24 comment was wrong); + glViewport/glScissor
+   (0,0,1280,720) must be set or a stale 0-size viewport rasterizes nothing.
+3. **glGenBuffers aliasing** — writing the generated id into the same memory as
+   the vertices clobbered the data → dedicated id slots.
+
+Coherent-renderer layout now fully reversed (doc: docs/frontier-sh25-triangle.md):
+renderer[+56]=container; container[+72]/[+80]=prim begin/end (stride 0x18,
+count=(end-begin)/24 via the magic-const mul); **renderer[+0x48]=INLINE
+vertex-descriptor table** (entry[vb]@+vb*16 = descriptor ptr, [desc+72]=ARRAY id);
+container[+96]=stride table ([+vb*8]); renderer[+120]=IBO ([+72]=ELEMENT id);
+renderer[+142] u16 count; primitive[+0]=vb,[+4]=offset,[+8]=format idx,
+[+12]=attrib(0),[+16]=base.
+
+Reproducible: runs/capture_triangle.sh; run-log runs/sh25-triangle.txt.
+
+**Next (closest unblocked):** sustainable real-geometry rendering — a loop of
+bind → clear → coherent-draw → swap on the detached host thread (mirror
+--rendersustain) re-seeding the clear color / primitive per frame so a recording
+proves fresh geometry renders (the last property a real main-loop frame drive
+needs). The engine's own main-loop producer still never enqueues a render task
+(the long-standing structural wall) — harness drives its own code on a time base.
+Also open: GLES slots 11+ (texture/uniform/shader) + ETC2/ASTC tex interception.
+Baselines unchanged: --jni exit 0; stable idle exit 124.
+
 ## Session (Sep 12, 2026, hermes-worker, cycle SH24) — the engine's OWN real GEOMETRY draw path now dispatches glDrawElements through the GLES bridge: complete 16-slot dispatch map (slots 9/10 = glDrawElements/glDrawArrays), new `--renderframe-drawprobe` that drives the engine's own geometry wrapper 0x5b35288 to a real indexed glDrawElements through the bridge (mode=GL_TRIANGLES, GL_UNSIGNED_INT, GL_ELEMENT_ARRAY_BUFFER bind), wrapper Ok(0x0) + post-draw swap Ok(0x1), exit 124 stable. Workspace 473/0; HEAD e358df0.
 
 Follows on SH23's sustained clear loop. The clear-only frame-fn (0x105b32c00)
