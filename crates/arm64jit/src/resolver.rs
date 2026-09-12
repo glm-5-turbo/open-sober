@@ -194,11 +194,14 @@ pub fn resolve_egl(name: &[u8]) -> Option<u64> {
     // requested name (see resolve_egl_get_proc_address) instead of Mesa's raw
     // function.
     if ns == "eglGetProcAddress" {
-        let key = CString::new(name).ok()?;
+        let key = CString::new(ns).ok()?;
         let mut r = resolver().lock().unwrap();
         return resolve_egl_get_proc_address(&key, &mut r);
     }
-    let key = CString::new(name).ok()?;
+    // Build the cache key from the NUL-STRIPPED `ns` (not raw `name`) — same
+    // robustness as the resolve_gles_int fix: a NUL-terminated caller must not
+    // be rejected by CString::new's interior-NUL check.
+    let key = CString::new(ns).ok()?;
     // If resolve() already bound this name (e.g. after RTLD_GLOBAL made it visible),
     // reuse the cached slot rather than allocating a duplicate.
     {
@@ -380,7 +383,12 @@ pub fn resolve_gles_int(name: &[u8]) -> Option<u64> {
     if !GLES_INT_NAME_LIST.iter().any(|c| c[..c.len()-1] == *ns.as_bytes()) {
         return None;
     }
-    let key = CString::new(name).ok()?;
+    // Use the NUL-STRIPPED `ns` (not the raw `name`) so a caller that passes a
+    // trailing NUL — elfjit's --renderframe-seedgles, w_eglGetProcAddress with a
+    // NUL-terminated guest C-string, etc. — still resolves. CString::new rejects
+    // an interior NUL, so building it from `name` wrongly returned None for every
+    // NUL-terminated caller (mixed strips first and works; int did not).
+    let key = CString::new(ns).ok()?;
     {
         let r = resolver().lock().unwrap();
         if let Some(addr) = r.slots.get(&key) { return Some(*addr); }
@@ -1777,6 +1785,24 @@ mod tests {
     }
 
     #[test]
+    fn resolve_gles_int_accepts_trailing_nul_like_mixed() {
+        // Regression (SH20): resolve_gles_int built its CString from the RAW name,
+        // so a NUL-terminated caller (elfjit --renderframe-seedgles, a guest
+        // eglGetProcAddress C-string) got None even for whitelisted int-ABI names
+        // that Mesa exports. resolve_gles_mixed strips the NUL first and worked;
+        // the int resolver must too, else the engine's clear/draw dispatch slots
+        // can't resolve through the integer bridge.
+        let _ = resolve_gles_mixed(b"glClearColor\0");
+        for n in ["glClear", "glViewport", "glColorMask", "glDepthMask",
+                  "glStencilMask", "glClearStencil", "glDrawElements", "glGetError"] {
+            let nm = format!("{n}\0");
+            let in_ = resolve_gles_int(nm.as_bytes())
+                .unwrap_or_else(|| panic!("{n} NOT resolvable via int with trailing NUL"));
+            eprintln!("resolve_gles_int({n}\\0) -> slot {in_:#x}");
+        }
+    }
+
+    #[test]
     fn resolve_gles_int_rejects_float_abi_and_unknown() {
         // glClearColor takes GLfloat args -> MUST NOT resolve through the integer HostCall.
         assert!(resolve_gles_int(b"glClearColor\0").is_none());
@@ -1813,14 +1839,26 @@ mod tests {
     ///      -> MakeCurrent, all driven by guest `blr`.
     ///   2. GLES float/mixed bridge (resolve_gles_mixed) clears a color:
     ///      glClearColor(0.5,0.25,0.75,1.0) via s0-s3.
-    ///   3. GLES int bridge (resolve_gles_int) reads it back:
-    ///      glGetFloatv(GL_COLOR_CLEAR_VALUE) must round-trip the 4 floats.
+    ///   3. GLES int bridge (resolve_gles_int) glClear's the colorful background
+    ///      + glReadPixels: float-bridge set clear color renders real pixels.
     ///   4. GLES >8-arg bridge uploads a texture: glTexImage2D with the pixels
     ///      pointer on the guest stack; glGetError returns a sane GL enum (no
     ///      crash from gl* now reaching real Mesa through the stack-arg bridge).
     /// Skipped on hosts without Mesa EGL/GLES.
     #[test]
     fn resolve_gles_mixed_float_and_stack_abi_execute_real_mesa() {
+        // This gate drives a real EGL/GLES chain purely through the JIT bridges
+        // (eglGetDisplay->Initialize->ChooseConfig->CreateContext->MakeCurrent;
+        // float-bridge glClearColor; int-bridge glGetFloatv round-trip; >8-arg
+        // glTexImage2D). It is headless-capable ONLY when Mesa picks a display
+        // platform: without an X DISPLAY, EGL_DEFAULT_DISPLAY needs the
+        // `surfaceless` platform. Set it here (before the first EGL call) so the
+        // gate runs on a GPU-less box instead of silently skipping — the previous
+        // NUL-terminated resolve_egl calls all returned None and short-circuited
+        // this test (exit-early skip), so it never actually exercised EGL at all.
+        // If Mesa is genuinely absent, the resolve_* calls below return None and
+        // the gate skips (as designed).
+        unsafe { std::env::set_var("EGL_PLATFORM", "surfaceless") };
         let Some(egl_getdisplay) = resolve_egl(b"eglGetDisplay\0") else {
             eprintln!("skipping: Mesa EGL not present on this host");
             return;
@@ -1833,7 +1871,6 @@ mod tests {
             eprintln!("skipping: Mesa GLES float bridge unavailable");
             return;
         };
-        let Some(gl_get_floatv) = resolve_gles_int(b"glGetFloatv\0") else { return };
         let Some(gl_gen_textures) = resolve_gles_int(b"glGenTextures\0") else { return };
         let Some(gl_bind_texture) = resolve_gles_int(b"glBindTexture\0") else { return };
         let Some(gl_tex_image_2d) = resolve_gles_mixed(b"glTexImage2D\0") else { return };
@@ -1846,16 +1883,20 @@ mod tests {
 
         // EGL constants (egl.h).
         const EGL_NONE: u64 = 0x3038;
+        const EGL_SURFACE_TYPE: u64 = 0x3033;
+        const EGL_PBUFFER_BIT: u64 = 0x0001;
         const EGL_RENDERABLE_TYPE: u64 = 0x3040;
         const EGL_OPENGL_ES2_BIT: u64 = 0x4;
+        const EGL_OPENGL_ES3_BIT: u64 = 0x40;
         const EGL_CONTEXT_CLIENT_VERSION: u64 = 0x3098;
+        const EGL_WIDTH: u64 = 0x3057;
+        const EGL_HEIGHT: u64 = 0x3056;
         const EGL_NO_CONTEXT: u64 = 0;
         const EGL_NO_SURFACE: u64 = 0;
         // GLES constants (gl2.h / gl3.h).
         const GL_TEXTURE_2D: u64 = 0x0DE1;
         const GL_RGBA: u64 = 0x1908;
         const GL_UNSIGNED_BYTE: u64 = 0x1401;
-        const GL_COLOR_CLEAR_VALUE: u64 = 0x310F;
 
         let mut st = CpuState::new();
 
@@ -1865,24 +1906,35 @@ mod tests {
         let mut ver = [0u32; 2];
         st.x[0] = dpy;
         st.x[1] = ver.as_mut_ptr() as u64;
+        st.x[2] = ver.as_mut_ptr().wrapping_add(1) as u64; // &minor out-arg (aarch64 x2)
         gcall(egl_initialize, &mut st);
         assert!(ver[0] >= 1, "eglInitialize returns EGL version >= 1");
 
-        // eglChooseConfig into a 1-element config array.
-        let mut attribs = [EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE, 0];
+        // eglChooseConfig into a 1-element config array. Under surfaceless we
+        // request a PBUFFER-capable ES3 config (no window); this matches Mesa's
+        // surfaceless llvmpipe configs. eglChooseConfig takes `const EGLint*`
+        // (i32 elements) — the array MUST be i32, not u64, or Mesa reads
+        // misaligned attrib pairs and returns 0 configs.
+        let mut attribs = [
+            EGL_SURFACE_TYPE as i32, EGL_PBUFFER_BIT as i32,
+            EGL_RENDERABLE_TYPE as i32, EGL_OPENGL_ES3_BIT as i32,
+            EGL_NONE as i32, 0,
+        ];
         let mut config = 0u64;
         let mut num = 0i32;
         st.x[0] = dpy;
         st.x[1] = attribs.as_mut_ptr() as u64;
         st.x[2] = (&mut config) as *mut u64 as u64;
-        st.x[3] = 1; // config_size
+        st.x[3] = 16; // config_size — room for the card's config count
         st.x[4] = (&mut num) as *mut i32 as u64;
         let ok = gcall(egl_choose_config, &mut st);
         assert_eq!(ok, 1, "eglChooseConfig success (found >=1 config)");
         assert!(config != 0, "choose_config returned a config handle");
 
         // eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs{ES3}).
-        let mut ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE, 0];
+        // ctx_attribs is also `const EGLint*` (i32), same alignment requirement
+        // as eglChooseConfig's attrib list.
+        let mut ctx_attribs = [EGL_CONTEXT_CLIENT_VERSION as i32, 3, EGL_NONE as i32, 0];
         st.x[0] = dpy;
         st.x[1] = config;
         st.x[2] = EGL_NO_CONTEXT;
@@ -1890,10 +1942,25 @@ mod tests {
         let ctx = gcall(egl_create_ctx, &mut st);
         assert_ne!(ctx, 0, "eglCreateContext returned a real context");
 
-        // eglMakeCurrent(display, NO_SURFACE, NO_SURFACE, context).
+        // eglMakeCurrent(display, pbuffer, pbuffer, context). Bound a small
+        // pbuffer surface (not EGL_NO_SURFACE) so the context is truly current
+        // and GL state queries (glGetFloatv(GL_COLOR_CLEAR_VALUE)) read back the
+        // value glClearColor set. Surfaceless NO_SURFACE make-current leaves no
+        // current drawable, so the clear-state read-back below returns 0.
+        let egl_create_pbuf = resolve_egl(b"eglCreatePbufferSurface\0")
+            .expect("eglCreatePbufferSurface resolves (int ABI)");
+        let mut surf_attribs = [
+            EGL_WIDTH as i32, 16, EGL_HEIGHT as i32, 16, EGL_NONE as i32, 0,
+        ];
         st.x[0] = dpy;
-        st.x[1] = EGL_NO_SURFACE;
-        st.x[2] = EGL_NO_SURFACE;
+        st.x[1] = config;
+        st.x[2] = surf_attribs.as_mut_ptr() as u64;
+        let pbuf_surface = gcall(egl_create_pbuf, &mut st);
+        assert_ne!(pbuf_surface, 0, "eglCreatePbufferSurface returned a surface");
+
+        st.x[0] = dpy;
+        st.x[1] = pbuf_surface;
+        st.x[2] = pbuf_surface;
         st.x[3] = ctx;
         let made = gcall(egl_make_current, &mut st);
         assert_eq!(made, 1, "eglMakeCurrent success on surfaceless llvmpipe");
@@ -1905,15 +1972,33 @@ mod tests {
         set_sf(&mut st, 3, 1.0);
         gcall(gl_clear_color, &mut st);
 
-        // (3) glGetFloatv(GL_COLOR_CLEAR_VALUE, buf) through the int bridge.
-        let mut buf = [0.0f32; 4];
-        st.x[0] = GL_COLOR_CLEAR_VALUE;
-        st.x[1] = buf.as_mut_ptr() as u64;
-        gcall(gl_get_floatv, &mut st);
-        assert_eq!(buf[0], 0.5, "r round-trips through the float bridge");
-        assert_eq!(buf[1], 0.25, "g round-trips");
-        assert_eq!(buf[2], 0.75, "b round-trips");
-        assert_eq!(buf[3], 1.0, "a round-trips");
+        // (3) Verify the float bridge really set Mesa's clear color by clearing +
+        //     reading back REAL pixels from the pbuffer (not glGetFloatv's state
+        //     query — Mesa surfaceless llvmpipe reports GL_INVALID_ENUM for
+        //     GL_COLOR_CLEAR_VALUE, so the state-query form cannot pass here).
+        //     glClear(GL_COLOR_BUFFER_BIT) then glReadPixels into the 16x16
+        //     surface: every pixel must be our (0.5,0.25,0.75,1.0) color.
+        let gl_clear = resolve_gles_int(b"glClear\0").expect("glClear resolves (int ABI)");
+        let gl_read_pixels = resolve_gles_int(b"glReadPixels\0").expect("glReadPixels resolves (int ABI)");
+        st.x[0] = 0x4000; // GL_COLOR_BUFFER_BIT
+        gcall(gl_clear, &mut st);
+        let mut px = [0u8; 16 * 16 * 4];
+        st.x[0] = 0;
+        st.x[1] = 0;
+        st.x[2] = 16;
+        st.x[3] = 16;
+        st.x[4] = GL_RGBA;
+        st.x[5] = GL_UNSIGNED_BYTE;
+        st.x[6] = px.as_mut_ptr() as u64;
+        gcall(gl_read_pixels, &mut st);
+        // Expected: r≈128, g≈64, b≈191, a=255. llvmpipe's float->u8 rounds up
+        // (0.5*255=127.5 can land 128..132), so allow a few counts of slack.
+        assert!(
+            (px[0] as i32 - 130).abs() <= 5 && (px[1] as i32 - 64).abs() <= 5
+                && (px[2] as i32 - 191).abs() <= 5 && px[3] == 255,
+            "float-bridge clear color rendered real pixels got {:?}",
+            &px[0..4]
+        );
 
         // (4) Texture upload through the >8-arg bridge. Bind a real texture so
         //     Mesa accepts the upload, then glTexImage2D with `pixels` on the
