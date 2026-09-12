@@ -2920,15 +2920,17 @@ if matches!(insn & 0xffff_fc00, 0x0e61_7800 | 0x4e61_7800) {
             }
             // .2S/.4S with LSL shift: value = imm8 << (cmode<<2) (word lanes; cmodes
             // 2,4,6 are pure word-lsl; cmodes 8,9,a,b are HALFWORD and handled below).
-            (0, 2) | (0, 4) | (0, 6) => {
-                let sh = (cmode << 2) as u32;
+            // Odd cmodes 1,3,5,7 are the ORR/BIC (RMW) shifted forms — same word-lsl
+            // value, cmode&1 selects kind at the end (1=bic/AND~,2=orr/OR).
+            (0, 2) | (0, 4) | (0, 6) | (0, 1) | (0, 3) | (0, 5) | (0, 7) => {
+                let sh = ((cmode & 0x6) << 2) as u32; // 0,8,16,24
                 let lane = ((imm8 as u64) << sh) & 0xffff_ffff;
                 let low = lane | (lane << 32);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
             }
             // mvni .2S/.4S with LSL shift: value = ~(imm8 << (cmode<<2))
-            (1, 2) | (1, 4) | (1, 6) => {
-                let sh = (cmode << 2) as u32;
+            (1, 2) | (1, 4) | (1, 6) | (1, 1) | (1, 3) | (1, 5) | (1, 7) => {
+                let sh = ((cmode & 0x6) << 2) as u32; // 0,8,16,24
                 let lane = (!((imm8 as u64) << sh)) & 0xffff_ffff;
                 let low = lane | (lane << 32);
                 if (insn >> 30) & 1 == 1 { (low, low) } else { (low, 0) }
@@ -5602,6 +5604,29 @@ mod tests {
                 other => panic!("{label}: expected VecMovi, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn orr_bic_shifted_immediate_ground_truth() {
+        // ORR/BIC Vd.2S/.4S with a shifted word immediate — the odd word-lsl
+        // cmodes 1,3,5,7 (orr/bic RMW forms). Ground truth from
+        // aarch64-linux-gnu-objdump: orr v0.2s,#7 = 0x0f0014e0, orr v0.4s,#7 =
+        // 0x4f0014e0, orr v1.4s,#0x7f,lsl16 = 0x4f0357e1, bic v2.4s,#5 =
+        // 0x6f0014a2, orr v9.4s,#0x3f,lsl#24 = 0x4f0177e9 (real Roblox).
+        use crate::decode::{decode, Inst};
+        assert!(matches!(decode(0x4f0177e9),
+            Inst::VecMovi { vd: 9, lo, hi, kind: 2 }
+                if lo == 0x3f00_0000_3f00_0000 && hi == 0x3f00_0000_3f00_0000),
+            "got {:?}", decode(0x4f0177e9));
+        // bic v0.4s (q=0 .2s): imm8=0x80 lsl24, inverted -> 0x7fffffff, hi=0
+        assert!(matches!(decode(0x2f047400),
+            Inst::VecMovi { vd: 0, lo, hi: 0, kind: 1 }
+                if lo == 0x7fff_ffff_7fff_ffff),
+            "got {:?}", decode(0x2f047400));
+        // orr v0.4s, #7 (cmode 0): lane 7
+        assert!(matches!(decode(0x4f0014e0),
+            Inst::VecMovi { vd: 0, lo, kind: 2, .. } if lo == 0x0000_0007_0000_0007),
+            "got {:?}", decode(0x4f0014e0));
     }
 
     #[test]

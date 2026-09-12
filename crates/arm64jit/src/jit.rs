@@ -4481,6 +4481,38 @@ mod tests {
     }
 
     #[test]
+    fn orr_bic_shifted_imm_exec() {
+        use crate::jit::exec_bytes;
+        // orr v1.4s, #0x3f, lsl#24 = 0x4f0177e1 (kind 2, OR-in-place): v1 |= 0x3f000000x4.
+        // Set v1 low lane 0 = 1, lane 1 = 0x10000000 -> OR appends the 0x3f000000 mask
+        // only where bits clear.
+        let mut st = CpuState::new();
+        // vreg 1 (vd=1) -> v[2] (lanes 0..1), v[3] (lanes 2..3)
+        st.v[2] = 0x0000_0000_0000_0001; // lane0=1, lane1=0
+        st.v[3] = 0x0000_0000_0000_0000;
+        // orr v1.4s, #0x3f lsl#24
+        let code = [0xe1u8, 0x77, 0x01, 0x4f, 0xc0, 0x03, 0x5f, 0xd6];
+        exec_bytes(&mut st, &code, 0).unwrap();
+        // v1 = 0x3f000000 in every lane where it OR's with 0: lane0 -> 0x3f000001,
+        // lane1 -> 0x3f000000, lanes2,3 -> 0x3f000000
+        let mask = 0x3f00_0000u64;
+        assert_eq!(st.v[2], (mask | 0x1) | (mask << 32), "v1 lo lanes");
+        assert_eq!(st.v[3], mask | (mask << 32), "v1 hi lanes");
+
+        // bic v0.4s, #0x1f, lsl#24 = 0x6f0077e0 (kind 1, AND~): v0 &= ~0x1f000000.
+        let mut st = CpuState::new();
+        st.v[0] = 0x1f12_3456_0000_0001; // vreg 0 low lanes: lane0=1, lane1=0x1f123456
+        st.v[1] = 0x1f00_0000_0000_0000;
+        let code = [0xe0u8, 0x77, 0x00, 0x6f, 0xc0, 0x03, 0x5f, 0xd6];
+        exec_bytes(&mut st, &code, 0).unwrap();
+        // ~0x1f000000 = 0xe0ffffff; lane1 0x1f123456 & 0xe0ffffff = 0x00123456
+        assert_eq!(st.v[0] & 0xffff_ffff, 0x0000_0001, "v0 lane0 (0x1f bits cleared)");
+        assert_eq!(st.v[0] >> 32 & 0xffff_ffff, 0x0012_3456, "v0 lane1");
+        assert_eq!(st.v[1] & 0xffff_ffff, 0x0000_0000, "v0 lane2");
+        assert_eq!(st.v[1] >> 32 & 0xffff_ffff, 0x0000_0000, "v0 lane3");
+    }
+
+    #[test]
     fn and_sxtl_accumulation_two_iterations() {
         // The full maskf loop body x2 (mov snapshot; add v31+=4; and &0xf;
         // sxtl + sxtl2), verifying the ACCUMULATOR survives across iterations:
